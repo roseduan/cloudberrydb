@@ -442,3 +442,6 @@ explain (costs off) insert into t2_dist_rand select * from t_dist_hash;
 
 reset gp_force_random_redistribution;
 reset optimizer;
+-- Try to set statement_mem > max_statement_mem
+SET statement_mem = '4000MB';
+RESET statement_mem;
