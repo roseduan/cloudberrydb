@@ -153,7 +153,7 @@ static RangeTblEntry *replace_rte_with_delta(RangeTblEntry *rte, MV_TriggerTable
 		   QueryEnvironment *queryEnv);
 static Query *rewrite_query_for_counting(Query *query, ParseState *pstate);
 
-static void calc_delta(MV_TriggerTable *table, int rte_index, Query *query,
+static void calc_delta(Oid matviewOid,MV_TriggerTable *table, int rte_index, Query *query,
 			DestReceiver *dest_old, DestReceiver *dest_new,
 			TupleDesc *tupdesc_old, TupleDesc *tupdesc_new,
 			QueryEnvironment *queryEnv);
@@ -1474,6 +1474,7 @@ IVM_immediate_before(PG_FUNCTION_ARGS)
 	}
 
 	entry->before_trig_count++;
+	elog(INFO, "trigger IVM_immediate_before.");
 
 	return PointerGetDatum(NULL);
 }
@@ -1746,7 +1747,7 @@ IVM_immediate_maintenance(PG_FUNCTION_ARGS)
 			TupleDesc		tupdesc_new;
 
 			/* calculate delta tables */
-			calc_delta(table, rte_index, rewritten, dest_old, dest_new,
+			calc_delta(matviewOid, table, rte_index, rewritten, dest_old, dest_new,
 					   &tupdesc_old, &tupdesc_new, queryEnv);
 
 			/* Set the table in the query to post-update state */
@@ -1796,7 +1797,7 @@ IVM_immediate_maintenance(PG_FUNCTION_ARGS)
 
 	/* Restore userid and security context */
 	SetUserIdAndSecContext(save_userid, save_sec_context);
-
+	elog(INFO, "trigger IVM_immediate_maintenance.");
 	return PointerGetDatum(NULL);
 }
 
@@ -2172,7 +2173,7 @@ rewrite_query_for_counting(Query *query, ParseState *pstate)
  * by the RTE index.
  */
 static void
-calc_delta(MV_TriggerTable *table, int rte_index, Query *query,
+calc_delta(Oid matviewOid, MV_TriggerTable *table, int rte_index, Query *query,
 			DestReceiver *dest_old, DestReceiver *dest_new,
 			TupleDesc *tupdesc_old, TupleDesc *tupdesc_new,
 			QueryEnvironment *queryEnv)
@@ -2182,9 +2183,7 @@ calc_delta(MV_TriggerTable *table, int rte_index, Query *query,
 	RefreshClause *refreshClause;
 	in_delta_calculation = true;
 
-	RangeVar *relation = makeRangeVar(get_namespace_name(RelationGetNamespace(table->rel)),
-									pstrdup(RelationGetRelationName(table->rel)),
-									-1);
+	RangeVar *relation = makeRangeVar(get_namespace_name(get_rel_namespace(matviewOid)), get_rel_name(matviewOid), -1);
 
 	refreshClause = MakeRefreshClause(false, false, relation,
 										RelationIsAppendOptimized(table->rel));

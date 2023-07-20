@@ -979,7 +979,8 @@ CreateIvmTrigger(Oid relOid, Oid viewOid, int16 type, int16 timing, bool ex_lock
 	refaddr.objectSubId = 0;
 
 	ivm_trigger = makeNode(CreateTrigStmt);
-	ivm_trigger->relation = NULL;
+	ivm_trigger->relation = makeRangeVar(get_namespace_name(get_rel_namespace(relOid)), get_rel_name(relOid), -1);
+	// FIXME(yang): use statment-level trigger
 	ivm_trigger->row = false;
 
 	ivm_trigger->timing = timing;
@@ -1059,6 +1060,15 @@ CreateIvmTrigger(Oid relOid, Oid viewOid, int16 type, int16 timing, bool ex_lock
 
 	recordDependencyOn(&address, &refaddr, DEPENDENCY_AUTO);
 
+	if (Gp_role == GP_ROLE_DISPATCH && ENABLE_DISPATCH())
+	{
+		CdbDispatchUtilityStatement((Node *) ivm_trigger,
+									DF_CANCEL_ON_ERROR|
+									DF_WITH_SNAPSHOT|
+									DF_NEED_TWO_PHASE,
+									GetAssignedOidsForDispatch(),
+									NULL);
+	}
 	/* Make changes-so-far visible */
 	CommandCounterIncrement();
 }
