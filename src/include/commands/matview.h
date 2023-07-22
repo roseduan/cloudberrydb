@@ -36,9 +36,11 @@ extern bool MatViewIncrementalMaintenanceIsEnabled(void);
 
 extern void transientrel_init(QueryDesc *queryDesc);
 
-extern Datum IVM_immediate_before(PG_FUNCTION_ARGS);
-extern Datum IVM_immediate_maintenance(PG_FUNCTION_ARGS);
-extern Datum IVM_visible_in_prestate(PG_FUNCTION_ARGS);
+extern Datum ivm_immediate_before(PG_FUNCTION_ARGS);
+extern Datum ivm_immediate_maintenance(PG_FUNCTION_ARGS);
+extern Datum ivm_visible_in_prestate(PG_FUNCTION_ARGS);
+extern Datum ivm_rule_before(PG_FUNCTION_ARGS);
+extern Datum ivm_rule_after(PG_FUNCTION_ARGS);
 extern void AtAbort_IVM(void);
 extern bool isIvmName(const char *s);
 

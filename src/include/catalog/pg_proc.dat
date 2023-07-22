@@ -12477,13 +12477,19 @@
 
 # IVM
 { oid => '786', descr => 'ivm trigger (before)',
-  proname => 'IVM_immediate_before', provolatile => 'v', prorettype => 'trigger',
-  proargtypes => '', prosrc => 'IVM_immediate_before' },
+  proname => 'ivm_immediate_before', provolatile => 'v', prorettype => 'trigger',
+  proargtypes => '', prosrc => 'ivm_immediate_before' },
 { oid => '787', descr => 'ivm trigger (after)',
-  proname => 'IVM_immediate_maintenance', provolatile => 'v', prorettype => 'trigger',
-  proargtypes => '', prosrc => 'IVM_immediate_maintenance' },
+  proname => 'ivm_immediate_maintenance', provolatile => 'v', prorettype => 'trigger',
+  proargtypes => '', prosrc => 'ivm_immediate_maintenance' },
 { oid => '788', descr => 'ivm filetring ',
   proname => 'ivm_visible_in_prestate', provolatile => 's', prorettype => 'bool',
   proargtypes => 'oid tid oid', prosrc => 'ivm_visible_in_prestate' },
+{ oid => '789', descr => 'ivm rule before ',
+  proname => 'ivm_rule_before', provolatile => 'v', prorettype => 'bool',
+  proargtypes => 'oid', prosrc => 'ivm_rule_before' },
+{ oid => '7201', descr => 'ivm rule after ',
+  proname => 'ivm_rule_after', provolatile => 'v', prorettype => 'bool',
+  proargtypes => 'oid', prosrc => 'ivm_rule_after' },
 ]
 

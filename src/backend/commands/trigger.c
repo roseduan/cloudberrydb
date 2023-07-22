@@ -2272,12 +2272,12 @@ ExecBSInsertTriggers(EState *estate, ResultRelInfo *relinfo)
 	TriggerDesc *trigdesc;
 	int			i;
 	TriggerData LocTriggerData = {0};
-
-	if (Gp_role == GP_ROLE_EXECUTE)
-	{
-		/* Don't fire statement-triggers in executor nodes. */
-		return;
-	}
+	//FIXME:
+	// if (Gp_role == GP_ROLE_EXECUTE)
+	// {
+	// 	/* Don't fire statement-triggers in executor nodes. */
+	// 	return;
+	// }
 
 	trigdesc = relinfo->ri_TrigDesc;
 
@@ -5688,10 +5688,13 @@ AfterTriggerSaveEvent(EState *estate, ResultRelInfo *relinfo,
 	 */
 	if (afterTriggers.query_depth < 0)
 		elog(ERROR, "AfterTriggerSaveEvent() called outside of query");
-
+	//FIXME:
 	/* Don't fire statement-triggers in executor nodes. */
-	if (!row_trigger && Gp_role == GP_ROLE_EXECUTE)
-		return;
+	// if (!row_trigger && Gp_role == GP_ROLE_EXECUTE)
+	// {
+	// 	elog(INFO, "AfterTriggerSaveEvent() Gp_role %d.", Gp_role);
+	// 	return;
+	// }
 
 	/* Be sure we have enough space to record events at this query depth. */
 	if (afterTriggers.query_depth >= afterTriggers.maxquerydepth)

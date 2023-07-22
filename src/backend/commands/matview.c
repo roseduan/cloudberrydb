@@ -1394,14 +1394,14 @@ get_matview_query(Relation matviewRel)
  */
 
 /*
- * IVM_immediate_before
+ * ivm_immediate_before
  *
  * IVM trigger function invoked before base table is modified. If this is
  * invoked firstly in the same statement, we save the transaction id and the
  * command id at that time.
  */
 Datum
-IVM_immediate_before(PG_FUNCTION_ARGS)
+ivm_immediate_before(PG_FUNCTION_ARGS)
 {
 	TriggerData *trigdata = (TriggerData *) fcinfo->context;
 	char	   *matviewOid_text = trigdata->tg_trigger->tgargs[0];
@@ -1474,20 +1474,20 @@ IVM_immediate_before(PG_FUNCTION_ARGS)
 	}
 
 	entry->before_trig_count++;
-	elog(INFO, "trigger IVM_immediate_before.");
+	elog(INFO, "trigger ivm_immediate_before.");
 
 	return PointerGetDatum(NULL);
 }
 
 /*
- * IVM_immediate_maintenance
+ * ivm_immediate_maintenance
  *
  * IVM trigger function invoked after base table is modified.
  * For each table, tuplestores of transition tables are collected.
  * and after the last modification
  */
 Datum
-IVM_immediate_maintenance(PG_FUNCTION_ARGS)
+ivm_immediate_maintenance(PG_FUNCTION_ARGS)
 {
 	TriggerData *trigdata = (TriggerData *) fcinfo->context;
 	Relation	rel;
@@ -1732,6 +1732,8 @@ IVM_immediate_maintenance(PG_FUNCTION_ARGS)
 		MemoryContextSwitchTo(oldcxt);
 	}
 
+	// FIXME: This is a hack to avoid error in oid_dispatch.c
+	Gp_role = GP_ROLE_UTILITY;
 	/* for all modified tables */
 	foreach(lc, entry->tables)
 	{
@@ -1773,6 +1775,7 @@ IVM_immediate_maintenance(PG_FUNCTION_ARGS)
 				tuplestore_clear(new_tuplestore);
 		}
 	}
+	Gp_role = GP_ROLE_EXECUTE;
 
 	/* Clean up hash entry and delete tuplestores */
 	clean_up_IVM_hash_entry(entry, false);
@@ -1797,7 +1800,7 @@ IVM_immediate_maintenance(PG_FUNCTION_ARGS)
 
 	/* Restore userid and security context */
 	SetUserIdAndSecContext(save_userid, save_sec_context);
-	elog(INFO, "trigger IVM_immediate_maintenance.");
+	elog(INFO, "trigger ivm_immediate_maintenance.");
 	return PointerGetDatum(NULL);
 }
 
@@ -2563,4 +2566,23 @@ isIvmName(const char *s)
 	if (s)
 		return (strncmp(s, "__ivm_", 6) == 0);
 	return false;
+}
+
+
+Datum
+ivm_rule_before(PG_FUNCTION_ARGS)
+{
+	Oid			tableoid = PG_GETARG_OID(0);
+	bool	result = true;
+	elog(INFO, "trigger ivm_rule_before %d", tableoid);
+	PG_RETURN_BOOL(result);
+}
+
+Datum
+ivm_rule_after(PG_FUNCTION_ARGS)
+{
+	Oid			tableoid = PG_GETARG_OID(0);
+	bool	result = true;
+	elog(INFO, "trigger ivm_rule_after %d", tableoid);
+	PG_RETURN_BOOL(result);
 }
