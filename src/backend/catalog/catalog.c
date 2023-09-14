@@ -72,7 +72,6 @@
 #include "catalog/pg_stat_last_shoperation.h"
 #include "catalog/pg_statistic.h"
 #include "catalog/pg_trigger.h"
-#include "catalog/main_manifest.h"
 #include "cdb/cdbvars.h"
 
 #include "catalog/gp_indexing.h"
@@ -511,11 +510,6 @@ IsSharedRelation(Oid relationId)
 	if (relationId == GpWarehouseRelationId ||
 		relationId == GpWarehouseOidIndexId ||
 		relationId == GpWarehouseNameIndexId)
-	{
-		return true;
-	}
-
-	if (relationId == ManifestRelationId)
 	{
 		return true;
 	}

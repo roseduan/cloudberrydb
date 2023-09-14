@@ -4026,9 +4026,6 @@ getObjectDescription(const ObjectAddress *object, bool missing_ok)
 				appendStringInfo(&buffer, _("task %s"), taskname);
 				break;
 			}
-
-		case OCLASS_MAIN_MANIFEST:
-			break;
 	}
 
 	/* an empty buffer is equivalent to no object found */
@@ -4590,10 +4587,6 @@ getObjectTypeDescription(const ObjectAddress *object, bool missing_ok)
 
 		case OCLASS_TASK:
 			appendStringInfoString(&buffer, "task");
-			break;
-		
-		case OCLASS_MAIN_MANIFEST:
-			appendStringInfoString(&buffer, "manifest");
 			break;
 
 			/*
@@ -5903,9 +5896,6 @@ getObjectIdentityParts(const ObjectAddress *object,
 						*objname = list_make1(taskname);
 				}
 			}
-			break;
-
-		case OCLASS_MAIN_MANIFEST:
 			break;
 
 			/*
