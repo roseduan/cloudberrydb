@@ -1779,6 +1779,8 @@ process_shared_preload_libraries(void)
 				   false);
 #endif
 
+	load_libraries("pg_gophermeta", "shared_preload_libraries", false);
+
 	process_shared_preload_libraries_in_progress = false;
 }
 
