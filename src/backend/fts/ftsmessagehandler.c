@@ -313,14 +313,6 @@ HandleFtsWalRepSyncRepOff(void)
 		false, /* RequestRetry */
 	};
 
-	if (FaultInjector_InjectFaultIfSet("fts_probe",
-										   DDLNotSpecified,
-										   "" /* databaseName */,
-										   "" /* tableName */) == FaultInjectorTypeSkip)
-	{
-		SendFtsResponse(&response, FTS_MSG_SYNCREP_OFF);
-	}
-
 	ereport(LOG,
 			(errmsg("turning off synchronous wal replication due to FTS request")));
 	UnsetSyncStandbysDefined();
@@ -393,14 +385,6 @@ HandleFtsWalRepPromote(void)
 	ereport(LOG,
 			(errmsg("promoting mirror to primary due to FTS request")));
 
-	if (FaultInjector_InjectFaultIfSet("fts_probe",
-										   DDLNotSpecified,
-										   "" /* databaseName */,
-										   "" /* tableName */) == FaultInjectorTypeSkip)
-	{
-		goto skip_promote;
-	}
-	
 #ifndef USE_INTERNAL_FTS
 	if (IS_QUERY_DISPATCHER()) {
 		bool succ;
@@ -448,7 +432,9 @@ HandleFtsWalRepPromote(void)
 			 " DBState = %d", state);
 	}
 
+#ifndef USE_INTERNAL_FTS
 skip_promote:
+#endif
 	SendFtsResponse(&response, FTS_MSG_PROMOTE);
 }
 
