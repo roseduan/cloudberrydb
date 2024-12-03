@@ -1898,6 +1898,15 @@ _outNode(StringInfo str, void *obj)
 			case T_AlterDirectoryTableStmt:
 				_outAlterDirectoryTableStmt(str, obj);
 				break;
+			case T_CreateTaskStmt:
+				_outCreateTaskStmt(str, obj);
+				break;
+			case T_AlterTaskStmt:
+				_outAlterTaskStmt(str, obj);
+				break;
+			case T_DropTaskStmt:
+				_outDropTaskStmt(str, obj);
+				break;
 			case T_EphemeralNamedRelationInfo:
 				_outEphemeralNamedRelationInfo(str, obj);
 				break;

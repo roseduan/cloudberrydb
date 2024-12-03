@@ -5757,6 +5757,43 @@ _copyDistributedBy(const DistributedBy *from)
 	return newnode;
 }
 
+static CreateTaskStmt *
+_copyCreateTaskStmt(const CreateTaskStmt *from)
+{
+	CreateTaskStmt *newnode = makeNode(CreateTaskStmt);
+
+	COPY_STRING_FIELD(taskname);
+	COPY_STRING_FIELD(schedule);
+	COPY_STRING_FIELD(sql);
+	COPY_NODE_FIELD(options);
+	COPY_SCALAR_FIELD(if_not_exists);
+
+	return newnode;
+}
+
+static AlterTaskStmt *
+_copyAlterTaskStmt(const AlterTaskStmt *from)
+{
+	AlterTaskStmt *newnode = makeNode(AlterTaskStmt);
+
+	COPY_STRING_FIELD(taskname);
+	COPY_NODE_FIELD(options);
+	COPY_SCALAR_FIELD(missing_ok);
+
+	return newnode;
+}
+
+static DropTaskStmt *
+_copyDropTaskStmt(const DropTaskStmt *from)
+{
+	DropTaskStmt *newnode = makeNode(DropTaskStmt);
+
+	COPY_STRING_FIELD(taskname);
+	COPY_SCALAR_FIELD(missing_ok);
+
+	return newnode;
+}
+
 static CreatePolicyStmt *
 _copyCreatePolicyStmt(const CreatePolicyStmt *from)
 {
@@ -7322,6 +7359,16 @@ copyObjectImpl(const void *from)
 
 		case T_DistributedBy:
 			retval = _copyDistributedBy(from);
+			break;
+
+		case T_CreateTaskStmt:
+			retval = _copyCreateTaskStmt(from);
+			break;
+		case T_AlterTaskStmt:
+			retval = _copyAlterTaskStmt(from);
+			break;
+		case T_DropTaskStmt:
+			retval = _copyDropTaskStmt(from);
 			break;
 
 			/*

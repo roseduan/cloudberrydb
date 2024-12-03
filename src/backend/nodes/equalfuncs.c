@@ -3484,6 +3484,37 @@ _equalAlterDirectoryTableStmt(const AlterDirectoryTableStmt *a, const AlterDirec
 	return true;
 }
 
+static bool
+_equalCreateTaskStmt(const CreateTaskStmt *a, const CreateTaskStmt *b)
+{
+	COMPARE_STRING_FIELD(taskname);
+	COMPARE_STRING_FIELD(schedule);
+	COMPARE_STRING_FIELD(sql);
+	COMPARE_NODE_FIELD(options);
+	COMPARE_SCALAR_FIELD(if_not_exists);
+
+	return true;
+}
+
+static bool
+_equalAlterTaskStmt(const AlterTaskStmt *a, const AlterTaskStmt *b)
+{
+	COMPARE_STRING_FIELD(taskname);
+	COMPARE_NODE_FIELD(options);
+	COMPARE_SCALAR_FIELD(missing_ok);
+
+	return true;
+}
+
+static bool
+_equalDropTaskStmt(const DropTaskStmt *a, const DropTaskStmt *b)
+{
+	COMPARE_STRING_FIELD(taskname);
+	COMPARE_SCALAR_FIELD(missing_ok);
+
+	return true;
+}
+
 /*
  * Stuff from pg_list.h
  */
@@ -4438,6 +4469,16 @@ equal(const void *a, const void *b)
 
 		case T_AlterDirectoryTableStmt:
 			retval = _equalAlterDirectoryTableStmt(a, b);
+			break;
+
+		case T_CreateTaskStmt:
+			retval = _equalCreateTaskStmt(a, b);
+			break;
+		case T_AlterTaskStmt:
+			retval = _equalAlterTaskStmt(a, b);
+			break;
+		case T_DropTaskStmt:
+			retval = _equalDropTaskStmt(a, b);
 			break;
 
 		default:

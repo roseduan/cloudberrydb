@@ -1774,6 +1774,43 @@ _readAlterDirectoryTableStmt(void)
 	READ_DONE();
 }
 
+static CreateTaskStmt *
+_readCreateTaskStmt(void)
+{
+	READ_LOCALS(CreateTaskStmt);
+
+	READ_STRING_FIELD(taskname);
+	READ_STRING_FIELD(schedule);
+	READ_STRING_FIELD(sql);
+	READ_NODE_FIELD(options);
+	READ_BOOL_FIELD(if_not_exists);
+
+	READ_DONE();
+}
+
+static AlterTaskStmt *
+_readAlterTaskStmt(void)
+{
+	READ_LOCALS(AlterTaskStmt);
+
+	READ_STRING_FIELD(taskname);
+	READ_NODE_FIELD(options);
+	READ_BOOL_FIELD(missing_ok);
+
+	READ_DONE();
+}
+
+static DropTaskStmt *
+_readDropTaskStmt(void)
+{
+	READ_LOCALS(DropTaskStmt);
+
+	READ_STRING_FIELD(taskname);
+	READ_BOOL_FIELD(missing_ok);
+
+	READ_DONE();
+}
+
 static EphemeralNamedRelationInfo *
 _readEphemeralNamedRelationInfo(void)
 {
@@ -2857,6 +2894,15 @@ readNodeBinary(void)
 				break;
 			case T_AlterDirectoryTableStmt:
 				return_value = _readAlterDirectoryTableStmt();
+				break;
+			case T_CreateTaskStmt:
+				return_value = _readCreateTaskStmt();
+				break;
+			case T_AlterTaskStmt:
+				return_value = _readAlterTaskStmt();
+				break;
+			case T_DropTaskStmt:
+				return_value = _readDropTaskStmt();
 				break;
 			default:
 				return_value = NULL; /* keep the compiler silent */

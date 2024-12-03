@@ -4045,6 +4045,37 @@ _outAlterDirectoryTableStmt(StringInfo str, const AlterDirectoryTableStmt *node)
 	WRITE_BOOL_FIELD(unsettag);
 }
 
+static void
+_outCreateTaskStmt(StringInfo str, const CreateTaskStmt *node)
+{
+	WRITE_NODE_TYPE("CREATETASKSTMT");
+
+	WRITE_STRING_FIELD(taskname);
+	WRITE_STRING_FIELD(schedule);
+	WRITE_STRING_FIELD(sql);
+	WRITE_NODE_FIELD(options);
+	WRITE_BOOL_FIELD(if_not_exists);
+}
+
+static void
+_outAlterTaskStmt(StringInfo str, const AlterTaskStmt *node)
+{
+	WRITE_NODE_TYPE("ALTERTASKSTMT");
+
+	WRITE_STRING_FIELD(taskname);
+	WRITE_NODE_FIELD(options);
+	WRITE_BOOL_FIELD(missing_ok);
+}
+
+static void
+_outDropTaskStmt(StringInfo str, const DropTaskStmt *node)
+{
+	WRITE_NODE_TYPE("DROPTASKSTMT");
+
+	WRITE_STRING_FIELD(taskname);
+	WRITE_BOOL_FIELD(missing_ok);
+}
+
 #include "outfuncs_common.c"
 #ifndef COMPILING_BINARY_FUNCS
 /*
@@ -5201,6 +5232,15 @@ outNode(StringInfo str, const void *obj)
 				break;
 			case T_AlterDirectoryTableStmt:
 				_outAlterDirectoryTableStmt(str, obj);
+				break;
+			case T_CreateTaskStmt:
+				_outCreateTaskStmt(str, obj);
+				break;
+			case T_AlterTaskStmt:
+				_outAlterTaskStmt(str, obj);
+				break;
+			case T_DropTaskStmt:
+				_outDropTaskStmt(str, obj);
 				break;
 			default:
 
