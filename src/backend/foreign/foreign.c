@@ -44,12 +44,17 @@ extern Datum postgresql_fdw_validator(PG_FUNCTION_ARGS);
 static int GetForeignTableSegNumbers(Oid relid);
 
 /* Get and separate out the mpp_execute option. */
-char
-SeparateOutMppExecute(List **options)
+CustomForeignOptions
+SeparateOutCustomForeignOptions(List **options)
 {
 	ListCell *lc = NULL;
+	// ListCell *prev = NULL;
 	char *mpp_execute = NULL;
-	char exec_location = FTEXECLOCATION_NOT_DEFINED;
+	char *segment_number_str = NULL;
+
+	CustomForeignOptions cfo;
+	cfo.exec_location = FTEXECLOCATION_NOT_DEFINED;
+	cfo.segment_number = -1;
 
 	foreach(lc, *options)
 	{
@@ -60,13 +65,13 @@ SeparateOutMppExecute(List **options)
 			mpp_execute = defGetString(def);
 
 			if (pg_strcasecmp(mpp_execute, "any") == 0)
-				exec_location = FTEXECLOCATION_ANY;
+				cfo.exec_location = FTEXECLOCATION_ANY;
 			else if (pg_strcasecmp(mpp_execute, "master") == 0)
-				exec_location = FTEXECLOCATION_COORDINATOR;
+				cfo.exec_location = FTEXECLOCATION_COORDINATOR;
 			else if (pg_strcasecmp(mpp_execute, "coordinator") == 0)
-				exec_location = FTEXECLOCATION_COORDINATOR;
+				cfo.exec_location = FTEXECLOCATION_COORDINATOR;
 			else if (pg_strcasecmp(mpp_execute, "all segments") == 0)
-				exec_location = FTEXECLOCATION_ALL_SEGMENTS;
+				cfo.exec_location = FTEXECLOCATION_ALL_SEGMENTS;
 			else
 			{
 				ereport(ERROR,
@@ -80,7 +85,34 @@ SeparateOutMppExecute(List **options)
 		}
 	}
 
-	return exec_location;
+	// return exec_location;
+	// prev = NULL;
+	foreach(lc, *options)
+	{
+		DefElem    *def = (DefElem *) lfirst(lc);
+
+		if (strcmp(def->defname, "segment_number") == 0)
+		{
+			segment_number_str = defGetString(def);
+			cfo.segment_number = pg_atoi(segment_number_str, sizeof(int32), 0);
+
+			if (cfo.segment_number <= 0)
+			{
+				ereport(ERROR,
+						(errcode(ERRCODE_SYNTAX_ERROR),
+						 errmsg("\"%d\" is not a valid segment_number value",
+								cfo.segment_number)));
+			}
+
+			// *options = list_delete_cell(*options, lc, prev);
+			*options = list_delete_cell(*options, lc);
+			break;
+		}
+
+		// prev = lc;
+	}
+
+	return cfo;
 }
 
 /* Get and separate out the num_segments option */
@@ -138,6 +170,7 @@ GetForeignDataWrapperExtended(Oid fdwid, bits16 flags)
 	Datum		datum;
 	HeapTuple	tp;
 	bool		isnull;
+	CustomForeignOptions cfo;
 
 	tp = SearchSysCache1(FOREIGNDATAWRAPPEROID, ObjectIdGetDatum(fdwid));
 
@@ -167,7 +200,9 @@ GetForeignDataWrapperExtended(Oid fdwid, bits16 flags)
 	else
 		fdw->options = untransformRelOptions(datum);
 
-	fdw->exec_location = SeparateOutMppExecute(&fdw->options);
+	// fdw->exec_location = SeparateOutMppExecute(&fdw->options);
+	cfo = SeparateOutCustomForeignOptions(&fdw->options);
+	fdw->exec_location = cfo.exec_location;
 	if (fdw->exec_location == FTEXECLOCATION_NOT_DEFINED)
 		fdw->exec_location = FTEXECLOCATION_COORDINATOR;
 
@@ -216,6 +251,7 @@ GetForeignServerExtended(Oid serverid, bits16 flags)
 	HeapTuple	tp;
 	Datum		datum;
 	bool		isnull;
+	CustomForeignOptions cfo;
 
 	tp = SearchSysCache1(FOREIGNSERVEROID, ObjectIdGetDatum(serverid));
 
@@ -258,12 +294,18 @@ GetForeignServerExtended(Oid serverid, bits16 flags)
 	else
 		server->options = untransformRelOptions(datum);
 
-	server->exec_location = SeparateOutMppExecute(&server->options);
+	// server->exec_location = SeparateOutMppExecute(&server->options);
+	cfo = SeparateOutCustomForeignOptions(&server->options);
+	server->exec_location = cfo.exec_location;
 	if (server->exec_location == FTEXECLOCATION_NOT_DEFINED)
 	{
 		ForeignDataWrapper *fdw = GetForeignDataWrapper(server->fdwid);
 		server->exec_location = fdw->exec_location;
 	}
+
+	server->segment_number = cfo.segment_number;
+	if (server->segment_number <= 0)
+		server->segment_number = getgpsegmentCount();
 
 	server->num_segments = SeparateOutNumSegments(&server->options);
 	if (server->num_segments <= 0)
@@ -466,6 +508,7 @@ GetForeignTable(Oid relid)
 	HeapTuple	tp;
 	Datum		datum;
 	bool		isnull;
+	CustomForeignOptions cfo;
 
 	tp = SearchSysCache1(FOREIGNTABLEREL, ObjectIdGetDatum(relid));
 	if (!HeapTupleIsValid(tp))
@@ -488,7 +531,10 @@ GetForeignTable(Oid relid)
 
 	ReleaseSysCache(tp);
 
-	ft->exec_location = SeparateOutMppExecute(&ft->options);
+	// ft->exec_location = SeparateOutMppExecute(&ft->options);
+	cfo = SeparateOutCustomForeignOptions(&ft->options);
+
+	ft->exec_location = cfo.exec_location;	
 
 	if (ft->exec_location == FTEXECLOCATION_ALL_SEGMENTS &&
 		OidIsValid(ft->serverid) &&
@@ -520,6 +566,10 @@ GetForeignTable(Oid relid)
 	{
 			ft->num_segments = server->num_segments;
 	}
+
+	ft->segment_number = cfo.segment_number;
+	if (ft->segment_number <= 0)
+		ft->segment_number = server->segment_number;
 
 	return ft;
 }

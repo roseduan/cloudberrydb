@@ -3621,7 +3621,12 @@ make_cdbpathlocus_for_foreign_relations(struct PlannerInfo   *root,
 		case FTEXECLOCATION_ALL_SEGMENTS:
 			server = GetForeignServer(rel->serverid);
 			if (server)
-				CdbPathLocus_MakeStrewn(&(pathnode->path.locus), server->num_segments, 0);
+			{
+				if (rel->segment_number > 0)
+					CdbPathLocus_MakeStrewn(&(pathnode->path.locus), server->segment_number, 0);
+				else
+					CdbPathLocus_MakeStrewn(&(pathnode->path.locus), server->num_segments, 0);
+			}
 			else
 				CdbPathLocus_MakeStrewn(&(pathnode->path.locus), getgpsegmentCount(), 0);
 			break;

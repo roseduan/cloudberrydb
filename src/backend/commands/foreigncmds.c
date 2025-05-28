@@ -195,7 +195,8 @@ transformGenericOptions(Oid catalogId,
 	 */
 	if (catalogId != UserMappingRelationId)
 	{
-		SeparateOutMppExecute(&resultOptions);
+		// SeparateOutMppExecute(&resultOptions);
+		SeparateOutCustomForeignOptions(&resultOptions);
 		SeparateOutNumSegments(&resultOptions);
 	}
 

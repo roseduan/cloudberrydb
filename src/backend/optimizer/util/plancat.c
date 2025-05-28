@@ -473,6 +473,7 @@ get_relation_info(PlannerInfo *root, Oid relationObjectId, bool inhparent,
 		rel->fdwroutine = GetFdwRoutineForRelation(relation, true);
 		rel->exec_location = GetForeignTable(RelationGetRelid(relation))->exec_location;
 		rel->num_segments = GetForeignTable(RelationGetRelid(relation))->num_segments;
+		rel->segment_number = GetForeignTable(RelationGetRelid(relation))->segment_number;
 	}
 	else
 	{
@@ -481,6 +482,7 @@ get_relation_info(PlannerInfo *root, Oid relationObjectId, bool inhparent,
 		rel->fdwroutine = NULL;
 		rel->exec_location = FTEXECLOCATION_NOT_DEFINED;
 		rel->num_segments = getgpsegmentCount();
+		rel->segment_number = 0;
 	}
 
 	/* Collect info about relation's foreign keys, if relevant */

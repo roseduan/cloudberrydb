@@ -43,6 +43,7 @@ typedef struct ForeignServer
 	List	   *options;		/* srvoptions as DefElem list */
 	char		exec_location;  /* execute on MASTER, ANY or ALL SEGMENTS, Cloudberry MPP specific */
 	int32		num_segments;	/* the number of segments of the foreign cluster */
+	int32		segment_number;	/* segment number of the foreign cluster */
 } ForeignServer;
 
 typedef struct UserMapping
@@ -60,7 +61,14 @@ typedef struct ForeignTable
 	List	   *options;		/* ftoptions as DefElem list */
 	char		exec_location;  /* execute on COORDINATOR, ANY or ALL SEGMENTS, Cloudberry MPP specific */
 	int32		num_segments;	/* the number of segments of the foreign table */
+	int32		segment_number;	/* segment number of the foreign cluster */
 } ForeignTable;
+
+typedef struct CustomForeignOptions
+{
+	char		exec_location;  /* execute on MASTER, ANY or ALL SEGMENTS, Greenplum MPP specific */
+	int32		segment_number;	/* segment number of the foreign cluster */
+} CustomForeignOptions;
 
 /* Flags for GetForeignServerExtended */
 #define FSV_MISSING_OK	0x01
@@ -69,7 +77,7 @@ typedef struct ForeignTable
 #define FDW_MISSING_OK	0x01
 
 
-extern char SeparateOutMppExecute(List **options);
+extern CustomForeignOptions SeparateOutCustomForeignOptions(List **options);
 extern int32 SeparateOutNumSegments(List **options);
 extern ForeignServer *GetForeignServer(Oid serverid);
 extern ForeignServer *GetForeignServerExtended(Oid serverid,

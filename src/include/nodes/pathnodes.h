@@ -927,6 +927,7 @@ typedef struct RelOptInfo
 	bool		useridiscurrent;	/* join is only valid for current user */
 	char		exec_location;  /* execute on MASTER, ANY or ALL SEGMENTS, Cloudberry MPP specific */
 	int32		num_segments;  /* number of segments, Cloudberry MPP specific */
+	int			segment_number;   /* segment number of the foreign cluster, gpdb specific */
 	/* use "struct FdwRoutine" to avoid including fdwapi.h here */
 	struct FdwRoutine *fdwroutine;
 	void	   *fdw_private;
