@@ -16,6 +16,7 @@ DO $d$
     END;
 $d$;
 CREATE USER MAPPING IF NOT EXISTS FOR CURRENT_USER SERVER loopback;
+CREATE SCHEMA "S 1";
 CREATE TABLE table_dist_rand
 (
 	f1 int,
