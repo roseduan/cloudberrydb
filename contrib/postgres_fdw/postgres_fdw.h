@@ -136,6 +136,7 @@ typedef struct PgFdwConnState
 } PgFdwConnState;
 
 /* in postgres_fdw.c */
+extern void _PG_init(void);
 extern int	set_transmission_modes(void);
 extern void reset_transmission_modes(int nestlevel);
 extern void process_pending_request(AsyncRequest *areq);
@@ -143,6 +144,9 @@ extern void process_pending_request(AsyncRequest *areq);
 /* in connection.c */
 extern PGconn *GetConnection(UserMapping *user, bool will_prep_stmt,
 							 PgFdwConnState **state);
+extern PGconn *GetCustomConnection(UserMapping *user, bool will_prep_stmt,
+								   PgFdwConnState **state, bool is_gp_retrieve,
+								   int segid, List *server_options);
 extern void ReleaseConnection(PGconn *conn);
 extern unsigned int GetCursorNumber(PGconn *conn);
 extern unsigned int GetPrepStmtNumber(PGconn *conn);

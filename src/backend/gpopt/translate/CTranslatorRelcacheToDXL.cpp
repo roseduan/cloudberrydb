@@ -3082,7 +3082,7 @@ CTranslatorRelcacheToDXL::RetrieveStorageTypeForPartitionedTable(Relation rel)
 			// in ExecInit* to work with parallel cursors. This must run on the coordinator,
 			// but in Orca is run on the segments. We likely can't use Orca's dynamic scan
 			// approach for this case
-			CWStringConst str_greenplum_fdw(GPOS_WSZ_LIT("greenplum_fdw"));
+			CWStringConst str_greenplum_fdw(GPOS_WSZ_LIT("postgres_fdw"));
 			CAutoMemoryPool amp;
 			CMemoryPool *mp = amp.Pmp();
 			CWStringDynamic *fdw_name_str =
@@ -3095,7 +3095,7 @@ CTranslatorRelcacheToDXL::RetrieveStorageTypeForPartitionedTable(Relation rel)
 				GPOS_RAISE(
 					gpdxl::ExmaMD, gpdxl::ExmiMDObjUnsupported,
 					GPOS_WSZ_LIT(
-						"Queries with partitions of greenplum_fdw are not supported"));
+						"Queries with partitions of postgres_fdw are not supported"));
 			}
 			GPOS_DELETE(fdw_name_str);
 			continue;
