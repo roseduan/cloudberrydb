@@ -142,6 +142,7 @@ extern void reset_transmission_modes(int nestlevel);
 extern void process_pending_request(AsyncRequest *areq);
 
 /* in connection.c */
+extern PGconn *GetRawConnection(ForeignServer *server, UserMapping *user);
 extern PGconn *GetConnection(UserMapping *user, bool will_prep_stmt,
 							 PgFdwConnState **state);
 extern PGconn *GetCustomConnection(UserMapping *user, bool will_prep_stmt,

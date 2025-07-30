@@ -19,7 +19,7 @@ EXTENSION = postgres_fdw
 DATA = postgres_fdw--1.0.sql postgres_fdw--1.0--1.1.sql
 
 # REGRESS = gp2pg_postgres_fdw gp_postgres_fdw mpp_postgres_fdw #postgres_fdw
-REGRESS = gp2pg_postgres_fdw
+REGRESS = cloudberry_fdw_insert
 REGRESS_OPTS += --init-file=$(top_srcdir)/src/test/regress/init_file
 
 ifdef USE_PGXS
@@ -35,11 +35,11 @@ include $(top_srcdir)/contrib/contrib-global.mk
 endif
 
 # For postgres_fdw test
-export PG_PORT=5432
-installcheck: install prep_postgres
-clean: clean_postgres
-prep_postgres:
-	./postgres_setup.bash
-clean_postgres:
-	./postgres_clean.bash
-.PHONY: prep_postgres clean_postgres
+export PG_PORT=15432
+installcheck: install prep_cloudberry
+clean: clean_cloudberry
+prep_cloudberry:
+	./cloudberry_setup.bash
+clean_cloudberry:
+	./cloudberry_clean.bash
+.PHONY: prep_cloudberry clean_cloudberry

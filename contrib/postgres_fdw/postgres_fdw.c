@@ -24,13 +24,17 @@
 #include "catalog/pg_opfamily.h"
 #include "cdb/cdbvars.h"
 #include "cdb/cdbgang.h"
+#include "commands/copyto_internal.h"
 #include "commands/defrem.h"
 #include "commands/explain.h"
 #include "commands/vacuum.h"
 #include "executor/execAsync.h"
+#include "executor/execUtils.h"
+#include "executor/spi.h"
 #include "foreign/fdwapi.h"
 #include "funcapi.h"
 #include "miscadmin.h"
+#include "nodes/execnodes.h"
 #include "nodes/makefuncs.h"
 #include "nodes/nodeFuncs.h"
 #include "optimizer/appendinfo.h"
@@ -47,6 +51,7 @@
 #include "postgres_fdw.h"
 #include "storage/latch.h"
 #include "tcop/utility.h"
+#include "utils/backend_progress.h"
 #include "utils/builtins.h"
 #include "utils/float.h"
 #include "utils/guc.h"
@@ -67,6 +72,8 @@ PG_MODULE_MAGIC;
 
 /* If no remote estimates, assume a sort costs 20% extra */
 #define DEFAULT_FDW_SORT_MULTIPLIER 1.2
+
+#define EXEC_DATA_P 0
 
 static ProcessUtility_hook_type cbdb_fdw_prev_ProcessUtility = NULL;
 
@@ -204,6 +211,13 @@ typedef struct PgFdwScanState
 	char		*endpoint_name;
 } PgFdwScanState;
 
+typedef struct HelperPortsInfo
+{
+	int32	segid;
+	int32	port;
+	char	*hostname;
+} HelperPortsInfo;
+
 /*
  * Execution state of a foreign insert/update/delete operation.
  */
@@ -240,6 +254,10 @@ typedef struct PgFdwModifyState
 	/* for update row movement if subplan result rel */
 	struct PgFdwModifyState *aux_fmstate;	/* foreign-insert state, if
 											 * created */
+	struct CopyToStateData *ext_pstate;
+	bool					is_copyfrom;
+	char					*copyfrom_sql;
+	List					*helper_ports;
 } PgFdwModifyState;
 
 /*
@@ -345,10 +363,27 @@ typedef struct
 	List	   *already_used;	/* expressions already dealt with */
 } ec_member_foreign_arg;
 
+typedef struct CopyFromContext
+{
+	CopyFromState	cstate;
+	Relation		rel;
+	TupleDesc		tupdesc;
+	Datum			*values;
+	bool			*nulls;
+} CopyFromContext;
+
+typedef struct SegmentInfo
+{
+	char	*hostname;
+	int32	contentid;
+} SegmentInfo;
+
 /*
  * SQL functions
  */
 PG_FUNCTION_INFO_V1(postgres_fdw_handler);
+PG_FUNCTION_INFO_V1(cbdb_fdw_get_helper_ports);
+PG_FUNCTION_INFO_V1(cbdb_fdw_copy_from);
 
 /*
  * FDW callback routines
@@ -583,6 +618,16 @@ static void cbdb_fdw_ProcessUtility(PlannedStmt *pstmt, const char *queryString,
 									ProcessUtilityContext context, ParamListInfo params,
 									QueryEnvironment *queryEnv,
 									DestReceiver *dest, QueryCompletion *qc);
+static void beginForeignModifyByCopy(ModifyTableState *mtstate,
+									 PgFdwModifyState *fmstate,
+									 RangeTblEntry *rte,
+									 Relation rel,
+									 CmdType operation);
+static TupleTableSlot *execForeignInsertByCopy(ResultRelInfo *resultRelInfo,
+											   TupleTableSlot *slot);
+static void endForeignModifyByCopy(PgFdwModifyState *fmstate);
+static void InitParseStateTo(CopyToState pstate);
+static void CopySendToHelper(CopyToState cstate);
 
 /*
  * Foreign-data wrapper handler function: return a struct with pointers
@@ -2082,6 +2127,10 @@ postgresBeginForeignModify(ModifyTableState *mtstate,
 									retrieved_attrs);
 
 	resultRelInfo->ri_FdwState = fmstate;
+
+	beginForeignModifyByCopy(mtstate, fmstate, rte,
+							 resultRelInfo->ri_RelationDesc,
+							 mtstate->operation);
 }
 
 /*
@@ -2097,6 +2146,9 @@ postgresExecForeignInsert(EState *estate,
 	PgFdwModifyState *fmstate = (PgFdwModifyState *) resultRelInfo->ri_FdwState;
 	TupleTableSlot **rslot;
 	int			numSlots = 1;
+
+	if (fmstate->is_copyfrom)
+		return execForeignInsertByCopy(resultRelInfo, slot);
 
 	/*
 	 * If the fmstate has aux_fmstate set, use the aux_fmstate (see
@@ -2254,6 +2306,8 @@ postgresEndForeignModify(EState *estate,
 	/* If fmstate is NULL, we are in EXPLAIN; nothing to do */
 	if (fmstate == NULL)
 		return;
+
+	endForeignModifyByCopy(fmstate);
 
 	/* Destroy the execution state */
 	finish_foreign_modify(fmstate);
@@ -3114,6 +3168,11 @@ postgresExecForeignTruncate(List *rels,
 	StringInfoData sql;
 	ListCell   *lc;
 	bool		server_truncatable = true;
+
+	/*
+	 */
+	if (Gp_role == GP_ROLE_EXECUTE)
+		return;
 
 	/*
 	 * By default, all postgres_fdw foreign tables are assumed truncatable.
@@ -8035,4 +8094,758 @@ cbdb_fdw_ProcessUtility(PlannedStmt *pstmt, const char *queryString,
 	else
 		standard_ProcessUtility(pstmt, queryString, readOnlyTree,
 								context, params, queryEnv, dest, qc);
+}
+
+static void
+InitCopyFile(PgFdwModifyState *fmstate)
+{
+	CopyToStateData *pstate;
+	StringInfoData	ports;
+	StringInfoData	hosts;
+	ListCell		*lc;
+	int				i = 0,
+					j = 0,
+					k = 0;
+	int				length = 0;
+
+	pstate = fmstate->ext_pstate;
+	initStringInfo(&ports);
+	initStringInfo(&hosts);
+
+	length = list_length(fmstate->helper_ports);
+	for (j = 0; j < numsegmentsFromQD - length; j ++)
+	{
+		fmstate->helper_ports = lappend(fmstate->helper_ports, list_nth(fmstate->helper_ports, k));
+		if (k == length)
+			k = 0;
+	}
+
+	foreach_with_count(lc, fmstate->helper_ports, i)
+	{
+		HelperPortsInfo *port = (HelperPortsInfo *) lfirst(lc);
+		appendStringInfo(&ports, "%d", port->port);
+		appendStringInfo(&hosts, "%s", port->hostname);
+
+		if (i < list_length(fmstate->helper_ports) - 1)
+		{
+			appendStringInfo(&ports, ",");
+			appendStringInfo(&hosts, ",");
+		}
+	}
+
+	pstate->filename = psprintf("cbcopy_helper --no-compression --seg-id %d --host %s --port %s",
+								GpIdentity.segindex, hosts.data, ports.data);
+	pfree(ports.data);
+	pfree(hosts.data);
+
+	pstate->program_pipes = open_program_pipes(pstate->filename, true);
+	pstate->copy_file = fdopen(pstate->program_pipes->pipes[EXEC_DATA_P], PG_BINARY_W);
+	if (pstate->copy_file == NULL)
+		ereport(ERROR,
+				(errcode_for_file_access(),
+				 errmsg("could not execute command \"%s\": %m", pstate->filename)));
+}
+
+static StringInfo
+getTableColumnDefs(Oid relid)
+{
+	int				ret;
+	StringInfo		coldefs;
+	bool			needComma;
+
+	coldefs = makeStringInfo();
+	needComma = false;
+	appendStringInfoChar(coldefs, '(');
+
+	char *sql = psprintf("SELECT\n"
+						 "a.attname,\n"
+						 "pg_catalog.format_type(t.oid, a.atttypmod) AS atttypname\n"
+						 "FROM pg_catalog.pg_attribute a LEFT JOIN pg_catalog.pg_type t\n"
+						 "ON a.atttypid = t.oid\n"
+						 "WHERE attrelid = '%u'::pg_catalog.oid\n"
+						 "AND a.attnum > 0::pg_catalog.int2\n"
+						 "AND a.attisdropped = false\n"
+						 "AND (a.attgenerated = '' or a.attgenerated IS NULL)\n"
+						 "ORDER BY a.attnum;", relid);
+
+	if ((ret = SPI_connect()) < 0)
+		elog(ERROR, "getTableColumnDefs: SPI_connect returned %d", ret);
+
+	if ((ret = SPI_execute(sql, true, 0)) != SPI_OK_SELECT)
+		elog(ERROR, "getTableColumnDefs: SPI_execute returned %d", ret);
+
+	for (int i = 0; i < SPI_processed; i++)
+	{
+		Datum	dat;
+		bool	isnull;
+		char	*attname;
+		char	*atttypname;
+
+		/* attname */
+		dat = SPI_getbinval(SPI_tuptable->vals[i],
+							SPI_tuptable->tupdesc,
+							1,
+							&isnull);
+		Assert(!isnull);
+		attname = NameStr(*DatumGetName(dat));
+
+		/* atttypname */
+		dat = SPI_getbinval(SPI_tuptable->vals[i],
+							SPI_tuptable->tupdesc,
+							2,
+							&isnull);
+		Assert(!isnull);
+		atttypname = text_to_cstring(DatumGetTextP(dat));
+
+		if (needComma)
+			appendStringInfoString(coldefs, ", ");
+		appendStringInfoString(coldefs, quote_identifier(attname));
+		appendStringInfo(coldefs, " %s", atttypname);
+		needComma = true;
+	}
+	if (!needComma)
+		resetStringInfo(coldefs);
+	else
+		appendStringInfoChar(coldefs, ')');
+
+	SPI_finish();
+	pfree(sql);
+
+	return coldefs;
+}
+
+static List *
+getRemoteSegmentInfo(PgFdwModifyState *fmstate)
+{
+	PGresult	*volatile res = NULL;
+	int			ntuples;
+	List		*segList = NIL;
+
+	char *sql = "SELECT content, hostname "
+				"FROM gp_segment_configuration "
+				"WHERE role = 'p' "
+				"AND content >= 0 "
+				"ORDER BY content";
+
+	res = pgfdw_exec_query(fmstate->conn, sql, NULL);
+	if (PQresultStatus(res) != PGRES_TUPLES_OK)
+		pgfdw_report_error(ERROR, res, fmstate->conn, false, sql);
+
+	ntuples = PQntuples(res);
+	for (int i = 0; i < ntuples; i++)
+	{
+		char *content = PQgetvalue(res, i, 0);
+		char *hostname = PQgetvalue(res, i, 1);
+		SegmentInfo *seginfo = palloc(sizeof(SegmentInfo));
+
+		seginfo->hostname = pstrdup(hostname);
+		seginfo->contentid = atoi(content);
+		segList = lappend(segList, seginfo);
+	}
+
+	PQclear(res);
+	ReleaseConnection(fmstate->conn);
+
+	return segList;
+}
+
+static StringInfo
+calculateClientNumbers(int localsegnum, int remotesegnum)
+{
+	int			*clientNums;
+	StringInfo	buf;
+
+	clientNums = (int *) palloc0(remotesegnum * sizeof(int));
+	for (int i = 0; i < localsegnum; i++)
+		clientNums[i % remotesegnum]++;
+
+	buf = makeStringInfo();
+
+	for (int i = 0; i < remotesegnum; i++)
+	{
+		if (i > 0)
+			appendStringInfoChar(buf, ',');
+
+		appendStringInfo(buf, "%d", clientNums[i]);
+	}
+
+	pfree(clientNums);
+	return buf;
+}
+
+static PGresult *
+waitCbCopyHelperPorts(PGconn *conn, char *sql)
+{
+	int		maxretries = 50;
+	int		ntuples = 0;
+
+	for (int i = 0; i < maxretries; i++)
+	{
+		PGresult	*res = NULL;
+
+		pg_usleep(100 * 1000);	/* wait for 100 msec */
+
+		res = pgfdw_exec_query(conn, sql, NULL);
+		if (PQresultStatus(res) != PGRES_TUPLES_OK)
+			pgfdw_report_error(ERROR, res, conn, true, sql);
+
+		ntuples = PQntuples(res);
+		if (ntuples > 0)
+			return res;
+
+		PQclear(res);
+		res = NULL;
+	}
+
+	ereport(ERROR,
+			(errcode(ERRCODE_FDW_ERROR),
+			 errmsg("cannot get cbcopy_helper process port from remote."),
+			 errdetail("make sure the extension is also installed in remote server.")));
+}
+
+static int
+getDispatchNumSegmengs(ModifyTableState *mtstate)
+{
+	EState		*estate;
+	ExecSlice	*slice;
+	int			numsegments = 0;
+	List		*segs = NIL;
+	ListCell	*lc;
+
+	estate = mtstate->ps.state;
+	slice = getCurrentSlice(estate, LocallyExecutingSliceIndex(estate));
+	if (slice)
+	{
+		foreach(lc, slice->segments)
+		{
+			int val = lfirst_int(lc);
+			segs = list_append_unique_int(segs, val);
+		}
+		numsegments = list_length(segs);
+	}
+	
+	if (numsegments == 0)
+		numsegments = cdbcomponent_getCdbComponents()->total_segments;
+
+	return numsegments;
+}
+
+static void
+beginForeignModifyByCopy(ModifyTableState *mtstate,
+						 PgFdwModifyState *fmstate,
+						 RangeTblEntry *rte,
+						 Relation rel,
+						 CmdType operation)
+{
+	ForeignTable	*table;
+	ListCell		*lc1,
+					*lc2;
+	char			*schema_name = NULL;
+	char			*table_name = NULL;
+	List			*remoteseglist = NIL;
+	int				remotesegnum = 0;
+	int				localsegnum = 0;
+	bool			sendlocalseg = false;
+	StringInfo		client_numbers = NULL;
+	StringInfo		coldefs;
+	Datum			uuid_d;
+	char			*uuid = NULL;
+	Oid				userid;
+	UserMapping		*user = NULL;
+	ForeignServer	*server = NULL;
+	PGconn			*conn = NULL;
+	char			*helper_ports_sql = NULL;
+	PGresult		*res = NULL;
+	int				ntuples = 0;
+	ModifyTable		*md_plan = NULL;
+	int				dummy_index = 0;
+	List			*copyto_options = NIL;
+
+	/* init copy related states */
+	fmstate->ext_pstate = NULL;
+	fmstate->is_copyfrom = false;
+	fmstate->copyfrom_sql = NULL;
+	fmstate->helper_ports = NIL;
+
+	/* Get info about foreign table. */
+	table = GetForeignTable(RelationGetRelid(rel));
+
+	/* Process only queries with mpp_execute 'all segments'. */
+	if (operation != CMD_INSERT ||
+		table->exec_location != FTEXECLOCATION_ALL_SEGMENTS)
+		return;
+
+	/* Start of the COPY FROM processing routine. */
+	fmstate->is_copyfrom = true;
+
+	/*
+	 * On the QD (Query Dispatcher), the 'COPY FROM' operation
+	 * should be executed on the remote server via the UDF cbdb_fdw_copy_from.
+	 */
+	if (Gp_role == GP_ROLE_DISPATCH)
+	{
+		/* Get schema name and table name from foreign table options */
+		foreach(lc1, table->options)
+		{
+			DefElem *def = (DefElem *) lfirst(lc1);
+			if (strcmp(def->defname, "schema_name") == 0)
+				schema_name = defGetString(def);
+			if (strcmp(def->defname, "table_name") == 0)
+				table_name = defGetString(def);
+		}
+
+		/* Generate a uuid as the cmdid required by cbcopy_helper */
+		uuid_d = OidFunctionCall0(F_GEN_RANDOM_UUID);
+		uuid = DatumGetCString(OidFunctionCall1(F_UUID_OUT, uuid_d));
+
+		/* Get remote segment info */
+		remoteseglist = getRemoteSegmentInfo(fmstate);
+		remotesegnum = list_length(remoteseglist);
+
+		/* Get local segment nums */
+		localsegnum = getDispatchNumSegmengs(mtstate);
+		if (localsegnum < remotesegnum)
+		{
+			/*
+			 * When the local cluster has fewer segments than the remote cluster, e.g.:
+			 * - Local:   0 1
+			 * - Remote:  0 1 2 3
+			 *
+			 * Only the corresponding remote segments (0 and 1) should launch the
+			 * cbcopy_helper process. To enable this mapping, we must send the local
+			 * segment index to the remote cluster.
+			 */
+			sendlocalseg = true;
+		}
+		else if (localsegnum > remotesegnum)
+		{
+			/*
+			 * When the local cluster has more segments than the remote cluster, e.g.:
+			 * - Local:   0 1 2 3
+			 * - Remote:  0 1
+			 *
+			 * Each remote segment should launch a concurrent cbcopy_helper process with
+			 * assigned client numbers. The client numbers are calculated using a simple
+			 * round-robin algorithm.
+			 */
+			client_numbers = calculateClientNumbers(localsegnum, remotesegnum);
+		}
+
+		/* Get remote table column definition */
+		coldefs = getTableColumnDefs(table->relid);
+
+		fmstate->copyfrom_sql = psprintf("insert into %s.%s select * from public.cbdb_fdw_copy_from('%s.%s'::regclass, '%s', %d, '%s') as t %s;",
+										schema_name, table_name,
+										schema_name, table_name,
+										uuid, sendlocalseg ? localsegnum : 0,
+										client_numbers ? client_numbers->data : "",
+										coldefs->data);
+
+		/* Send copy from sql to remote server */
+		if (!PQsendQuery(fmstate->conn, fmstate->copyfrom_sql))
+			pgfdw_report_error(ERROR, NULL, fmstate->conn, false, fmstate->copyfrom_sql);
+
+		/*
+		 * After the 'COPY FROM' operation has been executed on the remote server,
+		 * we retrieve the ports of the remote cbcopy_helper processes.
+		 * A new connection is required here because the previous one is still in the 'COPY FROM' state.
+		 */
+		userid = rte->checkAsUser ? rte->checkAsUser : GetUserId();
+		user = GetUserMapping(userid, table->serverid);
+		server = GetForeignServer(user->serverid);
+		conn = GetRawConnection(server, user);
+		helper_ports_sql = psprintf("select distinct segid, port from public.cbdb_fdw_get_helper_ports() where cmdid = '%s' order by segid;", uuid);
+
+		/* Must release the connection after this routine. */
+		PG_TRY();
+		{
+			res = waitCbCopyHelperPorts(conn, helper_ports_sql);
+			ntuples = PQntuples(res);
+
+			/* Put the helper ports info into the plan */
+			md_plan = (ModifyTable *) mtstate->ps.plan;
+			/* dummy entry */
+			md_plan->fdwPrivLists = lappend(md_plan->fdwPrivLists, makeString(""));
+
+			for (int i = 0; i < ntuples; i++)
+			{
+				char *segid = PQgetvalue(res, i, 0);
+				char *port = PQgetvalue(res, i, 1);
+				char *hostname = NULL;
+
+				if (segid == NULL || strlen(segid) == 0)
+					elog(ERROR, "canno get segindex of remote segment");
+
+				if (port == NULL || strlen(port) == 0)
+					elog(ERROR, "canno get cbcopy_helper port of remote segment %s", segid);
+
+				foreach(lc2, remoteseglist)
+				{
+					SegmentInfo *seginfo = (SegmentInfo *) lfirst(lc2);
+					if (seginfo->contentid == atoi(segid))
+					{
+						hostname = seginfo->hostname;
+						break;
+					}
+				}
+				if (hostname == NULL || strlen(hostname) == 0)
+					elog(ERROR, "canno get hostname of remote segment %s", segid);
+
+				List *port_info = list_make3(makeString(pstrdup(segid)),
+											 makeString(pstrdup(port)),
+											 makeString(pstrdup(hostname)));
+				md_plan->fdwPrivLists = lappend(md_plan->fdwPrivLists, port_info);
+			}
+		}
+		PG_FINALLY();
+		{
+			/* disconnect immediately */
+			PQfinish(conn);
+			ReleaseExternalFD();
+			if (res)
+				PQclear(res);
+			pfree(helper_ports_sql);
+		}
+		PG_END_TRY();
+	}
+
+	/*
+	 * On the QE (Query Executor), retrieve the cbcopy_helper process ports
+	 * as part of the execution plan, and initialize the 'COPY TO' state.
+	 */
+	if (Gp_role == GP_ROLE_EXECUTE)
+	{
+		/* Get remote helper ports info from plan */
+		md_plan = (ModifyTable *) mtstate->ps.plan;
+		foreach(lc1, md_plan->fdwPrivLists)
+		{
+			void *val = lfirst(lc1);
+			if (IsA(val, String))
+			{
+				if (strlen(strVal(val)) == 0)
+					break;
+			}
+			dummy_index++;
+		}
+
+		/* Helper port information starts after the dummy entry. */
+		for_each_from(lc2, md_plan->fdwPrivLists, dummy_index + 1)
+		{
+			List *ports_info = (List *) lfirst(lc2);
+			char *segId = strVal(list_nth(ports_info, 0));
+			char *port = strVal(list_nth(ports_info, 1));
+			char *hostname = strVal(list_nth(ports_info, 2));
+
+			HelperPortsInfo *ports = palloc(sizeof(HelperPortsInfo));
+			ports->segid = atoi(segId);
+			ports->port = atoi(port);
+			ports->hostname = hostname;
+			fmstate->helper_ports = lappend(fmstate->helper_ports, ports);
+		}
+
+		/* Begin 'Copy To' and init copy file. */
+		copyto_options = lappend(copyto_options, makeDefElem("format", (Node *) makeString("csv"), -1));
+		// TODO ignore external partitions?
+		fmstate->ext_pstate = BeginCopyToForeignTable(rel, copyto_options);
+		InitParseStateTo(fmstate->ext_pstate);
+		InitCopyFile(fmstate);
+	}
+}
+
+static TupleTableSlot *
+execForeignInsertByCopy(ResultRelInfo *resultRelInfo,
+						TupleTableSlot *slot)
+{
+	PgFdwModifyState *fmstate = (PgFdwModifyState *) resultRelInfo->ri_FdwState;
+	CopyToStateData *pstate = fmstate->ext_pstate;
+
+	if (Gp_role == GP_ROLE_DISPATCH)
+		return NULL;
+
+	slot_getallattrs(slot);
+	CopyOneRowTo(pstate, slot);
+	CopySendToHelper(pstate);
+
+	/* Reset our buffer to start clean next round */
+	resetStringInfo(pstate->fe_msgbuf);
+
+	return slot;
+}
+
+static void
+endForeignModifyByCopy(PgFdwModifyState *fmstate)
+{
+	if (!fmstate->is_copyfrom)
+		return;
+
+	if (Gp_role == GP_ROLE_EXECUTE)
+	{
+		CopyToStateData *pstate = fmstate->ext_pstate;	
+		if (pstate->copy_file)
+		{
+			fclose(pstate->copy_file);
+			pstate->copy_file = NULL;
+		}
+		close_program_pipes(pstate->program_pipes, true);
+
+		pgstat_progress_end_command();
+		MemoryContextDelete(pstate->copycontext);
+		pfree(pstate);
+	}
+	else
+	{
+		Assert(Gp_role == GP_ROLE_DISPATCH);
+		PGresult *result = pgfdw_get_result(fmstate->conn, fmstate->copyfrom_sql);
+		if (PQresultStatus(result) != PGRES_COMMAND_OK)
+			pgfdw_report_error(ERROR, result, fmstate->conn, true, fmstate->copyfrom_sql);
+
+		PQclear(result);
+		pfree(fmstate->copyfrom_sql);
+	}
+}
+
+static void
+InitParseStateTo(CopyToState pstate)
+{
+	TupleDesc	tupDesc;
+	int			num_phys_attrs;
+	ListCell	*cur;
+
+	tupDesc = RelationGetDescr(pstate->rel);
+	num_phys_attrs = tupDesc->natts;
+	pstate->out_functions = (FmgrInfo *) palloc(num_phys_attrs * sizeof(FmgrInfo));
+
+	foreach(cur, pstate->attnumlist)
+	{
+		int			attnum = lfirst_int(cur);
+		Form_pg_attribute attr = TupleDescAttr(tupDesc, attnum - 1);
+		Oid			out_func_oid;
+		bool		isvarlena;
+
+		if (pstate->opts.binary)
+			getTypeBinaryOutputInfo(attr->atttypid,
+									&out_func_oid,
+									&isvarlena);
+		else
+			getTypeOutputInfo(attr->atttypid,
+							  &out_func_oid,
+							  &isvarlena);
+		fmgr_info(out_func_oid, &pstate->out_functions[attnum - 1]);
+	}
+
+	/* init 'fe_mgbuf' */
+	pstate->fe_msgbuf = makeStringInfo();
+
+	/*
+	 * Create a temporary memory context that we can reset once per row to
+	 * recover palloc'd memory.  This avoids any problems with leaks inside
+	 * datatype input or output routines, and should be faster than retail
+	 * pfree's anyway.
+	 */
+	pstate->rowcontext = AllocSetContextCreate(CurrentMemoryContext,
+											   "postgresFdwCopyMemCxt",
+											   ALLOCSET_DEFAULT_MINSIZE,
+											   ALLOCSET_DEFAULT_INITSIZE,
+											   ALLOCSET_DEFAULT_MAXSIZE);
+}
+
+static void
+CopySendToHelper(CopyToState cstate)
+{
+	StringInfo	fe_msgbuf = cstate->fe_msgbuf;
+
+	/* Default line termination depends on platform */
+#ifndef WIN32
+	appendStringInfoCharMacro(cstate->fe_msgbuf, '\n');
+#else
+	appendBinaryStringInfo(cstate->fe_msgbuf, "\r\n", strlen("\r\n"));
+#endif
+
+	if (fwrite(fe_msgbuf->data, fe_msgbuf->len, 1, cstate->copy_file) != 1 ||
+		ferror(cstate->copy_file))
+	{
+		if (errno == EPIPE)
+		{
+			/*
+			 * The pipe will be closed automatically on error at
+			 * the end of transaction, but we might get a better
+			 * error message from the subprocess' exit code than
+			 * just "Broken Pipe"
+			 */
+			if (cstate->copy_file)
+			{
+				fclose(cstate->copy_file);
+				cstate->copy_file = NULL;
+			}
+			close_program_pipes(cstate->program_pipes, true);
+
+			/*
+			 * If ClosePipeToProgram() didn't throw an error, the
+			 * program terminated normally, but closed the pipe
+			 * first. Restore errno, and throw an error.
+			 */
+			errno = EPIPE;
+		}
+		ereport(ERROR,
+				(errcode_for_file_access(),
+				 errmsg("could not write to COPY program: %m")));
+	}
+}
+
+Datum
+cbdb_fdw_get_helper_ports(PG_FUNCTION_ARGS)
+{
+	FuncCallContext	*funcctx;
+	FILE			*fp;
+	char			line[1024];
+	List			*lines = NIL;
+
+	if (SRF_IS_FIRSTCALL())
+	{
+		MemoryContext	oldcontext;
+		TupleDesc		tupdesc;
+
+		funcctx = SRF_FIRSTCALL_INIT();
+		oldcontext = MemoryContextSwitchTo(funcctx->multi_call_memory_ctx);
+
+		/* Run the shell command and capture output. */
+		fp = popen("cat /tmp/cbcopy-*.txt 2>/dev/null || true", "r");
+		if (fp == NULL)
+			ereport(ERROR, (errmsg("cannot run shell command")));
+
+		while (fgets(line, sizeof(line), fp) != NULL)
+			lines = lappend(lines, pstrdup(line));
+
+		pclose(fp);
+
+		/* build tuple descriptor */
+		tupdesc = CreateTemplateTupleDesc(3);
+		TupleDescInitEntry(tupdesc, (AttrNumber) 1, "cmdID", TEXTOID, -1, 0);
+		TupleDescInitEntry(tupdesc, (AttrNumber) 2, "segID", INT4OID, -1, 0);
+		TupleDescInitEntry(tupdesc, (AttrNumber) 3, "port", INT4OID, -1, 0);
+		funcctx->tuple_desc = BlessTupleDesc(tupdesc);
+
+		funcctx->user_fctx = lines;
+		funcctx->max_calls = list_length(lines);
+		MemoryContextSwitchTo(oldcontext);
+	}
+
+	funcctx = SRF_PERCALL_SETUP();
+	lines = (List *) funcctx->user_fctx;
+
+	if (funcctx->call_cntr < funcctx->max_calls)
+	{
+		char		*line_data;
+		char		*token;
+		HeapTuple	tuple;
+		Datum		values[3];
+		bool		nulls[3];
+
+		memset(nulls, 0, sizeof(nulls));
+
+		line_data = (char *) list_nth(lines, funcctx->call_cntr);
+
+		token = strtok(line_data, "\t");
+		values[0] = CStringGetTextDatum(token ? token : "");
+
+		token = strtok(NULL, "\t");
+		values[1] = Int32GetDatum(token ? atoi(token) : 0);
+
+		token = strtok(NULL, "\t");
+		values[2] = Int32GetDatum(token ? atoi(token) : 0);
+
+		tuple = heap_form_tuple(funcctx->tuple_desc, values, nulls);
+
+		SRF_RETURN_NEXT(funcctx, HeapTupleGetDatum(tuple));
+	}
+	else
+	{
+		SRF_RETURN_DONE(funcctx);
+	}
+}
+
+Datum
+cbdb_fdw_copy_from(PG_FUNCTION_ARGS)
+{
+	FuncCallContext *funcctx;
+	Oid				relid = PG_GETARG_OID(0);
+	char			*cmdid = PG_GETARG_CSTRING(1);
+	int				segnum = PG_GETARG_INT32(2);
+	char			*clientNumbers = PG_GETARG_CSTRING(3);
+	CopyFromContext *cp = NULL;
+	bool			start_server = true;
+
+	if (segnum > 0)
+		start_server = (GpIdentity.segindex < segnum);
+
+	if (SRF_IS_FIRSTCALL())
+	{
+		MemoryContext	oldcontext;
+		char			*filename;
+		Relation		rel;
+		int				nattrs;
+		CopyFromState	cstate;
+		List			*options = NIL;
+
+		funcctx = SRF_FIRSTCALL_INIT();
+		oldcontext = MemoryContextSwitchTo(funcctx->multi_call_memory_ctx);
+
+		if (start_server)
+		{
+			cp = palloc(sizeof(CopyFromContext));
+
+			if (strlen(clientNumbers) > 0)
+				filename = psprintf("cbcopy_helper --no-compression --listen --seg-id <SEGID> --cmd-id %s --client-numbers %s --data-port-range 1024-65535", cmdid, clientNumbers);
+			else
+				filename = psprintf("cbcopy_helper --no-compression --listen --seg-id <SEGID> --cmd-id %s --data-port-range 1024-65535", cmdid);
+			rel = table_open(relid, AccessShareLock);
+			nattrs = rel->rd_att->natts;
+
+			/* begin copy from */
+			options = lappend(options, makeDefElem("format", (Node *) makeString("csv"), -1));
+			options = lappend(options, makeDefElem("on_segment", (Node *) makeInteger(true), -1));
+			cstate = BeginCopyFrom(NULL,
+									rel,
+									NULL,
+									filename,
+									true,
+									NULL,
+									NULL,
+									NIL,
+									options);
+
+			cp->cstate = cstate;
+			cp->rel = rel;
+			cp->tupdesc = RelationGetDescr(rel);
+			cp->values = (Datum *) palloc(nattrs * sizeof(Datum));
+			cp->nulls = (bool *) palloc(nattrs * sizeof(bool));
+			funcctx->user_fctx = cp;
+		}
+		else
+		{
+			funcctx->max_calls = 0;
+			funcctx->user_fctx = NULL;
+		}
+		MemoryContextSwitchTo(oldcontext);
+	}
+
+	funcctx = SRF_PERCALL_SETUP();
+
+	if (!start_server)
+		SRF_RETURN_DONE(funcctx);
+
+	cp = (CopyFromContext *) funcctx->user_fctx;
+
+	if (NextCopyFrom(cp->cstate, NULL, cp->values, cp->nulls))
+	{
+		HeapTuple tuple;
+
+		tuple = heap_form_tuple(cp->tupdesc, cp->values, cp->nulls);
+		SRF_RETURN_NEXT(funcctx, HeapTupleGetDatum(tuple));
+	}
+	else
+	{
+		table_close(cp->rel, AccessShareLock);
+		SRF_RETURN_DONE(funcctx);
+	}
 }

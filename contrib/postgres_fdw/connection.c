@@ -16,6 +16,7 @@
 #include "access/xact.h"
 #include "catalog/pg_user_mapping.h"
 #include "commands/defrem.h"
+#include "cdb/cdbvars.h"
 #include "funcapi.h"
 #include "mb/pg_wchar.h"
 #include "miscadmin.h"
@@ -131,6 +132,19 @@ PGconn *
 GetConnection(UserMapping *user, bool will_prep_stmt, PgFdwConnState **state)
 {
 	return GetCustomConnection(user, will_prep_stmt, state, false, 0, NULL);
+}
+
+/*
+ * Returns a raw PGconn for direct access to the remote server.
+ * This connection bypasses the ConnectionHash table and is intended
+ * for special-purpose or temporary operations.
+ *
+ * Must be explicitly released by the caller after use to avoid leaks.
+ */
+PGconn *
+GetRawConnection(ForeignServer *server, UserMapping *user)
+{
+	return connect_pg_server(server, user, false);
 }
 
 /*
