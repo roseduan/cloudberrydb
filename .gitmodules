@@ -17,4 +17,6 @@
 [submodule "dependency/yyjson"]
 	path = dependency/yyjson
 	url = https://github.com/ibireme/yyjson.git
-
+[submodule "contrib/postgres_fdw/cbcopy"]
+	path = contrib/postgres_fdw/cbcopy
+	url = https://github.com/cloudberry-contrib/cbcopy.git
