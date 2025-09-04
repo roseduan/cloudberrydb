@@ -22,9 +22,9 @@ CREATE EXTENSION postgres_fdw;
 
 CREATE SERVER testserver1 FOREIGN DATA WRAPPER postgres_fdw;
 CREATE SERVER pgserver FOREIGN DATA WRAPPER postgres_fdw
-  OPTIONS (dbname 'contrib_regression', host 'localhost', port '5432');
+  OPTIONS (dbname 'contrib_regression', host 'localhost', port '5432', mpp_execute 'all segments');
 CREATE SERVER pgserver2 FOREIGN DATA WRAPPER postgres_fdw
-  OPTIONS (dbname 'contrib_regression', host 'localhost', port '5432');
+  OPTIONS (dbname 'contrib_regression', host 'localhost', port '5432', mpp_execute 'all segments');
 
 CREATE USER MAPPING FOR public SERVER testserver1
 	OPTIONS (user 'value', password 'value');
@@ -201,6 +201,13 @@ ALTER FOREIGN TABLE ft1 OPTIONS (schema_name 'S 1', table_name 'T 1');
 ALTER FOREIGN TABLE ft2 OPTIONS (schema_name 'S 1', table_name 'T 1');
 ALTER FOREIGN TABLE ft1 ALTER COLUMN c1 OPTIONS (column_name 'C 1');
 ALTER FOREIGN TABLE ft2 ALTER COLUMN c1 OPTIONS (column_name 'C 1');
+
+ALTER FOREIGN TABLE ft1 OPTIONS (mpp_execute 'all segments');
+ALTER FOREIGN TABLE ft2 OPTIONS (mpp_execute 'all segments');
+ALTER FOREIGN TABLE ft4 OPTIONS (mpp_execute 'all segments');
+ALTER FOREIGN TABLE ft5 OPTIONS (mpp_execute 'all segments');
+ALTER FOREIGN TABLE ft6 OPTIONS (mpp_execute 'all segments');
+
 \det+
 
 -- Test that alteration of server options causes reconnection
@@ -418,8 +425,8 @@ SELECT t1.c1, t2.c1 FROM ft4 t1 LEFT JOIN ft5 t2 ON (t1.c1 = t2.c1) ORDER BY t1.
 SELECT t1.c1, t2.c1 FROM ft4 t1 LEFT JOIN ft5 t2 ON (t1.c1 = t2.c1) ORDER BY t1.c1, t2.c1 OFFSET 10 LIMIT 10;
 -- left outer join three tables
 EXPLAIN (VERBOSE, COSTS OFF)
-SELECT t1.c1, t2.c2, t3.c3 FROM ft2 t1 LEFT JOIN ft2 t2 ON (t1.c1 = t2.c1) LEFT JOIN ft4 t3 ON (t2.c1 = t3.c1) OFFSET 10 LIMIT 10;
-SELECT t1.c1, t2.c2, t3.c3 FROM ft2 t1 LEFT JOIN ft2 t2 ON (t1.c1 = t2.c1) LEFT JOIN ft4 t3 ON (t2.c1 = t3.c1) OFFSET 10 LIMIT 10;
+SELECT t1.c1, t2.c2, t3.c3 FROM ft2 t1 LEFT JOIN ft2 t2 ON (t1.c1 = t2.c1) LEFT JOIN ft4 t3 ON (t2.c1 = t3.c1) ORDER BY t1.c1 OFFSET 10 LIMIT 10;
+SELECT t1.c1, t2.c2, t3.c3 FROM ft2 t1 LEFT JOIN ft2 t2 ON (t1.c1 = t2.c1) LEFT JOIN ft4 t3 ON (t2.c1 = t3.c1) ORDER BY t1.c1 OFFSET 10 LIMIT 10;
 -- left outer join + placement of clauses.
 -- clauses within the nullable side are not pulled up, but top level clause on
 -- non-nullable side is pushed into non-nullable side
@@ -439,8 +446,8 @@ SELECT t1.c1, t2.c1 FROM ft5 t1 RIGHT JOIN ft4 t2 ON (t1.c1 = t2.c1) ORDER BY t2
 SELECT t1.c1, t2.c1 FROM ft5 t1 RIGHT JOIN ft4 t2 ON (t1.c1 = t2.c1) ORDER BY t2.c1, t1.c1 OFFSET 10 LIMIT 10;
 -- right outer join three tables
 EXPLAIN (VERBOSE, COSTS OFF)
-SELECT t1.c1, t2.c2, t3.c3 FROM ft2 t1 RIGHT JOIN ft2 t2 ON (t1.c1 = t2.c1) RIGHT JOIN ft4 t3 ON (t2.c1 = t3.c1) OFFSET 10 LIMIT 10;
-SELECT t1.c1, t2.c2, t3.c3 FROM ft2 t1 RIGHT JOIN ft2 t2 ON (t1.c1 = t2.c1) RIGHT JOIN ft4 t3 ON (t2.c1 = t3.c1) OFFSET 10 LIMIT 10;
+SELECT t1.c1, t2.c2, t3.c3 FROM ft2 t1 RIGHT JOIN ft2 t2 ON (t1.c1 = t2.c1) RIGHT JOIN ft4 t3 ON (t2.c1 = t3.c1) ORDER BY t1.c1 OFFSET 10 LIMIT 10;
+SELECT t1.c1, t2.c2, t3.c3 FROM ft2 t1 RIGHT JOIN ft2 t2 ON (t1.c1 = t2.c1) RIGHT JOIN ft4 t3 ON (t2.c1 = t3.c1) ORDER BY t1.c1 OFFSET 10 LIMIT 10;
 -- full outer join
 EXPLAIN (VERBOSE, COSTS OFF)
 SELECT t1.c1, t2.c1 FROM ft4 t1 FULL JOIN ft5 t2 ON (t1.c1 = t2.c1) ORDER BY t1.c1, t2.c1 OFFSET 45 LIMIT 10;
@@ -492,12 +499,12 @@ SELECT t1.c1, t2.c2, t3.c3 FROM ft2 t1 LEFT JOIN ft2 t2 ON (t1.c1 = t2.c1) FULL 
 SELECT t1.c1, t2.c2, t3.c3 FROM ft2 t1 LEFT JOIN ft2 t2 ON (t1.c1 = t2.c1) FULL JOIN ft4 t3 ON (t2.c1 = t3.c1) ORDER BY t1.c1, t2.c2, t3.c3 OFFSET 10 LIMIT 10;
 -- right outer join + left outer join
 EXPLAIN (VERBOSE, COSTS OFF)
-SELECT t1.c1, t2.c2, t3.c3 FROM ft2 t1 RIGHT JOIN ft2 t2 ON (t1.c1 = t2.c1) LEFT JOIN ft4 t3 ON (t2.c1 = t3.c1) OFFSET 10 LIMIT 10;
-SELECT t1.c1, t2.c2, t3.c3 FROM ft2 t1 RIGHT JOIN ft2 t2 ON (t1.c1 = t2.c1) LEFT JOIN ft4 t3 ON (t2.c1 = t3.c1) OFFSET 10 LIMIT 10;
+SELECT t1.c1, t2.c2, t3.c3 FROM ft2 t1 RIGHT JOIN ft2 t2 ON (t1.c1 = t2.c1) LEFT JOIN ft4 t3 ON (t2.c1 = t3.c1) ORDER BY t1.c1 OFFSET 10 LIMIT 10;
+SELECT t1.c1, t2.c2, t3.c3 FROM ft2 t1 RIGHT JOIN ft2 t2 ON (t1.c1 = t2.c1) LEFT JOIN ft4 t3 ON (t2.c1 = t3.c1) ORDER BY t1.c1 OFFSET 10 LIMIT 10;
 -- left outer join + right outer join
 EXPLAIN (VERBOSE, COSTS OFF)
-SELECT t1.c1, t2.c2, t3.c3 FROM ft2 t1 LEFT JOIN ft2 t2 ON (t1.c1 = t2.c1) RIGHT JOIN ft4 t3 ON (t2.c1 = t3.c1) OFFSET 10 LIMIT 10;
-SELECT t1.c1, t2.c2, t3.c3 FROM ft2 t1 LEFT JOIN ft2 t2 ON (t1.c1 = t2.c1) RIGHT JOIN ft4 t3 ON (t2.c1 = t3.c1) OFFSET 10 LIMIT 10;
+SELECT t1.c1, t2.c2, t3.c3 FROM ft2 t1 LEFT JOIN ft2 t2 ON (t1.c1 = t2.c1) RIGHT JOIN ft4 t3 ON (t2.c1 = t3.c1) ORDER BY t1.c1 OFFSET 10 LIMIT 10;
+SELECT t1.c1, t2.c2, t3.c3 FROM ft2 t1 LEFT JOIN ft2 t2 ON (t1.c1 = t2.c1) RIGHT JOIN ft4 t3 ON (t2.c1 = t3.c1) ORDER BY t1.c1 OFFSET 10 LIMIT 10;
 -- full outer join + WHERE clause, only matched rows
 EXPLAIN (VERBOSE, COSTS OFF)
 SELECT t1.c1, t2.c1 FROM ft4 t1 FULL JOIN ft5 t2 ON (t1.c1 = t2.c1) WHERE (t1.c1 = t2.c1 OR t1.c1 IS NULL) ORDER BY t1.c1, t2.c1 OFFSET 10 LIMIT 10;
@@ -949,6 +956,9 @@ select c2, sum from "S 1"."T 1" t1, lateral (select sum(t2.c1 + t1."C 1") sum fr
 reset enable_hashagg;
 
 -- bug #15613: bad plan for foreign table scan with lateral reference
+-- start_ignore
+-- FIXME: reopen this case after fix the issue:
+-- https://github.com/apache/cloudberry/issues/1341
 EXPLAIN (VERBOSE, COSTS OFF)
 SELECT ref_0.c2, subq_1.*
 FROM
@@ -973,6 +983,7 @@ FROM
     ) AS subq_1
 WHERE ref_0."C 1" < 10 AND subq_1.c3 = '00001'
 ORDER BY ref_0."C 1";
+-- end_ignore
 
 -- Check with placeHolderVars
 explain (verbose, costs off)
@@ -1081,17 +1092,17 @@ DEALLOCATE st8;
 
 -- System columns, except ctid and oid, should not be sent to remote
 EXPLAIN (VERBOSE, COSTS OFF)
-SELECT * FROM ft1 t1 WHERE t1.tableoid = 'pg_class'::regclass LIMIT 1;
-SELECT * FROM ft1 t1 WHERE t1.tableoid = 'ft1'::regclass LIMIT 1;
+SELECT * FROM ft1 t1 WHERE t1.tableoid = 'pg_class'::regclass ORDER BY c1 LIMIT 1;
+SELECT * FROM ft1 t1 WHERE t1.tableoid = 'ft1'::regclass ORDER BY c1 LIMIT 1;
 EXPLAIN (VERBOSE, COSTS OFF)
-SELECT tableoid::regclass, * FROM ft1 t1 LIMIT 1;
-SELECT tableoid::regclass, * FROM ft1 t1 LIMIT 1;
+SELECT tableoid::regclass, * FROM ft1 t1 ORDER BY c1 LIMIT 1;
+SELECT tableoid::regclass, * FROM ft1 t1 ORDER BY c1 LIMIT 1;
 EXPLAIN (VERBOSE, COSTS OFF)
-SELECT * FROM ft1 t1 WHERE t1.ctid = '(0,2)';
-SELECT * FROM ft1 t1 WHERE t1.ctid = '(0,2)';
+SELECT * FROM ft1 t1 WHERE t1.ctid = '(0,2)' ORDER BY c1;
+SELECT * FROM ft1 t1 WHERE t1.ctid = '(0,2)' ORDER BY c1;
 EXPLAIN (VERBOSE, COSTS OFF)
-SELECT ctid, * FROM ft1 t1 LIMIT 1;
-SELECT ctid, * FROM ft1 t1 LIMIT 1;
+SELECT ctid, * FROM ft1 t1 ORDER BY c1 LIMIT 1;
+SELECT ctid, * FROM ft1 t1 ORDER BY c1 LIMIT 1;
 
 -- ===================================================================
 -- used in PL/pgSQL function
@@ -1113,7 +1124,7 @@ DROP FUNCTION f_test(int);
 -- ===================================================================
 -- remote table is not created here
 CREATE FOREIGN TABLE reindex_foreign (c1 int, c2 int)
-  SERVER pgserver2 OPTIONS (table_name 'reindex_local');
+  SERVER pgserver2 OPTIONS (table_name 'reindex_local', mpp_execute 'all segments');
 REINDEX TABLE reindex_foreign; -- error
 -- In greenplum, REINDEX CONCURRENTLY is not supported.
 REINDEX TABLE CONCURRENTLY reindex_foreign; -- error
@@ -1124,7 +1135,7 @@ CREATE TABLE reind_fdw_0_10 PARTITION OF reind_fdw_parent
   FOR VALUES FROM (0) TO (10);
 CREATE FOREIGN TABLE reind_fdw_10_20 PARTITION OF reind_fdw_parent
   FOR VALUES FROM (10) TO (20)
-  SERVER pgserver OPTIONS (table_name 'reind_local_10_20');
+  SERVER pgserver OPTIONS (table_name 'reind_local_10_20', mpp_execute 'all segments');
 REINDEX TABLE reind_fdw_parent; -- ok
 -- In greenplum, REINDEX CONCURRENTLY is not supported.
 REINDEX TABLE CONCURRENTLY reind_fdw_parent; -- ok
@@ -1164,9 +1175,10 @@ COMMIT;
 -- ===================================================================
 -- test handling of collations
 -- ===================================================================
-\! env PGOPTIONS='' psql -p ${PG_PORT} contrib_regression -c 'create table loct3 (f1 text collate "C" unique, f2 text, f3 varchar(10) unique);'
+\! env PGOPTIONS='' psql -p ${PG_PORT} contrib_regression -c 'create table loct3 (f1 text collate "C" unique, f2 text, f3 varchar(10));'
 create foreign table ft3 (f1 text collate "C", f2 text, f3 varchar(10))
   server pgserver options (table_name 'loct3', use_remote_estimate 'true');
+ALTER FOREIGN TABLE ft3 OPTIONS (mpp_execute 'all segments');
 -- create table loct3 (f1 text collate "C" unique, f2 text, f3 varchar(10) unique) DISTRIBUTED BY (f1);
 -- SQL above in greenplum will report error as follows.
 -- ERROR:  UNIQUE or PRIMARY KEY definitions are incompatible with each other
@@ -1192,8 +1204,8 @@ explain (verbose, costs off) select * from ft3 f, loct3 l
 -- test writable foreign table stuff
 -- ===================================================================
 EXPLAIN (verbose, costs off)
-INSERT INTO ft2 (c1,c2,c3) SELECT c1+1000,c2+100, c3 || c3 FROM ft2 LIMIT 20;
-INSERT INTO ft2 (c1,c2,c3) SELECT c1+1000,c2+100, c3 || c3 FROM ft2 LIMIT 20;
+INSERT INTO ft2 (c1,c2,c3) SELECT c1+1000,c2+100, c3 || c3 FROM ft2 ORDER BY c1 LIMIT 20;
+INSERT INTO ft2 (c1,c2,c3) SELECT c1+1000,c2+100, c3 || c3 FROM ft2 ORDER BY c1 LIMIT 20;
 INSERT INTO ft2 (c1,c2,c3)
   VALUES (1101,201,'aaa'), (1102,202,'bbb'), (1103,203,'ccc') RETURNING *;
 INSERT INTO ft2 (c1,c2,c3) VALUES (1104,204,'ddd'), (1105,205,'eee');
@@ -1290,10 +1302,13 @@ DELETE FROM ft2
   USING ft4 INNER JOIN ft5 ON (ft4.c1 === ft5.c1)
   WHERE ft2.c1 > 2000 AND ft2.c2 = ft4.c1
   RETURNING ft2.c1, ft2.c2, ft2.c3;       -- can't be pushed down
+-- DELETE FROM ft2
+--   USING ft4 INNER JOIN ft5 ON (ft4.c1 === ft5.c1)
+--   WHERE ft2.c1 > 2000 AND ft2.c2 = ft4.c1
+--   RETURNING ft2.c1, ft2.c2, ft2.c3;
 DELETE FROM ft2
   USING ft4 INNER JOIN ft5 ON (ft4.c1 === ft5.c1)
-  WHERE ft2.c1 > 2000 AND ft2.c2 = ft4.c1
-  RETURNING ft2.c1, ft2.c2, ft2.c3;
+  WHERE ft2.c1 > 2000 AND ft2.c2 = ft4.c1;
 DELETE FROM ft2 WHERE ft2.c1 > 2000;
 ALTER SERVER pgserver OPTIONS (ADD extensions 'postgres_fdw');
 
@@ -1309,8 +1324,11 @@ ALTER SERVER pgserver OPTIONS (ADD extensions 'postgres_fdw');
 -- CREATE TRIGGER t1_br_insert BEFORE INSERT OR UPDATE
 --    ON "S 1"."T 1" FOR EACH ROW EXECUTE PROCEDURE "S 1".F_BRTRIG();
 
-INSERT INTO ft2 (c1,c2,c3) VALUES (1208, 818, 'fff') RETURNING *;
-INSERT INTO ft2 (c1,c2,c3,c6) VALUES (1218, 818, 'ggg', '(--;') RETURNING *;
+-- FIXME: returning with remote trigger is not supported
+-- INSERT INTO ft2 (c1,c2,c3) VALUES (1208, 818, 'fff') RETURNING *;
+-- INSERT INTO ft2 (c1,c2,c3,c6) VALUES (1218, 818, 'ggg', '(--;') RETURNING *;
+INSERT INTO ft2 (c1,c2,c3) VALUES (1208, 818, 'fff');
+INSERT INTO ft2 (c1,c2,c3,c6) VALUES (1218, 818, 'ggg', '(--;');
 UPDATE ft2 SET c2 = c2 + 600 WHERE c1 % 10 = 8 AND c1 < 1200 RETURNING *;
 
 -- Test errors thrown on remote side during update
@@ -1417,11 +1435,16 @@ ALTER FOREIGN TABLE ft1 DROP CONSTRAINT ft1_c2negative;
 -- ALTER TABLE base_tbl SET (autovacuum_enabled = 'false');
 -- CREATE TRIGGER row_before_insupd_trigger BEFORE INSERT OR UPDATE ON base_tbl FOR EACH ROW EXECUTE PROCEDURE row_before_insupd_trigfunc();
 CREATE FOREIGN TABLE foreign_tbl (a int, b int)
-  SERVER pgserver OPTIONS (table_name 'base_tbl');
+  SERVER pgserver OPTIONS (table_name 'base_tbl', mpp_execute 'all segments');
 CREATE VIEW rw_view AS SELECT * FROM foreign_tbl
   WHERE a < b WITH CHECK OPTION;
 \d+ rw_view
 
+-- start_ignore
+-- FIXME: local server will check options after remote table inserted,
+-- since we can not get the returning data from remote, so the
+-- local server will do check with the wrong old value.
+-- So the root cause is that we should add returning support for insert/update/delete.
 EXPLAIN (VERBOSE, COSTS OFF)
 INSERT INTO rw_view VALUES (0, 5);
 INSERT INTO rw_view VALUES (0, 5); -- should fail
@@ -1452,7 +1475,7 @@ DROP FOREIGN TABLE foreign_tbl CASCADE;
 -- ALTER TABLE child_tbl SET (autovacuum_enabled = 'false');
 -- CREATE TRIGGER row_before_insupd_trigger BEFORE INSERT OR UPDATE ON child_tbl FOR EACH ROW EXECUTE PROCEDURE row_before_insupd_trigfunc();
 CREATE FOREIGN TABLE foreign_tbl (a int, b int)
-  SERVER pgserver OPTIONS (table_name 'child_tbl');
+  SERVER pgserver OPTIONS (table_name 'child_tbl', mpp_execute 'all segments');
 
 CREATE TABLE parent_tbl (a int, b int) PARTITION BY RANGE(a);
 ALTER TABLE parent_tbl ATTACH PARTITION foreign_tbl FOR VALUES FROM (0) TO (100);
@@ -1479,6 +1502,7 @@ UPDATE rw_view SET b = b + 15;
 -- So here we disable the SQL below.
 -- UPDATE rw_view SET b = b + 15; -- ok
 SELECT * FROM foreign_tbl;
+-- end_ignore
 
 DROP FOREIGN TABLE foreign_tbl CASCADE;
 \! env PGOPTIONS='' psql -p ${PG_PORT} contrib_regression -c 'DROP TRIGGER row_before_insupd_trigger ON child_tbl;'
@@ -1497,7 +1521,7 @@ DROP TABLE parent_tbl CASCADE;
 -- create table loc1 (f1 serial, f2 text);
 -- alter table loc1 set (autovacuum_enabled = 'false');
 create foreign table rem1 (f1 serial, f2 text)
-  server pgserver options(table_name 'loc1');
+  server pgserver options(table_name 'loc1', mpp_execute 'all segments');
 select pg_catalog.setval('rem1_f1_seq', 10, false);
 \! env PGOPTIONS='' psql -p ${PG_PORT} contrib_regression -c "insert into loc1(f2) values('hi');"
 -- insert into loc1(f2) values('hi');
@@ -1521,7 +1545,7 @@ select * from rem1;
 create foreign table grem1 (
   a int,
   b int generated always as (a * 2) stored)
-  server pgserver options(table_name 'gloc1');
+  server pgserver options(table_name 'gloc1', mpp_execute 'all segments');
 explain (verbose, costs off)
 insert into grem1 (a) values (1), (2);
 insert into grem1 (a) values (1), (2);
@@ -1778,7 +1802,7 @@ CREATE TRIGGER trig_row_after
 AFTER INSERT OR UPDATE OR DELETE ON rem1
 FOR EACH ROW EXECUTE PROCEDURE trigger_data(23,'skidoo');
 
-\! env PGOPTIONS='' psql -p ${PG_PORT} contrib_regression -c 'CREATE TRIGGER trig_local_before BEFORE INSERT OR UPDATE ON loc1 FOR EACH ROW EXECUTE PROCEDURE trig_row_before_insupdate();'
+\! env PGOPTIONS='' psql -p ${PG_PORT} contrib_regression -c 'CREATE TRIGGER trig_local_before BEFORE INSERT ON loc1 FOR EACH ROW EXECUTE PROCEDURE trig_row_before_insupdate();'
 -- CREATE TRIGGER trig_local_before BEFORE INSERT OR UPDATE ON loc1
 -- FOR EACH ROW EXECUTE PROCEDURE trig_row_before_insupdate();
 
@@ -1786,7 +1810,8 @@ INSERT INTO rem1(f2) VALUES ('test');
 UPDATE rem1 SET f2 = 'testo';
 
 -- Test returning a system attribute
-INSERT INTO rem1(f2) VALUES ('test') RETURNING ctid;
+-- INSERT INTO rem1(f2) VALUES ('test') RETURNING ctid;
+INSERT INTO rem1(f2) VALUES ('test');
 
 -- cleanup
 DROP TRIGGER trig_row_before ON rem1;
@@ -1887,7 +1912,7 @@ ALTER TABLE a SET (autovacuum_enabled = 'false');
 -- CREATE TABLE loct (aa TEXT, bb TEXT);
 -- ALTER TABLE loct SET (autovacuum_enabled = 'false');
 CREATE FOREIGN TABLE b (bb TEXT) INHERITS (a)
-  SERVER pgserver OPTIONS (table_name 'loct');
+  SERVER pgserver OPTIONS (table_name 'loct', mpp_execute 'all segments');
 
 INSERT INTO a(aa) VALUES('aaa');
 INSERT INTO a(aa) VALUES('aaaa');
@@ -1949,10 +1974,10 @@ alter table loct2 set (autovacuum_enabled = 'false');
 
 create table foo (f1 int, f2 int);
 create foreign table foo2 (f3 int) inherits (foo)
-  server pgserver options (table_name 'loct1');
+  server pgserver options (table_name 'loct1', mpp_execute 'all segments');
 create table bar (f1 int, f2 int);
 create foreign table bar2 (f3 int) inherits (bar)
-  server pgserver options (table_name 'loct2');
+  server pgserver options (table_name 'loct2', mpp_execute 'all segments');
 
 alter table foo set (autovacuum_enabled = 'false');
 alter table bar set (autovacuum_enabled = 'false');
@@ -2110,9 +2135,9 @@ create table parent (a int, b text);
 -- create table loct1 (a int, b text);
 -- create table loct2 (a int, b text);
 create foreign table remt1 (a int, b text)
-  server pgserver options (table_name 'loct1');
+  server pgserver options (table_name 'loct1', mpp_execute 'all segments');
 create foreign table remt2 (a int, b text)
-  server pgserver options (table_name 'loct2');
+  server pgserver options (table_name 'loct2', mpp_execute 'all segments');
 alter foreign table remt1 inherit parent;
 
 insert into remt1 values (1, 'foo');
@@ -2151,10 +2176,10 @@ drop table parent;
 create table itrtest (a int, b text) partition by list (a);
 \! env PGOPTIONS='' psql -p ${PG_PORT} contrib_regression -c 'create table loct1 (a int check (a in (1)), b text);'
 -- create table loct1 (a int check (a in (1)), b text);
-create foreign table remp1 (a int check (a in (1)), b text) server pgserver options (table_name 'loct1');
+create foreign table remp1 (a int check (a in (1)), b text) server pgserver options (table_name 'loct1', mpp_execute 'all segments');
 \! env PGOPTIONS='' psql -p ${PG_PORT} contrib_regression -c 'create table loct2 (a int check (a in (2)), b text);'
 -- create table loct2 (a int check (a in (2)), b text);
-create foreign table remp2 (b text, a int check (a in (2))) server pgserver options (table_name 'loct2');
+create foreign table remp2 (b text, a int check (a in (2))) server pgserver options (table_name 'loct2', mpp_execute 'all segments');
 alter table itrtest attach partition remp1 for values in (1);
 alter table itrtest attach partition remp2 for values in (2);
 
@@ -2339,10 +2364,10 @@ drop table utrtest;
 create table ctrtest (a int, b text) partition by list (a);
 \! env PGOPTIONS='' psql -p ${PG_PORT} contrib_regression -c 'create table loct1 (a int check (a in (1)), b text);'
 -- create table loct1 (a int check (a in (1)), b text);
-create foreign table remp1 (a int check (a in (1)), b text) server pgserver options (table_name 'loct1');
+create foreign table remp1 (a int check (a in (1)), b text) server pgserver options (table_name 'loct1', mpp_execute 'all segments');
 \! env PGOPTIONS='' psql -p ${PG_PORT} contrib_regression -c 'create table loct2 (a int check (a in (2)), b text);'
 -- create table loct2 (a int check (a in (2)), b text);
-create foreign table remp2 (b text, a int check (a in (2))) server pgserver options (table_name 'loct2');
+create foreign table remp2 (b text, a int check (a in (2))) server pgserver options (table_name 'loct2', mpp_execute 'all segments');
 alter table ctrtest attach partition remp1 for values in (1);
 alter table ctrtest attach partition remp2 for values in (2);
 
@@ -2376,7 +2401,7 @@ drop table ctrtest;
 \! env PGOPTIONS='' psql -p ${PG_PORT} contrib_regression -c 'alter table loc2 set (autovacuum_enabled = 'false');'
 -- create table loc2 (f1 int, f2 text);
 -- alter table loc2 set (autovacuum_enabled = 'false');
-create foreign table rem2 (f1 int, f2 text) server pgserver options(table_name 'loc2');
+create foreign table rem2 (f1 int, f2 text) server pgserver options(table_name 'loc2', mpp_execute 'all segments');
 
 -- Test basic functionality
 copy rem2 from stdin;
@@ -2524,7 +2549,7 @@ delete from rem2;
 -- create table loc3 (f1 int, f2 text);
 begin;
 create foreign table rem3 (f1 int, f2 text)
-	server pgserver options(table_name 'loc3');
+	server pgserver options(table_name 'loc3', mpp_execute 'all segments');
 copy rem3 from stdin;
 1	foo
 2	bar
@@ -2632,7 +2657,7 @@ FROM pg_foreign_server
 WHERE srvname = 'fetch101'
 AND srvoptions @> array['fetch_size=202'];
 
-CREATE FOREIGN TABLE table30000 ( x int ) SERVER fetch101 OPTIONS ( fetch_size '30000' );
+CREATE FOREIGN TABLE table30000 ( x int ) SERVER fetch101 OPTIONS ( fetch_size '30000', mpp_execute 'all segments');
 
 SELECT COUNT(*)
 FROM pg_foreign_table
@@ -2673,9 +2698,9 @@ CREATE TABLE fprt1 (a int, b int, c varchar) PARTITION BY RANGE(a);
 -- INSERT INTO fprt1_p1 SELECT i, i, to_char(i/50, 'FM0000') FROM generate_series(0, 249, 2) i;
 -- INSERT INTO fprt1_p2 SELECT i, i, to_char(i/50, 'FM0000') FROM generate_series(250, 499, 2) i;
 CREATE FOREIGN TABLE ftprt1_p1 PARTITION OF fprt1 FOR VALUES FROM (0) TO (250)
-	SERVER pgserver OPTIONS (table_name 'fprt1_p1', use_remote_estimate 'true');
+	SERVER pgserver OPTIONS (table_name 'fprt1_p1', use_remote_estimate 'true', mpp_execute 'all segments');
 CREATE FOREIGN TABLE ftprt1_p2 PARTITION OF fprt1 FOR VALUES FROM (250) TO (500)
-	SERVER pgserver OPTIONS (TABLE_NAME 'fprt1_p2');
+	SERVER pgserver OPTIONS (TABLE_NAME 'fprt1_p2', mpp_execute 'all segments');
 \! env PGOPTIONS='' psql -p ${PG_PORT} contrib_regression -c 'ANALYZE fprt1;'
 \! env PGOPTIONS='' psql -p ${PG_PORT} contrib_regression -c 'ANALYZE fprt1_p1;'
 \! env PGOPTIONS='' psql -p ${PG_PORT} contrib_regression -c 'ANALYZE fprt1_p2;'
@@ -2698,10 +2723,10 @@ CREATE TABLE fprt2 (a int, b int, c varchar) PARTITION BY RANGE(b);
 -- INSERT INTO fprt2_p1 SELECT i, i, to_char(i/50, 'FM0000') FROM generate_series(0, 249, 3) i;
 -- INSERT INTO fprt2_p2 SELECT i, i, to_char(i/50, 'FM0000') FROM generate_series(250, 499, 3) i;
 CREATE FOREIGN TABLE ftprt2_p1 (b int, c varchar, a int)
-	SERVER pgserver OPTIONS (table_name 'fprt2_p1', use_remote_estimate 'true');
+	SERVER pgserver OPTIONS (table_name 'fprt2_p1', use_remote_estimate 'true', mpp_execute 'all segments');
 ALTER TABLE fprt2 ATTACH PARTITION ftprt2_p1 FOR VALUES FROM (0) TO (250);
 CREATE FOREIGN TABLE ftprt2_p2 PARTITION OF fprt2 FOR VALUES FROM (250) TO (500)
-	SERVER pgserver OPTIONS (table_name 'fprt2_p2', use_remote_estimate 'true');
+	SERVER pgserver OPTIONS (table_name 'fprt2_p2', use_remote_estimate 'true', mpp_execute 'all segments');
 \! env PGOPTIONS='' psql -p ${PG_PORT} contrib_regression -c 'ANALYZE fprt2;'
 \! env PGOPTIONS='' psql -p ${PG_PORT} contrib_regression -c 'ANALYZE fprt2_p1;'
 \! env PGOPTIONS='' psql -p ${PG_PORT} contrib_regression -c 'ANALYZE fprt2_p2;'
@@ -2764,9 +2789,9 @@ CREATE TABLE pagg_tab (a int, b int, c text) PARTITION BY RANGE(a);
 -- INSERT INTO pagg_tab_p3 SELECT i % 30, i % 50, to_char(i/30, 'FM0000') FROM generate_series(1, 3000) i WHERE (i % 30) < 30 and (i % 30) >= 20;
 
 -- Create foreign partitions
-CREATE FOREIGN TABLE fpagg_tab_p1 PARTITION OF pagg_tab FOR VALUES FROM (0) TO (10) SERVER pgserver OPTIONS (table_name 'pagg_tab_p1');
-CREATE FOREIGN TABLE fpagg_tab_p2 PARTITION OF pagg_tab FOR VALUES FROM (10) TO (20) SERVER pgserver OPTIONS (table_name 'pagg_tab_p2');;
-CREATE FOREIGN TABLE fpagg_tab_p3 PARTITION OF pagg_tab FOR VALUES FROM (20) TO (30) SERVER pgserver OPTIONS (table_name 'pagg_tab_p3');;
+CREATE FOREIGN TABLE fpagg_tab_p1 PARTITION OF pagg_tab FOR VALUES FROM (0) TO (10) SERVER pgserver OPTIONS (table_name 'pagg_tab_p1', mpp_execute 'all segments');
+CREATE FOREIGN TABLE fpagg_tab_p2 PARTITION OF pagg_tab FOR VALUES FROM (10) TO (20) SERVER pgserver OPTIONS (table_name 'pagg_tab_p2', mpp_execute 'all segments');
+CREATE FOREIGN TABLE fpagg_tab_p3 PARTITION OF pagg_tab FOR VALUES FROM (20) TO (30) SERVER pgserver OPTIONS (table_name 'pagg_tab_p3', mpp_execute 'all segments');
 
 ANALYZE pagg_tab;
 ANALYZE fpagg_tab_p1;

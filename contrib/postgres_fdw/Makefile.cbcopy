@@ -1,0 +1,53 @@
+# cbcopy build config
+CB_COPY_DIR := $(CURDIR)/cbcopy
+CB_COPY_BIN := $(CB_COPY_DIR)/cbcopy_helper
+GO_LOCAL := $(CURDIR)/tools/go
+GO_VERSION := 1.21.5
+PG_BINDIR := $(shell pg_config --bindir)
+INSTALL_PROGRAM := /usr/bin/install -c -m 755
+
+# Detect system-installed Go binary
+GO_BIN_SYS := $(shell command -v go 2>/dev/null)
+
+# Determine OS and ARCH
+OS := $(shell uname -s | tr A-Z a-z)
+ARCH := $(shell uname -m)
+ifeq ($(ARCH),x86_64)
+  ARCH := amd64
+endif
+ifeq ($(ARCH),aarch64)
+  ARCH := arm64
+endif
+
+# Compose Go tarball and download URL
+GO_TARBALL := go$(GO_VERSION).$(OS)-$(ARCH).tar.gz
+GO_DOWNLOAD_URL := https://go.dev/dl/$(GO_TARBALL)
+
+# Final GO binary selection logic
+ifeq ("$(wildcard $(GO_LOCAL)/bin/go)","")
+  GO := $(GO_BIN_SYS)
+else
+  GO := $(GO_LOCAL)/bin/go
+endif
+
+.PHONY: cbcopy ensure-go build-cbcopy install-cbcopy
+
+cbcopy: ensure-go build-cbcopy
+
+# Only install Go if both system and local Go are missing
+ensure-go:
+	@if [ ! -x "$(GO)" ]; then \
+		echo "Go not found, installing Go $(GO_VERSION) locally for $(OS)/$(ARCH)..."; \
+		mkdir -p $(dir $(GO_LOCAL)); \
+		curl -fsSL $(GO_DOWNLOAD_URL) -o /tmp/$(GO_TARBALL); \
+		tar -C $(CURDIR)/tools -xzf /tmp/$(GO_TARBALL); \
+	else \
+		echo "Go found at: $(GO)"; \
+	fi
+
+build-cbcopy:
+	@echo "Building cbcopy using Go: $(GO)"
+	cd $(CB_COPY_DIR) && GO=$(GO) PATH=$(dir $(GO)):$$PATH make
+
+install-cbcopy:
+	${INSTALL_PROGRAM} $(CB_COPY_BIN) $(PG_BINDIR)/cbcopy_helper

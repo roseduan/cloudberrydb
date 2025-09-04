@@ -19,7 +19,7 @@ RETURNS bool
 AS 'MODULE_PATHNAME'
 LANGUAGE C STRICT PARALLEL RESTRICTED;
 
-CREATE FUNCTION cbdb_fdw_get_helper_ports (
+CREATE FUNCTION public.cbdb_fdw_get_helper_ports (
 	OUT cmdID text,
 	OUT segID int4,
 	OUT port int4)
@@ -27,7 +27,17 @@ RETURNS SETOF record
 AS 'MODULE_PATHNAME'
 LANGUAGE C STRICT EXECUTE ON ALL SEGMENTS;
 
-CREATE FUNCTION cbdb_fdw_copy_from (Oid, cstring, int4 DEFAULT 0, cstring DEFAULT '')
+CREATE FUNCTION public.cbdb_fdw_copy_from (Oid, cstring, int4 DEFAULT 0, cstring DEFAULT '')
+RETURNS SETOF record
+AS 'MODULE_PATHNAME'
+LANGUAGE C STRICT EXECUTE ON ALL SEGMENTS;
+
+CREATE FUNCTION public.cbdb_fdw_update_copy_from (Oid, cstring, int4 DEFAULT 0, cstring DEFAULT '')
+RETURNS SETOF record
+AS 'MODULE_PATHNAME'
+LANGUAGE C STRICT EXECUTE ON ALL SEGMENTS;
+
+CREATE FUNCTION public.cbdb_fdw_delete_copy_from (Oid, cstring, int4 DEFAULT 0, cstring DEFAULT '')
 RETURNS SETOF record
 AS 'MODULE_PATHNAME'
 LANGUAGE C STRICT EXECUTE ON ALL SEGMENTS;

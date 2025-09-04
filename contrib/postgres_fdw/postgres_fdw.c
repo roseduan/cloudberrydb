@@ -15,9 +15,12 @@
 #include <limits.h>
 
 #include "access/genam.h"
+#include "access/heaptoast.h"
 #include "access/htup_details.h"
 #include "access/sysattr.h"
 #include "access/table.h"
+#include "access/xact.h"
+#include "catalog/heap.h"
 #include "catalog/pg_class.h"
 #include "catalog/pg_foreign_server.h"
 #include "catalog/pg_foreign_table_seg.h"
@@ -149,6 +152,7 @@ enum FdwModifyPrivateIndex
  * 2) Boolean flag showing if the remote query has a RETURNING clause
  * 3) Integer list of attribute numbers retrieved by RETURNING, if any
  * 4) Boolean flag showing if we set the command es_processed
+ * 5) Random segment to execute the direct modification
  */
 enum FdwDirectModifyPrivateIndex
 {
@@ -159,7 +163,9 @@ enum FdwDirectModifyPrivateIndex
 	/* Integer list of attribute numbers retrieved by RETURNING */
 	FdwDirectModifyPrivateRetrievedAttrs,
 	/* set-processed flag (as an integer Value node) */
-	FdwDirectModifyPrivateSetProcessed
+	FdwDirectModifyPrivateSetProcessed,
+	/* Random segment flag (as an integer Value node) */
+	FdwDirectModifyPrivateRandomSegment
 };
 
 /*
@@ -242,6 +248,8 @@ typedef struct PgFdwModifyState
 
 	/* info about parameters for prepared statement */
 	AttrNumber	ctidAttno;		/* attnum of input resjunk ctid column */
+	AttrNumber	segidAttno;		/* attnum of input resjunk gp_segment_id column */
+	AttrNumber	wholerowAttno;
 	int			p_nums;			/* number of parameters to transmit */
 	FmgrInfo   *p_flinfo;		/* output conversion functions for them */
 
@@ -273,6 +281,7 @@ typedef struct PgFdwDirectModifyState
 	bool		has_returning;	/* is there a RETURNING clause? */
 	List	   *retrieved_attrs;	/* attr numbers retrieved by RETURNING */
 	bool		set_processed;	/* do we set the command es_processed? */
+	int			executeSegment;
 
 	/* for remote query execution */
 	PGconn	   *conn;			/* connection for the update */
@@ -378,12 +387,20 @@ typedef struct SegmentInfo
 	int32	contentid;
 } SegmentInfo;
 
+typedef struct TableColumnInfo {
+	StringInfo coldefs;
+	StringInfo selectdefs;
+	bool		has_generated;
+} TableColumnInfo;
+
 /*
  * SQL functions
  */
 PG_FUNCTION_INFO_V1(postgres_fdw_handler);
 PG_FUNCTION_INFO_V1(cbdb_fdw_get_helper_ports);
 PG_FUNCTION_INFO_V1(cbdb_fdw_copy_from);
+PG_FUNCTION_INFO_V1(cbdb_fdw_update_copy_from);
+PG_FUNCTION_INFO_V1(cbdb_fdw_delete_copy_from);
 
 /*
  * FDW callback routines
@@ -485,8 +502,6 @@ static void postgresForeignAsyncRequest(AsyncRequest *areq);
 static void postgresForeignAsyncConfigureWait(AsyncRequest *areq);
 static void postgresForeignAsyncNotify(AsyncRequest *areq);
 
-static int greenplumCheckIsCloudberry(UserMapping *user);
-
 /*
  * Helper functions
  */
@@ -579,6 +594,7 @@ static HeapTuple make_tuple_from_result_row(PGresult *res,
 											AttInMetadata *attinmeta,
 											List *retrieved_attrs,
 											ForeignScanState *fsstate,
+											bool is_direct_modify,
 											MemoryContext temp_context);
 static void conversion_error_callback(void *arg);
 static bool foreign_join_ok(PlannerInfo *root, RelOptInfo *joinrel,
@@ -628,6 +644,17 @@ static TupleTableSlot *execForeignInsertByCopy(ResultRelInfo *resultRelInfo,
 static void endForeignModifyByCopy(PgFdwModifyState *fmstate);
 static void InitParseStateTo(CopyToState pstate);
 static void CopySendToHelper(CopyToState cstate);
+static TupleTableSlot *execForeignUpdateByCopy(ResultRelInfo *resultRelInfo,
+											   TupleTableSlot *slot,
+											   TupleTableSlot **planSlots);
+static TupleTableSlot *execForeignDeleteByCopy(ResultRelInfo *resultRelInfo,
+											   TupleTableSlot *slot,
+											   TupleTableSlot **planSlots);
+static bool postgresFdwNextCopyFrom(CopyFromState cstate,
+									ExprContext *econtext,
+									Datum *values, bool *nulls);
+static List *simplerel_rebuild_fdw_scan_tlist(PlannerInfo *root, List *tlist, Oid relid,
+											  Index rtindex, CmdType operation);
 
 /*
  * Foreign-data wrapper handler function: return a struct with pointers
@@ -1384,6 +1411,11 @@ postgresGetForeignPlan(PlannerInfo *root,
 		 * should recheck all the remote quals.
 		 */
 		fdw_recheck_quals = remote_exprs;
+
+		if (root->parse->commandType == CMD_UPDATE ||
+			root->parse->commandType == CMD_DELETE)
+			fdw_scan_tlist = simplerel_rebuild_fdw_scan_tlist(root, tlist, foreigntableid,
+															  scan_relid, root->parse->commandType);
 	}
 	else
 	{
@@ -1917,6 +1949,11 @@ postgresAddForeignUpdateTargets(PlannerInfo *root,
 								Relation target_relation)
 {
 	Var		   *var;
+	Var		   *varSegid;
+	Oid		   reloid;
+	Oid		   vartypeid;
+	int32	   type_mod;
+	Oid		   type_coll;
 
 	/*
 	 * In postgres_fdw, what we need is the ctid, same as for a regular table.
@@ -1932,6 +1969,24 @@ postgresAddForeignUpdateTargets(PlannerInfo *root,
 
 	/* Register it as a row-identity column needed by this target rel */
 	add_row_identity_var(root, var, rtindex, "ctid");
+
+	/*
+	 * Cloudberry also needs gp_segment_id.
+	 * ctid is only unique in the same segment.
+	 */
+	reloid = RelationGetRelid(target_relation);
+	get_atttypetypmodcoll(reloid,
+						  GpSegmentIdAttributeNumber,
+						  &vartypeid,
+						  &type_mod,
+						  &type_coll);
+	varSegid = makeVar(rtindex,
+					   GpSegmentIdAttributeNumber,
+					   vartypeid,
+					   type_mod,
+					   type_coll,
+					   0);
+	add_row_identity_var(root, varSegid, rtindex, "gp_segment_id");
 }
 
 /*
@@ -2060,6 +2115,24 @@ postgresPlanForeignModify(PlannerInfo *root,
 	}
 
 	table_close(rel, NoLock);
+
+	/* FIXME: insert returning ctid is not supported right now */
+	if (operation == CMD_INSERT &&
+		list_member_int(retrieved_attrs, SelfItemPointerAttributeNumber))
+	{
+		ereport(ERROR,
+				errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+				errmsg("returning ctid is not supported"));
+	}
+	/* FIXME: delete returning is not supported */
+	if (operation == CMD_DELETE &&
+		plan->returningLists != NULL &&
+		plan->fdwDirectModifyPlans != NULL)
+	{
+		ereport(ERROR,
+				errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+				errmsg("delete returning is not supported"));
+	}
 
 	/*
 	 * Build the fdw_private list that will be available to the executor.
@@ -2265,8 +2338,12 @@ postgresExecForeignUpdate(EState *estate,
 						  TupleTableSlot *slot,
 						  TupleTableSlot *planSlot)
 {
+	PgFdwModifyState *fmstate = (PgFdwModifyState *) resultRelInfo->ri_FdwState;
 	TupleTableSlot **rslot;
 	int			numSlots = 1;
+
+	if (fmstate->is_copyfrom)
+		return execForeignUpdateByCopy(resultRelInfo, slot, &planSlot);
 
 	rslot = execute_foreign_modify(estate, resultRelInfo, CMD_UPDATE,
 								   &slot, &planSlot, &numSlots);
@@ -2284,8 +2361,12 @@ postgresExecForeignDelete(EState *estate,
 						  TupleTableSlot *slot,
 						  TupleTableSlot *planSlot)
 {
+	PgFdwModifyState *fmstate = (PgFdwModifyState *) resultRelInfo->ri_FdwState;
 	TupleTableSlot **rslot;
 	int			numSlots = 1;
+
+	if (fmstate->is_copyfrom)
+		return execForeignDeleteByCopy(resultRelInfo, slot, &planSlot);
 
 	rslot = execute_foreign_modify(estate, resultRelInfo, CMD_DELETE,
 								   &slot, &planSlot, &numSlots);
@@ -2511,16 +2592,7 @@ postgresIsForeignRelUpdatable(Relation rel)
 	if (!updatable)
 		return 0;
 
-	/*
-	 * Cloudberry only supports INSERT, because UPDATE/DELETE SELECT requires
-	 * the hidden column gp_segment_id and the other "ModifyTable mixes
-	 * distributed and entry-only tables" issue.
-	 */
-	UserMapping *user = GetUserMapping(GetUserId(), server->serverid);
-	if (greenplumCheckIsCloudberry(user))
-		return (1 << CMD_INSERT);
-	else
-		return (1 << CMD_INSERT) | (1 << CMD_UPDATE) | (1 << CMD_DELETE);
+	return (1 << CMD_INSERT) | (1 << CMD_UPDATE) | (1 << CMD_DELETE);
 }
 
 /*
@@ -2612,6 +2684,144 @@ find_modifytable_subplan(PlannerInfo *root,
 	return NULL;
 }
 
+static List *
+simplerel_rebuild_fdw_scan_tlist(PlannerInfo *root, List *oldtlist, Oid relid,
+								 Index rtindex, CmdType operation)
+{
+	List		*tlist = NIL;
+	TupleDesc	tupdesc;
+	int			i;
+	Relation	rel;
+	Oid			vartypeid;
+	int32		type_mod;
+	Oid			type_coll;
+	Var			*varRemoteSegid;
+	Var			*varCtid;
+	Var			*varSegid;
+	Var			*varWholerow;
+
+	rel = table_open(relid, NoLock);
+	tupdesc = RelationGetDescr(rel);
+
+	/* original table columns */
+	for (i = 1; i <= tupdesc->natts; i++)
+	{
+		Form_pg_attribute attr = TupleDescAttr(tupdesc, i - 1);
+		Var		   *var;
+
+		var = makeVar(rtindex,
+					i,
+					// attr->atttypid == 0 ? 2278 : attr->atttypid,
+					attr->atttypid == 0 ? 23 : attr->atttypid,
+					attr->atttypmod,
+					attr->attcollation,
+					0);
+
+		tlist = lappend(tlist,
+						makeTargetEntry((Expr *) var,
+										list_length(tlist) + 1,
+										NULL,
+										false));
+	}
+	table_close(rel, NoLock);
+
+	/* our extra column: remote gp_segment_id */
+	get_atttypetypmodcoll(relid, GpSegmentIdAttributeNumber, &vartypeid, &type_mod, &type_coll);
+	varRemoteSegid = makeVar(rtindex,
+							 i,
+							 vartypeid,
+							 type_mod,
+							 type_coll,
+							 0);
+	tlist = lappend(tlist,
+					makeTargetEntry((Expr *) varRemoteSegid,
+									list_length(tlist) + 1,
+									NULL,
+									false));
+
+	/* ctid */
+	varCtid = makeVar(rtindex,
+					  SelfItemPointerAttributeNumber,
+					  TIDOID,
+					  -1,
+					  InvalidOid,
+					  0);
+	tlist = lappend(tlist,
+					makeTargetEntry((Expr *) varCtid,
+									list_length(tlist) + 1,
+									NULL,
+									false));
+
+	/* gp_segment_id */
+	get_atttypetypmodcoll(relid, GpSegmentIdAttributeNumber, &vartypeid, &type_mod, &type_coll);
+	varSegid = makeVar(rtindex,
+					   GpSegmentIdAttributeNumber,
+					   vartypeid,
+					   type_mod,
+					   type_coll,
+					   0);
+	tlist = lappend(tlist,
+					makeTargetEntry((Expr *) varSegid,
+									list_length(tlist) + 1,
+									NULL,
+									false));
+
+	Oid rowvartypeid = RECORDOID;
+	PlanRowMark *rc = get_plan_rowmark(root->rowMarks, rtindex);
+	if (rc)
+	{
+		ListCell *lc;
+		lc = list_nth_cell(oldtlist, 0);
+		TargetEntry *tle = (TargetEntry *) lfirst(lc);
+		
+		if (IsA(tle->expr, Var))
+		{
+			Var *var = (Var *) tle->expr;
+			rowvartypeid = var->vartype;
+		}
+	}
+
+	/* wholerow */
+	varWholerow = makeVar(rtindex,
+						  InvalidAttrNumber,
+						  rowvartypeid,
+						  -1,
+						  InvalidOid,
+						  0);
+	tlist = lappend(tlist,
+					makeTargetEntry((Expr *) varWholerow,
+									list_length(tlist) + 1,
+									NULL,
+									false));
+
+	/* table oid */
+	AppendRelInfo *appinfo = NULL;
+	if (root->append_rel_array)
+		appinfo = root->append_rel_array[rtindex];
+
+	if (appinfo != NULL)
+	{
+		RangeTblEntry *parentRte = root->simple_rte_array[appinfo->parent_relid];
+		if (parentRte->relkind == RELKIND_PARTITIONED_TABLE)
+		{
+			Var *varTableOid;
+			varTableOid = makeVar(rtindex,
+								  TableOidAttributeNumber,
+								  OIDOID,
+								  -1,
+								  InvalidOid,
+								  0);
+			tlist = lappend(tlist,
+							makeTargetEntry((Expr *) varTableOid,
+											list_length(tlist) + 1,
+											NULL,
+											false));
+		}
+	}
+
+	return tlist;
+}
+
 /*
  * postgresPlanDirectModify
  *		Consider a direct foreign table modification
@@ -2642,6 +2852,9 @@ postgresPlanDirectModify(PlannerInfo *root,
 	/*
 	 * Decide whether it is safe to modify a foreign table directly.
 	 */
+
+	if (IsTransactionBlock())
+		return false;
 
 	/*
 	 * The table modification must be an UPDATE or DELETE.
@@ -2784,10 +2997,11 @@ postgresPlanDirectModify(PlannerInfo *root,
 	 * Update the fdw_private list that will be available to the executor.
 	 * Items in the list must match enum FdwDirectModifyPrivateIndex, above.
 	 */
-	fscan->fdw_private = list_make4(makeString(sql.data),
+	fscan->fdw_private = list_make5(makeString(sql.data),
 									makeInteger((retrieved_attrs != NIL)),
 									retrieved_attrs,
-									makeInteger(plan->canSetTag));
+									makeInteger(plan->canSetTag),
+									makeInteger(random() % getgpsegmentCount()));
 
 	/*
 	 * Update the foreign-join-related fields.
@@ -2829,6 +3043,7 @@ postgresBeginDirectModify(ForeignScanState *node, int eflags)
 	ForeignTable *table;
 	UserMapping *user;
 	int			numParams;
+	int			executeSegment;
 
 	/*
 	 * Do nothing in EXPLAIN (no ANALYZE) case.  node->fdw_state stays NULL.
@@ -2841,6 +3056,10 @@ postgresBeginDirectModify(ForeignScanState *node, int eflags)
 	 */
 	dmstate = (PgFdwDirectModifyState *) palloc0(sizeof(PgFdwDirectModifyState));
 	node->fdw_state = (void *) dmstate;
+
+	executeSegment = intVal(list_nth(fsplan->fdw_private,
+									 FdwDirectModifyPrivateRandomSegment));
+	dmstate->executeSegment = executeSegment;
 
 	/*
 	 * Identify which user to do the remote access as.  This should match what
@@ -2942,6 +3161,10 @@ postgresIterateDirectModify(ForeignScanState *node)
 	PgFdwDirectModifyState *dmstate = (PgFdwDirectModifyState *) node->fdw_state;
 	EState	   *estate = node->ss.ps.state;
 	ResultRelInfo *resultRelInfo = node->resultRelInfo;
+
+	if (node->resultRelInfo->ri_usesFdwDirectModify &&
+		dmstate->executeSegment != GpIdentity.segindex)
+		return NULL;
 
 	/*
 	 * If this is the first call after Begin, execute the statement.
@@ -4066,6 +4289,7 @@ fetch_more_data(ForeignScanState *node)
 										   fsstate->attinmeta,
 										   fsstate->retrieved_attrs,
 										   node,
+										   false,
 										   fsstate->temp_cxt);
 		}
 
@@ -4257,6 +4481,12 @@ create_foreign_modify(EState *estate,
 														  "ctid");
 		if (!AttributeNumberIsValid(fmstate->ctidAttno))
 			elog(ERROR, "could not find junk ctid column");
+
+		/* Find the gp_segment_id resjunk column in the subplan's result */
+		fmstate->segidAttno = ExecFindJunkAttributeInTlist(subplan->targetlist,
+														   "gp_segment_id");
+		if (!AttributeNumberIsValid(fmstate->segidAttno))
+			elog(ERROR, "could not find junk gp_segment_id column");
 
 		/* First transmittable parameter will be ctid */
 		getTypeOutputInfo(TIDOID, &typefnoid, &isvarlena);
@@ -4571,6 +4801,7 @@ store_returning_result(PgFdwModifyState *fmstate,
 											fmstate->attinmeta,
 											fmstate->retrieved_attrs,
 											NULL,
+											false,
 											fmstate->temp_cxt);
 
 		/*
@@ -4865,6 +5096,7 @@ get_returning_data(ForeignScanState *node)
 												dmstate->attinmeta,
 												dmstate->retrieved_attrs,
 												node,
+												true,
 												dmstate->temp_cxt);
 			ExecStoreHeapTuple(newtup, slot, false);
 		}
@@ -5445,6 +5677,7 @@ analyze_row_processor(PGresult *res, int row, PgFdwAnalyzeState *astate)
 													   astate->attinmeta,
 													   astate->retrieved_attrs,
 													   NULL,
+													   false,
 													   astate->temp_cxt);
 
 		MemoryContextSwitchTo(oldcontext);
@@ -7432,6 +7665,7 @@ make_tuple_from_result_row(PGresult *res,
 						   AttInMetadata *attinmeta,
 						   List *retrieved_attrs,
 						   ForeignScanState *fsstate,
+						   bool is_direct_modify,
 						   MemoryContext temp_context)
 {
 	HeapTuple	tuple;
@@ -7439,11 +7673,15 @@ make_tuple_from_result_row(PGresult *res,
 	Datum	   *values;
 	bool	   *nulls;
 	ItemPointer ctid = NULL;
+	int			gp_segment_id = -1;
 	ConversionLocation errpos;
 	ErrorContextCallback errcallback;
 	MemoryContext oldcontext;
 	ListCell   *lc;
 	int			j;
+	TupleDesc	resultdesc;
+	Datum		*resultvalues;
+	bool		*resultnulls;
 
 	Assert(row < PQntuples(res));
 
@@ -7525,9 +7763,104 @@ make_tuple_from_result_row(PGresult *res,
 				ctid = (ItemPointer) DatumGetPointer(datum);
 			}
 		}
+		else if (i == GpSegmentIdAttributeNumber)
+		{
+			/* gp_segment_id */
+			if (valstr != NULL)
+			{
+				Datum		datum;
+
+				datum = DirectFunctionCall1(int4in, CStringGetDatum(valstr));
+				gp_segment_id = DatumGetInt32(datum);
+			}
+		}
 		errpos.cur_attno = 0;
 
 		j++;
+	}
+
+	if (fsstate != NULL && !is_direct_modify)
+	{
+		int			k;
+
+		resultdesc = fsstate->ss.ss_ScanTupleSlot->tts_tupleDescriptor;
+		resultvalues = (Datum *) palloc0(resultdesc->natts * sizeof(Datum));
+		resultnulls = (bool *) palloc(resultdesc->natts * sizeof(bool));
+		memset(resultnulls, true, resultdesc->natts * sizeof(bool));
+
+		j = 0;
+		foreach(lc, retrieved_attrs)
+		{
+			int			i = lfirst_int(lc);
+			char	   *valstr;
+
+			/* fetch next column's textual value */
+			if (PQgetisnull(res, row, j))
+				valstr = NULL;
+			else
+				valstr = PQgetvalue(res, row, j);
+			if (i > 0)
+			{
+				/* ordinary column */
+				Assert(i <= tupdesc->natts);
+				resultnulls[i - 1] = (valstr == NULL);
+				resultvalues[i - 1] = InputFunctionCall(&attinmeta->attinfuncs[i - 1],
+														valstr,
+														attinmeta->attioparams[i - 1],
+														attinmeta->atttypmods[i - 1]);
+			}
+			j++;
+		}
+
+		/* add extra columns */
+		k = 0;
+		for (int i = tupdesc->natts; i < resultdesc->natts; i++)
+		{
+			if (k == 0) /* remote gp_segment_id */
+			{
+				if (gp_segment_id != -1)
+				{
+					resultvalues[i] = Int32GetDatum(gp_segment_id);
+					resultnulls[i] = false;
+				}
+			}
+			else if (k == 1) /* ctid */
+			{
+				if (ctid != NULL)
+				{
+					resultvalues[i] = PointerGetDatum(ctid);
+					resultnulls[i] = false;
+				}
+			}
+			else if (k == 2) /* gp_segment_id */
+			{
+				if (gp_segment_id != -1)
+				{
+					resultvalues[i] = Int32GetDatum(gp_segment_id);
+					resultnulls[i] = false;
+				}
+			}
+			else if (k == 3) /* whole row */
+			{
+				HeapTuple flat_tuple;
+				HeapTupleHeader dtuple;
+
+				flat_tuple = toast_build_flattened_tuple(tupdesc, values, nulls);
+				dtuple = flat_tuple->t_data;
+
+				HeapTupleHeaderSetTypeId(dtuple, resultdesc->attrs[i].atttypid);
+				HeapTupleHeaderSetTypMod(dtuple, resultdesc->attrs[i].atttypmod);
+
+				resultvalues[i] = PointerGetDatum(dtuple);
+				resultnulls[i] = false;
+			}
+			else if (k == 4) /* table oid */
+			{
+				resultvalues[i] = ObjectIdGetDatum(RelationGetRelid(rel));
+				resultnulls[i] = false;
+			}
+			k++;
+		}
 	}
 
 	/* Uninstall error context callback. */
@@ -7545,7 +7878,10 @@ make_tuple_from_result_row(PGresult *res,
 	 */
 	MemoryContextSwitchTo(oldcontext);
 
-	tuple = heap_form_tuple(tupdesc, values, nulls);
+	if (fsstate != NULL && !is_direct_modify)
+		tuple = heap_form_tuple(resultdesc, resultvalues, resultnulls);
+	else
+		tuple = heap_form_tuple(tupdesc, values, nulls);
 
 	/*
 	 * If we have a CTID to return, install it in both t_self and t_ctid.
@@ -7822,32 +8158,6 @@ get_batch_size_option(Relation rel)
 }
 
 static int
-greenplumCheckIsCloudberry(UserMapping *user)
-{
-	PGconn     *conn;
-	PGresult   *res;
-	int                     ret;
-
-	char *query =  "SELECT version()";
-
-	conn = GetConnection(user, false, NULL);
-
-	res = pgfdw_exec_query(conn, query, NULL);
-	if (PQresultStatus(res) != PGRES_TUPLES_OK)
-		pgfdw_report_error(ERROR, res, conn, true, query);
-
-	if (PQntuples(res) == 0)
-		pgfdw_report_error(ERROR, res, conn, true, query);
-
-	ret = strstr(PQgetvalue(res, 0, 0), "Apache Cloudberry") ? 1 : 0;
-
-	PQclear(res);
-	ReleaseConnection(conn);
-
-	return ret;
-}
-
-static int
 GetForeignTableSegNumbers(Oid relid)
 {
 	Relation 	foreignTableRel;
@@ -8026,7 +8336,7 @@ cbdb_fdw_ProcessUtility(PlannedStmt *pstmt, const char *queryString,
 
 			stmt = (CreateForeignServerStmt *) pstmt->utilityStmt;
 
-			if (pg_strcasecmp(stmt->fdwname, "cloudberry_fdw") == 0)
+			if (pg_strcasecmp(stmt->fdwname, "postgres_fdw") == 0)
 			{
 				foreach(lc, stmt->options)
 				{
@@ -8072,7 +8382,7 @@ cbdb_fdw_ProcessUtility(PlannedStmt *pstmt, const char *queryString,
 					{
 						srvForm = (Form_pg_foreign_server) GETSTRUCT(tup);
 						ForeignDataWrapper *fdw = GetForeignDataWrapper(srvForm->srvfdw);
-						if (pg_strcasecmp(fdw->fdwname, "cloudberry_fdw") == 0)
+						if (pg_strcasecmp(fdw->fdwname, "postgres_fdw") == 0)
 						{
 							ereport(ERROR,
 									(errcode(ERRCODE_SYNTAX_ERROR),
@@ -8146,27 +8456,40 @@ InitCopyFile(PgFdwModifyState *fmstate)
 				 errmsg("could not execute command \"%s\": %m", pstate->filename)));
 }
 
-static StringInfo
-getTableColumnDefs(Oid relid)
+static TableColumnInfo *
+getTableColumnDefs(Oid relid, CmdType operation)
 {
 	int				ret;
 	StringInfo		coldefs;
+	StringInfo		selectdefs;
 	bool			needComma;
+	bool			needComma2;
+	TableColumnInfo *tcl;
 
+	tcl = (TableColumnInfo *) palloc(sizeof(TableColumnInfo));
 	coldefs = makeStringInfo();
+	selectdefs = makeStringInfo();
 	needComma = false;
+	needComma2 = false;
 	appendStringInfoChar(coldefs, '(');
 
-	char *sql = psprintf("SELECT\n"
-						 "a.attname,\n"
-						 "pg_catalog.format_type(t.oid, a.atttypmod) AS atttypname\n"
-						 "FROM pg_catalog.pg_attribute a LEFT JOIN pg_catalog.pg_type t\n"
-						 "ON a.atttypid = t.oid\n"
-						 "WHERE attrelid = '%u'::pg_catalog.oid\n"
-						 "AND a.attnum > 0::pg_catalog.int2\n"
-						 "AND a.attisdropped = false\n"
-						 "AND (a.attgenerated = '' or a.attgenerated IS NULL)\n"
-						 "ORDER BY a.attnum;", relid);
+	char *sql = psprintf(
+					"SELECT\n"
+					"    a.attname,\n"
+					"    a.attgenerated,\n"
+					"    CASE WHEN t.oid > 16384 THEN\n"
+					"        n.nspname || '.' || pg_catalog.format_type(t.oid, a.atttypmod)\n"
+					"    ELSE\n"
+					"        pg_catalog.format_type(t.oid, a.atttypmod)\n"
+					"    END AS atttypname\n"
+					"FROM pg_catalog.pg_attribute a\n"
+					"JOIN pg_catalog.pg_type t ON a.atttypid = t.oid\n"
+					"JOIN pg_catalog.pg_namespace n ON t.typnamespace = n.oid\n"
+					"WHERE a.attrelid = '%u'::pg_catalog.oid\n"
+					"  AND a.attnum > 0::pg_catalog.int2\n"
+					"  AND a.attisdropped = false\n"
+					"ORDER BY a.attnum;",
+					relid);
 
 	if ((ret = SPI_connect()) < 0)
 		elog(ERROR, "getTableColumnDefs: SPI_connect returned %d", ret);
@@ -8180,6 +8503,7 @@ getTableColumnDefs(Oid relid)
 		bool	isnull;
 		char	*attname;
 		char	*atttypname;
+		bool	isgenerated;
 
 		/* attname */
 		dat = SPI_getbinval(SPI_tuptable->vals[i],
@@ -8189,10 +8513,29 @@ getTableColumnDefs(Oid relid)
 		Assert(!isnull);
 		attname = NameStr(*DatumGetName(dat));
 
-		/* atttypname */
+		/* attgenerated */
 		dat = SPI_getbinval(SPI_tuptable->vals[i],
 							SPI_tuptable->tupdesc,
 							2,
+							&isnull);
+		isgenerated = (!isnull && DatumGetChar(dat));
+
+		if (!isgenerated)
+		{
+			if(needComma2)
+				appendStringInfoString(selectdefs, ", ");
+			appendStringInfoString(selectdefs, quote_identifier(attname));
+			needComma2 = true;
+		}
+		else
+		{
+			tcl->has_generated = true;
+		}
+
+		/* atttypname */
+		dat = SPI_getbinval(SPI_tuptable->vals[i],
+							SPI_tuptable->tupdesc,
+							3,
 							&isnull);
 		Assert(!isnull);
 		atttypname = text_to_cstring(DatumGetTextP(dat));
@@ -8206,12 +8549,69 @@ getTableColumnDefs(Oid relid)
 	if (!needComma)
 		resetStringInfo(coldefs);
 	else
+	{
+		/*
+		 * Add extra column ctid and gp_segment_id if operation is update/delete.
+		 */
+		if (operation == CMD_UPDATE || operation == CMD_DELETE)
+			appendStringInfoString(coldefs, ", ctid tid, gp_segment_id integer");
 		appendStringInfoChar(coldefs, ')');
+	}
 
 	SPI_finish();
 	pfree(sql);
 
-	return coldefs;
+	tcl->coldefs = coldefs;
+	tcl->selectdefs = selectdefs;
+	return tcl;
+}
+
+static StringInfo
+getUpdateColumnDefs(PgFdwModifyState *fmstate)
+{
+	ListCell	*lc;
+	int			i;
+	TupleDesc	tupdesc;
+	int			nestlevel;
+	StringInfo	update_cols;
+	int			valid_attrs;
+	List		*attrnames = NIL;
+
+	nestlevel = set_transmission_modes();
+	tupdesc = RelationGetDescr(fmstate->rel);
+	update_cols = makeStringInfo();
+
+	valid_attrs = 0;
+	foreach(lc, fmstate->target_attrs)
+	{
+		int		attnum = lfirst_int(lc);
+		char	*attname;
+
+		Form_pg_attribute attr = TupleDescAttr(tupdesc, attnum - 1);
+		attname = NameStr(attr->attname);
+
+		if (attr->attgenerated)
+			continue;
+
+		attrnames = lappend(attrnames, attname);
+		valid_attrs++;
+	}
+
+	i = 0;
+	foreach_with_count(lc, attrnames, i)
+	{
+		char *attname = (char *) lfirst(lc);
+		appendStringInfo(update_cols,
+						 "%s = l.%s",
+						 quote_identifier(attname),
+						 quote_identifier(attname));
+		if (i < valid_attrs - 1)
+			appendStringInfoString(update_cols, ", ");
+	}
+
+	reset_transmission_modes(nestlevel);
+
+	return update_cols;
 }
 
 static List *
@@ -8323,11 +8723,18 @@ getDispatchNumSegmengs(ModifyTableState *mtstate)
 		}
 		numsegments = list_length(segs);
 	}
-	
+
 	if (numsegments == 0)
 		numsegments = cdbcomponent_getCdbComponents()->total_segments;
 
 	return numsegments;
+}
+
+static const char *
+getFullTableName(char *schema_name, char *table_name)
+{
+	return psprintf("%s.%s",
+					schema_name ? quote_identifier(schema_name) : "public", quote_identifier(table_name));
 }
 
 static void
@@ -8347,7 +8754,8 @@ beginForeignModifyByCopy(ModifyTableState *mtstate,
 	int				localsegnum = 0;
 	bool			sendlocalseg = false;
 	StringInfo		client_numbers = NULL;
-	StringInfo		coldefs;
+	StringInfo		update_cols;
+	char			*onconflictclause = "";
 	Datum			uuid_d;
 	char			*uuid = NULL;
 	Oid				userid;
@@ -8370,9 +8778,9 @@ beginForeignModifyByCopy(ModifyTableState *mtstate,
 	/* Get info about foreign table. */
 	table = GetForeignTable(RelationGetRelid(rel));
 
-	/* Process only queries with mpp_execute 'all segments'. */
-	if (operation != CMD_INSERT ||
-		table->exec_location != FTEXECLOCATION_ALL_SEGMENTS)
+	/* Process only table with (mpp_execute 'all segments') option. */
+	if ((operation != CMD_INSERT && operation != CMD_UPDATE && operation != CMD_DELETE)
+		|| table->exec_location != FTEXECLOCATION_ALL_SEGMENTS)
 		return;
 
 	/* Start of the COPY FROM processing routine. */
@@ -8431,15 +8839,53 @@ beginForeignModifyByCopy(ModifyTableState *mtstate,
 			client_numbers = calculateClientNumbers(localsegnum, remotesegnum);
 		}
 
+		TableColumnInfo *tcl;
 		/* Get remote table column definition */
-		coldefs = getTableColumnDefs(table->relid);
+		tcl = getTableColumnDefs(table->relid, operation);
 
-		fmstate->copyfrom_sql = psprintf("insert into %s.%s select * from public.cbdb_fdw_copy_from('%s.%s'::regclass, '%s', %d, '%s') as t %s;",
-										schema_name, table_name,
-										schema_name, table_name,
-										uuid, sendlocalseg ? localsegnum : 0,
-										client_numbers ? client_numbers->data : "",
-										coldefs->data);
+		if (operation == CMD_INSERT)
+		{
+			md_plan = (ModifyTable *) mtstate->ps.plan;
+			if (md_plan->onConflictAction == ONCONFLICT_NOTHING)
+			{
+				onconflictclause = "ON CONFLICT DO NOTHING";
+			}
+
+			fmstate->copyfrom_sql = psprintf("INSERT INTO %s SELECT %s FROM public.cbdb_fdw_copy_from('%s'::regclass, '%s', %d, '%s') AS t %s %s;",
+											getFullTableName(schema_name, table_name),
+											tcl->has_generated ? tcl->selectdefs->data : "*",
+											getFullTableName(schema_name, table_name),
+											uuid, sendlocalseg ? localsegnum : 0,
+											client_numbers ? client_numbers->data : "",
+											tcl->coldefs->data,
+											onconflictclause);
+		}
+		else if (operation == CMD_UPDATE)
+		{
+			update_cols = getUpdateColumnDefs(fmstate);
+			fmstate->copyfrom_sql = psprintf("UPDATE %s "
+											"SET %s "
+											"FROM (SELECT * FROM public.cbdb_fdw_update_copy_from('%s'::regclass, '%s', 0,'0') "
+											"AS t %s) l WHERE %s.ctid = l.ctid AND %s.gp_segment_id = l.gp_segment_id;",
+											getFullTableName(schema_name, table_name),
+											update_cols->data,
+											getFullTableName(schema_name, table_name),
+											uuid,
+											tcl->coldefs->data,
+											getFullTableName(schema_name, table_name),
+											getFullTableName(schema_name, table_name));
+		}
+		else if (operation == CMD_DELETE)
+		{
+			fmstate->copyfrom_sql = psprintf("DELETE FROM %s "
+											 "USING (SELECT * FROM public.cbdb_fdw_delete_copy_from('%s'::regclass, '%s', 0,'0')"
+											 "AS t (ctid tid, gp_segment_id integer)) l WHERE %s.ctid = l.ctid AND %s.gp_segment_id = l.gp_segment_id;",
+											 getFullTableName(schema_name, table_name),
+											 getFullTableName(schema_name, table_name),
+											 uuid,
+											 getFullTableName(schema_name, table_name),
+											 getFullTableName(schema_name, table_name));
+		}
 
 		/* Send copy from sql to remote server */
 		if (!PQsendQuery(fmstate->conn, fmstate->copyfrom_sql))
@@ -8543,9 +8989,12 @@ beginForeignModifyByCopy(ModifyTableState *mtstate,
 			fmstate->helper_ports = lappend(fmstate->helper_ports, ports);
 		}
 
-		/* Begin 'Copy To' and init copy file. */
+		/*
+		 * Begin 'Copy To' and init copy file,
+		 * the options are following the original cbcopy.
+		 */
 		copyto_options = lappend(copyto_options, makeDefElem("format", (Node *) makeString("csv"), -1));
-		// TODO ignore external partitions?
+		copyto_options = lappend(copyto_options, makeDefElem("skip_foreign_partitions", (Node *) makeInteger(true), -1));
 		fmstate->ext_pstate = BeginCopyToForeignTable(rel, copyto_options);
 		InitParseStateTo(fmstate->ext_pstate);
 		InitCopyFile(fmstate);
@@ -8562,8 +9011,103 @@ execForeignInsertByCopy(ResultRelInfo *resultRelInfo,
 	if (Gp_role == GP_ROLE_DISPATCH)
 		return NULL;
 
+	CopyOneRowTo(pstate, slot);
+	CopySendToHelper(pstate);
+
+	/* Reset our buffer to start clean next round */
+	resetStringInfo(pstate->fe_msgbuf);
+
+	return slot;
+}
+
+static TupleTableSlot *
+execForeignUpdateByCopy(ResultRelInfo *resultRelInfo,
+						TupleTableSlot *slot,
+						TupleTableSlot **planSlots)
+{
+	ItemPointer ctid = NULL;
+	int			gp_segment_id;
+	Datum		datum;
+	bool		isNull;
+	PgFdwModifyState *fmstate = (PgFdwModifyState *) resultRelInfo->ri_FdwState;
+	CopyToStateData *pstate = fmstate->ext_pstate;
+
+	if (Gp_role == GP_ROLE_DISPATCH)
+		return NULL;
+
+	/* row data */
 	slot_getallattrs(slot);
 	CopyOneRowTo(pstate, slot);
+
+	/* ctid */
+	datum = ExecGetJunkAttribute(planSlots[0],
+								 fmstate->ctidAttno,
+								 &isNull);
+	/* shouldn't ever get a null result... */
+	if (isNull)
+		elog(ERROR, "ctid is NULL");
+	ctid = (ItemPointer) DatumGetPointer(datum);
+
+	char *ctidstr = (char *) DirectFunctionCall1(tidout, ItemPointerGetDatum(ctid));
+	appendStringInfo(pstate->fe_msgbuf, ",\"%s\"", ctidstr);
+
+	/* gp_segment_id */
+	datum = ExecGetJunkAttribute(planSlots[0],
+								 fmstate->segidAttno,
+								 &isNull);
+	/* shouldn't ever get a null result... */
+	if (isNull)
+		elog(ERROR, "gp_segment_id is NULL");
+	gp_segment_id = DatumGetInt32(datum);
+	appendStringInfo(pstate->fe_msgbuf, ",%d", gp_segment_id);
+
+	/* send to helper */
+	CopySendToHelper(pstate);
+
+	/* Reset our buffer to start clean next round */
+	resetStringInfo(pstate->fe_msgbuf);
+
+	return slot;
+}
+
+static TupleTableSlot *
+execForeignDeleteByCopy(ResultRelInfo *resultRelInfo,
+						TupleTableSlot *slot,
+						TupleTableSlot **planSlots)
+{
+	ItemPointer ctid = NULL;
+	int			gp_segment_id;
+	Datum		datum;
+	bool		isNull;
+	PgFdwModifyState *fmstate = (PgFdwModifyState *) resultRelInfo->ri_FdwState;
+	CopyToStateData *pstate = fmstate->ext_pstate;
+
+	if (Gp_role == GP_ROLE_DISPATCH)
+		return NULL;
+
+	/* ctid */
+	datum = ExecGetJunkAttribute(planSlots[0],
+								 fmstate->ctidAttno,
+								 &isNull);
+	/* shouldn't ever get a null result... */
+	if (isNull)
+		elog(ERROR, "ctid is NULL");
+	ctid = (ItemPointer) DatumGetPointer(datum);
+
+	char *ctidstr = (char *) DirectFunctionCall1(tidout, ItemPointerGetDatum(ctid));
+	appendStringInfo(pstate->fe_msgbuf, "\"%s\"", ctidstr);
+
+	/* gp_segment_id */
+	datum = ExecGetJunkAttribute(planSlots[0],
+								 fmstate->segidAttno,
+								 &isNull);
+	/* shouldn't ever get a null result... */
+	if (isNull)
+		elog(ERROR, "gp_segment_id is NULL");
+	gp_segment_id = DatumGetInt32(datum);
+	appendStringInfo(pstate->fe_msgbuf, ",%d", gp_segment_id);
+
+	/* send to helper */
 	CopySendToHelper(pstate);
 
 	/* Reset our buffer to start clean next round */
@@ -8845,7 +9389,328 @@ cbdb_fdw_copy_from(PG_FUNCTION_ARGS)
 	}
 	else
 	{
+		EndCopyFrom(cp->cstate);
 		table_close(cp->rel, AccessShareLock);
 		SRF_RETURN_DONE(funcctx);
 	}
+}
+
+Datum
+cbdb_fdw_update_copy_from(PG_FUNCTION_ARGS)
+{
+	FuncCallContext *funcctx;
+	Oid				relid = PG_GETARG_OID(0);
+	char			*cmdid = PG_GETARG_CSTRING(1);
+	int				segnum = PG_GETARG_INT32(2);
+	char			*clientNumbers = PG_GETARG_CSTRING(3);
+	CopyFromContext *cp = NULL;
+	bool			start_server = true;
+
+	if (segnum > 0)
+		start_server = (GpIdentity.segindex < segnum);
+
+	if (SRF_IS_FIRSTCALL())
+	{
+		MemoryContext	oldcontext;
+		char			*filename;
+		Relation		rel;
+		int				nattrs;
+		CopyFromState	cstate;
+		List			*options = NIL;
+
+		funcctx = SRF_FIRSTCALL_INIT();
+		oldcontext = MemoryContextSwitchTo(funcctx->multi_call_memory_ctx);
+
+		if (start_server)
+		{
+			cp = palloc(sizeof(CopyFromContext));
+
+			if (strlen(clientNumbers) > 0)
+				filename = psprintf("cbcopy_helper --no-compression --listen --seg-id <SEGID> --cmd-id %s --client-numbers %s --data-port-range 1024-65535", cmdid, clientNumbers);
+			else
+				filename = psprintf("cbcopy_helper --no-compression --listen --seg-id <SEGID> --cmd-id %s --data-port-range 1024-65535", cmdid);
+			rel = table_open(relid, AccessShareLock);
+
+			/* begin copy from */
+			options = lappend(options, makeDefElem("format", (Node *) makeString("csv"), -1));
+			options = lappend(options, makeDefElem("on_segment", (Node *) makeInteger(true), -1));
+			cstate = BeginCopyFrom(NULL,
+									rel,
+									NULL,
+									filename,
+									true,
+									NULL,
+									NULL,
+									NIL,
+									options);
+
+			nattrs = rel->rd_att->natts;
+			cp->cstate = cstate;
+			cp->rel = rel;
+
+			TupleDesc newtupdesc = CreateTemplateTupleDesc(nattrs + 2);
+			memcpy(TupleDescAttr(newtupdesc, 0),
+					TupleDescAttr(RelationGetDescr(rel), 0),
+					nattrs * sizeof(FormData_pg_attribute));
+			memcpy(TupleDescAttr(newtupdesc, nattrs),
+					SystemAttributeDefinition(SelfItemPointerAttributeNumber),
+					ATTRIBUTE_FIXED_PART_SIZE);
+			memcpy(TupleDescAttr(newtupdesc, nattrs + 1),
+					SystemAttributeDefinition(GpSegmentIdAttributeNumber),
+					ATTRIBUTE_FIXED_PART_SIZE);
+
+			cp->tupdesc = BlessTupleDesc(newtupdesc);
+			cp->values = (Datum *) palloc((nattrs + 2) * sizeof(Datum));
+			cp->nulls = (bool *) palloc((nattrs + 2) * sizeof(bool));
+			funcctx->user_fctx = cp;
+		}
+		else
+		{
+			funcctx->max_calls = 0;
+			funcctx->user_fctx = NULL;
+		}
+		MemoryContextSwitchTo(oldcontext);
+	}
+
+	funcctx = SRF_PERCALL_SETUP();
+
+	if (!start_server)
+		SRF_RETURN_DONE(funcctx);
+
+	cp = (CopyFromContext *) funcctx->user_fctx;
+
+	if (postgresFdwNextCopyFrom(cp->cstate, NULL, cp->values, cp->nulls))
+	{
+		HeapTuple tuple;
+
+		tuple = heap_form_tuple(cp->tupdesc, cp->values, cp->nulls);
+		SRF_RETURN_NEXT(funcctx, HeapTupleGetDatum(tuple));
+	}
+	else
+	{
+		EndCopyFrom(cp->cstate);
+		table_close(cp->rel, AccessShareLock);
+		SRF_RETURN_DONE(funcctx);
+	}
+}
+
+Datum
+cbdb_fdw_delete_copy_from(PG_FUNCTION_ARGS)
+{
+	FuncCallContext *funcctx;
+	Oid				relid = PG_GETARG_OID(0);
+	char			*cmdid = PG_GETARG_CSTRING(1);
+	int				segnum = PG_GETARG_INT32(2);
+	char			*clientNumbers = PG_GETARG_CSTRING(3);
+	CopyFromContext *cp = NULL;
+	bool			start_server = true;
+
+	if (segnum > 0)
+		start_server = (GpIdentity.segindex < segnum);
+
+	if (SRF_IS_FIRSTCALL())
+	{
+		MemoryContext	oldcontext;
+		char			*filename;
+		Relation		rel;
+		CopyFromState	cstate;
+		List			*options = NIL;
+
+		funcctx = SRF_FIRSTCALL_INIT();
+		oldcontext = MemoryContextSwitchTo(funcctx->multi_call_memory_ctx);
+
+		if (start_server)
+		{
+			cp = palloc(sizeof(CopyFromContext));
+
+			if (strlen(clientNumbers) > 0)
+				filename = psprintf("cbcopy_helper --no-compression --listen --seg-id <SEGID> --cmd-id %s --client-numbers %s --data-port-range 1024-65535", cmdid, clientNumbers);
+			else
+				filename = psprintf("cbcopy_helper --no-compression --listen --seg-id <SEGID> --cmd-id %s --data-port-range 1024-65535", cmdid);
+			rel = table_open(relid, AccessShareLock);
+
+			/* begin copy from */
+			options = lappend(options, makeDefElem("format", (Node *) makeString("csv"), -1));
+			options = lappend(options, makeDefElem("on_segment", (Node *) makeInteger(true), -1));
+			cstate = BeginCopyFrom(NULL,
+									rel,
+									NULL,
+									filename,
+									true,
+									NULL,
+									NULL,
+									NIL,
+									options);
+
+			cp->cstate = cstate;
+			cp->rel = rel;
+
+			TupleDesc newtupdesc = CreateTemplateTupleDesc(2);
+			memcpy(TupleDescAttr(newtupdesc, 0),
+					SystemAttributeDefinition(SelfItemPointerAttributeNumber),
+					ATTRIBUTE_FIXED_PART_SIZE);
+			memcpy(TupleDescAttr(newtupdesc, 1),
+					SystemAttributeDefinition(GpSegmentIdAttributeNumber),
+					ATTRIBUTE_FIXED_PART_SIZE);
+
+			cp->tupdesc = BlessTupleDesc(newtupdesc);
+			cp->values = (Datum *) palloc((2) * sizeof(Datum));
+			cp->nulls = (bool *) palloc((2) * sizeof(bool));
+			funcctx->user_fctx = cp;
+		}
+		else
+		{
+			funcctx->max_calls = 0;
+			funcctx->user_fctx = NULL;
+		}
+		MemoryContextSwitchTo(oldcontext);
+	}
+
+	funcctx = SRF_PERCALL_SETUP();
+
+	if (!start_server)
+		SRF_RETURN_DONE(funcctx);
+
+	cp = (CopyFromContext *) funcctx->user_fctx;
+
+	char	  **field_strings;
+	int			fldct;
+	char	   *string;
+	if (NextCopyFromRawFields(cp->cstate, &field_strings, &fldct))
+	{
+		HeapTuple tuple;
+		Assert(fldct == 2);
+
+		/* ctid */
+		string = field_strings[0];
+		cp->values[0] = DirectFunctionCall1(tidin, CStringGetDatum(string));
+		cp->nulls[0] = false;
+
+		/* gp_segment_id */
+		string = field_strings[1];
+		cp->values[1] = DirectFunctionCall1(int4in, CStringGetDatum(string));
+		cp->nulls[1] = false;
+
+		tuple = heap_form_tuple(cp->tupdesc, cp->values, cp->nulls);
+		SRF_RETURN_NEXT(funcctx, HeapTupleGetDatum(tuple));
+	}
+	else
+	{
+		EndCopyFrom(cp->cstate);
+		table_close(cp->rel, AccessShareLock);
+		SRF_RETURN_DONE(funcctx);
+	}
+}
+
+static bool
+postgresFdwNextCopyFrom(CopyFromState cstate,
+						ExprContext *econtext,
+						Datum *values, bool *nulls)
+{
+	TupleDesc	tupDesc;
+	AttrNumber	num_phys_attrs,
+				attr_count;
+	FmgrInfo   *in_functions = cstate->in_functions;
+	Oid		   *typioparams = cstate->typioparams;
+	List	   *attnumlist;
+	char	  **field_strings;
+	ListCell   *cur;
+	int			fldct;
+	int			fieldno;
+	char	   *string;
+
+	tupDesc = RelationGetDescr(cstate->rel);
+	num_phys_attrs = tupDesc->natts;
+	attnumlist = cstate->attnumlist;
+	attr_count = list_length(attnumlist);
+
+	/* Initialize all values for row to NULL */
+	MemSet(values, 0, (num_phys_attrs + 2) * sizeof(Datum));
+	MemSet(nulls, true, (num_phys_attrs + 2) * sizeof(bool));
+
+	if (!NextCopyFromRawFields(cstate, &field_strings, &fldct))
+		return false;
+
+	if (fldct > attr_count + 2)
+		ereport(ERROR,
+				(errcode(ERRCODE_BAD_COPY_FILE_FORMAT),
+					errmsg("extra data after last expected column")));
+
+	if (cstate->line_buf.len == 0 &&
+		cstate->opts.fill_missing &&
+		list_length(cstate->attnumlist) > 1)
+	{
+		ereport(ERROR,
+				(errcode(ERRCODE_BAD_COPY_FILE_FORMAT),
+					errmsg("missing data for column \"%s\", found empty data line",
+						NameStr(TupleDescAttr(tupDesc, 1)->attname))));
+	}
+
+	fieldno = 0;
+	/* Loop to read the user attributes on the line. */
+	foreach(cur, attnumlist)
+	{
+		int			attnum = lfirst_int(cur);
+		int			m = attnum - 1;
+		Form_pg_attribute att = TupleDescAttr(tupDesc, m);
+
+		if (fieldno >= fldct)
+		{
+			if (!cstate->opts.fill_missing)
+				ereport(ERROR,
+					(errcode(ERRCODE_BAD_COPY_FILE_FORMAT),
+						errmsg("missing data for column \"%s\"",
+							NameStr(att->attname))));
+			fieldno++;
+			string = NULL;
+		}
+		else
+			string = field_strings[fieldno++];
+
+		if (cstate->convert_select_flags &&
+			!cstate->convert_select_flags[m])
+		{
+			/* ignore input field, leaving column as NULL */
+			continue;
+		}
+
+		if (cstate->opts.csv_mode)
+		{
+			if (string == NULL &&
+				cstate->opts.force_notnull_flags[m])
+			{
+				string = cstate->opts.null_print;
+			}
+			else if (string != NULL && cstate->opts.force_null_flags[m]
+						&& strcmp(string, cstate->opts.null_print) == 0)
+			{
+				string = NULL;
+			}
+		}
+
+		cstate->cur_attname = NameStr(att->attname);
+		cstate->cur_attval = string;
+		values[m] = InputFunctionCall(&in_functions[m],
+										string,
+										typioparams[m],
+										att->atttypmod);
+		if (string != NULL)
+			nulls[m] = false;
+		cstate->cur_attname = NULL;
+		cstate->cur_attval = NULL;
+	}
+
+	Assert(fieldno == attr_count);
+
+	/* ctid */
+	string = field_strings[fieldno];
+	values[num_phys_attrs] = DirectFunctionCall1(tidin, CStringGetDatum(string));
+	nulls[num_phys_attrs] = false;
+
+	/* gp_segment_id */
+	string = field_strings[fieldno + 1];
+	values[num_phys_attrs + 1] = DirectFunctionCall1(int4in, CStringGetDatum(string));
+	nulls[num_phys_attrs + 1] = false;
+
+	return true;
 }

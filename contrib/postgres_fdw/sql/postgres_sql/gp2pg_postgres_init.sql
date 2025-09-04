@@ -6,6 +6,8 @@
 -- ===================================================================
 SET timezone = 'PST8PDT';
 
+CREATE EXTENSION postgres_fdw;
+
 CREATE TYPE user_enum AS ENUM ('foo', 'bar', 'buz');
 CREATE SCHEMA "S 1";
 CREATE TABLE "S 1"."T 1" (
@@ -38,10 +40,11 @@ CREATE TABLE "S 1"."T 4" (
 );
 
 -- Disable autovacuum for these tables to avoid unexpected effects of that
-ALTER TABLE "S 1"."T 1" SET (autovacuum_enabled = 'false');
-ALTER TABLE "S 1"."T 2" SET (autovacuum_enabled = 'false');
-ALTER TABLE "S 1"."T 3" SET (autovacuum_enabled = 'false');
-ALTER TABLE "S 1"."T 4" SET (autovacuum_enabled = 'false');
+-- autovacuum is not supported in Cloudberry (tablecmds.c:16198)
+-- ALTER TABLE "S 1"."T 1" SET (autovacuum_enabled = 'false');
+-- ALTER TABLE "S 1"."T 2" SET (autovacuum_enabled = 'false');
+-- ALTER TABLE "S 1"."T 3" SET (autovacuum_enabled = 'false');
+-- ALTER TABLE "S 1"."T 4" SET (autovacuum_enabled = 'false');
 
 INSERT INTO "S 1"."T 1"
 	SELECT id,

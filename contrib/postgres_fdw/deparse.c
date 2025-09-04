@@ -1275,6 +1275,23 @@ deparseTargetList(StringInfo buf,
 									   SelfItemPointerAttributeNumber);
 	}
 
+	if (bms_is_member(GpSegmentIdAttributeNumber - FirstLowInvalidHeapAttributeNumber,
+					  attrs_used))
+	{
+		if (!first)
+			appendStringInfoString(buf, ", ");
+		else if (is_returning)
+			appendStringInfoString(buf, " RETURNING ");
+		first = false;
+
+		if (qualify_col)
+			ADD_REL_QUALIFIER(buf, rtindex);
+		appendStringInfoString(buf, "gp_segment_id");
+
+		*retrieved_attrs = lappend_int(*retrieved_attrs,
+									   GpSegmentIdAttributeNumber);
+	}
+
 	/* Don't generate bad syntax if no undropped columns */
 	if (first && !is_returning)
 		appendStringInfoString(buf, "NULL");
@@ -1318,7 +1335,8 @@ deparseLockingClause(deparse_expr_cxt *context)
 			 root->parse->commandType == CMD_DELETE))
 		{
 			/* Relation is UPDATE/DELETE target, so use FOR UPDATE */
-			appendStringInfoString(buf, " FOR UPDATE");
+			if (!IS_SIMPLE_REL(rel))
+				appendStringInfoString(buf, " FOR UPDATE");
 
 			/* Add the relation alias if we are here for a join relation */
 			if (IS_JOIN_REL(rel))

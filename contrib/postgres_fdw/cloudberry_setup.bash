@@ -22,6 +22,7 @@ mkdir -p "$DATADIRS" || {
 fi
 
 export PGPORT=$PORT_BASE
+export PG_PORT=5432
 
 echo "Using PORT_BASE=$PORT_BASE"
 echo "NUM_PRIMARY_MIRROR_PAIRS=$NUM_PRIMARY_MIRROR_PAIRS"
@@ -50,13 +51,18 @@ echo "Cluster created successfully."
 fi
 
 echo "Creating database remotedb..."
-psql -h localhost -p 15432 -U gpadmin -d postgres -c "CREATE DATABASE remotedb;" || {
+psql -h localhost -p 5432 -U gpadmin -d postgres -c "CREATE DATABASE remotedb;" || {
 	echo "Failed to create remotedb"
 	exit 1
 }
 
+psql -h localhost -p 5432 -U gpadmin -d postgres -c "CREATE DATABASE contrib_regression;" || {
+	echo "Failed to create contrib_regression"
+	exit 1
+}
+
 echo "Running remote initialization SQL..."
-psql -q -h localhost -p 15432 -U gpadmin -d remotedb -f ../../contrib/postgres_fdw/sql/postgres_sql/cloudberry_fdw_insert_init.sql || {
+psql -q -h localhost -p 5432 -U gpadmin -d remotedb -f ../../contrib/postgres_fdw/sql/postgres_sql/cloudberry_fdw_insert_init.sql || {
 	echo "Failed to run cloudberry_fdw_insert_init.sql"
 	exit 1
 }

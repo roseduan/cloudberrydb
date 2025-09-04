@@ -1227,7 +1227,7 @@ ExecDelete(ModifyTableState *mtstate,
 	 * incorrectly (e.g. insert data on incorrect segment through
 	 * utility mode) or there is bug in code, etc.
 	 */
-	if (segid != GpIdentity.segindex)
+	if (segid != GpIdentity.segindex && resultRelInfo->ri_FdwRoutine == NULL)
 		elog(ERROR,
 			 "distribution key of the tuple (%u, %u) doesn't belong to "
 			 "current segment (actually from seg%d)",
@@ -1831,7 +1831,7 @@ ExecUpdate(ModifyTableState *mtstate,
 	 * incorrectly (e.g. insert data on incorrect segment through
 	 * utility mode) or there is bug in code, etc.
 	 */
-	if (segid != GpIdentity.segindex)
+	if (segid != GpIdentity.segindex && resultRelInfo->ri_FdwRoutine == NULL)
 		elog(ERROR,
 			 "distribution key of the tuple (%u, %u) doesn't belong to "
 			 "current segment (actually from seg%d)",
