@@ -3451,7 +3451,8 @@ appendLimitClause(deparse_expr_cxt *context)
 	/* Make sure any constants in the exprs are printed portably */
 	nestlevel = set_transmission_modes();
 
-	if (foreignrel->exec_location != FTEXECLOCATION_ALL_SEGMENTS)
+	if (foreignrel->exec_location != FTEXECLOCATION_ALL_SEGMENTS ||
+		foreignrel->num_segments == 1)
 	{
 		if (root->parse->limitCount)
 		{

@@ -8,7 +8,11 @@
 --    2.3 gpdb don't support REINDEX CONCURRENTLY.
 -- 3. gpdb will generate different PLAN from postgres, such as join local table and remote table, select for update/share and so on.
 -- start_matchignore
--- m/^DETAIL:  Falling back to Postgres-based planner because GPORCA does not support the following feature: .*$
+-- m/^WARNING:  could not obtain message string for remote error$/
+-- m/^CONTEXT:  remote SQL command: CLOSE c[0-9]+$/
+-- end_matchignore
+-- start_matchignore
+-- m/WARNING:  canceling MPP operation: "Endpoint retrieve session is quitting/
 -- end_matchignore
 -- ===================================================================
 -- create FDW objects
@@ -5231,7 +5235,7 @@ SELECT tableoid::regclass, * FROM ft1 t1 ORDER BY c1 LIMIT 1;
 (1 row)
 
 EXPLAIN (VERBOSE, COSTS OFF)
-SELECT * FROM ft1 t1 WHERE t1.ctid = '(0,2)' ORDER BY c1;
+SELECT * FROM ft1 t1 WHERE t1.ctid = '(0,2)' ORDER BY c1 LIMIT 1;
                                               QUERY PLAN                                               
 -------------------------------------------------------------------------------------------------------
  Foreign Scan on public.ft1 t1
@@ -5240,13 +5244,11 @@ SELECT * FROM ft1 t1 WHERE t1.ctid = '(0,2)' ORDER BY c1;
  Optimizer: GPORCA
 (4 rows)
 
-SELECT * FROM ft1 t1 WHERE t1.ctid = '(0,2)' ORDER BY c1;
- c1 | c2 |  c3   |              c4              |            c5            | c6 |     c7     | c8  
-----+----+-------+------------------------------+--------------------------+----+------------+-----
-  3 |  3 | 00003 | Sun Jan 04 00:00:00 1970 PST | Sun Jan 04 00:00:00 1970 | 3  | 3          | foo
-  6 |  6 | 00006 | Wed Jan 07 00:00:00 1970 PST | Wed Jan 07 00:00:00 1970 | 6  | 6          | foo
- 12 |  2 | 00012 | Tue Jan 13 00:00:00 1970 PST | Tue Jan 13 00:00:00 1970 | 2  | 2          | foo
-(3 rows)
+SELECT c8 FROM ft1 t1 WHERE t1.ctid = '(0,2)' ORDER BY c1 LIMIT 1;
+ c8  
+-----
+ foo
+(1 row)
 
 EXPLAIN (VERBOSE, COSTS OFF)
 SELECT ctid, * FROM ft1 t1 ORDER BY c1 LIMIT 1;

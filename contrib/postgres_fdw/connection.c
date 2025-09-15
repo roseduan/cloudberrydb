@@ -71,6 +71,7 @@ typedef struct ConnCacheEntry
 	uint32		server_hashvalue;	/* hash value of foreign server OID */
 	uint32		mapping_hashvalue;	/* hash value of user mapping OID */
 	PgFdwConnState state;		/* extra per-connection state */
+	int			session_id;
 } ConnCacheEntry;
 
 /*
@@ -94,7 +95,7 @@ PG_FUNCTION_INFO_V1(postgres_fdw_disconnect_all);
 
 /* prototypes of private functions */
 static void make_new_connection(ConnCacheEntry *entry, UserMapping *user,
-								List *server_options, bool is_gp_retrieve);
+								List *server_options, bool is_gp_retrieve, int session_id);
 static PGconn *connect_pg_server(ForeignServer *server, UserMapping *user, bool is_gp_retrieve);
 static void disconnect_pg_server(ConnCacheEntry *entry);
 static void check_conn_params(const char **keywords, const char **values, UserMapping *user);
@@ -131,7 +132,7 @@ static bool disconnect_cached_connections(Oid serverid);
 PGconn *
 GetConnection(UserMapping *user, bool will_prep_stmt, PgFdwConnState **state)
 {
-	return GetCustomConnection(user, will_prep_stmt, state, false, 0, NULL);
+	return GetCustomConnection(user, will_prep_stmt, state, false, 0, NULL, -1);
 }
 
 /*
@@ -154,7 +155,7 @@ GetRawConnection(ForeignServer *server, UserMapping *user)
 PGconn *
 GetCustomConnection(UserMapping *user, bool will_prep_stmt,
 					PgFdwConnState **state, bool is_gp_retrieve,
-					int segid, List *server_options)
+					int segid, List *server_options, int session_id)
 {
 	bool		found;
 	bool		retry = false;
@@ -218,6 +219,9 @@ GetCustomConnection(UserMapping *user, bool will_prep_stmt,
 		entry->conn = NULL;
 	}
 
+	if (entry->session_id != -1 && entry->session_id != session_id)
+		disconnect_pg_server(entry);
+
 	/* Reject further use of connections which failed abort cleanup. */
 	pgfdw_reject_incomplete_xact_state_change(entry);
 
@@ -238,7 +242,7 @@ GetCustomConnection(UserMapping *user, bool will_prep_stmt,
 	 * will remain in a valid empty state, ie conn == NULL.)
 	 */
 	if (entry->conn == NULL)
-		make_new_connection(entry, user, server_options, is_gp_retrieve);
+		make_new_connection(entry, user, server_options, is_gp_retrieve, session_id);
 
 	/*
 	 * We check the health of the cached connection here when using it.  In
@@ -309,7 +313,7 @@ GetCustomConnection(UserMapping *user, bool will_prep_stmt,
 		disconnect_pg_server(entry);
 
 		if (entry->conn == NULL)
-			make_new_connection(entry, user, server_options, is_gp_retrieve);
+			make_new_connection(entry, user, server_options, is_gp_retrieve, session_id);
 
 		if (!is_gp_retrieve)
 			begin_remote_xact(entry);
@@ -331,7 +335,7 @@ GetCustomConnection(UserMapping *user, bool will_prep_stmt,
  */
 static void
 make_new_connection(ConnCacheEntry *entry, UserMapping *user,
-					List *server_options, bool is_gp_retrieve)
+					List *server_options, bool is_gp_retrieve, int session_id)
 {
 	ForeignServer *server = GetForeignServer(user->serverid);
 	ListCell   *lc,
@@ -371,6 +375,7 @@ make_new_connection(ConnCacheEntry *entry, UserMapping *user,
 	}
 
 	/* Reset all transient state fields, to be sure all are clean */
+	entry->session_id = session_id;
 	entry->xact_depth = 0;
 	entry->have_prep_stmt = false;
 	entry->have_error = false;

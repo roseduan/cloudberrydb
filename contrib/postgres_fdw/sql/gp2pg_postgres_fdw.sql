@@ -9,7 +9,11 @@
 -- 3. gpdb will generate different PLAN from postgres, such as join local table and remote table, select for update/share and so on.
 
 -- start_matchignore
--- m/^DETAIL:  Falling back to Postgres-based planner because GPORCA does not support the following feature: .*$
+-- m/^WARNING:  could not obtain message string for remote error$/
+-- m/^CONTEXT:  remote SQL command: CLOSE c[0-9]+$/
+-- end_matchignore
+-- start_matchignore
+-- m/WARNING:  canceling MPP operation: "Endpoint retrieve session is quitting/
 -- end_matchignore
 
 -- ===================================================================
@@ -1098,8 +1102,8 @@ EXPLAIN (VERBOSE, COSTS OFF)
 SELECT tableoid::regclass, * FROM ft1 t1 ORDER BY c1 LIMIT 1;
 SELECT tableoid::regclass, * FROM ft1 t1 ORDER BY c1 LIMIT 1;
 EXPLAIN (VERBOSE, COSTS OFF)
-SELECT * FROM ft1 t1 WHERE t1.ctid = '(0,2)' ORDER BY c1;
-SELECT * FROM ft1 t1 WHERE t1.ctid = '(0,2)' ORDER BY c1;
+SELECT * FROM ft1 t1 WHERE t1.ctid = '(0,2)' ORDER BY c1 LIMIT 1;
+SELECT c8 FROM ft1 t1 WHERE t1.ctid = '(0,2)' ORDER BY c1 LIMIT 1;
 EXPLAIN (VERBOSE, COSTS OFF)
 SELECT ctid, * FROM ft1 t1 ORDER BY c1 LIMIT 1;
 SELECT ctid, * FROM ft1 t1 ORDER BY c1 LIMIT 1;

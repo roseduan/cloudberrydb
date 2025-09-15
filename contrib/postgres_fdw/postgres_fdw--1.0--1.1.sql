@@ -27,17 +27,7 @@ RETURNS SETOF record
 AS 'MODULE_PATHNAME'
 LANGUAGE C STRICT EXECUTE ON ALL SEGMENTS;
 
-CREATE FUNCTION public.cbdb_fdw_copy_from (Oid, cstring, int4 DEFAULT 0, cstring DEFAULT '')
-RETURNS SETOF record
-AS 'MODULE_PATHNAME'
-LANGUAGE C STRICT EXECUTE ON ALL SEGMENTS;
-
-CREATE FUNCTION public.cbdb_fdw_update_copy_from (Oid, cstring, int4 DEFAULT 0, cstring DEFAULT '')
-RETURNS SETOF record
-AS 'MODULE_PATHNAME'
-LANGUAGE C STRICT EXECUTE ON ALL SEGMENTS;
-
-CREATE FUNCTION public.cbdb_fdw_delete_copy_from (Oid, cstring, int4 DEFAULT 0, cstring DEFAULT '')
+CREATE FUNCTION public.cbdb_fdw_copy_from (Oid, cstring, int4 DEFAULT 0, cstring DEFAULT '', cstring DEFAULT '')
 RETURNS SETOF record
 AS 'MODULE_PATHNAME'
 LANGUAGE C STRICT EXECUTE ON ALL SEGMENTS;
