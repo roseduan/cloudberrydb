@@ -265,8 +265,10 @@ typedef struct PgFdwModifyState
 	/* for update row movement if subplan result rel */
 	struct PgFdwModifyState *aux_fmstate;	/* foreign-insert state, if
 											 * created */
+
+	/* for modify by copy */
 	struct CopyToStateData *ext_pstate;
-	bool					is_copyfrom;
+	bool					is_copy_modify;
 	char					*copyfrom_sql;
 	List					*helper_ports;
 } PgFdwModifyState;
@@ -631,10 +633,12 @@ static void merge_fdw_options(PgFdwRelationInfo *fpinfo,
 							  const PgFdwRelationInfo *fpinfo_i);
 static int	get_batch_size_option(Relation rel);
 static int GetForeignTableSegNumbers(Oid relid);
-static int get_remote_num_segments(UserMapping *user);
 static void get_endpoints_info(PGconn *conn, int cursor_number,
 							   int session_id, List **endpoints);
 static void create_parallel_retrieve_cursor(ForeignScanState *node);
+static PGconn *getRetrieveConnFromEndpoint(List *endpoint, UserMapping *user,
+										   Value *foreign_username,
+										   PgFdwConnState **state);
 static void cbdb_fdw_ProcessUtility(PlannedStmt *pstmt, const char *queryString,
 									bool readOnlyTree,
 									ProcessUtilityContext context, ParamListInfo params,
@@ -1609,35 +1613,6 @@ get_tupdesc_for_join_scan_tuples(ForeignScanState *node)
 	return tupdesc;
 }
 
-static PGconn *
-getRetrieveConnFromEndpoint(List *endpoint, UserMapping *user, Value *foreign_username)
-{
-	Value	*host = NULL;
-	Value	*port = NULL;
-	int32	segid = -1;
-	Value	*auth_token = NULL;
-	int		session_id = -1;
-	List	*server_options = NIL;
-
-	host = list_nth(endpoint, 0);
-	port = list_nth(endpoint, 1);
-	segid = atoi(strVal(list_nth(endpoint, 2)));
-	auth_token = list_nth(endpoint, 3);
-	session_id= intVal(list_nth(endpoint, 4));
-
-	/* Customize the fdw connection for parallel retrieve cursor. */
-	server_options = lappend(server_options, makeDefElem(pstrdup("host"), (Node *)host, -1));
-	server_options = lappend(server_options, makeDefElem(pstrdup("port"), (Node *)port, -1));
-	/* dbname will be populated in GetCustomConnection() since we need to get the database name there. */
-	server_options = lappend(server_options, makeDefElem(pstrdup("options"), (Node *) makeString("-c gp_retrieve_conn=true"), -1));
-
-	user->options = NIL;
-	user->options = lappend(user->options, makeDefElem(pstrdup("user"), (Node *)foreign_username, -1));
-	user->options = lappend(user->options, makeDefElem(pstrdup("password"), (Node *)auth_token, -1));
-
-	return GetCustomConnection(user, false, NULL, true, segid, server_options, session_id);
-}
-
 /*
  * postgresBeginForeignScan
  *		Initiate an executor scan of a foreign PostgreSQL table.
@@ -1654,14 +1629,8 @@ postgresBeginForeignScan(ForeignScanState *node, int eflags)
 	UserMapping *user;
 	int			rtindex;
 	int			numParams;
-	Value		*host = NULL;
-	Value		*port = NULL;
-	int32 		segid = -1;
-	Value		*auth_token = NULL;
-	int			session_id = -1;
 	Value		*foreign_username = NULL;
 	int			process_no = -1;
-	List		*server_options = NIL;
 	int			segnumbers = 0;
 	int			planNumSegments = 0;
 
@@ -1713,14 +1682,6 @@ postgresBeginForeignScan(ForeignScanState *node, int eflags)
 		fsstate->is_gp_parallel_retrieve_cursor = false;
 	}
 
-	if (false && fsstate->is_gp_parallel_retrieve_cursor)
-	{
-		int num_segments = get_remote_num_segments(user);
-		if (num_segments!= table->num_segments)
-			ereport(ERROR, (errmsg("Option segment_number %d doesn't match remote "
-					"segment number %d", table->num_segments, num_segments)));
-	}
-
 	if (!fsstate->is_gp_retrieve)
 	{
 		/*
@@ -1747,38 +1708,28 @@ postgresBeginForeignScan(ForeignScanState *node, int eflags)
 			}
 		}
 
-		if (list_length(fsplan->fdw_private) >= FdwScanPrivateEndpointName)
-		{
-		foreign_username = list_nth(fsplan->fdw_private, FdwScanPrivateUserName);
-		fsstate->endpoint_name = strVal(list_nth(fsplan->fdw_private, FdwScanPrivateEndpointName));
-		fsstate->endpoints = list_nth(fsplan->fdw_private, FdwScanPrivateEndpoints);
-		}
-
 		if (process_no < 0)
 			ereport(ERROR, (errmsg("No valid slice number")));
+
+		if (list_length(fsplan->fdw_private) >= FdwScanPrivateEndpointName)
+		{
+			foreign_username = list_nth(fsplan->fdw_private, FdwScanPrivateUserName);
+			fsstate->endpoint_name = strVal(list_nth(fsplan->fdw_private, FdwScanPrivateEndpointName));
+			fsstate->endpoints = list_nth(fsplan->fdw_private, FdwScanPrivateEndpoints);
+		}
 
 		if (process_no < list_length(fsstate->endpoints))
 		{
 			List *endpoint = list_nth(fsstate->endpoints, process_no);
-			host = list_nth(endpoint, 0);
-			port = list_nth(endpoint, 1);
-			segid = atoi(strVal(list_nth(endpoint, 2)));
-			auth_token = list_nth(endpoint, 3);
-			session_id= intVal(list_nth(endpoint, 4));
-
-			/* Customize the fdw connection for parallel retrieve cursor. */
-			server_options = lappend(server_options, makeDefElem(pstrdup("host"), (Node *)host, -1));
-			server_options = lappend(server_options, makeDefElem(pstrdup("port"), (Node *)port, -1));
-			/* dbname will be populated in GetCustomConnection() since we need to get the database name there. */
-			server_options = lappend(server_options, makeDefElem(pstrdup("options"), (Node *) makeString("-c gp_retrieve_conn=true"), -1));
-
-			user->options = NIL;
-			user->options = lappend(user->options, makeDefElem(pstrdup("user"), (Node *)foreign_username, -1));
-			user->options = lappend(user->options, makeDefElem(pstrdup("password"), (Node *)auth_token, -1));
-
-			fsstate->conn = GetCustomConnection(user, false, &fsstate->conn_state, true, segid, server_options, session_id);
+			fsstate->conn = getRetrieveConnFromEndpoint(endpoint, user, foreign_username, &fsstate->conn_state);
 		}
 
+		/*
+		 * Handle case where remote cluster has more segments than local.
+		 * Extra endpoints are assigned to local segments in a round-robin
+		 * (i % planNumSegments). Each matching local segindex opens an
+		 * additional connection and stores it in extraConns.
+		 */
 		if (list_length(fsstate->endpoints) > planNumSegments)
 		{
 			for (int i = planNumSegments; i < list_length(fsstate->endpoints); i++)
@@ -1789,7 +1740,7 @@ postgresBeginForeignScan(ForeignScanState *node, int eflags)
 					PGconn	*conn;
 
 					endpoint = list_nth(fsstate->endpoints, i);
-					conn = getRetrieveConnFromEndpoint(endpoint, user, foreign_username);
+					conn = getRetrieveConnFromEndpoint(endpoint, user, foreign_username, NULL);
 					fsstate->extraConns = lappend(fsstate->extraConns, conn);
 				}
 			}
@@ -2312,7 +2263,7 @@ postgresExecForeignInsert(EState *estate,
 	TupleTableSlot **rslot;
 	int			numSlots = 1;
 
-	if (fmstate->is_copyfrom)
+	if (fmstate->is_copy_modify)
 		return execForeignInsertByCopy(resultRelInfo, slot);
 
 	/*
@@ -2434,7 +2385,7 @@ postgresExecForeignUpdate(EState *estate,
 	TupleTableSlot **rslot;
 	int			numSlots = 1;
 
-	if (fmstate->is_copyfrom)
+	if (fmstate->is_copy_modify)
 		return execForeignUpdateByCopy(resultRelInfo, slot, &planSlot);
 
 	rslot = execute_foreign_modify(estate, resultRelInfo, CMD_UPDATE,
@@ -2457,7 +2408,7 @@ postgresExecForeignDelete(EState *estate,
 	TupleTableSlot **rslot;
 	int			numSlots = 1;
 
-	if (fmstate->is_copyfrom)
+	if (fmstate->is_copy_modify)
 		return execForeignDeleteByCopy(resultRelInfo, slot, &planSlot);
 
 	rslot = execute_foreign_modify(estate, resultRelInfo, CMD_DELETE,
@@ -8290,32 +8241,6 @@ GetForeignTableSegNumbers(Oid relid)
 	return number;
 }
 
-static int
-get_remote_num_segments(UserMapping *user)
-{
-	PGconn	   *conn;
-	PGresult   *res;
-	int			size;
-
-	char *query = "SELECT count(DISTINCT content) FROM pg_catalog.gp_segment_configuration WHERE content >= 0";
-
-	conn = GetConnection(user, false, NULL);
-
-	res = pgfdw_exec_query(conn, query, NULL);
-	if (PQresultStatus(res) != PGRES_TUPLES_OK)
-		pgfdw_report_error(ERROR, res, conn, true, query);
-
-	if (PQntuples(res) == 0)
-		pgfdw_report_error(ERROR, res, conn, true, query);
-
-	size = pg_atoi(PQgetvalue(res, 0, 0), sizeof(int), 0);
-
-	PQclear(res);
-	ReleaseConnection(conn);
-
-	return size;
-}
-
 static void
 get_session_id(PGconn *conn, int *session_id)
 {
@@ -8421,6 +8346,37 @@ create_parallel_retrieve_cursor(ForeignScanState *node)
 
 	get_endpoints_info(fsstate->conn, fsstate->cursor_number, session_id,
 					   &foreign_scan->fdw_private);
+}
+
+static PGconn *
+getRetrieveConnFromEndpoint(List *endpoint, UserMapping *user,
+							Value *foreign_username,
+							PgFdwConnState **state)
+{
+	Value	*host;
+	Value	*port;
+	int32	segid;
+	Value	*auth_token;
+	int		session_id;
+	List	*server_options = NIL;
+
+	host = list_nth(endpoint, 0);
+	port = list_nth(endpoint, 1);
+	segid = atoi(strVal(list_nth(endpoint, 2)));
+	auth_token = list_nth(endpoint, 3);
+	session_id= intVal(list_nth(endpoint, 4));
+
+	/* Customize the fdw connection for parallel retrieve cursor. */
+	server_options = lappend(server_options, makeDefElem(pstrdup("host"), (Node *)host, -1));
+	server_options = lappend(server_options, makeDefElem(pstrdup("port"), (Node *)port, -1));
+	/* dbname will be populated in GetCustomConnection() since we need to get the database name there. */
+	server_options = lappend(server_options, makeDefElem(pstrdup("options"), (Node *) makeString("-c gp_retrieve_conn=true"), -1));
+
+	user->options = NIL;
+	user->options = lappend(user->options, makeDefElem(pstrdup("user"), (Node *)foreign_username, -1));
+	user->options = lappend(user->options, makeDefElem(pstrdup("password"), (Node *)auth_token, -1));
+
+	return GetCustomConnection(user, false, state, true, segid, server_options, session_id);
 }
 
 static void
@@ -8834,11 +8790,12 @@ getDispatchNumSegmengs(ModifyTableState *mtstate)
 	return numsegments;
 }
 
-static const char *
+static char *
 getFullTableName(char *schema_name, char *table_name)
 {
-	return psprintf("%s.%s",
-					schema_name ? quote_identifier(schema_name) : "public", quote_identifier(table_name));
+	const char *quote_schema = schema_name ? quote_identifier(schema_name) : "public";
+	const char *quote_tab = quote_identifier(table_name);
+	return psprintf("%s.%s", quote_schema, quote_tab);
 }
 
 static void
@@ -8853,15 +8810,17 @@ beginForeignModifyByCopy(ModifyTableState *mtstate,
 					*lc2;
 	char			*schema_name = NULL;
 	char			*table_name = NULL;
+	char			*fulltabname = NULL;
+	Datum			uuid_d;
+	char			*uuid = NULL;
 	List			*remoteseglist = NIL;
 	int				remotesegnum = 0;
 	int				localsegnum = 0;
 	bool			sendlocalseg = false;
 	StringInfo		client_numbers = NULL;
-	StringInfo		update_cols;
+	StringInfo		update_cols = NULL;
 	char			*onconflictclause = "";
-	Datum			uuid_d;
-	char			*uuid = NULL;
+	TableColumnInfo *tcl = NULL;
 	Oid				userid;
 	UserMapping		*user = NULL;
 	ForeignServer	*server = NULL;
@@ -8875,7 +8834,7 @@ beginForeignModifyByCopy(ModifyTableState *mtstate,
 
 	/* init copy related states */
 	fmstate->ext_pstate = NULL;
-	fmstate->is_copyfrom = false;
+	fmstate->is_copy_modify = false;
 	fmstate->copyfrom_sql = NULL;
 	fmstate->helper_ports = NIL;
 
@@ -8888,7 +8847,7 @@ beginForeignModifyByCopy(ModifyTableState *mtstate,
 		return;
 
 	/* Start of the COPY FROM processing routine. */
-	fmstate->is_copyfrom = true;
+	fmstate->is_copy_modify = true;
 
 	/*
 	 * On the QD (Query Dispatcher), the 'COPY FROM' operation
@@ -8905,6 +8864,8 @@ beginForeignModifyByCopy(ModifyTableState *mtstate,
 			if (strcmp(def->defname, "table_name") == 0)
 				table_name = defGetString(def);
 		}
+		/* full table name is schema + table name */
+		fulltabname = getFullTableName(schema_name, table_name);
 
 		/* Generate a uuid as the cmdid required by cbcopy_helper */
 		uuid_d = OidFunctionCall0(F_GEN_RANDOM_UUID);
@@ -8943,8 +8904,7 @@ beginForeignModifyByCopy(ModifyTableState *mtstate,
 			client_numbers = calculateClientNumbers(localsegnum, remotesegnum);
 		}
 
-		TableColumnInfo *tcl;
-		/* Get remote table column definition */
+		/* Get table column definition */
 		tcl = getTableColumnDefs(table->relid, operation);
 
 		if (operation == CMD_INSERT)
@@ -8956,9 +8916,9 @@ beginForeignModifyByCopy(ModifyTableState *mtstate,
 			}
 
 			fmstate->copyfrom_sql = psprintf("INSERT INTO %s SELECT %s FROM public.cbdb_fdw_copy_from('%s'::regclass, '%s', %d, '%s', 'insert') AS t %s %s;",
-											getFullTableName(schema_name, table_name),
+											fulltabname,
 											tcl->has_generated ? tcl->selectdefs->data : "*",
-											getFullTableName(schema_name, table_name),
+											fulltabname,
 											uuid, sendlocalseg ? localsegnum : 0,
 											client_numbers ? client_numbers->data : "",
 											tcl->coldefs->data,
@@ -8971,26 +8931,23 @@ beginForeignModifyByCopy(ModifyTableState *mtstate,
 											"SET %s "
 											"FROM (SELECT * FROM public.cbdb_fdw_copy_from('%s'::regclass, '%s', %d, '%s', 'update') "
 											"AS t %s) l WHERE %s.ctid = l.ctid AND %s.gp_segment_id = l.gp_segment_id;",
-											getFullTableName(schema_name, table_name),
+											fulltabname,
 											update_cols->data,
-											getFullTableName(schema_name, table_name),
+											fulltabname,
 											uuid, sendlocalseg ? localsegnum : 0,
 											client_numbers ? client_numbers->data : "",
 											tcl->coldefs->data,
-											getFullTableName(schema_name, table_name),
-											getFullTableName(schema_name, table_name));
+											fulltabname, fulltabname);
 		}
 		else if (operation == CMD_DELETE)
 		{
 			fmstate->copyfrom_sql = psprintf("DELETE FROM %s "
 											 "USING (SELECT * FROM public.cbdb_fdw_copy_from('%s'::regclass, '%s', %d, '%s', 'delete')"
 											 "AS t (ctid tid, gp_segment_id integer)) l WHERE %s.ctid = l.ctid AND %s.gp_segment_id = l.gp_segment_id;",
-											 getFullTableName(schema_name, table_name),
-											 getFullTableName(schema_name, table_name),
+											 fulltabname, fulltabname,
 											 uuid, sendlocalseg ? localsegnum : 0,
 											 client_numbers ? client_numbers->data : "",
-											 getFullTableName(schema_name, table_name),
-											 getFullTableName(schema_name, table_name));
+											 fulltabname, fulltabname);
 		}
 
 		/* Send copy from sql to remote server */
@@ -9006,7 +8963,7 @@ beginForeignModifyByCopy(ModifyTableState *mtstate,
 		user = GetUserMapping(userid, table->serverid);
 		server = GetForeignServer(user->serverid);
 		conn = GetRawConnection(server, user);
-		helper_ports_sql = psprintf("select distinct segid, port from public.cbdb_fdw_get_helper_ports() where cmdid = '%s' order by segid;", uuid);
+		helper_ports_sql = psprintf("SELECT DISTINCT segid, port FROM public.cbdb_fdw_get_helper_ports() WHERE cmdid = '%s' ORDER BY segid;", uuid);
 
 		/* Must release the connection after this routine. */
 		PG_TRY();
@@ -9024,6 +8981,7 @@ beginForeignModifyByCopy(ModifyTableState *mtstate,
 				char *segid = PQgetvalue(res, i, 0);
 				char *port = PQgetvalue(res, i, 1);
 				char *hostname = NULL;
+				List *port_info;
 
 				if (segid == NULL || strlen(segid) == 0)
 					elog(ERROR, "canno get segindex of remote segment");
@@ -9043,9 +9001,9 @@ beginForeignModifyByCopy(ModifyTableState *mtstate,
 				if (hostname == NULL || strlen(hostname) == 0)
 					elog(ERROR, "canno get hostname of remote segment %s", segid);
 
-				List *port_info = list_make3(makeString(pstrdup(segid)),
-											 makeString(pstrdup(port)),
-											 makeString(pstrdup(hostname)));
+				port_info = list_make3(makeString(pstrdup(segid)),
+									   makeString(pstrdup(port)),
+									   makeString(pstrdup(hostname)));
 				md_plan->fdwPrivLists = lappend(md_plan->fdwPrivLists, port_info);
 			}
 		}
@@ -9059,6 +9017,20 @@ beginForeignModifyByCopy(ModifyTableState *mtstate,
 			pfree(helper_ports_sql);
 		}
 		PG_END_TRY();
+
+		/* cleanup */
+		pfree(fulltabname);
+		if (remoteseglist)
+			list_free_deep(remoteseglist);
+		if (client_numbers)
+			pfree(client_numbers->data);
+		if (update_cols)
+			pfree(update_cols->data);
+		if (tcl)
+		{
+			pfree(tcl->coldefs->data);
+			pfree(tcl->selectdefs->data);
+		}
 	}
 
 	/*
@@ -9225,7 +9197,7 @@ execForeignDeleteByCopy(ResultRelInfo *resultRelInfo,
 static void
 endForeignModifyByCopy(PgFdwModifyState *fmstate)
 {
-	if (!fmstate->is_copyfrom)
+	if (!fmstate->is_copy_modify)
 		return;
 
 	if (Gp_role == GP_ROLE_EXECUTE)
