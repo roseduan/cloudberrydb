@@ -219,13 +219,6 @@ typedef struct PgFdwScanState
 	int			curr_extra_conn;
 } PgFdwScanState;
 
-typedef struct HelperPortsInfo
-{
-	int32	segid;
-	int32	port;
-	char	*hostname;
-} HelperPortsInfo;
-
 /*
  * Execution state of a foreign insert/update/delete operation.
  */
@@ -377,6 +370,10 @@ typedef struct
 	List	   *already_used;	/* expressions already dealt with */
 } ec_member_foreign_arg;
 
+#define COPY_FROM_EXTRA_FIELDS 2
+#define COPY_FROM_FIELD_CTID 0
+#define COPY_FROM_FIELD_SEGID 1
+
 typedef bool (*copyfrom_function) (CopyFromState cstate,
 								   ExprContext *econtext,
 								   Datum *values, bool *nulls);
@@ -390,6 +387,13 @@ typedef struct CopyFromContext
 	bool			*nulls;
 	copyfrom_function copyfrom;
 } CopyFromContext;
+
+typedef struct HelperPortsInfo
+{
+	int32	segid;
+	int32	port;
+	char	*hostname;
+} HelperPortsInfo;
 
 typedef struct SegmentInfo
 {
@@ -9428,14 +9432,14 @@ cbdb_fdw_copy_from(PG_FUNCTION_ARGS)
 			options = lappend(options, makeDefElem("format", (Node *) makeString("csv"), -1));
 			options = lappend(options, makeDefElem("on_segment", (Node *) makeInteger(true), -1));
 			cstate = BeginCopyFrom(NULL,
-									rel,
-									NULL,
-									filename,
-									true,
-									NULL,
-									NULL,
-									NIL,
-									options);
+								   rel,
+								   NULL,
+								   filename,
+								   true,
+								   NULL,
+								   NULL,
+								   NIL,
+								   options);
 
 			cp->cstate = cstate;
 			cp->rel = rel;
@@ -9448,14 +9452,14 @@ cbdb_fdw_copy_from(PG_FUNCTION_ARGS)
 			else if (pg_strcasecmp(operation, "update") == 0)
 			{
 				/* for Update statement, there are two extra fields ctid and gp_segment_id */
-				TupleDesc newtupdesc = CreateTemplateTupleDesc(nattrs + 2);
-				memcpy(TupleDescAttr(newtupdesc, 0),
-						TupleDescAttr(RelationGetDescr(rel), 0),
+				TupleDesc newtupdesc = CreateTemplateTupleDesc(nattrs + COPY_FROM_EXTRA_FIELDS);
+				memcpy(TupleDescAttr(newtupdesc, COPY_FROM_FIELD_CTID),
+						TupleDescAttr(RelationGetDescr(rel), COPY_FROM_FIELD_CTID),
 						nattrs * sizeof(FormData_pg_attribute));
 				memcpy(TupleDescAttr(newtupdesc, nattrs),
 						SystemAttributeDefinition(SelfItemPointerAttributeNumber),
 						ATTRIBUTE_FIXED_PART_SIZE);
-				memcpy(TupleDescAttr(newtupdesc, nattrs + 1),
+				memcpy(TupleDescAttr(newtupdesc, nattrs + COPY_FROM_FIELD_SEGID),
 						SystemAttributeDefinition(GpSegmentIdAttributeNumber),
 						ATTRIBUTE_FIXED_PART_SIZE);
 				cp->tupdesc = BlessTupleDesc(newtupdesc);
@@ -9464,11 +9468,11 @@ cbdb_fdw_copy_from(PG_FUNCTION_ARGS)
 			else if (pg_strcasecmp(operation, "delete") == 0)
 			{
 				/* for Delete statement, there are only ctid and gp_segment_id */
-				TupleDesc newtupdesc = CreateTemplateTupleDesc(2);
-				memcpy(TupleDescAttr(newtupdesc, 0),
+				TupleDesc newtupdesc = CreateTemplateTupleDesc(COPY_FROM_EXTRA_FIELDS);
+				memcpy(TupleDescAttr(newtupdesc, COPY_FROM_FIELD_CTID),
 						SystemAttributeDefinition(SelfItemPointerAttributeNumber),
 						ATTRIBUTE_FIXED_PART_SIZE);
-				memcpy(TupleDescAttr(newtupdesc, 1),
+				memcpy(TupleDescAttr(newtupdesc, COPY_FROM_FIELD_SEGID),
 						SystemAttributeDefinition(GpSegmentIdAttributeNumber),
 						ATTRIBUTE_FIXED_PART_SIZE);
 				cp->tupdesc = BlessTupleDesc(newtupdesc);
@@ -9526,20 +9530,20 @@ DeleteNextCopyFrom(CopyFromState cstate,
 		return false;
 
 	/* only ctid and gp_segment_id */
-	if (fldct != 2)
+	if (fldct != COPY_FROM_EXTRA_FIELDS)
 		ereport(ERROR,
 				(errcode(ERRCODE_BAD_COPY_FILE_FORMAT),
 					errmsg("extra data after last expected column")));
 
 	/* ctid */
 	string = field_strings[0];
-	values[0] = DirectFunctionCall1(tidin, CStringGetDatum(string));
-	nulls[0] = false;
+	values[COPY_FROM_FIELD_CTID] = DirectFunctionCall1(tidin, CStringGetDatum(string));
+	nulls[COPY_FROM_FIELD_CTID] = false;
 
 	/* gp_segment_id */
 	string = field_strings[1];
-	values[1] = DirectFunctionCall1(int4in, CStringGetDatum(string));
-	nulls[1] = false;
+	values[COPY_FROM_FIELD_SEGID] = DirectFunctionCall1(int4in, CStringGetDatum(string));
+	nulls[COPY_FROM_FIELD_SEGID] = false;
 
 	return true;
 }
@@ -9567,13 +9571,13 @@ UpdateNextCopyFrom(CopyFromState cstate,
 	attr_count = list_length(attnumlist);
 
 	/* Initialize all values for row to NULL */
-	MemSet(values, 0, (num_phys_attrs + 2) * sizeof(Datum));
-	MemSet(nulls, true, (num_phys_attrs + 2) * sizeof(bool));
+	MemSet(values, 0, (num_phys_attrs + COPY_FROM_EXTRA_FIELDS) * sizeof(Datum));
+	MemSet(nulls, true, (num_phys_attrs + COPY_FROM_EXTRA_FIELDS) * sizeof(bool));
 
 	if (!NextCopyFromRawFields(cstate, &field_strings, &fldct))
 		return false;
 
-	if (fldct > attr_count + 2)
+	if (fldct > attr_count + COPY_FROM_EXTRA_FIELDS)
 		ereport(ERROR,
 				(errcode(ERRCODE_BAD_COPY_FILE_FORMAT),
 					errmsg("extra data after last expected column")));
