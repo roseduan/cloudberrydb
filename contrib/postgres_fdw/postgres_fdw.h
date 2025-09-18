@@ -233,7 +233,7 @@ extern void deparseSelectStmtForRel(StringInfo buf, PlannerInfo *root,
 									RelOptInfo *foreignrel, List *tlist,
 									List *remote_conds, List *pathkeys,
 									bool has_final_sort, bool has_limit,
-									bool is_subquery,
+									bool is_subquery, bool is_explain,
 									List **retrieved_attrs, List **params_list);
 extern const char *get_jointype_name(JoinType jointype);
 

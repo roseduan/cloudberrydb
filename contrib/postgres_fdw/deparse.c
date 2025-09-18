@@ -104,6 +104,7 @@ typedef struct deparse_expr_cxt
 								 * a base relation. */
 	StringInfo	buf;			/* output buffer to append to */
 	List	  **params_list;	/* exprs that will become remote Params */
+	bool		is_explain;
 } deparse_expr_cxt;
 
 #define REL_ALIAS_PREFIX	"r"
@@ -1037,7 +1038,7 @@ build_tlist_to_deparse(RelOptInfo *foreignrel)
 void
 deparseSelectStmtForRel(StringInfo buf, PlannerInfo *root, RelOptInfo *rel,
 						List *tlist, List *remote_conds, List *pathkeys,
-						bool has_final_sort, bool has_limit, bool is_subquery,
+						bool has_final_sort, bool has_limit, bool is_subquery, bool is_explain,
 						List **retrieved_attrs, List **params_list)
 {
 	deparse_expr_cxt context;
@@ -1056,6 +1057,7 @@ deparseSelectStmtForRel(StringInfo buf, PlannerInfo *root, RelOptInfo *rel,
 	context.foreignrel = rel;
 	context.scanrel = IS_UPPER_REL(rel) ? fpinfo->outerrel : rel;
 	context.params_list = params_list;
+	context.is_explain = is_explain;
 
 	/* Construct SELECT clause */
 	deparseSelectSql(tlist, is_subquery, retrieved_attrs, &context);
@@ -1335,7 +1337,7 @@ deparseLockingClause(deparse_expr_cxt *context)
 			 root->parse->commandType == CMD_DELETE))
 		{
 			/* Relation is UPDATE/DELETE target, so use FOR UPDATE */
-			if (!IS_SIMPLE_REL(rel))
+			if (!context->is_explain)
 				appendStringInfoString(buf, " FOR UPDATE");
 
 			/* Add the relation alias if we are here for a join relation */
@@ -1721,7 +1723,7 @@ deparseRangeTblRef(StringInfo buf, PlannerInfo *root, RelOptInfo *foreignrel,
 		appendStringInfoChar(buf, '(');
 		deparseSelectStmtForRel(buf, root, foreignrel, NIL,
 								fpinfo->remote_conds, NIL,
-								false, false, true,
+								false, false, true, false,
 								&retrieved_attrs, params_list);
 		appendStringInfoChar(buf, ')');
 

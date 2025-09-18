@@ -76,10 +76,6 @@ PG_MODULE_MAGIC;
 /* If no remote estimates, assume a sort costs 20% extra */
 #define DEFAULT_FDW_SORT_MULTIPLIER 1.2
 
-#define EXEC_DATA_P 0
-
-static ProcessUtility_hook_type cbdb_fdw_prev_ProcessUtility = NULL;
-
 /*
  * Indexes of FDW-private information stored in fdw_private lists.
  *
@@ -244,8 +240,6 @@ typedef struct PgFdwModifyState
 	/* info about parameters for prepared statement */
 	AttrNumber	ctidAttno;		/* attnum of input resjunk ctid column */
 	AttrNumber	segidAttno;		/* attnum of input resjunk gp_segment_id column */
-	AttrNumber	remotesegidAttno;		/* attnum of input resjunk gp_segment_id column */
-	AttrNumber	wholerowAttno;
 	int			p_nums;			/* number of parameters to transmit */
 	FmgrInfo   *p_flinfo;		/* output conversion functions for them */
 
@@ -373,6 +367,9 @@ typedef struct
 #define COPY_FROM_EXTRA_FIELDS 2
 #define COPY_FROM_FIELD_CTID 0
 #define COPY_FROM_FIELD_SEGID 1
+#define EXEC_DATA_P 0
+
+static ProcessUtility_hook_type cbdb_fdw_prev_ProcessUtility = NULL;
 
 typedef bool (*copyfrom_function) (CopyFromState cstate,
 								   ExprContext *econtext,
@@ -636,6 +633,12 @@ static void merge_fdw_options(PgFdwRelationInfo *fpinfo,
 							  const PgFdwRelationInfo *fpinfo_o,
 							  const PgFdwRelationInfo *fpinfo_i);
 static int	get_batch_size_option(Relation rel);
+
+/*
+ * Modify by copy functions
+ */
+static List *simplerel_rebuild_fdw_scan_tlist(PlannerInfo *root, List *tlist, Oid relid,
+											  Index rtindex, CmdType operation);
 static int GetForeignTableSegNumbers(Oid relid);
 static void get_endpoints_info(PGconn *conn, int cursor_number,
 							   int session_id, List **endpoints);
@@ -670,8 +673,6 @@ static bool UpdateNextCopyFrom(CopyFromState cstate,
 static bool DeleteNextCopyFrom(CopyFromState cstate,
 							   ExprContext *econtext,
 							   Datum *values, bool *nulls);
-static List *simplerel_rebuild_fdw_scan_tlist(PlannerInfo *root, List *tlist, Oid relid,
-											  Index rtindex, CmdType operation);
 
 /*
  * Foreign-data wrapper handler function: return a struct with pointers
@@ -1532,7 +1533,7 @@ postgresGetForeignPlan(PlannerInfo *root,
 	initStringInfo(&sql);
 	deparseSelectStmtForRel(&sql, root, foreignrel, fdw_scan_tlist,
 							remote_exprs, best_path->path.pathkeys,
-							has_final_sort, has_limit, false,
+							has_final_sort, has_limit, false, false,
 							&retrieved_attrs, &params_list);
 
 	/* Remember remote_exprs for possible use by postgresPlanDirectModify */
@@ -1842,6 +1843,11 @@ postgresIterateForeignScan(ForeignScanState *node)
 		/* No point in another fetch if we already detected EOF, though. */
 		if (!fsstate->eof_reached)
 		{
+			/*
+			 * Since we have extraConns in parallel retrieve mode, if the current
+			 * conn didn`t get any tuples, it may have tuples in extra conns,
+			 * So we shuold continue to fetch more data.
+			 */
 			do {
 				fetch_more_data(node);
 			}
@@ -1983,6 +1989,7 @@ postgresAddForeignUpdateTargets(PlannerInfo *root,
 {
 	Var		   *var;
 	Var		   *varSegid;
+	Var		   *varcmdid;
 	Oid		   reloid;
 	Oid		   vartypeid;
 	int32	   type_mod;
@@ -2021,7 +2028,17 @@ postgresAddForeignUpdateTargets(PlannerInfo *root,
 					   0);
 	add_row_identity_var(root, varSegid, rtindex, "gp_segment_id");
 
-	Var *varcmdid;
+	/*
+	 * This is an ugly hack.
+	 *
+	 * Cloudberry requires remote gp_segment_id when update/delete.
+	 * Using a normal attribute is unsafe, since attno would exceed
+	 * rel->min_attr..rel->max_attr and trigger assertions, such as:
+	 * - Assert(attno >= rel->min_attr && attno <= rel->max_attr);
+	 *
+	 * To avoid this, we reuse a system attribute number
+	 * (MinCommandIdAttributeNumber) as a placeholder.
+	 */
 	get_atttypetypmodcoll(reloid,
 						  MinCommandIdAttributeNumber,
 						  &vartypeid,
@@ -2731,144 +2748,6 @@ find_modifytable_subplan(PlannerInfo *root,
 	return NULL;
 }
 
-static List *
-simplerel_rebuild_fdw_scan_tlist(PlannerInfo *root, List *oldtlist, Oid relid,
-								 Index rtindex, CmdType operation)
-{
-	List		*tlist = NIL;
-	TupleDesc	tupdesc;
-	int			i;
-	Relation	rel;
-	Oid			vartypeid;
-	int32		type_mod;
-	Oid			type_coll;
-	Var			*varRemoteSegid;
-	Var			*varCtid;
-	Var			*varSegid;
-	Var			*varWholerow;
-
-	rel = table_open(relid, NoLock);
-	tupdesc = RelationGetDescr(rel);
-
-	/* original table columns */
-	for (i = 1; i <= tupdesc->natts; i++)
-	{
-		Form_pg_attribute attr = TupleDescAttr(tupdesc, i - 1);
-		Var		   *var;
-
-		var = makeVar(rtindex,
-					i,
-					// attr->atttypid == 0 ? 2278 : attr->atttypid,
-					attr->atttypid == 0 ? 23 : attr->atttypid,
-					attr->atttypmod,
-					attr->attcollation,
-					0);
-
-		tlist = lappend(tlist,
-						makeTargetEntry((Expr *) var,
-										list_length(tlist) + 1,
-										NULL,
-										false));
-	}
-	table_close(rel, NoLock);
-
-	/* our extra column: remote gp_segment_id */
-	get_atttypetypmodcoll(relid, MinCommandIdAttributeNumber, &vartypeid, &type_mod, &type_coll);
-	varRemoteSegid = makeVar(rtindex,
-							 MinCommandIdAttributeNumber,
-							 vartypeid,
-							 type_mod,
-							 type_coll,
-							 0);
-	tlist = lappend(tlist,
-					makeTargetEntry((Expr *) varRemoteSegid,
-									list_length(tlist) + 1,
-									NULL,
-									false));
-
-	/* ctid */
-	varCtid = makeVar(rtindex,
-					  SelfItemPointerAttributeNumber,
-					  TIDOID,
-					  -1,
-					  InvalidOid,
-					  0);
-	tlist = lappend(tlist,
-					makeTargetEntry((Expr *) varCtid,
-									list_length(tlist) + 1,
-									NULL,
-									false));
-
-	/* gp_segment_id */
-	get_atttypetypmodcoll(relid, GpSegmentIdAttributeNumber, &vartypeid, &type_mod, &type_coll);
-	varSegid = makeVar(rtindex,
-					   GpSegmentIdAttributeNumber,
-					   vartypeid,
-					   type_mod,
-					   type_coll,
-					   0);
-	tlist = lappend(tlist,
-					makeTargetEntry((Expr *) varSegid,
-									list_length(tlist) + 1,
-									NULL,
-									false));
-
-	Oid rowvartypeid = RECORDOID;
-	PlanRowMark *rc = get_plan_rowmark(root->rowMarks, rtindex);
-	if (rc)
-	{
-		ListCell *lc;
-		lc = list_nth_cell(oldtlist, 0);
-		TargetEntry *tle = (TargetEntry *) lfirst(lc);
-		
-		if (IsA(tle->expr, Var))
-		{
-			Var *var = (Var *) tle->expr;
-			rowvartypeid = var->vartype;
-		}
-	}
-
-	/* wholerow */
-	varWholerow = makeVar(rtindex,
-						  InvalidAttrNumber,
-						  rowvartypeid,
-						  -1,
-						  InvalidOid,
-						  0);
-	tlist = lappend(tlist,
-					makeTargetEntry((Expr *) varWholerow,
-									list_length(tlist) + 1,
-									NULL,
-									false));
-
-	/* table oid */
-	AppendRelInfo *appinfo = NULL;
-	if (root->append_rel_array)
-		appinfo = root->append_rel_array[rtindex];
-
-	if (appinfo != NULL)
-	{
-		RangeTblEntry *parentRte = root->simple_rte_array[appinfo->parent_relid];
-		if (parentRte->relkind == RELKIND_PARTITIONED_TABLE)
-		{
-			Var *varTableOid;
-			varTableOid = makeVar(rtindex,
-								  TableOidAttributeNumber,
-								  OIDOID,
-								  -1,
-								  InvalidOid,
-								  0);
-			tlist = lappend(tlist,
-							makeTargetEntry((Expr *) varTableOid,
-											list_length(tlist) + 1,
-											NULL,
-											false));
-		}
-	}
-
-	return tlist;
-}
-
 /*
  * postgresPlanDirectModify
  *		Consider a direct foreign table modification
@@ -3440,6 +3319,8 @@ postgresExecForeignTruncate(List *rels,
 	bool		server_truncatable = true;
 
 	/*
+	 * Truncate table is a direct sql command send by QD,
+	 * QE will do nothing here.
 	 */
 	if (Gp_role == GP_ROLE_EXECUTE)
 		return;
@@ -3610,7 +3491,7 @@ estimate_path_cost_size(PlannerInfo *root,
 								remote_conds, pathkeys,
 								fpextra ? fpextra->has_final_sort : false,
 								fpextra ? fpextra->has_limit : false,
-								false, &retrieved_attrs, NULL);
+								false, true, &retrieved_attrs, NULL);
 
 		/* Get the remote estimate */
 		conn = GetConnection(fpinfo->user, false, NULL);
@@ -4539,11 +4420,11 @@ create_foreign_modify(EState *estate,
 		if (!AttributeNumberIsValid(fmstate->ctidAttno))
 			elog(ERROR, "could not find junk ctid column");
 
-		/* Find the gp_segment_id resjunk column in the subplan's result */
+		/* Find the remote gp_segment_id resjunk column in the subplan's result */
 		fmstate->segidAttno = ExecFindJunkAttributeInTlist(subplan->targetlist,
 														   "remote_gp_segment_id");
 		if (!AttributeNumberIsValid(fmstate->segidAttno))
-			elog(ERROR, "could not find junk gp_segment_id column");
+			elog(ERROR, "could not find junk remote_gp_segment_id column");
 
 		/* First transmittable parameter will be ctid */
 		getTypeOutputInfo(TIDOID, &typefnoid, &isvarlena);
@@ -7894,7 +7775,6 @@ make_tuple_from_result_row(PGresult *res,
 				if (gp_segment_id != -1)
 				{
 					resultvalues[i] = Int32GetDatum(GpIdentity.segindex);
-					// resultvalues[i] = Int32GetDatum(gp_segment_id);
 					resultnulls[i] = false;
 				}
 			}
@@ -8213,6 +8093,143 @@ get_batch_size_option(Relation rel)
 	}
 
 	return batch_size;
+}
+
+static List *
+simplerel_rebuild_fdw_scan_tlist(PlannerInfo *root, List *oldtlist, Oid relid,
+								 Index rtindex, CmdType operation)
+{
+	List		*tlist = NIL;
+	TupleDesc	tupdesc;
+	int			i;
+	Relation	rel;
+	Oid			vartypeid;
+	int32		type_mod;
+	Oid			type_coll;
+	Var			*varRemoteSegid;
+	Var			*varCtid;
+	Var			*varSegid;
+	Var			*varWholerow;
+
+	rel = table_open(relid, NoLock);
+	tupdesc = RelationGetDescr(rel);
+
+	/* original table columns */
+	for (i = 1; i <= tupdesc->natts; i++)
+	{
+		Form_pg_attribute attr = TupleDescAttr(tupdesc, i - 1);
+		Var		   *var;
+
+		var = makeVar(rtindex,
+					i,
+					attr->atttypid == 0 ? 23 : attr->atttypid,
+					attr->atttypmod,
+					attr->attcollation,
+					0);
+
+		tlist = lappend(tlist,
+						makeTargetEntry((Expr *) var,
+										list_length(tlist) + 1,
+										NULL,
+										false));
+	}
+	table_close(rel, NoLock);
+
+	/* remote gp_segment_id */
+	get_atttypetypmodcoll(relid, MinCommandIdAttributeNumber, &vartypeid, &type_mod, &type_coll);
+	varRemoteSegid = makeVar(rtindex,
+							 MinCommandIdAttributeNumber,
+							 vartypeid,
+							 type_mod,
+							 type_coll,
+							 0);
+	tlist = lappend(tlist,
+					makeTargetEntry((Expr *) varRemoteSegid,
+									list_length(tlist) + 1,
+									NULL,
+									false));
+
+	/* ctid */
+	varCtid = makeVar(rtindex,
+					  SelfItemPointerAttributeNumber,
+					  TIDOID,
+					  -1,
+					  InvalidOid,
+					  0);
+	tlist = lappend(tlist,
+					makeTargetEntry((Expr *) varCtid,
+									list_length(tlist) + 1,
+									NULL,
+									false));
+
+	/* gp_segment_id */
+	get_atttypetypmodcoll(relid, GpSegmentIdAttributeNumber, &vartypeid, &type_mod, &type_coll);
+	varSegid = makeVar(rtindex,
+					   GpSegmentIdAttributeNumber,
+					   vartypeid,
+					   type_mod,
+					   type_coll,
+					   0);
+	tlist = lappend(tlist,
+					makeTargetEntry((Expr *) varSegid,
+									list_length(tlist) + 1,
+									NULL,
+									false));
+
+	Oid rowvartypeid = RECORDOID;
+	PlanRowMark *rc = get_plan_rowmark(root->rowMarks, rtindex);
+	if (rc)
+	{
+		ListCell *lc;
+		lc = list_nth_cell(oldtlist, 0);
+		TargetEntry *tle = (TargetEntry *) lfirst(lc);
+		
+		if (IsA(tle->expr, Var))
+		{
+			Var *var = (Var *) tle->expr;
+			rowvartypeid = var->vartype;
+		}
+	}
+
+	/* wholerow */
+	varWholerow = makeVar(rtindex,
+						  InvalidAttrNumber,
+						  rowvartypeid,
+						  -1,
+						  InvalidOid,
+						  0);
+	tlist = lappend(tlist,
+					makeTargetEntry((Expr *) varWholerow,
+									list_length(tlist) + 1,
+									NULL,
+									false));
+
+	/* table oid */
+	AppendRelInfo *appinfo = NULL;
+	if (root->append_rel_array)
+		appinfo = root->append_rel_array[rtindex];
+
+	if (appinfo != NULL)
+	{
+		RangeTblEntry *parentRte = root->simple_rte_array[appinfo->parent_relid];
+		if (parentRte->relkind == RELKIND_PARTITIONED_TABLE)
+		{
+			Var *varTableOid;
+			varTableOid = makeVar(rtindex,
+								  TableOidAttributeNumber,
+								  OIDOID,
+								  -1,
+								  InvalidOid,
+								  0);
+			tlist = lappend(tlist,
+							makeTargetEntry((Expr *) varTableOid,
+											list_length(tlist) + 1,
+											NULL,
+											false));
+		}
+	}
+
+	return tlist;
 }
 
 static int

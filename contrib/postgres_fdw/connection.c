@@ -32,6 +32,8 @@
 #include "utils/memutils.h"
 #include "utils/syscache.h"
 
+#define INVALID_SEGMENT_ID -2
+
 /*
  * Connection cache hash table entry
  *
@@ -172,7 +174,7 @@ GetCustomConnection(UserMapping *user, bool will_prep_stmt,
 	 */
 	if (!is_gp_retrieve)
 	{
-		segid = -2;
+		segid = INVALID_SEGMENT_ID;
 		server_options = NULL;
 	}
 
@@ -254,7 +256,12 @@ GetCustomConnection(UserMapping *user, bool will_prep_stmt,
 		/* Process a pending asynchronous request if any. */
 		if (entry->state.pendingAreq)
 			process_pending_request(entry->state.pendingAreq);
-		/* Start a new transaction or subtransaction if needed. */
+		/*
+		 * Start a new transaction or subtransaction if needed.
+		 * If we are in a gp_retrieve connection, the sql command
+		 * must be RETRIEVE, otherwise we will get an error:
+		 * ERROR:  This is a retrieve connection, but the query is not a RETRIEVE.
+		 */
 		if (!is_gp_retrieve)
 			begin_remote_xact(entry);
 	}
