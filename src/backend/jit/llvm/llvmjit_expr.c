@@ -1838,14 +1838,14 @@ llvm_compile_expr(ExprState *state)
 
 			case EEOP_SCALARARRAYOP_FAST_INT:
 				build_EvalXFunc(b, mod, "ExecEvalScalarArrayOpFastInt",
-								v_state, v_econtext, op);
-				LLVMBuildBr(b, opblocks[i + 1]);
+								v_state, op);
+				LLVMBuildBr(b, opblocks[opno + 1]);
 				break;
 
 			case EEOP_SCALARARRAYOP_FAST_STR:
 				build_EvalXFunc(b, mod, "ExecEvalScalarArrayOpFastStr",
-								v_state, v_econtext, op);
-				LLVMBuildBr(b, opblocks[i + 1]);
+								v_state, op);
+				LLVMBuildBr(b, opblocks[opno + 1]);
 				break;
 
 			case EEOP_HASHED_SCALARARRAYOP:
@@ -1901,7 +1901,7 @@ llvm_compile_expr(ExprState *state)
 					LLVMBuildStore(b, v_group_id, v_resvaluep);
 					LLVMBuildStore(b, l_sbool_const(0), v_resnullp);
 
-					LLVMBuildBr(b, opblocks[i + 1]);
+					LLVMBuildBr(b, opblocks[opno + 1]);
 					break;
 				}
 
@@ -1920,7 +1920,7 @@ llvm_compile_expr(ExprState *state)
 					LLVMBuildStore(b, v_gset_id, v_resvaluep);
 					LLVMBuildStore(b, l_sbool_const(0), v_resnullp);
 
-					LLVMBuildBr(b, opblocks[i + 1]);
+					LLVMBuildBr(b, opblocks[opno + 1]);
 					break;
 				}
 
@@ -1939,7 +1939,7 @@ llvm_compile_expr(ExprState *state)
 					LLVMBuildStore(b, v_currentExprId, v_resvaluep);
 					LLVMBuildStore(b, l_sbool_const(0), v_resnullp);
 
-					LLVMBuildBr(b, opblocks[i + 1]);
+					LLVMBuildBr(b, opblocks[opno + 1]);
 					break;
 				}
 
@@ -1963,7 +1963,7 @@ llvm_compile_expr(ExprState *state)
 					LLVMBuildStore(b, v_rowcounter_new, v_resvaluep);
 					LLVMBuildStore(b, l_sbool_const(0), v_resnullp);
 
-					LLVMBuildBr(b, opblocks[i + 1]);
+					LLVMBuildBr(b, opblocks[opno + 1]);
 					break;
 				}
 
