@@ -423,7 +423,35 @@ standard_planner(Query *parse, const char *query_string, int cursorOptions,
 		}
 
 		if (result)
+		{
+#ifdef USE_LLVM
+			result->jitFlags = PGJIT_NONE;
+			if (jit_enabled && jit_above_cost >= 0 &&
+				result->planTree->total_cost * jit_cost_factor > jit_above_cost)
+			{
+				result->jitFlags |= PGJIT_PERFORM;
+
+				/*
+				 * Decide how much effort should be put into generating better code.
+				 */
+				if (jit_optimize_above_cost >= 0 &&
+					result->planTree->total_cost * jit_inline_opt_cost_factor > jit_optimize_above_cost)
+					result->jitFlags |= PGJIT_OPT3;
+				if (jit_inline_above_cost >= 0 &&
+					result->planTree->total_cost * jit_inline_opt_cost_factor > jit_inline_above_cost)
+					result->jitFlags |= PGJIT_INLINE;
+
+				/*
+				 * Decide which operations should be JITed.
+				 */
+				if (jit_expressions)
+					result->jitFlags |= PGJIT_EXPR;
+				if (jit_tuple_deforming)
+					result->jitFlags |= PGJIT_DEFORM;
+			}
+#endif
 			return result;
+		}
 	}
 
 	/*

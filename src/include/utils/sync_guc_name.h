@@ -133,6 +133,10 @@
 		"jit_optimize_above_cost",
 		"jit_profiling_support",
 		"jit_tuple_deforming",
+#ifdef USE_LLVM
+		"jit_cost_factor",
+		"jit_inline_opt_cost_factor",
+#endif
 		"lc_messages",
 		"lc_monetary",
 		"lc_numeric",

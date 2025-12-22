@@ -37,6 +37,9 @@
 #include "commands/defrem.h"
 #include "commands/vacuum.h"
 #include "commands/variable.h"
+#ifdef USE_LLVM
+#include "jit/jit.h"
+#endif
 #include "miscadmin.h"
 #include "optimizer/cost.h"
 #include "optimizer/planmain.h"
@@ -4709,6 +4712,30 @@ struct config_int ConfigureNamesInt_gp[] =
 		5, 1, MAX_BACKENDS,
 		check_max_running_tasks, NULL, NULL
 	},
+
+#ifdef USE_LLVM
+	{
+		{"jit_cost_factor", PGC_USERSET, QUERY_TUNING_COST,
+			gettext_noop("Multiplier for enabling JIT compilation in ORCA."),
+			NULL,
+			GUC_EXPLAIN,
+		},
+		&jit_cost_factor,
+		20, -1, INT_MAX,
+		check_max_running_tasks, NULL, NULL
+	},
+
+	{
+		{"jit_inline_opt_cost_factor", PGC_USERSET, QUERY_TUNING_COST,
+			gettext_noop("Multiplier for enabling JIT inlining and optimization in ORCA."),
+			NULL,
+			GUC_EXPLAIN,
+		},
+		&jit_inline_opt_cost_factor,
+		25, -1, INT_MAX,
+		check_max_running_tasks, NULL, NULL
+	},
+#endif
 	
 	/* End-of-list marker */
 	{

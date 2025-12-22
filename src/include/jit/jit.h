@@ -89,6 +89,8 @@ extern bool jit_tuple_deforming;
 extern double jit_above_cost;
 extern double jit_inline_above_cost;
 extern double jit_optimize_above_cost;
+extern int jit_cost_factor;
+extern int jit_inline_opt_cost_factor;
 
 
 extern void jit_reset_after_error(void);

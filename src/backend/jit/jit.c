@@ -39,6 +39,8 @@ bool		jit_tuple_deforming = true;
 double		jit_above_cost = 100000;
 double		jit_inline_above_cost = 500000;
 double		jit_optimize_above_cost = 500000;
+int			jit_cost_factor = 20;
+int			jit_inline_opt_cost_factor = 25;
 
 static JitProviderCallbacks provider;
 static bool provider_successfully_loaded = false;
