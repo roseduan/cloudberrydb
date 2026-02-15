@@ -170,6 +170,15 @@ motion_rewrite_numeric_type_schema(MotionState *node, TupleTableSlot *outerTuple
 					garrow_store_func(field, garrow_field_new(garrow_field_get_name(field), new_type));
 					garrow_store_func(schema, garrow_schema_replace_field(schema, variable->varattno - 1, field, &error));
 				}
+				else if(variable->vartype == TIMESTAMPOID ||
+						variable->vartype == TIMESTAMPTZOID ||
+						variable->vartype == TIMEOID)
+				{
+					g_autoptr(GError) error = NULL;
+					g_autoptr(GArrowDataType) new_type = GARROW_DATA_TYPE(garrow_int64_data_type_new());
+					garrow_store_func(field, garrow_field_new(garrow_field_get_name(field), new_type));
+					garrow_store_func(schema, garrow_schema_replace_field(schema, variable->varattno - 1, field, &error));
+				}
 				break;
 			}
 			default:

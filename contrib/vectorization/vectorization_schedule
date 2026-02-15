@@ -47,6 +47,7 @@ test: sort/arrow_merge_sort
 test: sort/topk
 test: explain/exec_explain
 test: combos/combo_1
+test: misc/motion_hash_time
 ##test: misc/clickhouse_simplifed
 
 #clickhouse cases
