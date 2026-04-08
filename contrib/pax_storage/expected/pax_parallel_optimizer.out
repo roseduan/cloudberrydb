@@ -43,10 +43,8 @@ EXPLAIN SELECT COUNT(*) FROM foo WHERE b = 17;
  Finalize Aggregate  (cost=0.00..268.00 rows=1 width=8)
    ->  Gather Motion 6:1  (slice1; segments: 6)  (cost=0.00..268.00 rows=1 width=8)
          ->  Partial Aggregate  (cost=0.00..268.00 rows=1 width=8)
-               ->  Parallel Bitmap Heap Scan on foo  (cost=0.00..213.39 rows=2 width=1)
-                     Recheck Cond: (b = 17)
-                     ->  Bitmap Index Scan on foo_index  (cost=0.00..0.00 rows=0 width=0)
-                           Index Cond: (b = 17)
+               ->  Parallel Seq Scan on foo  (cost=0.00..268.00 rows=2 width=1)
+                     Filter: (b = 17)
  Optimizer: GPORCA
 (6 rows)
 

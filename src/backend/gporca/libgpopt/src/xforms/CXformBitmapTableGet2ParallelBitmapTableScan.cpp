@@ -90,6 +90,20 @@ CXformBitmapTableGet2ParallelBitmapTableScan::Exfp(CExpressionHandle &exprhdl) c
 	CLogicalBitmapTableGet *popGet = CLogicalBitmapTableGet::PopConvert(exprhdl.Pop());
 	CTableDescriptor *ptabdesc = popGet->Ptabdesc();
 
+	// AO/AOCS tables do not support parallel bitmap scan: the executor's
+	// parallel bitmap path (tbm_shared_iterate + multiple workers) is
+	// incompatible with appendonly_scan_bitmap_next_tuple which maintains
+	// per-scan fetch state not designed for concurrent access.
+	IMDRelation::Erelstoragetype storage_type =
+		ptabdesc->RetrieveRelStorageType();
+	if (storage_type == IMDRelation::ErelstorageAppendOnlyRows ||
+		storage_type == IMDRelation::ErelstorageAppendOnlyCols ||
+		storage_type == IMDRelation::ErelstoragePAX ||
+		storage_type == IMDRelation::ErelstorageMixedPartitioned)
+	{
+		return CXform::ExfpNone;
+	}
+
 	if (ptabdesc->GetRelDistribution() == IMDRelation::EreldistrReplicated ||
 		ptabdesc->GetRelDistribution() == IMDRelation::EreldistrMasterOnly ||
 		COptCtxt::PoctxtFromTLS()->HasReplicatedTables())
