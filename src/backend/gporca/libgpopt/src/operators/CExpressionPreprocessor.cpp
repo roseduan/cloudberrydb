@@ -25,6 +25,7 @@
 #include "gpopt/eval/IConstExprEvaluator.h"
 #include "gpopt/exception.h"
 #include "gpopt/mdcache/CMDAccessor.h"
+#include "gpopt/operators/CCorrSubqFilterPushdownPreprocessor.h"
 #include "gpopt/operators/CDedupSupersetPreprocessor.h"
 #include "gpopt/operators/CExpressionFactorizer.h"
 #include "gpopt/operators/CExpressionUtils.h"
@@ -3769,12 +3770,27 @@ CExpressionPreprocessor::PexprPreprocess(
 		"Normalize expression");
 	pexprNoUnusedPrEl->Release();
 
-	// transform outer join into inner join whenever possible
-	CExpression *pexprLOJToIJ = PexprOuterJoinToInnerJoin(mp, pexprNormalized1);
+	// Correlated scalar-subquery-with-aggregate WinMagic rewrite.  When
+	// the subquery's correlation predicate matches an outer NAryJoin
+	// conjunct on the same key pair (Q17 shape), rewrite the whole
+	// NAryJoin + CScalarSubquery(GbAgg(...)) into
+	//   Select(filter, SequenceProject(Window PARTITION BY key, NAryJoin))
+	// so the aggregate is computed once over the join result instead of
+	// per-outer-row.  Gated by EopttraceEnableScalarSubq2FilteredAgg.
+	CExpression *pexprCorrSubqPushed =
+		CCorrSubqFilterPushdownPreprocessor::PexprPreprocess(mp,
+															 pexprNormalized1);
 	GPOS_CHECK_ABORT;
-	TRCAE_PREPROCESS_STEP(pexprLOJToIJ, 
-		"Transform outer join into inner join whenever possible");
+	TRCAE_PREPROCESS_STEP(pexprCorrSubqPushed,
+		"Correlated scalar-subquery filter pushdown");
 	pexprNormalized1->Release();
+
+	// transform outer join into inner join whenever possible
+	CExpression *pexprLOJToIJ = PexprOuterJoinToInnerJoin(mp, pexprCorrSubqPushed);
+	GPOS_CHECK_ABORT;
+	TRCAE_PREPROCESS_STEP(pexprLOJToIJ,
+		"Transform outer join into inner join whenever possible");
+	pexprCorrSubqPushed->Release();
 
 	// collapse cascaded inner and left outer joins
 	CExpression *pexprCollapsed = PexprCollapseJoins(mp, pexprLOJToIJ);

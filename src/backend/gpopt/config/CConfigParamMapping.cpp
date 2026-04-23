@@ -375,6 +375,12 @@ CConfigParamMapping::SConfigMappingElem CConfigParamMapping::m_elements[] = {
 	 GPOS_WSZ_LIT(
 		 "Disable streaming hash agg in ORCA-generated local partial aggregations.")},
 
+	{EopttraceEnableScalarSubq2FilteredAgg,
+	 &optimizer_enable_scalar_subq_filter_pushdown,
+	 false,	 // m_negate_param (GUC=on sets the trace flag, enabling the xform)
+	 GPOS_WSZ_LIT("Enable rewrite of a correlated scalar-subquery-with-aggregate "
+				  "into a window-aggregate (SequenceProject) plan (WinMagic).")},
+
 };
 
 //---------------------------------------------------------------------------

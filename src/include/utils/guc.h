@@ -623,6 +623,7 @@ extern bool optimizer_enable_use_distribution_in_dqa;
 extern bool optimizer_enable_push_join_below_union_all;
 extern bool optimizer_disable_dynamic_table_scan;
 extern bool optimizer_force_partition_topk;
+extern bool optimizer_enable_scalar_subq_filter_pushdown;
 
 /* Analyze related GUCs for Optimizer */
 extern bool optimizer_analyze_root_partition;

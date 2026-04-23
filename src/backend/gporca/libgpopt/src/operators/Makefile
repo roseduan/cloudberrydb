@@ -219,6 +219,7 @@ OBJS        = CExpression.o \
               CLeftJoinPruningPreprocessor.o \
               CJoinOrderHintsPreprocessor.o \
               CDedupSupersetPreprocessor.o \
+              CCorrSubqFilterPushdownPreprocessor.o \
               CLogicalPartitionTopK.o \
               CPhysicalPartitionTopK.o
 

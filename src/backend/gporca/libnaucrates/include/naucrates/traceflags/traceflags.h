@@ -281,6 +281,16 @@ enum EOptTraceFlag
 	// Disable streaming hash agg in ORCA-generated local partial aggregations
 	EopttraceDisableStreamingHashAgg = 103061,
 
+	// Enable the WinMagic correlated-scalar-subquery rewrite preprocessor.
+	// When set, ORCA rewrites a Q17-shaped NAryJoin + CScalarSubquery(GbAgg)
+	// into a window-aggregate plan: a CLogicalSequenceProject carrying
+	// CScalarWindowFunc nodes partitioned on the correlation keys, feeding a
+	// Select on the outer predicate. This decorrelates the subquery via a
+	// window rather than a SemiJoin. The rewrite is restricted to
+	// duplication-insensitive aggregates (avg/min/max) for soundness.
+	// Mapped to GUC 'optimizer_enable_scalar_subq_filter_pushdown' (GUC=on sets this).
+	EopttraceEnableScalarSubq2FilteredAgg = 103062,
+
 	///////////////////////////////////////////////////////
 	///////////////////// statistics flags ////////////////
 	//////////////////////////////////////////////////////

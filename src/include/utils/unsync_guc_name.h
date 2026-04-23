@@ -445,6 +445,7 @@
 		"optimizer_enable_push_join_below_union_all",
 		"optimizer_disable_dynamic_table_scan",
 		"optimizer_force_partition_topk",
+		"optimizer_enable_scalar_subq_filter_pushdown",
 		"optimizer_enable_range_predicate_dpe",
 		"optimizer_enable_use_distribution_in_dqa",
 		"optimizer_enable_redistribute_nestloop_loj_inner_child",

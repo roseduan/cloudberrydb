@@ -444,6 +444,7 @@ bool		optimizer_enable_push_join_below_union_all;
 bool		optimizer_enable_orderedagg;
 bool		optimizer_disable_dynamic_table_scan;
 bool		optimizer_force_partition_topk;
+bool		optimizer_enable_scalar_subq_filter_pushdown;
 
 /* Analyze related GUCs for Optimizer */
 bool		optimizer_analyze_root_partition;
@@ -3236,6 +3237,24 @@ struct config_bool ConfigureNamesBool_gp[] =
 		 GUC_NOT_IN_SAMPLE
 		},
 		&optimizer_force_partition_topk,
+		false,
+		NULL, NULL, NULL
+	},
+
+	{
+		{"optimizer_enable_scalar_subq_filter_pushdown", PGC_USERSET, DEVELOPER_OPTIONS,
+		 gettext_noop("Enable ORCA rewrite of a correlated scalar-subquery-with-aggregate into a window-aggregate plan."),
+		 gettext_noop("When on, ORCA rewrites a Q17-shaped correlated scalar-subquery-with-aggregate "
+					  "into an equivalent window-aggregate (SequenceProject) plan, computing the "
+					  "aggregate once over the join result via agg(...) OVER (PARTITION BY correlation_key) "
+					  "instead of once per outer row. This mirrors StarRocks' ScalarApply2AnalyticRule "
+					  "(WinMagic). When executed by the Arrow vectorized engine the window aggregate may "
+					  "spill; its budget is governed by vector.winagg_spill_memory_mb (default 512 MB), "
+					  "which can be raised if the spill path stalls under memory pressure. "
+					  "Default off keeps current behavior."),
+		 GUC_NOT_IN_SAMPLE
+		},
+		&optimizer_enable_scalar_subq_filter_pushdown,
 		false,
 		NULL, NULL, NULL
 	},

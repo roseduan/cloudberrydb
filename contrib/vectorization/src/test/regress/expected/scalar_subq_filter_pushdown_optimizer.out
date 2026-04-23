@@ -1,0 +1,75 @@
+-- Regression test for the optimizer_enable_scalar_subq_filter_pushdown GUC
+-- (Q17 "WinMagic" rewrite).
+--
+-- The GUC (default off) lets ORCA rewrite a Q17-shaped correlated
+-- scalar-subquery-with-aggregate into an equivalent window-aggregate
+-- (SequenceProject) plan.  This test verifies:
+--   1. Results are identical with the GUC off and on (correctness is
+--      plan-independent, so this never flakes).
+--   2. The rewrite actually engages (a WindowAgg appears) when the GUC is
+--      on under ORCA -- checked via a plan-operator count, so the volatile
+--      parts of EXPLAIN never reach the expected output.
+create schema scalar_subq_pushdown;
+set search_path = scalar_subq_pushdown;
+create table part17 (p_partkey int, p_brand text)
+  distributed by (p_partkey);
+create table line17 (l_partkey int, l_qty numeric, l_price numeric)
+  distributed by (l_partkey);
+insert into part17 select g, 'b' || (g % 5) from generate_series(1, 200) g;
+insert into line17 select (g % 200) + 1, (g % 50) + 1, (g % 100) + 1.5
+  from generate_series(1, 5000) g;
+analyze part17;
+analyze line17;
+-- start_ignore
+create language plpython3u;
+-- end_ignore
+-- Counts how many times a plan operator appears in a query's EXPLAIN.
+-- Returns a stable integer, so no volatile EXPLAIN text reaches the .out.
+create or replace function count_op(query text, op text) returns int as $$
+rv = plpy.execute('EXPLAIN ' + query)
+result = 0
+for i in range(len(rv)):
+    if op.lower() in rv[i]['QUERY PLAN'].lower():
+        result = result + 1
+return result
+$$ language plpython3u;
+-- The Q17-shaped query: correlated scalar subquery with aggregate, where the
+-- correlation key matches an outer equi-join conjunct.
+-- 1a. Baseline result with the GUC off.
+set optimizer_enable_scalar_subq_filter_pushdown = off;
+select round(sum(l_price), 2) as total from line17, part17
+ where p_partkey = l_partkey and p_brand = 'b3'
+   and l_qty < (select 1.5 * avg(l_qty) from line17 l2 where l2.l_partkey = p_partkey);
+  total   
+----------
+ 51000.00
+(1 row)
+
+-- 1b. Result with the GUC on must be identical.
+set optimizer_enable_scalar_subq_filter_pushdown = on;
+select round(sum(l_price), 2) as total from line17, part17
+ where p_partkey = l_partkey and p_brand = 'b3'
+   and l_qty < (select 1.5 * avg(l_qty) from line17 l2 where l2.l_partkey = p_partkey);
+  total   
+----------
+ 51000.00
+(1 row)
+
+-- 2. With the GUC on, the rewrite must engage: a WindowAgg appears in the plan.
+select count_op($q$
+ select sum(l_price) from line17, part17
+ where p_partkey = l_partkey and p_brand = 'b3'
+   and l_qty < (select 1.5 * avg(l_qty) from line17 l2 where l2.l_partkey = p_partkey)
+$q$, 'WindowAgg') > 0 as rewrite_engaged;
+ rewrite_engaged 
+-----------------
+ t
+(1 row)
+
+reset optimizer_enable_scalar_subq_filter_pushdown;
+set search_path = public;
+drop schema scalar_subq_pushdown cascade;
+NOTICE:  drop cascades to 3 other objects
+DETAIL:  drop cascades to table scalar_subq_pushdown.part17
+drop cascades to table scalar_subq_pushdown.line17
+drop cascades to function scalar_subq_pushdown.count_op(text,text)
