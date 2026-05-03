@@ -210,3 +210,9 @@ test: window_hashagg_spill_parallel
 
 # vectorized HashJoin spill (multi-join collision, thread-safety, replay correctness)
 test: hashjoin_spill
+
+# vectorized Limit+HashAgg fusion (EXPLAIN visibility + correctness)
+test: limit_hashagg
+
+# vectorized Sonic hash agg routing (EXPLAIN visibility + correctness)
+test: vec_sonic_hashagg

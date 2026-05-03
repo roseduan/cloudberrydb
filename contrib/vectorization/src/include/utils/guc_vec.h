@@ -51,7 +51,17 @@ extern char *sort_external_temp_file_base;
 extern int topk_bound_threshold;
 /* topk runtime filter: push threshold to PAX for group-level skip */
 extern bool enable_topk_runtime_filter;
-/* limit+hashagg fusion: only track first N groups when GROUP BY feeds LIMIT */
-extern bool enable_limit_hashagg;
+/*
+ * Limit+HashAgg fusion cap.  When GROUP BY feeds directly into LIMIT,
+ * Arrow's GroupByNode tracks only the first N groups (N = LIMIT + OFFSET).
+ * This GUC sets the upper bound on N; 0 disables the fusion entirely.
+ *
+ * The hard ceiling LIMIT_HASHAGG_MAX_TOTAL_MAX is empirical: beyond ~10k
+ * the per-row group-tracking overhead in Arrow's GroupByNode dominates
+ * the early-stop savings, so we refuse to expose larger settings even
+ * if an operator asks for them.
+ */
+#define LIMIT_HASHAGG_MAX_TOTAL_MAX 10000
+extern int limit_hashagg_max_total;
 
 #endif   /* GUC_VEC_H */

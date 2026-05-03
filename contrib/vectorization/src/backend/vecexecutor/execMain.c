@@ -16,6 +16,7 @@
 
 #include "catalog/pg_operator_d.h"
 #include "catalog/pg_tablespace_d.h"
+#include "cdb/cdbplan.h"
 #include "cdb/cdbvars.h"
 #include "common/int.h"
 #include "nodes/nodeFuncs.h"
@@ -181,7 +182,7 @@ static GArrowProjectNodeOptions* build_project_options(List *targetList, PlanBui
 static GArrowProjectNodeOptions* build_agg_project_options(List *targetList, List *aggInfos, PlanBuildContext *pcontext);
 static GArrowProjectNodeOptions* build_windowagg_project_options(List *targetList, List *aggInfos, PlanBuildContext *pcontext);
 static GArrowProjectNodeOptions* build_windowhashagg_project_options(List *targetList, List *aggInfos, PlanBuildContext *pcontext);
-static GArrowAggregateNodeOptions* build_aggregatation_options(GList *aggregations, PlanBuildContext *pcontext);
+static GArrowAggregateNodeOptions* build_aggregatation_options(GList *aggregations, PlanBuildContext *pcontext, bool sonic_ok);
 static GArrowFilterNodeOptions *build_filter_options(List *filterInfo, PlanBuildContext *pcontext);
 static GArrowAssertOpNodeOptions *build_assertop_options(List *filterInfo, PlanBuildContext *pcontext);
 static GArrowExecuteNode *BuildHashjoin(PlanBuildContext *pcontext, GArrowExecuteNode *left, GArrowExecuteNode *right, List *joinqual);
@@ -3586,6 +3587,197 @@ skip_topk_rf:
 	return topk_node;
 }
 
+/*
+ * Returns true if every key column in the agg's input schema is one
+ * sonic's SonicGroupByNode currently knows how to scatter / hash /
+ * compare. Mirrors compute/sonic/exec_node.cc::ArrowTypeToKeyType.
+ */
+static bool
+sonic_supports_key_type(GArrowType id)
+{
+	switch (id)
+	{
+		case GARROW_TYPE_INT16:
+		case GARROW_TYPE_INT32:
+		case GARROW_TYPE_INT64:
+		case GARROW_TYPE_DATE32:
+		case GARROW_TYPE_DATE64:
+		case GARROW_TYPE_TIME32:
+		case GARROW_TYPE_TIME64:
+		case GARROW_TYPE_TIMESTAMP:
+		case GARROW_TYPE_STRING:
+		case GARROW_TYPE_BINARY:
+		case GARROW_TYPE_NUMERIC128:
+			return true;
+		default:
+			return false;
+	}
+}
+
+/*
+ * Sonic's hash_sum / hash_mean_numeric currently accept signed integer
+ * inputs (and the date / time variants that map onto an integer width).
+ */
+static bool
+sonic_supports_signed_int_input(GArrowType id)
+{
+	switch (id)
+	{
+		case GARROW_TYPE_INT16:
+		case GARROW_TYPE_INT32:
+		case GARROW_TYPE_INT64:
+		case GARROW_TYPE_DATE32:
+		case GARROW_TYPE_DATE64:
+		case GARROW_TYPE_TIME32:
+		case GARROW_TYPE_TIME64:
+		case GARROW_TYPE_TIMESTAMP:
+			return true;
+		default:
+			return false;
+	}
+}
+
+/*
+ * Sonic's hash_min currently accepts utf8 / binary inputs only.
+ */
+static bool
+sonic_supports_text_input(GArrowType id)
+{
+	return id == GARROW_TYPE_STRING || id == GARROW_TYPE_BINARY;
+}
+
+/*
+ * Decide whether sonic's SonicGroupByNode can handle this aggregate
+ * shape. If anything is outside its current capability we fall back
+ * to normal-mode hash agg so the query still runs (correctness over
+ * speed). The set checked here MUST be a subset of what sonic's
+ * MakeAggregateFunctions / ArrowTypeToKeyType actually implement —
+ * keep these two in sync when extending sonic.
+ */
+static bool
+is_sonic_compatible(List *aggInfos, PlanBuildContext *pcontext)
+{
+	ListCell *l;
+
+	/*
+	 * The "no agg, just GROUP BY" path appends a synthetic
+	 * hash_distinct in BuildAggregatation; sonic doesn't implement
+	 * hash_distinct, so route those queries to normal mode.
+	 */
+	if (aggInfos == NIL)
+		return false;
+
+	/* Group keys: every key column type must be one sonic supports. */
+	for (int i = 0; i < pcontext->nkey; i++)
+	{
+		g_autoptr(GArrowField) field = garrow_schema_get_field_by_name(
+			pcontext->inputschema, pcontext->keys[i]);
+		if (!field)
+			return false;
+		g_autoptr(GArrowDataType) type = garrow_field_get_data_type(field);
+		GArrowType id = garrow_data_type_get_id(type);
+		if (!sonic_supports_key_type(id))
+			return false;
+	}
+
+	/* Aggregates: function name + input column type must both be supported. */
+	foreach(l, aggInfos)
+	{
+		VecAggInfo *agginfo = (VecAggInfo *) lfirst(l);
+		const char *fn = agginfo->aname;
+
+		if (strcmp(fn, "hash_count") == 0)
+		{
+			/*
+			 * Sonic handles both shapes of count:
+			 *   count(*)   -> CountOptions::ALL        -> CountStarAggregate
+			 *   count(col) -> CountOptions::ONLY_VALID -> CountColAggregate
+			 *                                            (reads only the
+			 *                                             validity bitmap,
+			 *                                             type-agnostic)
+			 * MakeAggregateFunctions in compute/sonic/exec_node.cc picks
+			 * between them on agg.options->mode, which our
+			 * build_all_count_options sets per list_length(aggref->args).
+			 * Neither path needs an input-type check here.
+			 *
+			 * count(distinct col) is the aggregate "hash_count_distinct"
+			 * (a different function name); it falls through to the
+			 * unconditional fallback at the bottom of this loop, routing
+			 * DISTINCT counts to normal mode (sonic does not implement
+			 * hash_count_distinct).
+			 */
+			continue;
+		}
+
+		/*
+		 * Every other supported sonic agg requires a resolved input
+		 * column. If the aggref has no args (shouldn't happen for
+		 * hash_sum / hash_min / hash_mean_numeric), bail to be safe.
+		 */
+		if (!agginfo->aggref || !agginfo->aggref->args)
+			return false;
+		TargetEntry *tle = (TargetEntry *) linitial(agginfo->aggref->args);
+		Oid pg_type = exprType((Node *) tle->expr);
+		GArrowType in_id = PGTypeToArrowID(pg_type);
+
+		if (strcmp(fn, "hash_sum") == 0)
+		{
+			/* signed int (sonic SumIntAggregate) or numeric128
+			 * (SumNumeric128Aggregate, used by single-stage SUM(numeric)
+			 * and final stage of two-stage SUM(int8)). */
+			if (!sonic_supports_signed_int_input(in_id) &&
+				in_id != GARROW_TYPE_NUMERIC128)
+				return false;
+		}
+		else if (strcmp(fn, "hash_sum_64") == 0)
+		{
+			/* Partial stage of SUM(int8): int64 input → numeric128.
+			 * Also accepts numeric128 input (Arrow registers it for
+			 * symmetry; sonic routes it to SumNumeric128Aggregate). */
+			if (in_id != GARROW_TYPE_INT64 &&
+				in_id != GARROW_TYPE_DATE64 &&
+				in_id != GARROW_TYPE_TIME64 &&
+				in_id != GARROW_TYPE_TIMESTAMP &&
+				in_id != GARROW_TYPE_NUMERIC128)
+				return false;
+		}
+		else if (strcmp(fn, "hash_min") == 0)
+		{
+			if (!sonic_supports_text_input(in_id))
+				return false;
+		}
+		else if (strcmp(fn, "hash_mean_numeric") == 0)
+		{
+			if (!sonic_supports_signed_int_input(in_id))
+				return false;
+		}
+		else if (strcmp(fn, "hash_avg_trans") == 0)
+		{
+			/*
+			 * Two-phase AVG partial. Sonic supports signed integer
+			 * input (output struct<int64, int64>) and numeric128 input
+			 * (output struct<numeric128, int64>). Float / decimal128
+			 * not yet implemented.
+			 */
+			if (!sonic_supports_signed_int_input(in_id) &&
+				in_id != GARROW_TYPE_NUMERIC128)
+				return false;
+		}
+		else if (strcmp(fn, "hash_avg_final") == 0)
+		{
+			/* PG-level type for the partial state is bigint[]; Arrow
+			 * sees struct<sum, count>. Sonic Consume validates the
+			 * runtime struct layout — the PG type check is a facade. */
+		}
+		else
+		{
+			/* Any other function name (hash_max, hash_avg_trans_stddev, etc.). */
+			return false;
+		}
+	}
+	return true;
+}
+
 static GArrowExecuteNode *
 BuildAggregatation(List *aggInfos, GArrowExecuteNode *input, PlanBuildContext *pcontext)
 {
@@ -3627,7 +3819,16 @@ BuildAggregatation(List *aggInfos, GArrowExecuteNode *input, PlanBuildContext *p
 		aggregations = garrow_list_append_ptr(aggregations, agg_func);
 	}
 
-	options = build_aggregatation_options(aggregations, pcontext);
+	bool sonic_ok = false;
+	if (pcontext->aggstrategy == AGG_HASHED)
+	{
+		sonic_ok = is_sonic_compatible(aggInfos, pcontext);
+		if (!sonic_ok)
+			elog(DEBUG1, "sonic: query keys/aggs not all supported, "
+						 "falling back to normal-mode hash agg");
+	}
+
+	options = build_aggregatation_options(aggregations, pcontext, sonic_ok);
 
 	aggregate = garrow_execute_plan_build_aggregate_node(pcontext->plan,
 														input,
@@ -3642,33 +3843,95 @@ BuildAggregatation(List *aggInfos, GArrowExecuteNode *input, PlanBuildContext *p
 }
 
 
+/*
+ * Walker context for find_agg_parent_limit().  base must come first so
+ * the node can be passed to plan_tree_walker.
+ */
+typedef struct
+{
+	plan_tree_base_prefix	base;
+	Plan				   *target;	/* HashAgg Plan we're searching for */
+	Limit				   *found;	/* output: the parent Limit if any */
+} agg_parent_limit_context;
+
+/*
+ * plan_tree_walker callback: stop and record the Limit node whose
+ * outerPlan is our target Agg.  Pre-order so the *immediate* Limit
+ * parent is the first one we hit (a chain "Limit -> ... -> Agg" can
+ * only have one immediate parent anyway).
+ */
+static bool
+agg_parent_limit_walker(Node *node, agg_parent_limit_context *ctx)
+{
+	if (node == NULL)
+		return false;
+
+	if (IsA(node, Limit) && outerPlan(node) == ctx->target)
+	{
+		ctx->found = (Limit *) node;
+		return true;
+	}
+	return plan_tree_walker(node, agg_parent_limit_walker, ctx, true);
+}
+
+/*
+ * Search the full Plan tree for a Limit whose immediate outerPlan is
+ * 'target'.  Returns the parent Limit if found, else NULL.  Walks the
+ * full tree (not just the slice this segment runs) because on the QD
+ * ExecutorStart initializes every PlanState in the dispatched
+ * PlannedStmt, including nodes that belong to remote slices.
+ *
+ * The MPP "push limit through motion" optimization produces
+ *     Limit (top, count=O+C)
+ *       -> Gather Motion
+ *         -> Limit (segment, count=O+C, offset=0)
+ *           -> HashAgg
+ * so the Agg's *immediate* parent Limit lives below the motion, not at
+ * the top of the tree.  A direct "topPlan->outerPlan == target" check
+ * would miss it; the walker finds it regardless of intervening nodes.
+ */
+static Limit *
+find_agg_parent_limit(PlannedStmt *stmt, Plan *target)
+{
+	agg_parent_limit_context ctx;
+
+	exec_init_plan_tree_base(&ctx.base, stmt);
+	ctx.target = target;
+	ctx.found = NULL;
+	agg_parent_limit_walker((Node *) stmt->planTree, &ctx);
+	return ctx.found;
+}
+
 static GArrowAggregateNodeOptions *
-build_aggregatation_options(GList *aggregations, PlanBuildContext *pcontext)
+build_aggregatation_options(GList *aggregations, PlanBuildContext *pcontext,
+							bool sonic_ok)
 {
 	g_autoptr(GArrowAggregateNodeOptions) options = NULL;
 	g_autoptr(GError) error = NULL;
 	int64 limit_count = 0;
 
 	/*
-	 * Detect Limit+HashAgg fusion: the top-level plan is Limit whose
-	 * direct child is our HashAgg (no Sort in between).  Read offset+count
-	 * from the Limit Plan node and pass to Arrow so GroupByNode only tracks
-	 * the first N groups.
+	 * Detect Limit+HashAgg fusion: walk the Plan tree to find any Limit
+	 * whose direct child is our HashAgg, then pass that Limit's
+	 * offset+count to Arrow so GroupByNode only tracks the first N
+	 * groups.  In MPP the immediate parent Limit usually sits below a
+	 * Gather Motion (see find_agg_parent_limit for the shape), so we
+	 * cannot just inspect the top of the tree.
 	 *
-	 * We walk the Plan tree (not PlanState) because PlanState lacks a parent
-	 * pointer, and the Agg and Limit are built in separate BuildVecPlan calls.
+	 * We work on Plan, not PlanState: PlanState lacks a parent pointer,
+	 * and the Agg and Limit are built in separate BuildVecPlan calls so
+	 * no live PlanState chain exists at this point.
 	 */
-	if (enable_limit_hashagg &&
+	if (limit_hashagg_max_total > 0 &&
 		pcontext->aggstrategy == AGG_HASHED &&
 		pcontext->planstate->state &&
 		pcontext->planstate->state->es_plannedstmt)
 	{
-		Plan *topPlan = pcontext->planstate->state->es_plannedstmt->planTree;
-		if (topPlan &&
-			IsA(topPlan, Limit) &&
-			outerPlan(topPlan) == pcontext->planstate->plan)
+		Limit *limitPlan = find_agg_parent_limit(
+			pcontext->planstate->state->es_plannedstmt,
+			pcontext->planstate->plan);
+		if (limitPlan)
 		{
-			Limit *limitPlan = (Limit *)topPlan;
 			/*
 			 * Extract constant limit/offset from the Plan node.
 			 * limitCount/limitOffset are expression nodes; for constant
@@ -3716,12 +3979,31 @@ build_aggregatation_options(GList *aggregations, PlanBuildContext *pcontext)
 			{
 				int64 total;
 				if (!pg_add_s64_overflow(lim_offset, lim_count, &total) &&
-					total > 0 && total <= 1000)
+					total > 0)
 				{
-					limit_count = total;
-					elog(DEBUG1, "LimitAgg: fusing Limit(%ld)+HashAgg, limit_count=%ld",
-						 (long)lim_count, (long)limit_count);
+					if (total <= limit_hashagg_max_total)
+					{
+						limit_count = total;
+						/*
+						 * Record the effective limit on VecAggState so
+						 * show_hashagg_info can surface the fusion in
+						 * EXPLAIN output.  Cast is safe: the AGG_HASHED
+						 * gate above guarantees planstate is an AggState
+						 * and BuildVecPlan only invokes us through
+						 * ExecInitVecAgg, which allocates
+						 * sizeof(VecAggState).
+						 */
+						((VecAggState *) pcontext->planstate)->limit_count = limit_count;
+						elog(DEBUG1, "LimitAgg: fusing Limit(%ld)+HashAgg, limit_count=%ld",
+							 (long)lim_count, (long)limit_count);
+					}
+					else
+					{
+						elog(DEBUG1, "LimitAgg: total %ld exceeds vector.limit_hashagg_max_total %d, skipping",
+							 (long)total, limit_hashagg_max_total);
+					}
 				}
+				/* Overflow or non-positive total: silently skip fusion. */
 			}
 		}
 	}
@@ -3735,6 +4017,7 @@ build_aggregatation_options(GList *aggregations, PlanBuildContext *pcontext)
 													pcontext->nkey,
 													mode,
 													pcontext->orderby_sortoption,
+													/* sonic_motion_direct_send */ NULL,
 													&error);
 	}
 	else if (IsA(pcontext->planstate, WindowHashAggState))
@@ -3752,6 +4035,7 @@ build_aggregatation_options(GList *aggregations, PlanBuildContext *pcontext)
 														pcontext->nkey,
 														garrow_aggregate_get_parallel_window_mode(),
 														pcontext->orderby_sortoption,
+														/* sonic_motion_direct_send */ NULL,
 														&error);
 		}
 		else
@@ -3806,12 +4090,49 @@ build_aggregatation_options(GList *aggregations, PlanBuildContext *pcontext)
 															pcontext->keys,
 															pcontext->nkey,
 															&error);
-	else
+	else if (limit_count > 0 || !sonic_ok)
+	{
+		/*
+		 * Normal-mode hash agg fallback. Two reasons we land here:
+		 *   (a) Limit+HashAgg fusion: GroupByNode tracks only the first N
+		 *       groups via AggregateNodeOptions::limit_count. Sonic does
+		 *       not yet honor limit_count, so keep the legacy normal-mode
+		 *       path when the planner enables this fusion.
+		 *   (b) The query uses a key type or aggregate function sonic
+		 *       hasn't implemented yet (is_sonic_compatible returned
+		 *       false). Falling back keeps the query running at normal-
+		 *       mode speed instead of erroring out at runtime — this is
+		 *       important for ClickBench full-suite runs.
+		 */
 		options = garrow_aggregate_node_options_new(aggregations,
 													pcontext->keys,
 													pcontext->nkey,
 													limit_count,
 													&error);
+		if (pcontext->aggstrategy == AGG_HASHED)
+			((VecAggState *) pcontext->planstate)->method =
+				(limit_count > 0) ? VEC_AGG_METHOD_LIMIT_FUSION
+								  : VEC_AGG_METHOD_NORMAL;
+	}
+	else
+	{
+		/*
+		 * Default hash-agg path: route to Sonic
+		 * (compute/sonic/exec_node.cc -> SonicGroupByNode).
+		 * Sonic's per-thread share-nothing sink + 256-partition parallel
+		 * finalize replaces Arrow's GrouperFastImpl + serial Merge.
+		 */
+		int mode = garrow_aggregate_get_sonic_mode();
+		options = garrow_general_aggregate_node_options_new(aggregations,
+															pcontext->keys,
+															pcontext->nkey,
+															mode,
+															/* sort_options */ NULL,
+															/* sonic_motion_direct_send */ NULL,
+															&error);
+		if (pcontext->aggstrategy == AGG_HASHED)
+			((VecAggState *) pcontext->planstate)->method = VEC_AGG_METHOD_SONIC;
+	}
 	if (error)
 		elog(ERROR, "Failed to create agg node options, cause: %s", error->message);
 

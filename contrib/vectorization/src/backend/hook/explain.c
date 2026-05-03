@@ -5192,6 +5192,74 @@ show_hashagg_info(AggState *aggstate, ExplainState *es)
 		agg->aggstrategy != AGG_MIXED)
 		return;
 
+	/*
+	 * Emit "Vec HashAgg Method: <engine>" for vectorized HashAgg nodes so
+	 * EXPLAIN VERBOSE reveals which Arrow aggregate engine
+	 * BuildAggregatation routed the node to:
+	 *
+	 *   Sonic           SonicGroupByNode (default fast path)
+	 *   Normal          legacy Arrow GroupByNode -- chosen when a key
+	 *                   type or aggregate function is not sonic-compatible
+	 *   Limit+HashAgg   legacy GroupByNode + AggregateNodeOptions::limit_count
+	 *                   = N to stop after the first N groups
+	 *                   (Limit+HashAgg fusion; sonic does not yet honor
+	 *                   limit_count, so this implies the normal-mode path)
+	 *
+	 * Gated on es->verbose so plain EXPLAIN output stays stable: this is
+	 * a vectorization-engine internal routing decision, not a property
+	 * of the SQL plan itself, and we do not want to churn every existing
+	 * vectorization regression test's expected output.  Users debugging
+	 * routing add VERBOSE to opt in.
+	 *
+	 * Shown for plain EXPLAIN VERBOSE as well as EXPLAIN (ANALYZE, VERBOSE)
+	 * since the method is a plan-shape property set at ExecInit time
+	 * (before ExecutorRun).
+	 */
+	if (es->verbose && plan_is_vectorized(aggstate->ss.ps.state))
+	{
+		VecAggState *vagg = (VecAggState *) aggstate;
+		const char *method_name = NULL;
+
+		switch (vagg->method)
+		{
+			case VEC_AGG_METHOD_SONIC:
+				method_name = "Sonic";
+				break;
+			case VEC_AGG_METHOD_NORMAL:
+				method_name = "Normal";
+				break;
+			case VEC_AGG_METHOD_LIMIT_FUSION:
+				method_name = "Limit+HashAgg";
+				break;
+			case VEC_AGG_METHOD_UNSET:
+				/* not routed through BuildAggregatation -- skip the line */
+				break;
+		}
+
+		if (method_name)
+		{
+			if (es->format == EXPLAIN_FORMAT_TEXT)
+			{
+				appendStringInfoSpaces(es->str, es->indent * 2);
+				if (vagg->method == VEC_AGG_METHOD_LIMIT_FUSION)
+					appendStringInfo(es->str,
+									 "Vec HashAgg Method:  %s  Limit: " INT64_FORMAT "\n",
+									 method_name, vagg->limit_count);
+				else
+					appendStringInfo(es->str,
+									 "Vec HashAgg Method:  %s\n",
+									 method_name);
+			}
+			else
+			{
+				ExplainPropertyText("Vec HashAgg Method", method_name, es);
+				if (vagg->method == VEC_AGG_METHOD_LIMIT_FUSION)
+					ExplainPropertyInteger("HashAgg Limit", NULL,
+										   vagg->limit_count, es);
+			}
+		}
+	}
+
 	if (es->format != EXPLAIN_FORMAT_TEXT)
 	{
 

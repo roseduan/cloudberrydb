@@ -162,6 +162,20 @@ typedef struct VecAppendState
 } VecAppendState;
 
 
+/*
+ * Which Arrow aggregate engine BuildAggregatation routed this HashAgg to.
+ * Set during ExecInit (by build_aggregatation_options); read at EXPLAIN
+ * time by show_hashagg_info to surface the choice.  Only meaningful for
+ * AGG_HASHED plans -- other strategies leave it at _UNSET.
+ */
+typedef enum VecAggMethod
+{
+	VEC_AGG_METHOD_UNSET = 0,	/* default / non-AGG_HASHED / init failed */
+	VEC_AGG_METHOD_SONIC,		/* SonicGroupByNode (compute/sonic/exec_node.cc) */
+	VEC_AGG_METHOD_NORMAL,		/* legacy Arrow GroupByNode (sonic-incompatible) */
+	VEC_AGG_METHOD_LIMIT_FUSION	/* legacy GroupByNode + Limit+HashAgg fusion */
+} VecAggMethod;
+
 typedef struct VecAggState
 {
 	AggState base;
@@ -221,6 +235,23 @@ typedef struct VecAggState
 	int		curgroups;  /* the number of the groups in GroupByNode currently */
 	bool skip ;
 
+	/*
+	 * Set by build_aggregatation_options when the Limit+HashAgg fusion fires:
+	 * the Arrow GroupByNode is built with AggregateNodeOptions::limit_count =
+	 * offset + count so it stops tracking after the first N groups.  Zero
+	 * means the fusion did not apply (no parent Limit, non-constant
+	 * limit/offset, total > vector.limit_hashagg_max_total, or GUC disabled).
+	 * Read by show_hashagg_info at EXPLAIN time to display the limit value
+	 * alongside method == VEC_AGG_METHOD_LIMIT_FUSION.
+	 */
+	int64	limit_count;
+
+	/*
+	 * Which Arrow aggregate engine this HashAgg ended up using.  Set by
+	 * build_aggregatation_options for AGG_HASHED plans (left at _UNSET
+	 * otherwise).  Drives the "Vec HashAgg Method: ..." line in EXPLAIN.
+	 */
+	VecAggMethod	method;
 } VecAggState;
 
 typedef struct VecNestLoopState

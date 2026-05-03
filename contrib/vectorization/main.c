@@ -281,16 +281,23 @@ _PG_init(void)
                              GUC_GPDB_NEED_SYNC,
                              NULL, NULL, NULL);
 
-    DefineCustomBoolVariable("vector.enable_limit_hashagg",
-                             "Enable Limit+HashAgg fusion: when GROUP BY "
-                             "feeds directly into LIMIT without ORDER BY, "
-                             "only track the first N groups.",
-                             NULL,
-                             &enable_limit_hashagg,
-                             true,
-                             PGC_USERSET,
-                             GUC_GPDB_NEED_SYNC,
-                             NULL, NULL, NULL);
+    DefineCustomIntVariable("vector.limit_hashagg_max_total",
+                            "Maximum value of (LIMIT + OFFSET) at which the "
+                            "Limit+HashAgg fusion is applied; 0 disables "
+                            "the fusion. When GROUP BY feeds directly into "
+                            "LIMIT without ORDER BY, Arrow's GroupByNode "
+                            "tracks only the first (LIMIT + OFFSET) groups. "
+                            "Above this threshold the per-group tracking "
+                            "overhead is judged to outweigh the early-stop "
+                            "benefit.",
+                            NULL,
+                            &limit_hashagg_max_total,
+                            1000,
+                            0,
+                            LIMIT_HASHAGG_MAX_TOTAL_MAX,
+                            PGC_USERSET,
+                            GUC_GPDB_NEED_SYNC,
+                            NULL, NULL, NULL);
 
     exec_simple_query_hook_prev = exec_simple_query_hook;
     exec_simple_query_hook = exec_simple_query_vec;

@@ -147,11 +147,12 @@ SELECT count(*) FROM
                            ->  Vec Streaming Vec HashAggregate
                                  Output: two, four
                                  Group Key: tenk1.two, tenk1.four, tenk1.two
+                                 Vec HashAgg Method:  Normal
                                  ->  Vec Seq Scan on public.tenk1
                                        Output: two, four
  Settings: optimizer = 'on'
  Optimizer: Pivotal Optimizer (GPORCA)
-(18 rows)
+(19 rows)
 
 SELECT count(*) FROM
   (SELECT DISTINCT two, four, two FROM tenk1) ss;
