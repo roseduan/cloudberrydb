@@ -2036,8 +2036,31 @@ std::unique_ptr<MicroPartitionReader::Group> PaxVecReader::ReadGroup(
 // TopK Runtime Filter: EvalTopKThresholdSkip
 // ---------------------------------------------------------------------------
 
+// Build a varlena (text/varchar/bpchar) using PAX_ALLOC (malloc) instead of
+// PG palloc, so it is safe to call from Arrow worker threads where the PG
+// CurrentMemoryContext is not available.  The returned pointer must be freed
+// with PAX_FREE, NOT pfree.  The format is the standard 4-byte-header
+// varlena, which is correctly parsed by VARDATA_ANY/VARSIZE_ANY_EXHDR used
+// in the PAX TextCmp/VarstrCmp comparators (pax_oper.cc).
+//
+// Note: we intentionally do not honor atttypmod (no truncation/padding) since
+// thresholds are obtained from already-stored column values that are already
+// normalized; comparison only inspects the actual byte payload.
+static inline void *MakeVarlenaPaxAlloc(const char *s, size_t len) {
+  void *p = ::pax::PAX_ALLOC(len + VARHDRSZ);
+  SET_VARSIZE(p, len + VARHDRSZ);
+  memcpy(VARDATA(p), s, len);
+  return p;
+}
+
 // Convert Arrow physical-type Scalar to PG Datum for comparison with
 // PAX group min/max statistics. Handles the common ClickBench types.
+//
+// IMPORTANT: This function is called from Arrow worker threads via
+// PaxVecReader::ReadBatch -> EvalTopKThresholdSkip.  PG palloc/pfree are
+// NOT thread-safe, so for variable-length string types we construct the
+// varlena buffer with PAX_ALLOC (malloc).  The caller in EvalTopKThresholdSkip
+// frees the returned datum with PAX_FREE.
 static std::pair<Datum, bool> ThresholdScalarToDatum(
     const std::shared_ptr<arrow::Scalar> &scalar, Form_pg_attribute attr) {
   if (!scalar || !scalar->is_valid) return {0, false};
@@ -2078,11 +2101,9 @@ static std::pair<Datum, bool> ThresholdScalarToDatum(
       auto len = static_cast<size_t>(bs->value->size());
       switch (attr->atttypid) {
         case TEXTOID:
-          return {PointerGetDatum(cbdb::CstringToText(s, len)), true};
         case VARCHAROID:
-          return {PointerGetDatum(cbdb::VarcharInput(s, len, attr->atttypmod)), true};
         case BPCHAROID:
-          return {PointerGetDatum(cbdb::BpcharInput(s, len, attr->atttypmod)), true};
+          return {PointerGetDatum(MakeVarlenaPaxAlloc(s, len)), true};
         default:
           break;
       }
@@ -2094,11 +2115,9 @@ static std::pair<Datum, bool> ThresholdScalarToDatum(
       auto len = static_cast<size_t>(ss->value->size());
       switch (attr->atttypid) {
         case TEXTOID:
-          return {PointerGetDatum(cbdb::CstringToText(s, len)), true};
         case VARCHAROID:
-          return {PointerGetDatum(cbdb::VarcharInput(s, len, attr->atttypmod)), true};
         case BPCHAROID:
-          return {PointerGetDatum(cbdb::BpcharInput(s, len, attr->atttypmod)), true};
+          return {PointerGetDatum(MakeVarlenaPaxAlloc(s, len)), true};
         default:
           break;
       }
@@ -2154,11 +2173,13 @@ bool PaxVecReader::EvalTopKThresholdSkip(
       skip = cmp_func(&group_max, &threshold_datum, collation);
   }
 
-  // ThresholdScalarToDatum palloc's a fresh varlena for non-byval types
-  // (TEXT/VARCHAR/BPCHAR); free it here. group_min/group_max are pointers
-  // into the protobuf stats message and must NOT be pfreed.
+  // ThresholdScalarToDatum allocates a fresh varlena for non-byval types
+  // (TEXT/VARCHAR/BPCHAR) using PAX_ALLOC (malloc) so it is safe to call
+  // from Arrow worker threads.  Free with PAX_FREE here, NOT pfree.
+  // group_min/group_max are pointers into the protobuf stats message and
+  // must not be freed.
   if (!attr->attbyval && DatumGetPointer(threshold_datum) != nullptr)
-    pfree(DatumGetPointer(threshold_datum));
+    ::pax::PAX_FREE(DatumGetPointer(threshold_datum));
 
   return skip;
 }
