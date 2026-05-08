@@ -632,8 +632,8 @@ SELECT * FROM t1 ORDER BY a,b;
 DROP TABLE t1;
 CREATE COLLATION c1 (LOCALE = 'en_US.UTF-8');
 CREATE TABLE test_locale (a char(8) COLLATE "C", b char(8) COLLATE c1) using ao_column;
-
-
+NOTICE:  Table doesn't have 'DISTRIBUTED BY' clause -- Using column named 'a' as the Apache Cloudberry data distribution key for this table.
+HINT:  The 'DISTRIBUTED BY' clause determines the distribution of data. Make sure column(s) chosen are the optimal data distribution key to minimize skew.
 INSERT INTO test_locale VALUES ('XXXX', 'A');
 INSERT INTO test_locale VALUES ('ABAB', 'b');
 INSERT INTO test_locale VALUES ('ABAB', 'c');
@@ -701,35 +701,3 @@ SELECT NOT EXISTS (
 ROLLBACK;
 \if :skip_test
 \quit
-\endif
-CREATE COLLATION c_utf8 (LOCALE = 'C.utf8');
-CREATE TABLE test_c_utf8_sort (a int, b text COLLATE c_utf8)
-    USING pax DISTRIBUTED BY (a);
-INSERT INTO test_c_utf8_sort VALUES (1, 'XXXX'), (2, 'ABAB'), (3, 'bbbb'),
-                                    (4, 'CCCC'), (5, 'aaaa');
--- Plan must contain Vec Sort.  Without the C.utf8 whitelist entry the
--- planner would fall back to the row engine and the plan would have a
--- plain "Sort" node (and no "Vec ..." operators at all).
-EXPLAIN (costs off) SELECT b FROM test_c_utf8_sort ORDER BY b;
-                  QUERY PLAN
-----------------------------------------------
- Vec Gather Motion 3:1  (slice1; segments: 3)
-   Merge Key: b
-   ->  Vec Sort
-         Sort Key: b COLLATE c_utf8
-         ->  Vec Seq Scan on test_c_utf8_sort
- Optimizer: Postgres query optimizer
-(6 rows)
-
-SELECT b FROM test_c_utf8_sort ORDER BY b;
-  b   
-------
- ABAB
- CCCC
- XXXX
- aaaa
- bbbb
-(5 rows)
-
-drop table test_c_utf8_sort;
-drop COLLATION c_utf8;

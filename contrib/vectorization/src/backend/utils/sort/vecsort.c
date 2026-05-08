@@ -234,7 +234,9 @@ get_arrow_locale_from_collation(Oid collid)
 		localeptr = setlocale(LC_COLLATE, NULL);
 		if (!localeptr)
 			elog(ERROR, "invalid LC_COLLATE setting");
-		if (strcmp(localeptr, "C") == 0)
+		if (strcmp(localeptr, "C") == 0
+				|| strcasecmp(localeptr, "C.utf8") == 0
+				|| strcasecmp(localeptr, "C.UTF-8") == 0)
 			return GARROW_SORT_ORDER_Default;
 		else if(strcasecmp(localeptr, "en_US.utf8") == 0 || strcasecmp(localeptr, "en_US.UTF-8") == 0)
 			return GARROW_SORT_ORDER_En_US_UTF8;

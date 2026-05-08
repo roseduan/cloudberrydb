@@ -1221,6 +1221,8 @@ is_sort_collation_vectorable(Sort *sort)
 
 			if (strcasecmp(collcollate, "en_US.UTF-8") == 0
 					|| strcasecmp(collcollate, "en_US.utf8") == 0
+					|| strcasecmp(collcollate, "C.UTF-8") == 0
+					|| strcasecmp(collcollate, "C.utf8") == 0
 					|| (collform->oid == C_COLLATION_OID))
 			{
 				ReleaseSysCache(tp);
@@ -1232,6 +1234,8 @@ is_sort_collation_vectorable(Sort *sort)
 				if (!localeptr)
 					elog(ERROR, "invalid LC_COLLATE setting");
 				if (strcmp(localeptr, "C") == 0
+						|| strcasecmp(localeptr, "C.utf8") == 0
+						|| strcasecmp(localeptr, "C.UTF-8") == 0
 						|| strcasecmp(localeptr, "en_US.utf8") == 0
 						|| strcasecmp(localeptr, "en_US.UTF-8") == 0)
 				{

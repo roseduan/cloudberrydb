@@ -65,3 +65,44 @@ select a from test_locale order by a;
 select b from test_locale order by b;
 drop table test_locale;
 drop COLLATION c1;
+
+-- C.utf8 / C.UTF-8 libc collations sort bytewise (same as the built-in
+-- "C") and are common on databases initialized with --lc-collate=C.utf8.
+-- is_sort_collation_vectorable() / get_arrow_locale_from_collation()
+-- whitelist these names; without that, an ORDER BY on a column declared
+-- with one of these collations forces the entire plan back to the row
+-- engine.  Pin the Postgres planner so the EXPLAIN plan below is stable.
+--
+-- glibc < 2.35 (e.g. CentOS 7) doesn't ship a C.utf8 system locale, so
+-- CREATE COLLATION would fail with "could not create locale".  Probe
+-- via a subtransaction and \quit on platforms that lack it; the skip
+-- path is covered by the alternate expected file sort_1.out.
+SET optimizer = off;
+BEGIN;
+DO $$
+BEGIN
+    EXECUTE 'CREATE COLLATION _probe_c_utf8 (LOCALE = ''C.utf8'')';
+EXCEPTION WHEN OTHERS THEN
+    NULL;
+END$$;
+SELECT NOT EXISTS (
+    SELECT 1 FROM pg_collation WHERE collname = '_probe_c_utf8'
+) AS skip_test \gset
+ROLLBACK;
+\if :skip_test
+\quit
+\endif
+
+CREATE COLLATION c_utf8 (LOCALE = 'C.utf8');
+CREATE TABLE test_c_utf8_sort (a int, b text COLLATE c_utf8)
+    USING pax DISTRIBUTED BY (a);
+INSERT INTO test_c_utf8_sort VALUES (1, 'XXXX'), (2, 'ABAB'), (3, 'bbbb'),
+                                    (4, 'CCCC'), (5, 'aaaa');
+
+-- Plan must contain Vec Sort.  Without the C.utf8 whitelist entry the
+-- planner would fall back to the row engine and the plan would have a
+-- plain "Sort" node (and no "Vec ..." operators at all).
+EXPLAIN (costs off) SELECT b FROM test_c_utf8_sort ORDER BY b;
+SELECT b FROM test_c_utf8_sort ORDER BY b;
+drop table test_c_utf8_sort;
+drop COLLATION c_utf8;
