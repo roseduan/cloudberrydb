@@ -216,3 +216,6 @@ test: limit_hashagg
 
 # vectorized Sonic hash agg routing (EXPLAIN visibility + correctness)
 test: vec_sonic_hashagg
+
+# vectorized Sonic Motion Direct-Send (EXPLAIN visibility + correctness)
+test: vec_motion_direct_send

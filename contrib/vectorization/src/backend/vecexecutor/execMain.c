@@ -32,6 +32,7 @@
 #include "utils/vecsort.h"
 #include "vecexecutor/execslot.h"
 #include "vecexecutor/executor.h"
+#include "vecexecutor/vec_motion_direct_send.h"
 #include "vecexecutor/vec_topk_bounds.h"
 #include "utils/numeric.h"
 #include "utils/guc_vec.h"
@@ -177,6 +178,13 @@ typedef struct PlanBuildContext
 	int is_cross_slice;
 	bool ready;
 	bool is_producer;
+
+	/* sonic motion direct-send: set true after BuildAggregatation when the
+	 * downstream Acero schema carries a leading hidden target-segment
+	 * column (named by sonic_target_segment_col_name) that must survive
+	 * the post-Agg project node. */
+	bool sonic_target_segment_passthrough;
+	const char *sonic_target_segment_col_name;
 } PlanBuildContext;
 
 typedef struct SortKey
@@ -2660,6 +2668,21 @@ BuildProject(List *targetList, List *qualList, GArrowExecuteNode *input, PlanBui
 	g_autoptr(GArrowExecuteNode) current = garrow_copy_ptr(input);
 	g_autoptr(GError) error = NULL;
 
+	/*
+	 * Sonic Motion Direct-Send: the passthrough flag is set authoritatively
+	 * by build_aggregatation_options when a hint is found in the
+	 * vec_motion_direct_send HTAB. Reset here to avoid stale state from a
+	 * sibling plan node.
+	 *
+	 * project_options must be built BEFORE the agg block (its expressions
+	 * reference agginfo->outname strings which the agg block populates,
+	 * but free_agg_infos at the end of the agg block invalidates them).
+	 * If the agg block then turns the passthrough flag on, we rebuild
+	 * project_options below — slightly wasteful but correct.
+	 */
+	pcontext->sonic_target_segment_passthrough = false;
+	pcontext->sonic_target_segment_col_name = NULL;
+
 	if (targetList)
 		project_options = build_project_options(targetList, pcontext);
 
@@ -2680,10 +2703,25 @@ BuildProject(List *targetList, List *qualList, GArrowExecuteNode *input, PlanBui
 		/* build project for aggregate input */
 		aggregation_input = BuildAggProject(targetList, agginfos, current, pcontext);
 		if (aggregation_input)
-			aggregation = BuildAggregatation(agginfos, aggregation_input, pcontext); 
+			aggregation = BuildAggregatation(agginfos, aggregation_input, pcontext);
 		else
 			aggregation = BuildAggregatation(agginfos, current, pcontext);
 		garrow_store_ptr(current, aggregation);
+
+		/*
+		 * Sonic Motion Direct-Send: if build_aggregatation_options turned on
+		 * the passthrough flag, the upstream project_options built above ran
+		 * with the flag still false and is missing the hidden-column
+		 * field_ref. Rebuild here, while agginfos is still alive — Aggref
+		 * resolution in expr_to_arrow_expression iterates agginfos to look
+		 * up outname, so this MUST happen before free_agg_infos.
+		 */
+		if (pcontext->sonic_target_segment_passthrough && targetList)
+		{
+			g_clear_object(&project_options);
+			project_options = build_project_options(targetList, pcontext);
+		}
+
 		free_agg_infos(agginfos);
 	}
 
@@ -3363,9 +3401,48 @@ build_project_options(List *targetList, PlanBuildContext *pcontext)
 		expressions = garrow_list_append_ptr(expressions, arrow_expr);
 		i++;
 	}
-	options = garrow_project_node_options_new(expressions,
-											  (gchar**)names,
-											  length);
+	/*
+	 * Sonic motion direct-send: when the upstream Sonic agg added a
+	 * leading hidden target-segment column (named by
+	 * sonic_target_segment_col_name), append a passthrough field_ref so
+	 * the project carries it through to the Motion node. Append at the
+	 * end so existing Var(varattno = i+1) references in targetList stay
+	 * valid (they refer to positions 1..length in the post-project
+	 * output, which we leave unchanged).
+	 */
+	if (pcontext->sonic_target_segment_passthrough)
+	{
+		const char *seg_name = pcontext->sonic_target_segment_col_name;
+		Assert(seg_name != NULL);
+		g_autoptr(GError) seg_err = NULL;
+		GArrowExpression *seg_expr = GARROW_EXPRESSION(
+			garrow_field_expression_new(seg_name, &seg_err));
+		if (seg_err != NULL)
+			elog(ERROR,
+				 "sonic motion direct-send: build target_segment_col_name "
+				 "field_ref failed: %s",
+				 seg_err->message);
+
+		const gchar **names_extended =
+			palloc((length + 1) * sizeof(gchar *));
+		for (gsize j = 0; j < length; ++j)
+			names_extended[j] = names[j];
+		names_extended[length] = seg_name;
+		/* garrow_list_append_ptr requires an lvalue (it takes &C); use the
+		 * named local seg_expr rather than a temporary. The list takes
+		 * ownership, so we don't unref afterwards. */
+		expressions = garrow_list_append_ptr(expressions, seg_expr);
+		options = garrow_project_node_options_new(expressions,
+												  (gchar**)names_extended,
+												  length + 1);
+		pfree(names_extended);
+	}
+	else
+	{
+		options = garrow_project_node_options_new(expressions,
+												  (gchar**)names,
+												  length);
+	}
 	pfree(names);
 	pcontext->append_filed_index = 0;
 
@@ -4174,14 +4251,53 @@ build_aggregatation_options(GList *aggregations, PlanBuildContext *pcontext,
 		 * (compute/sonic/exec_node.cc -> SonicGroupByNode).
 		 * Sonic's per-thread share-nothing sink + 256-partition parallel
 		 * finalize replaces Arrow's GrouperFastImpl + serial Merge.
+		 *
+		 * Sonic Motion Direct-Send: when the parent HASH Motion's
+		 * ExecInitVecMotion has published a hint (all gates passed,
+		 * see sonic_motion_direct_send_design.md §2.3), build a
+		 * GArrowSonicMotionDirectSendOptions from it and pass it into
+		 * the aggregate options constructor so Sonic emits each batch
+		 * pre-bucketed by target segment. No hint → pass NULL, default
+		 * per-partition emit behavior is preserved.
 		 */
 		int mode = garrow_aggregate_get_sonic_mode();
+		g_autoptr(GArrowSonicMotionDirectSendOptions) ds_options = NULL;
+		const VecMotionDirectSendHint *hint =
+			vec_motion_direct_send_lookup(pcontext->planstate->plan);
+		if (hint != NULL)
+		{
+			gint32 *idx = (gint32 *) palloc(sizeof(gint32) * hint->numHashCols);
+			for (int i = 0; i < hint->numHashCols; ++i)
+				idx[i] = (gint32) hint->hash_grpcol_idx[i];
+			ds_options = garrow_sonic_motion_direct_send_options_new(
+				(gint32) hint->numHashSegments,
+				(gint32) hint->reduce_alg,
+				idx, (gsize) hint->numHashCols,
+				hint->target_segment_col_name);
+			/*
+			 * Only mark the project node as a passthrough for the hidden
+			 * segment column when Sonic will actually emit it.  If the
+			 * constructor failed (e.g. internal validation rejected the
+			 * arguments and returned NULL), garrow_general_aggregate_node_options_new
+			 * gets NULL too and Sonic never prepends the column — leaving the
+			 * passthrough flag on would make build_project_options reference
+			 * a non-existent field and fail Arrow plan construction.
+			 */
+			if (ds_options != NULL)
+			{
+				pcontext->sonic_target_segment_passthrough = true;
+				pcontext->sonic_target_segment_col_name =
+					hint->target_segment_col_name;
+			}
+			pfree(idx);
+		}
+
 		options = garrow_general_aggregate_node_options_new(aggregations,
 															pcontext->keys,
 															pcontext->nkey,
 															mode,
 															/* sort_options */ NULL,
-															/* sonic_motion_direct_send */ NULL,
+															ds_options,
 															&error);
 		if (pcontext->aggstrategy == AGG_HASHED)
 			((VecAggState *) pcontext->planstate)->method = VEC_AGG_METHOD_SONIC;

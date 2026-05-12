@@ -299,6 +299,18 @@ _PG_init(void)
                             GUC_GPDB_NEED_SYNC,
                             NULL, NULL, NULL);
 
+    DefineCustomBoolVariable("vector.sonic_motion_direct_send",
+                             "When a Sonic HashAgg feeds a Redistribute "
+                             "Motion, partition rows into segment-tagged "
+                             "batches inside Sonic so Motion can send each "
+                             "batch directly without re-hashing.",
+                             NULL,
+                             &enable_sonic_motion_direct_send,
+                             false,
+                             PGC_USERSET,
+                             GUC_GPDB_NEED_SYNC,
+                             NULL, NULL, NULL);
+
     exec_simple_query_hook_prev = exec_simple_query_hook;
     exec_simple_query_hook = exec_simple_query_vec;
 

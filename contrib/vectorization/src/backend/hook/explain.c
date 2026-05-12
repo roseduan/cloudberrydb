@@ -43,7 +43,9 @@
 #include "cdb/cdbendpoint.h"
 #include "vecnodes/nodes.h"
 
+#include "utils/guc_vec.h"
 #include "vecexecutor/executor.h"
+#include "vecexecutor/vec_motion_direct_send.h"
 
 
 /* Convert bytes into kilobytes */
@@ -95,6 +97,7 @@ static void ExplainPropertyStringInfo(const char *qlabel, ExplainState *es,
 
 static void ExplainIndentText(ExplainState *es);
 static bool VecExplainPreScanNode(PlanState *planstate, Bitmapset **rels_used);
+static bool plan_is_vectorized(EState *estate);
 static ExplainWorkersState * ExplainCreateWorkersState(int num_workers);
 static void ExplainYAMLLineStarting(ExplainState *es);
 static void ExplainJSONLineEnding(ExplainState *es);
@@ -2262,6 +2265,48 @@ VecExplainNode(PlanState *planstate, List *ancestors,
 					appendStringInfo(es->str,
 									 "Hash Module: %d\n",
 									 pMotion->numHashSegments);
+				}
+				/*
+				 * Sonic Motion Direct-Send: emit "Direct Send: yes" when
+				 * the GUC is on AND this HASH Motion's child (modulo
+				 * trivial Result chase) is an Agg.
+				 *
+				 * Why a static plan check (not vec_motion_direct_send_lookup)?
+				 * EXPLAIN runs on the QD, but the hint is registered on the
+				 * sender QE inside ExecInitVecMotion. The QD's HTAB is
+				 * always empty here. So we approximate "would fire" by
+				 * mirroring the cheap gate checks (GUC + plan shape).
+				 * Deeper runtime checks (Case A resolution, type/reduce_alg
+				 * support) are not replicated — the annotation may
+				 * therefore over-report by a small margin (e.g. when
+				 * hash columns hit an Aggref, falling to slow path on QE).
+				 * That trade-off keeps the explain code simple and the
+				 * annotation visible for the common direct-send queries.
+				 */
+				if (pMotion->motionType == MOTIONTYPE_HASH &&
+					plan_is_vectorized(planstate->state) &&
+					enable_sonic_motion_direct_send)
+				{
+					Plan *child = outerPlan(plan);
+					while (child != NULL && IsA(child, Result) &&
+						   ((Result *) child)->resconstantqual == NULL &&
+						   child->qual == NIL &&
+						   ((Result *) child)->numHashFilterCols == 0 &&
+						   outerPlan(child) != NULL)
+						child = outerPlan(child);
+					if (child != NULL && IsA(child, Agg))
+					{
+						if (es->format == EXPLAIN_FORMAT_TEXT)
+						{
+							appendStringInfoSpaces(es->str, es->indent * 2);
+							appendStringInfo(es->str,
+											 "Direct Send: yes\n");
+						}
+						else
+						{
+							ExplainPropertyText("Direct Send", "yes", es);
+						}
+					}
 				}
 			}
 			break;

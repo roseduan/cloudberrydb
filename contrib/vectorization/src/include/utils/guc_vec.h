@@ -63,5 +63,8 @@ extern bool enable_topk_runtime_filter;
  */
 #define LIMIT_HASHAGG_MAX_TOTAL_MAX 10000
 extern int limit_hashagg_max_total;
+/* sonic motion direct send: emit segment-tagged batches from Sonic so that a
+ * downstream Redistribute Motion can route each batch without re-hashing */
+extern bool enable_sonic_motion_direct_send;
 
 #endif   /* GUC_VEC_H */

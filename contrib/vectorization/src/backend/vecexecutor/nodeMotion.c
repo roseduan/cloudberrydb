@@ -17,6 +17,8 @@
 #include "utils/fmgr_vec.h"
 #include "executor/tuptable.h"
 #include "vecexecutor/execAmi.h"
+#include "vecexecutor/vec_motion_direct_send.h"
+#include "utils/guc_vec.h"
 #include "utils/vecsort.h"
 #include "utils/tuptable_vec.h"
 
@@ -208,6 +210,164 @@ hashAndSendVec_vechash(Motion *motion, MotionState *node, TupleTableSlot *outerT
 	if (outerTupleSlot->tts_tupleDescriptor->natts <= 0
 		|| (rows <= 0))
 		return;
+
+	/*
+	 * Sonic motion-direct-send fast path: when the upstream Sonic node
+	 * has tagged each batch with a leading int32 column
+	 * `_sonic_target_segment`, the segment id is constant across rows
+	 * (Sonic guarantees same key -> same segment via deterministic
+	 * hash(canonical_key) % numSegments). Read the value, strip the
+	 * column, and send the rest of the batch directly to that segment
+	 * — bypassing Gandiva projector + cdbhash + per-row slice.
+	 *
+	 * Safety:
+	 *   * Same-key-same-segment is enforced by Sonic's hash function,
+	 *     so the receiver's Final HashAgg merge stays correct.
+	 *   * The hidden column is removed before SendTupleVec, so the
+	 *     receiver's incoming schema matches Motion's declared output.
+	 *   * Only triggers when the upstream Sonic node was constructed
+	 *     with sonic_segment_count > 0 (gated by GUC
+	 *     vector.sonic_motion_direct_send and a no-HashJoin plan).
+	 */
+	{
+		GArrowRecordBatch *rb_full =
+			(GArrowRecordBatch *) VECSLOT(outerTupleSlot)->tts_recordbatch;
+		/*
+		 * Locate the hidden target-segment column by the name registered
+		 * on this Motion's VecMotionDirectSendHint. Sonic emits it as
+		 * field 0; an intermediate vec project node typically moves it
+		 * to the end (we instructed build_project_options to append it).
+		 * To avoid scanning column names on every batch, cache the index
+		 * on VecMotionState.
+		 *
+		 * Cache invalidation has two layers:
+		 *   1. Cheap: column-count mismatch -> rescan. Catches the common
+		 *      "first batch" case as well as obvious schema swaps.
+		 *   2. Reorder-safe: if a positive idx is cached, verify the
+		 *      column at that idx still has the expected name. A future
+		 *      schema change that preserves column count but reorders
+		 *      columns (multi-input fan-in, rescan-with-replan, ...)
+		 *      would otherwise route batches to the wrong segment using
+		 *      a stale idx. The check is O(1) — one name lookup per
+		 *      batch — and avoids the dangling-pointer hazard of caching
+		 *      a borrowed GArrowSchema*.
+		 *
+		 * Cache states (vmotionstate->sonic_seg_col_idx):
+		 *   -1 : uninitialized / cache invalidated -> rescan
+		 *   -2 : absent in this schema -> always slow path
+		 *   >=0: column index of the target-segment column
+		 *
+		 * If no hint was registered (sonic_seg_col_name == NULL), we never
+		 * scan and always fall through to slow path.
+		 */
+		int seg_col_idx = -2;
+		if (rb_full != NULL && vnode->sonic_seg_col_name != NULL)
+		{
+			gint n_cols = garrow_record_batch_get_n_columns(rb_full);
+
+			/*
+			 * Layer 2: cheap O(1) reorder check on the cached index.
+			 *
+			 * The `sonic_seg_col_idx < n_cols` bound is required because
+			 * this branch runs BEFORE the Layer 1 column-count check, so
+			 * a batch whose schema shrank would otherwise pass a stale
+			 * idx to garrow_record_batch_get_column_name. GLib wrappers
+			 * typically return NULL on out-of-range indices, but Arrow
+			 * C++ in release mode may assert or invoke UB underneath.
+			 *
+			 * When idx is out of range here we simply skip Layer 2;
+			 * Layer 1 below will see sonic_seg_col_n_cols != n_cols and
+			 * trigger the rescan path on its own.
+			 */
+			if (vnode->sonic_seg_col_idx >= 0 &&
+				vnode->sonic_seg_col_idx < n_cols)
+			{
+				const gchar *cname =
+					garrow_record_batch_get_column_name(rb_full,
+						vnode->sonic_seg_col_idx);
+				if (cname == NULL ||
+					strcmp(cname, vnode->sonic_seg_col_name) != 0)
+				{
+					vnode->sonic_seg_col_idx = -1; /* force rescan */
+				}
+			}
+
+			if (vnode->sonic_seg_col_idx == -1 ||
+				vnode->sonic_seg_col_n_cols != n_cols)
+			{
+				/* schema changed (or first call): rescan + cache */
+				vnode->sonic_seg_col_idx = -2;
+				vnode->sonic_seg_col_n_cols = n_cols;
+				for (gint c = 0; c < n_cols; ++c)
+				{
+					const gchar *cname =
+						garrow_record_batch_get_column_name(rb_full, c);
+					if (cname != NULL &&
+						strcmp(cname, vnode->sonic_seg_col_name) == 0)
+					{
+						vnode->sonic_seg_col_idx = c;
+						break;
+					}
+				}
+			}
+			seg_col_idx = vnode->sonic_seg_col_idx;
+		}
+		if (seg_col_idx >= 0)
+		{
+			g_autoptr(GArrowArray) seg_arr =
+				garrow_record_batch_get_column_data(rb_full, seg_col_idx);
+			/*
+			 * Guard against silent wrong-segment routing. If
+			 * garrow_record_batch_get_column_data returned NULL (internal
+			 * Arrow error despite a valid index) or the column at
+			 * seg_col_idx is not an int32 array (column name collision
+			 * with a same-named non-int32 field in some pathological
+			 * upstream schema), garrow_int32_array_get_value silently
+			 * returns 0 via its g_return_val_if_fail guard. target_seg = 0
+			 * would then pass the < 0 / >= numsegs range check (segment 0
+			 * is always valid because numHashSegments > 1 is a
+			 * registration gate) and the entire batch would be routed to
+			 * segment 0 — wrong-result data corruption with no diagnostic.
+			 * Promote it to a clear elog(ERROR) instead.
+			 */
+			if (seg_arr == NULL || !GARROW_IS_INT32_ARRAY(seg_arr))
+				elog(ERROR,
+					 "sonic motion direct-send: column %s at index %d is absent or not int32",
+					 vnode->sonic_seg_col_name, seg_col_idx);
+			int32 target_seg =
+				(int32) garrow_int32_array_get_value(
+					GARROW_INT32_ARRAY(seg_arr), 0);
+			g_autoptr(GError) rm_err = NULL;
+			g_autoptr(GArrowRecordBatch) stripped =
+				garrow_record_batch_remove_column(rb_full, seg_col_idx, &rm_err);
+			if (rm_err != NULL)
+				elog(ERROR,
+					 "sonic motion direct-send: remove_column failed: %s",
+					 rm_err->message);
+			if (target_seg < 0 || target_seg >= cdbhash->base.numsegs)
+				elog(ERROR,
+					 "sonic motion direct-send: target_segment %d out of range [0, %d)",
+					 target_seg, cdbhash->base.numsegs);
+			ExecStoreBatch(vnode->vecslot, stripped);
+			int sent_rows = GetNumRows(vnode->vecslot);
+			if (sent_rows > 0)
+			{
+				SendReturnCode sendRC;
+				sendRC = SendTupleVec(node->ps.state->motionlayer_context,
+									  node->ps.state->interconnect_context,
+									  motion->motionID,
+									  vnode->vecslot,
+									  (int16) target_seg);
+				Assert(sendRC == SEND_COMPLETE || sendRC == STOP_SENDING);
+				if (sendRC == SEND_COMPLETE)
+					node->numTuplesToAMS += sent_rows;
+				else
+					node->stopRequested = true;
+			}
+			return;
+		}
+	}
+
 	econtext->ecxt_outertuple = outerTupleSlot;
 	g_autoptr(GArrowSchema) rewrite_schema = motion_rewrite_numeric_type_schema(node, outerTupleSlot);
 	g_autoptr(GArrowRecordBatch) rewrite_batch = garrow_record_batch_copy_with_schema(VECSLOT(outerTupleSlot)->tts_recordbatch, rewrite_schema);
@@ -557,6 +717,196 @@ ExecVecMotion(PlanState *pstate)
 	}
 }
 
+/*
+ * ============================================================================
+ * Sonic Motion Direct-Send helpers (used by ExecInitVecMotion).
+ *
+ * The functions below resolve the hash-column mapping needed to register a
+ * VecMotionDirectSendHint when a HASH Redistribute Motion sits directly
+ * above an Agg. See sonic_motion_direct_send_design.md §2.6 / §2.7 / §2.9
+ * for the plan-shape constraints and supported type/reduce-alg set.
+ * ============================================================================
+ */
+
+/*
+ * Trivial Result passthrough check: a Result with no qual, no hashFilter,
+ * no resconstantqual, and an actual child. Such a node passes rows from
+ * its child unchanged at the row-count level, so we can chase
+ * Motion.hashExprs Var references through it down to the Agg.
+ *
+ * The 1:1 targetlist (each entry is a bare Var) is verified lazily by
+ * trace_attno_through_trivial as it walks down.
+ */
+static bool
+is_trivial_passthrough(Plan *p)
+{
+	if (p == NULL || !IsA(p, Result))
+		return false;
+	if (((Result *) p)->resconstantqual != NULL)
+		return false;
+	if (p->qual != NIL)
+		return false;
+	if (((Result *) p)->numHashFilterCols > 0)
+		return false;
+	if (outerPlan(p) == NULL)
+		return false;		/* leaf scalar Result, nothing to chase */
+	return true;
+}
+
+/*
+ * Walk an attno from `top` (Motion's input schema, top of trivial-Result
+ * chain) down to `bottom` (the Agg), translating through each trivial
+ * Result's targetlist. Returns the attno relative to `bottom`'s
+ * targetlist (1-based), or -1 if any intermediate step breaks the chain
+ * (non-Var TargetEntry, out-of-range attno, etc.).
+ */
+static int
+trace_attno_through_trivial(Plan *top, Plan *bottom, int attno_top)
+{
+	Plan	   *p = top;
+	int			attno = attno_top;
+
+	while (p != bottom)
+	{
+		TargetEntry *te;
+
+		if (!IsA(p, Result))
+			return -1;
+		if (attno <= 0 || attno > list_length(p->targetlist))
+			return -1;
+		te = list_nth_node(TargetEntry, p->targetlist, attno - 1);
+		if (!IsA(te->expr, Var))
+			return -1;
+		attno = ((Var *) te->expr)->varattno;
+		p = outerPlan(p);
+		if (p == NULL)
+			return -1;
+	}
+	return attno;
+}
+
+/*
+ * Resolve Motion.hashExprs to agg->grpColIdx[] positions. On success
+ * (Case A — all hash columns are group-by keys, no Aggref references),
+ * fills out_indices[i] with the agg->grpColIdx[] position of the i-th
+ * hash column (in Motion.hashExprs order) and returns true.
+ *
+ * Returns false (caller skips registration) when any of:
+ *   * a hashExpr is not a bare Var (expressions not supported in v1);
+ *   * the Var resolves through agg_chain_top to an Aggref in the Agg
+ *     targetlist (Case B — hash-on-agg-result, deferred to v2);
+ *   * the Var resolves to a column not present in agg->grpColIdx[];
+ *   * the trivial-Result chain breaks.
+ */
+static bool
+direct_send_resolve_hash_cols(Motion *m,
+							  Plan *agg_chain_top,
+							  Agg *agg,
+							  int *out_indices)
+{
+	ListCell   *lc;
+	int			i = 0;
+
+	foreach(lc, m->hashExprs)
+	{
+		Expr	   *e = (Expr *) lfirst(lc);
+		Var		   *v;
+		int			attno_at_agg;
+		TargetEntry *te;
+		Var		   *te_var;
+		int			gci = -1;
+
+		if (!IsA(e, Var))
+			return false;
+		v = (Var *) e;
+
+		attno_at_agg = trace_attno_through_trivial(
+			agg_chain_top, (Plan *) agg, v->varattno);
+		if (attno_at_agg <= 0)
+			return false;
+		if (attno_at_agg > list_length(agg->plan.targetlist))
+			return false;
+
+		te = list_nth_node(TargetEntry, agg->plan.targetlist,
+						   attno_at_agg - 1);
+		if (!IsA(te->expr, Var))
+			return false;	/* Aggref => Case B, deferred */
+		te_var = (Var *) te->expr;
+
+		for (int k = 0; k < agg->numCols; ++k)
+		{
+			if (agg->grpColIdx[k] == te_var->varattno)
+			{
+				gci = k;
+				break;
+			}
+		}
+		if (gci < 0)
+			return false;	/* attno not in group keys */
+
+		out_indices[i++] = gci;
+	}
+	return true;
+}
+
+/*
+ * Sonic Motion Direct-Send: generate the hidden int32 column name that
+ * Sonic prepends to each output batch.
+ *
+ * The name must not collide with any column the Agg already exposes —
+ * neither its input columns (what Sonic sees) nor its output names (the
+ * group keys + aggregate result fields). A 4-byte random suffix gives
+ * ~2^32 namespace, so collisions are astronomically unlikely and
+ * usually resolved in a single attempt; we still retry up to 8 times
+ * out of paranoia before giving up.
+ *
+ * Returns palloc'd string on success (caller frees / hint set() copies).
+ * Returns NULL if all attempts collide — caller should skip the
+ * optimization (the slow Motion path will still produce correct results).
+ */
+static bool
+sonic_colname_conflicts_p(Agg *agg, const char *colname)
+{
+	ListCell   *lc;
+	Plan	   *child;
+
+	foreach(lc, agg->plan.targetlist)
+	{
+		TargetEntry *te = lfirst_node(TargetEntry, lc);
+		if (te->resname != NULL && strcmp(te->resname, colname) == 0)
+			return true;
+	}
+	child = outerPlan(&agg->plan);
+	if (child != NULL)
+	{
+		foreach(lc, child->targetlist)
+		{
+			TargetEntry *te = lfirst_node(TargetEntry, lc);
+			if (te->resname != NULL && strcmp(te->resname, colname) == 0)
+				return true;
+		}
+	}
+	return false;
+}
+
+static char *
+sonic_make_target_segment_colname(Agg *agg)
+{
+	char		buf[NAMEDATALEN];
+
+	for (int attempt = 0; attempt < 8; ++attempt)
+	{
+		unsigned int rnd = 0;
+		if (!pg_strong_random(&rnd, sizeof(rnd)))
+			rnd = (unsigned int) random();
+		snprintf(buf, sizeof(buf),
+				 "__sonic_target_segment_%08x__", rnd);
+		if (!sonic_colname_conflicts_p(agg, buf))
+			return pstrdup(buf);
+	}
+	return NULL;
+}
+
 /* ----------------------------------------------------------------
  *		ExecInitMotion
  *
@@ -604,6 +954,12 @@ ExecInitVecMotion(Motion *node, EState *estate, int eflags)
 	 */
 	vmotionstate = (VecMotionState*) palloc0(sizeof(VecMotionState));
 	vmotionstate->random_const_array_template = NULL;
+	/* Sonic Motion Direct-Send: -1 marks "not yet searched" so the
+	 * first fast-path call triggers a rescan + cache.
+	 * sonic_seg_col_name is set below from the registered hint (if any). */
+	vmotionstate->sonic_seg_col_idx = -1;
+	vmotionstate->sonic_seg_col_n_cols = -1;
+	vmotionstate->sonic_seg_col_name = NULL;
 	motionstate = (MotionState*) vmotionstate;
 	NodeSetTag(motionstate, T_MotionState);
 	motionstate->ps.plan = (Plan *) node;
@@ -691,6 +1047,119 @@ ExecInitVecMotion(Motion *node, EState *estate, int eflags)
 	 * create expression context for node
 	 */
 	ExecAssignExprContext(estate, &motionstate->ps);
+
+	/*
+	 * Sonic Motion Direct-Send: register a hint for the child Agg so
+	 * BuildAggregatation can configure Sonic to pre-bucket its output
+	 * by target segment. All gates per
+	 * sonic_motion_direct_send_design.md §2.3:
+	 *   * GUC enabled
+	 *   * QE side, SEND mstype (sender carries child Agg)
+	 *   * HASH Motion with > 0 segments
+	 *   * not under rescan (REWIND): Arrow plan is built once
+	 *   * hashExprs non-empty
+	 *   * all hashFuncs Oids in v1-supported set (rejects legacy hash)
+	 *   * child (post trivial-Result chain) is an Agg
+	 *   * hash cols all resolve to group-by keys (Case A; Case B v2)
+	 *
+	 * Failure to register is silent: the Agg runs unmodified and Motion's
+	 * slow path handles redistribution as before.
+	 *
+	 * Must run before VecExecInitNode(outerPlan) below so that the child's
+	 * BuildAggregatation can see the hint via vec_motion_direct_send_lookup.
+	 */
+	/*
+	 * numHashSegments > 1 (not >= 1): direct-send is degenerate at
+	 * numHashSegments == 1 — JumpConsistentHash(_, 1) returns 0 for every
+	 * row, so Sonic still pays the per-row cdbhash cost plus the hidden
+	 * int32 column allocation/fill with zero routing benefit. Sonic's
+	 * Make() also rejects seg_count == 1 as defense in depth; skipping
+	 * registration here keeps that error path unreached in practice.
+	 *
+	 * In any case, a HASH Motion to a single segment is a planner oddity:
+	 * gather-to-one-segment uses MOTIONTYPE_FOCUS / GATHER. If one ever
+	 * lands here, the standard non-direct-send path handles it correctly
+	 * (Motion's internal cdbhash also degenerates trivially).
+	 */
+	if (enable_sonic_motion_direct_send &&
+		Gp_role == GP_ROLE_EXECUTE &&
+		motionstate->mstype == MOTIONSTATE_SEND &&
+		node->motionType == MOTIONTYPE_HASH &&
+		node->numHashSegments > 1 &&
+		!(eflags & EXEC_FLAG_REWIND) &&
+		node->hashExprs != NIL)
+	{
+		Plan	   *child = outerPlan(node);
+		Plan	   *agg_chain_top = child;
+		bool		types_ok = true;
+		int			num_hash_cols = list_length(node->hashExprs);
+
+		/* Type / reduce-alg gate (rejects legacy hash function Oids). */
+		for (int i = 0; i < num_hash_cols && types_ok; ++i)
+		{
+			if (!vec_motion_direct_send_supports_hashfunc(node->hashFuncs[i]))
+				types_ok = false;
+		}
+
+		while (is_trivial_passthrough(child))
+			child = outerPlan(child);
+
+		if (types_ok && child != NULL && IsA(child, Agg))
+		{
+			Agg		   *agg = (Agg *) child;
+			int		   *idxs = (int *) palloc(sizeof(int) * num_hash_cols);
+
+			if (direct_send_resolve_hash_cols(node, agg_chain_top, agg, idxs))
+			{
+				/*
+				 * Generate the hidden-column name with a random suffix and
+				 * check it against the Agg's input/output schemas. On the
+				 * astronomically rare event that 8 random suffixes all
+				 * collide, skip registration and fall back to slow path.
+				 */
+				char *colname = sonic_make_target_segment_colname(agg);
+				if (colname != NULL)
+				{
+					VecMotionDirectSendHint hint;
+
+					hint.numHashSegments         = node->numHashSegments;
+					hint.hashExprs               = node->hashExprs;
+					hint.hashFuncs               = node->hashFuncs;
+					hint.numHashCols             = num_hash_cols;
+					hint.reduce_alg              = REDUCE_JUMP_HASH;
+					hint.hash_grpcol_idx         = idxs;
+					hint.target_segment_col_name = colname;
+					vec_motion_direct_send_set(estate, (Plan *) agg, &hint);
+
+					/*
+					 * Cache the colname on this Motion's VecMotionState so
+					 * the sender-side fast-path (hashAndSendVec_vechash) can
+					 * use it without re-looking up the hint. Reuse the same
+					 * deep-copied storage by referencing the registered
+					 * entry, which lives in es_query_cxt.
+					 */
+					{
+						const VecMotionDirectSendHint *registered =
+							vec_motion_direct_send_lookup((Plan *) agg);
+						if (registered != NULL)
+							vmotionstate->sonic_seg_col_name =
+								registered->target_segment_col_name;
+					}
+					pfree(colname);
+				}
+				else
+				{
+					ereport(DEBUG1, (errmsg(
+						"sonic motion direct-send: could not generate a "
+						"non-colliding hidden column name after 8 attempts; "
+						"falling back to slow path")));
+				}
+			}
+			/* idxs is deep-copied inside _set() (or unused on reject);
+			 * either way we can free our local. */
+			pfree(idxs);
+		}
+	}
 
 	/*
 	 * Initializes child nodes. If alien elimination is on, we skip children

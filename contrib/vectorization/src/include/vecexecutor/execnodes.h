@@ -133,6 +133,27 @@ typedef struct VecMotionState
 	void *hash_projector;
 	List *hashExprsGandivaNodes;
 	GArrowUInt32Array* random_const_array_template;
+
+	/*
+	 * Sonic Motion Direct-Send fast-path: cached column index of the
+	 * hidden target-segment column in the upstream batch. -1 means "not
+	 * yet searched" (lazy init); -2 means "absent, run slow path".
+	 *
+	 * Two-layer invalidation in hashAndSendVec_vechash:
+	 *   1. Column count mismatch (sonic_seg_col_n_cols) -> rescan.
+	 *   2. If a positive idx is cached, verify the column at that idx
+	 *      still has sonic_seg_col_name; otherwise rescan. Catches
+	 *      same-width reorderings (multi-input fan-in, rescan-with-
+	 *      replan) that would slip past the column-count gate.
+	 *
+	 * sonic_seg_col_name is set at ExecInit time from the registered
+	 * VecMotionDirectSendHint and remains stable for the plan's lifetime.
+	 * NULL means no hint was registered for this Motion (slow path
+	 * unconditionally).
+	 */
+	int sonic_seg_col_idx;
+	int sonic_seg_col_n_cols;
+	const char *sonic_seg_col_name;
 } VecMotionState;
 
 
