@@ -17,6 +17,7 @@
 #include "catalog/pg_operator_d.h"
 #include "catalog/pg_tablespace_d.h"
 #include "cdb/cdbvars.h"
+#include "common/int.h"
 #include "nodes/nodeFuncs.h"
 #include "parser/parsetree.h"
 #include "nodes/nodes.h"
@@ -3646,6 +3647,84 @@ build_aggregatation_options(GList *aggregations, PlanBuildContext *pcontext)
 {
 	g_autoptr(GArrowAggregateNodeOptions) options = NULL;
 	g_autoptr(GError) error = NULL;
+	int64 limit_count = 0;
+
+	/*
+	 * Detect Limit+HashAgg fusion: the top-level plan is Limit whose
+	 * direct child is our HashAgg (no Sort in between).  Read offset+count
+	 * from the Limit Plan node and pass to Arrow so GroupByNode only tracks
+	 * the first N groups.
+	 *
+	 * We walk the Plan tree (not PlanState) because PlanState lacks a parent
+	 * pointer, and the Agg and Limit are built in separate BuildVecPlan calls.
+	 */
+	if (enable_limit_hashagg &&
+		pcontext->aggstrategy == AGG_HASHED &&
+		pcontext->planstate->state &&
+		pcontext->planstate->state->es_plannedstmt)
+	{
+		Plan *topPlan = pcontext->planstate->state->es_plannedstmt->planTree;
+		if (topPlan &&
+			IsA(topPlan, Limit) &&
+			outerPlan(topPlan) == pcontext->planstate->plan)
+		{
+			Limit *limitPlan = (Limit *)topPlan;
+			/*
+			 * Extract constant limit/offset from the Plan node.
+			 * limitCount/limitOffset are expression nodes; for constant
+			 * values they are Const nodes.
+			 */
+			int64 lim_offset = 0;
+			int64 lim_count = 0;
+			bool valid = true;
+
+			if (limitPlan->limitCount && IsA(limitPlan->limitCount, Const))
+			{
+				Const *c = (Const *)limitPlan->limitCount;
+				if (!c->constisnull)
+					lim_count = DatumGetInt64(c->constvalue);
+				else
+					valid = false;
+			}
+			else if (limitPlan->limitCount)
+			{
+				/* Non-constant LIMIT expression — skip optimization */
+				valid = false;
+			}
+			else
+			{
+				/* No LIMIT COUNT (LIMIT ALL) — skip */
+				valid = false;
+			}
+
+			if (valid && limitPlan->limitOffset)
+			{
+				if (IsA(limitPlan->limitOffset, Const))
+				{
+					Const *c = (Const *)limitPlan->limitOffset;
+					if (!c->constisnull)
+						lim_offset = DatumGetInt64(c->constvalue);
+				}
+				else
+				{
+					/* Non-constant OFFSET expression — skip optimization */
+					valid = false;
+				}
+			}
+
+			if (valid && lim_count > 0)
+			{
+				int64 total;
+				if (!pg_add_s64_overflow(lim_offset, lim_count, &total) &&
+					total > 0 && total <= 1000)
+				{
+					limit_count = total;
+					elog(DEBUG1, "LimitAgg: fusing Limit(%ld)+HashAgg, limit_count=%ld",
+						 (long)lim_count, (long)limit_count);
+				}
+			}
+		}
+	}
 
 	if (IsA(pcontext->planstate, WindowAggState))
 	{
@@ -3731,6 +3810,7 @@ build_aggregatation_options(GList *aggregations, PlanBuildContext *pcontext)
 		options = garrow_aggregate_node_options_new(aggregations,
 													pcontext->keys,
 													pcontext->nkey,
+													limit_count,
 													&error);
 	if (error)
 		elog(ERROR, "Failed to create agg node options, cause: %s", error->message);

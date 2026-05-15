@@ -51,5 +51,7 @@ extern char *sort_external_temp_file_base;
 extern int topk_bound_threshold;
 /* topk runtime filter: push threshold to PAX for group-level skip */
 extern bool enable_topk_runtime_filter;
+/* limit+hashagg fusion: only track first N groups when GROUP BY feeds LIMIT */
+extern bool enable_limit_hashagg;
 
 #endif   /* GUC_VEC_H */

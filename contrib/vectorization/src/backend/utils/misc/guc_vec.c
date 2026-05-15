@@ -47,3 +47,4 @@ int hashjoin_spill_memory_mb = 512;
 int winagg_spill_memory_mb = 512;
 int topk_bound_threshold = 2000;
 bool enable_topk_runtime_filter = true;
+bool enable_limit_hashagg = true;

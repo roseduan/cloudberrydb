@@ -281,6 +281,17 @@ _PG_init(void)
                              GUC_GPDB_NEED_SYNC,
                              NULL, NULL, NULL);
 
+    DefineCustomBoolVariable("vector.enable_limit_hashagg",
+                             "Enable Limit+HashAgg fusion: when GROUP BY "
+                             "feeds directly into LIMIT without ORDER BY, "
+                             "only track the first N groups.",
+                             NULL,
+                             &enable_limit_hashagg,
+                             true,
+                             PGC_USERSET,
+                             GUC_GPDB_NEED_SYNC,
+                             NULL, NULL, NULL);
+
     exec_simple_query_hook_prev = exec_simple_query_hook;
     exec_simple_query_hook = exec_simple_query_vec;
 
