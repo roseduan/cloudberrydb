@@ -167,32 +167,9 @@ GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA iceberg_toolkit TO public;
 -- ============================================================================
 
 -------------------------------------
--- Table AM interface functions
--------------------------------------
-CREATE FUNCTION pg_iceberg_tableam_handler(internal)
-RETURNS table_am_handler
-AS 'MODULE_PATHNAME'
-LANGUAGE C STRICT;
-
-CREATE ACCESS METHOD iceberg TYPE TABLE
-HANDLER pg_iceberg_tableam_handler;
-
--- Force the OID of the 'iceberg' access method to 8320 to match ICEBERG_AM_OID in rel.h
-CREATE FUNCTION pg_iceberg_set_am_oid_local(oid)
-RETURNS void
-AS 'MODULE_PATHNAME', 'pg_iceberg_set_am_oid_local'
-LANGUAGE C STRICT;
-
-CREATE FUNCTION pg_iceberg_fix_oid(oid)
-RETURNS void
-AS 'MODULE_PATHNAME', 'pg_iceberg_fix_oid'
-LANGUAGE C STRICT;
-
-SELECT pg_iceberg_fix_oid(8320);
-
--- Clean up
-DROP FUNCTION pg_iceberg_fix_oid(oid);
-DROP FUNCTION pg_iceberg_set_am_oid_local(oid);
+-- Note: the 'iceberg' access method (OID 8320) and its handler
+-- pg_iceberg_tableam_handler (OID 8321) are preinstalled at initdb time
+-- via iceberg-cdbinit--1.0.sql, so no CREATE ACCESS METHOD here.
 
 -- Internal helper used by C code to dispatch location option upsert to QEs
 CREATE FUNCTION pg_catalog.pg_iceberg_upsert_location_option_local(oid, text)

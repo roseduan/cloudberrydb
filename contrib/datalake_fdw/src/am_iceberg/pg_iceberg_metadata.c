@@ -39,10 +39,6 @@
 #include "utils/syscache.h"
 #include "utils/rel.h"
 #include "utils/lsyscache.h"
-#include "lib/stringinfo.h"
-#include "cdb/cdbdisp_query.h"
-#include "cdb/cdbvars.h"
-
 #include "include/pg_iceberg_metadata.h"
 
 /*
@@ -577,97 +573,4 @@ pg_iceberg_free_metadata_info(IcebergMetadataInfo *info)
 		pfree(info->previous_metadata_location);
 
 	pfree(info);
-}
-
-PG_FUNCTION_INFO_V1(pg_iceberg_set_am_oid_local);
-Datum
-pg_iceberg_set_am_oid_local(PG_FUNCTION_ARGS)
-{
-	Relation    rel;
-	ScanKeyData key[1];
-	SysScanDesc scan;
-	HeapTuple   tuple;
-	HeapTuple   newtuple;
-	Datum       values[Natts_pg_am];
-	bool        nulls[Natts_pg_am];
-	bool        replaces[Natts_pg_am];
-	Oid         iceberg_am_oid;
-	Form_pg_am  amform;
-
-	if (!superuser())
-		ereport(ERROR, (errcode(ERRCODE_INSUFFICIENT_PRIVILEGE),
-						errmsg("must be superuser")));
-
-	if (PG_ARGISNULL(0))
-		ereport(ERROR, (errcode(ERRCODE_NULL_VALUE_NOT_ALLOWED),
-						errmsg("target OID cannot be NULL")));
-
-	iceberg_am_oid = PG_GETARG_OID(0);
-
-	/* Open pg_am */
-	rel = table_open(AccessMethodRelationId, RowExclusiveLock);
-
-	/* Search for 'iceberg' amname */
-	ScanKeyInit(&key[0],
-				Anum_pg_am_amname,
-				BTEqualStrategyNumber, F_NAMEEQ,
-				CStringGetDatum("iceberg"));
-
-	scan = systable_beginscan(rel, AmNameIndexId, true, NULL, 1, key);
-	tuple = systable_getnext(scan);
-
-	if (HeapTupleIsValid(tuple))
-	{
-		amform = (Form_pg_am) GETSTRUCT(tuple);
-		if (amform->oid != iceberg_am_oid)
-		{
-			/* Prepare to update */
-			MemSet(values, 0, sizeof(values));
-			MemSet(nulls, false, sizeof(nulls));
-			MemSet(replaces, false, sizeof(replaces));
-
-			/* Update OID column */
-			values[Anum_pg_am_oid - 1] = ObjectIdGetDatum(iceberg_am_oid);
-			replaces[Anum_pg_am_oid - 1] = true;
-
-			newtuple = heap_modify_tuple(tuple, RelationGetDescr(rel), values, nulls, replaces);
-			CatalogTupleUpdate(rel, &tuple->t_self, newtuple);
-			heap_freetuple(newtuple);
-		}
-	}
-
-	systable_endscan(scan);
-	table_close(rel, RowExclusiveLock);
-
-	PG_RETURN_VOID();
-}
-
-PG_FUNCTION_INFO_V1(pg_iceberg_fix_oid);
-Datum
-pg_iceberg_fix_oid(PG_FUNCTION_ARGS)
-{
-	StringInfoData sql_command;
-	Oid target_oid;
-
-	if (Gp_role != GP_ROLE_DISPATCH)
-		PG_RETURN_VOID();
-
-	if (PG_ARGISNULL(0))
-		ereport(ERROR, (errcode(ERRCODE_NULL_VALUE_NOT_ALLOWED),
-						errmsg("target OID cannot be NULL")));
-
-	target_oid = PG_GETARG_OID(0);
-
-	/* 1. Dispatch to all segments */
-	initStringInfo(&sql_command);
-	appendStringInfo(&sql_command, "SELECT pg_iceberg_set_am_oid_local(%u)", target_oid);
-
-	CdbDispatchCommand(sql_command.data, DF_CANCEL_ON_ERROR, NULL);
-
-	pfree(sql_command.data);
-
-	/* 2. Execute locally on Coordinator */
-	DirectFunctionCall1(pg_iceberg_set_am_oid_local, target_oid);
-
-	PG_RETURN_VOID();
 }

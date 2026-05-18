@@ -73,8 +73,4 @@ extern bool pg_iceberg_update_metadata_cas(Oid relid,
 /* Function to delete iceberg metadata */
 extern void pg_iceberg_remove_metadata(Oid relid);
 
-/* SQL-callable helper to set AM OID (from metadata.c) */
-extern Datum pg_iceberg_set_am_oid_local(PG_FUNCTION_ARGS);
-extern Datum pg_iceberg_fix_oid(PG_FUNCTION_ARGS);
-
 #endif /* __PG_ICEBERG_METADATA_H__ */

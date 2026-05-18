@@ -205,3 +205,16 @@ top_builddir = ../..
 include $(top_builddir)/src/Makefile.global
 include $(top_srcdir)/contrib/contrib-global.mk
 endif
+
+# Install the iceberg AM cdb_init.d script so initdb registers
+# pg_iceberg_tableam_handler (OID 8321) and the iceberg access method
+# (OID 8320) in template1. See iceberg-cdbinit--1.0.sql.
+.PHONY: install-data uninstall-data
+install-data:
+	$(INSTALL_DATA) $(srcdir)/iceberg-cdbinit--1.0.sql '$(DESTDIR)$(datadir)/cdb_init.d/iceberg-cdbinit--1.0.sql'
+
+uninstall-data:
+	$(RM) '$(DESTDIR)$(datadir)/cdb_init.d/iceberg-cdbinit--1.0.sql'
+
+install: install-data
+uninstall: uninstall-data
