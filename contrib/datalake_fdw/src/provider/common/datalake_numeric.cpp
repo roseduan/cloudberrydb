@@ -59,18 +59,38 @@ void numeric_to_FLBA(Numeric num, char *res)
 		val *= POWER_TABLE.at(scale);
 	}
 	int frac_offset = weight >= 0 ? 0 : (abs(weight) - 1) * 4;
-	// fractional part
-	while (frac_offset < scale)
+
+	/*
+	 * Fractional part: accumulate full NBASE-aligned digits first, then a
+	 * sub-NBASE tail when scale is not a multiple of DEC_DIGITS.
+	 *
+	 * The previous one-pass form "multiply by NBASE, then divide back when we
+	 * overshoot scale" silently corrupted numeric(p,s) values whose scale is
+	 * in {37, 38} (issue #325): after nine full iterations frac_val is
+	 * already ~10^36, multiplying by NBASE=10000 before dividing back blows
+	 * the intermediate up to ~10^40, past signed __int128 max (~1.7e38).  The
+	 * subsequent divide could not unwind the wrap-around.  Splitting the tail
+	 * into a partial multiply keeps every intermediate within int128 range
+	 * for any scale supported by PG numeric.
+	 */
+	static constexpr int small_pow10[DEC_DIGITS + 1] = {1, 10, 100, 1000, NBASE};
+	while (frac_offset + DEC_DIGITS <= scale)
 	{
 		frac_val = frac_val * NBASE;
-		frac_offset += DEC_DIGITS;
 		if (i < ndigits)
 		{
 			frac_val += digits[i];
 		}
-		if (frac_offset > scale)
+		frac_offset += DEC_DIGITS;
+		i++;
+	}
+	if (frac_offset < scale)
+	{
+		int partial = scale - frac_offset;
+		frac_val = frac_val * small_pow10[partial];
+		if (i < ndigits)
 		{
-			frac_val = frac_val / POWER_TABLE[DEC_DIGITS - scale % DEC_DIGITS];
+			frac_val += digits[i] / small_pow10[DEC_DIGITS - partial];
 		}
 		i++;
 	}
