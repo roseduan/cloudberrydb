@@ -224,8 +224,15 @@ std::shared_ptr<parquet::schema::GroupNode> parquetFileWriter::setupSchema()
                 break;
             }
             case BPCHAROID: {
+                /*
+                 * CHAR(N) is mapped to Iceberg string (= Parquet variable-length
+                 * BYTE_ARRAY with UTF8 logical type), aligning with VARCHAR /
+                 * TEXT and matching Snowflake / Spark / Trino / PrestoDB
+                 * semantics.  PG CHAR trailing-space padding is not preserved
+                 * on disk.
+                 */
                 fields.push_back(::parquet::schema::PrimitiveNode::Make(columnName.c_str(),
-                    ::parquet::Repetition::OPTIONAL, ::parquet::Type::FIXED_LEN_BYTE_ARRAY, ::parquet::ConvertedType::NONE, tupdesc->attrs[i].atttypmod - VARHDRSZ, -1, -1, i + 1));
+                    ::parquet::Repetition::OPTIONAL, ::parquet::Type::BYTE_ARRAY, ::parquet::ConvertedType::UTF8, -1, -1, -1, i + 1));
                 break;
             }
             case VARCHAROID: {
@@ -610,17 +617,47 @@ void parquetFileWriter::writeToField(int index, const void* data)
                 break;
             }
             case CHAROID:
-            case BPCHAROID:
             {
                 StringVectorBatch* val = reinterpret_cast<StringVectorBatch*>(batchField[i]);
                 if (!isNULL)
                 {
                     char *data = DatumGetCString(DirectFunctionCall1(bpcharout, tts_values));
                     int64_t textlen = static_cast<int64_t> (strlen(data));
-                    int64_t datalen = (tupdesc->attrs[i].atttypid == CHAROID) ? 1 : (tupdesc->attrs[i].atttypmod - VARHDRSZ);
+                    int64_t datalen = 1;
                     resizeDataBuff(index, dataBuffer, datalen, dataBufferOffset);
                     memset(dataBuffer.data() + dataBufferOffset, ' ', datalen);
                     memcpy(dataBuffer.data() + dataBufferOffset, data, textlen);
+                    val->buffer[index] = dataBuffer.data() + dataBufferOffset;
+                    val->length[index] = datalen;
+                    val->notNull[index] = true;
+                    val->num = index;
+                    dataBufferOffset += datalen;
+                    if (data != NULL)
+                    {
+                        pfree(data);
+                    }
+                    estimated_bytes += datalen;
+                }
+                else
+                {
+                    val->notNull[index] = false;
+                }
+                break;
+            }
+            case BPCHAROID:
+            {
+                /*
+                 * Write CHAR(N) as variable-length UTF-8 (Iceberg string
+                 * semantics).  bpcharout already strips trailing spaces, so we
+                 * write only the significant prefix and do NOT pad to N.
+                 */
+                StringVectorBatch* val = reinterpret_cast<StringVectorBatch*>(batchField[i]);
+                if (!isNULL)
+                {
+                    char *data = DatumGetCString(DirectFunctionCall1(bpcharout, tts_values));
+                    int64_t datalen = static_cast<int64_t> (strlen(data));
+                    resizeDataBuff(index, dataBuffer, datalen, dataBufferOffset);
+                    memcpy(dataBuffer.data() + dataBufferOffset, data, datalen);
                     val->buffer[index] = dataBuffer.data() + dataBufferOffset;
                     val->length[index] = datalen;
                     val->notNull[index] = true;
@@ -937,8 +974,7 @@ void parquetFileWriter::writeToBatch(int rows)
                 writer->WriteBatchSpaced(rows, definition_level, nullptr, valid_bits.data(), 0, fixByteArray);
                 break;
             }
-            case CHAROID:
-            case BPCHAROID: {
+            case CHAROID: {
                 StringVectorBatch* val = reinterpret_cast<StringVectorBatch*>(batchField[i]);
                 parquet::FixedLenByteArrayWriter* writer = static_cast<parquet::FixedLenByteArrayWriter*>(rg_writer->column(i));
                 std::vector<uint8_t> valid_bits(parquet_arrow::bit_util::BytesForBits(BATCH_WRITE_SIZE), 255);
@@ -959,6 +995,7 @@ void parquetFileWriter::writeToBatch(int rows)
                 writer->WriteBatchSpaced(rows, definition_level, nullptr, valid_bits.data(), 0, fixByteArray);
                 break;
             }
+            case BPCHAROID:
             case VARCHAROID:
             case BYTEAOID:
             case CSTRINGOID:

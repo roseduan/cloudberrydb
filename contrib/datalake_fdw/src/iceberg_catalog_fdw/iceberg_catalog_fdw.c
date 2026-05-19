@@ -1132,6 +1132,13 @@ static const char* mapPostgresToIcebergType(Oid pgType, int32 typemod)
         }
         case TEXTOID:
         case VARCHAROID:
+        case BPCHAROID:
+            /*
+             * Iceberg has no fixed-length character type; CHAR(N) is mapped to
+             * string, matching Snowflake / Spark / Trino / PrestoDB.  Trailing
+             * space and right-padding semantics of PG CHAR(N) are NOT preserved
+             * on the Iceberg side -- see contrib/datalake_fdw/README.md.
+             */
             return DATALAKEFDW_ICEBERG_TYPE_STRING;
         case DATEOID:
             return DATALAKEFDW_ICEBERG_TYPE_DATE;

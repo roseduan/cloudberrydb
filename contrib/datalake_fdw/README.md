@@ -337,6 +337,20 @@ server sync_server
 OPTIONS (filePath 'icebergdb.iceberg_table1', catalog_type 'hive', server_name 'hive-cluster-1', hdfs_cluster_name 'hdfs-cluster-1', table_identifier 'icebergdb.iceberg_table1', format 'iceberg');
 ```
 
+##### CHAR(N) column behaviour
+
+The Iceberg specification has no fixed-length character type; the closest
+match is `string` (variable-length UTF-8).  `CHAR(N)` columns in
+ICEBERG TABLE are therefore mapped to the Iceberg `string` type, matching
+the behaviour of Snowflake, Spark, Trino and PrestoDB.
+
+A consequence is that PostgreSQL's standard CHAR right-padding and
+trailing-space semantics are **not** preserved across a write/read cycle:
+values written through `CHAR(N)` are stored without padding and read back
+without padding, effectively behaving like `VARCHAR(N)`.  Use heap tables
+or apply `RPAD()` at the application layer when strict CHAR(N) semantics
+are required.
+
 #### hudi
 ```
 ------ create hudi table ------

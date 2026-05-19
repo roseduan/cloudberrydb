@@ -86,6 +86,27 @@ SELECT * FROM bt_str ORDER BY id;
 DROP TABLE bt_str;
 
 -- ============================================================
+-- Test 6b: char(N) maps to Iceberg `string`
+-- Verifies that CHAR(N) columns no longer emit
+--   WARNING: Unsupported PostgreSQL type OID: 1042, using string
+-- and follow Snowflake / Spark / Trino / PrestoDB semantics:
+-- trailing-space and right-padding are NOT preserved across
+-- write/read; CHAR(N) effectively behaves like VARCHAR(N).
+-- ============================================================
+SELECT test_log('Test 6b: char(N) maps to Iceberg string');
+
+CREATE ICEBERG TABLE bt_char (id bigint, val_c char(5));
+INSERT INTO bt_char VALUES (1, 'A');
+INSERT INTO bt_char VALUES (2, 'A   ');
+INSERT INTO bt_char VALUES (3, '     ');
+INSERT INTO bt_char VALUES (4, 'ABCDE');
+SELECT id, '[' || val_c || ']' AS bracketed,
+       length(val_c) AS chars,
+       octet_length(val_c) AS bytes
+FROM bt_char ORDER BY id;
+DROP TABLE bt_char;
+
+-- ============================================================
 -- Test 7: All-NULL row
 -- ============================================================
 SELECT test_log('Test 7: All-NULL row insert and query');
