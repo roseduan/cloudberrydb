@@ -677,7 +677,6 @@ void parquetFileWriter::writeToField(int index, const void* data)
                 break;
             }
             case VARCHAROID:
-            case BYTEAOID:
             case TEXTOID: {
                 StringVectorBatch* val = reinterpret_cast<StringVectorBatch*>(batchField[i]);
                 if (!isNULL)
@@ -696,6 +695,36 @@ void parquetFileWriter::writeToField(int index, const void* data)
                     {
                         pfree(data);
                     }
+                    estimated_bytes += datalen;
+                }
+                else
+                {
+                    val->notNull[index] = false;
+                }
+                break;
+            }
+            case BYTEAOID: {
+                /*
+                 * bytea must be written as raw bytes, including embedded NULs.
+                 * The earlier shared path with text/varchar called byteaout via
+                 * textout and then strlen() on the result, which truncated at
+                 * the first 0x00 byte (issue #328).  Detoast and copy
+                 * length-prefixed bytes directly out of the varlena.
+                 */
+                StringVectorBatch* val = reinterpret_cast<StringVectorBatch*>(batchField[i]);
+                if (!isNULL)
+                {
+                    bytea   *b      = DatumGetByteaPP(tts_values);
+                    char    *data   = VARDATA_ANY(b);
+                    int64_t  datalen = (int64_t) VARSIZE_ANY_EXHDR(b);
+                    resizeDataBuff(index, dataBuffer, datalen, dataBufferOffset);
+                    memcpy(dataBuffer.data() + dataBufferOffset, data, datalen);
+
+                    val->buffer[index] = dataBuffer.data() + dataBufferOffset;
+                    val->length[index] = datalen;
+                    val->notNull[index] = true;
+                    val->num = index;
+                    dataBufferOffset += datalen;
                     estimated_bytes += datalen;
                 }
                 else
