@@ -1655,51 +1655,6 @@ public class IcebergRestController {
         }
     }
 
-    private void processVolumePolarisS3FileIO(Configuration configuration, Map<String, String> properties) {
-        String implClass = properties.getOrDefault(IcebergConfigConstants.FILE_IO_CONFIG_IMPL_CLASS, IcebergConfigConstants.HADOOP_FILE_IO_CLASS_NAME);
-        configuration.set(IcebergConfigConstants.FILE_IO_CONFIG_IMPL_CLASS, implClass);
-
-        // Get S3 credentials from volume config
-        String accessKeyConfigKey = IcebergConfigConstants.ICEBERG_VOLUME_CONFIG.ICEBERG_VOLUME_CONFIG_STRING + "." + IcebergConfigConstants.ICEBERG_VOLUME_CONFIG.ACCESS_KEY_ID;
-        String secretKeyConfigKey = IcebergConfigConstants.ICEBERG_VOLUME_CONFIG.ICEBERG_VOLUME_CONFIG_STRING + "." + IcebergConfigConstants.ICEBERG_VOLUME_CONFIG.SECRET_ACCESS_KEY;
-        String endpointConfigKey = IcebergConfigConstants.ICEBERG_VOLUME_CONFIG.ICEBERG_VOLUME_CONFIG_STRING + "." + IcebergConfigConstants.ICEBERG_VOLUME_CONFIG.VOLUME_ENDPOINT;
-        String pathStyleConfigKey = IcebergConfigConstants.ICEBERG_VOLUME_CONFIG.ICEBERG_VOLUME_CONFIG_STRING + "." + IcebergConfigConstants.ICEBERG_VOLUME_CONFIG.PATH_STYLE_ACCESS;
-
-        String accessKey = properties.get(accessKeyConfigKey);
-        String secretKey = properties.get(secretKeyConfigKey);
-        String endpoint = properties.get(endpointConfigKey);
-        Boolean pathStyleAccess = Boolean.parseBoolean(properties.getOrDefault(pathStyleConfigKey, "true"));
-
-        // Configure for S3FileIO
-        String regionConfigKey = IcebergConfigConstants.ICEBERG_VOLUME_CONFIG.ICEBERG_VOLUME_CONFIG_STRING + "." + IcebergConfigConstants.ICEBERG_VOLUME_CONFIG.VOLUME_REGION;
-        String region = properties.getOrDefault(regionConfigKey, IcebergConfigConstants.DEFAULT_S3_REGION_VALUE);
-
-        if (accessKey != null) configuration.set(IcebergConfigConstants.S3FILEIO_ACCESS_KEY_ID, accessKey);
-        if (secretKey != null) configuration.set(IcebergConfigConstants.S3FILEIO_SECRET_ACCESS_KEY, secretKey);
-        if (endpoint != null) configuration.set(IcebergConfigConstants.S3FILEIO_ENDPOINT, endpoint);
-        if (region != null) configuration.set(IcebergConfigConstants.S3FILEIO_REGION, region);
-        configuration.set(IcebergConfigConstants.S3FILEIO_PATH_STYLE_ACCESS, pathStyleAccess.toString());
-
-        // Set warehouse location from volume config
-        String bucketConfigKey = IcebergConfigConstants.ICEBERG_VOLUME_CONFIG.ICEBERG_VOLUME_CONFIG_STRING + "." + IcebergConfigConstants.ICEBERG_VOLUME_CONFIG.BUCKET_NAME;
-        String basePathConfigKey = IcebergConfigConstants.ICEBERG_VOLUME_CONFIG.ICEBERG_VOLUME_CONFIG_STRING + "." + IcebergConfigConstants.ICEBERG_VOLUME_CONFIG.BASE_PATH;
-        String bucketName = properties.get(bucketConfigKey);
-        String basePath = properties.getOrDefault(basePathConfigKey, "/hive");
-        if (bucketName != null) {
-            String warehouseLocation = String.format("s3a://%s%s", bucketName, basePath);
-            configuration.set("hive.metastore.warehouse.dir", warehouseLocation);
-        }
-
-        // Pass through all FileIOConfig.properties to configuration
-        String prefix = IcebergConfigConstants.FILE_IO_CONFIG_PROPERTIES_PREFIX + ".";
-        for (Map.Entry<String, String> entry : properties.entrySet()) {
-            if (entry.getKey().startsWith(prefix)) {
-                String configKey = entry.getKey().substring(prefix.length());
-                configuration.set(configKey, entry.getValue());
-            }
-        }
-    }
-
     private void processVolumeS3Resource(Configuration configuration, Map<String, String> properties) {
         String file_io_config = properties.getOrDefault(IcebergConfigConstants.FILE_IO_CONFIG_IMPL_CLASS, "");
         if (file_io_config.equals(IcebergConfigConstants.GOPHER_FILE_IO)) {
@@ -1886,7 +1841,9 @@ public class IcebergRestController {
         if (!scope.isEmpty()) {
             configuration.set(IcebergConfigConstants.ICEBERG_CATALOG_CONFIG.SCOPE, scope);
         }
-        processVolumePolarisS3FileIO(configuration, properties);
+        // Volume credentials reach IcebergPolarisCatalog through
+        // gopherProperties (translated from SQL options by PropertiesMapping);
+        // Polaris always uses GopherFileIO, so no S3A / S3FileIO config here.
     }
 
     /**

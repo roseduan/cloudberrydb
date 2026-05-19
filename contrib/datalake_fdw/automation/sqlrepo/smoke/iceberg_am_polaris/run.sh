@@ -41,6 +41,14 @@ docker exec "$LAKEHOUSE" bash -lc '
 docker exec -u gpadmin "$CONTAINER" bash -c "
   source /workspace/dist/database/cloudberry-env.sh
   export PGPORT=$PGPORT
+  # Hermetic-env guard: the polaris smoke must pass on a clean environment.
+  # AWS_* env vars masking a regression in the Polaris -> Gopher routing is
+  # exactly what GitLab #318 was about.
+  if env | grep -q '^AWS_'; then
+      echo 'FAIL: AWS_* env vars must be unset for hermetic test' >&2
+      env | grep '^AWS_' >&2
+      exit 1
+  fi
   psql -d postgres -v ON_ERROR_STOP=1 <<SQL
     DROP DATABASE IF EXISTS $DB;
     CREATE DATABASE $DB;

@@ -102,7 +102,8 @@ public class IcebergCatalogWrapper {
                 return new IcebergPolarisCatalog(
                     context.getDataSource(),
                     icebergUtilities,
-                    context.getConfiguration());
+                    context.getConfiguration(),
+                    context.getGopherProperties());
             case "builtin":
                 return new IcebergBuildInCatalog(context.getPath(),
                     icebergUtilities,

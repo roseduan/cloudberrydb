@@ -44,7 +44,6 @@ import org.apache.iceberg.rest.RESTCatalog;
 import org.apache.iceberg.rest.auth.OAuth2Properties;
 import org.apache.iceberg.exceptions.NoSuchTableException;
 import com.google.common.base.Preconditions;
-import com.google.common.collect.ImmutableMap;
 import cloud.elastic.dlagent.plugins.hudi.utilities.FilePathUtils;
 import org.apache.iceberg.CatalogUtil;
 
@@ -62,7 +61,8 @@ public class IcebergPolarisCatalog implements IcebergCatalog {
     private IcebergUtilities icebergUtilities;
     private Configuration configuration;
 
-    public IcebergPolarisCatalog(String warehouse, IcebergUtilities icebergUtilities, Configuration configuration) {
+    public IcebergPolarisCatalog(String warehouse, IcebergUtilities icebergUtilities,
+                                 Configuration configuration, Map<String, String> gopherProperties) {
         this.icebergUtilities = icebergUtilities;
         this.configuration = configuration;
         this.restCatalog = new RESTCatalog();
@@ -75,14 +75,17 @@ public class IcebergPolarisCatalog implements IcebergCatalog {
         String realm = FilePathUtils.unescapeString(configuration.get("polaris_server_realm", "POLARIS"));
         String credential = clientId + ":" + clientSecret;
 
-        ImmutableMap.Builder<String, String> propertiesBuilder =
-            ImmutableMap.<String, String>builder()
-                .put(CatalogProperties.URI, polarisServerUrl)
-                .put(OAuth2Properties.CREDENTIAL, credential)
-                .put(OAuth2Properties.SCOPE, scope)
-                .put("header.Polaris-Realm", realm)
-                .put(CatalogProperties.WAREHOUSE_LOCATION, catalogName);
-        Map<String, String> props = propertiesBuilder.build();
+        // Polaris-specific REST keys are stamped last so an inbound gopher.*
+        // entry with the same name cannot override them.
+        Map<String, String> props = icebergUtilities.composeCatalogProperties(this.configuration);
+        if (gopherProperties != null) {
+            props.putAll(gopherProperties);
+        }
+        props.put(CatalogProperties.URI, polarisServerUrl);
+        props.put(OAuth2Properties.CREDENTIAL, credential);
+        props.put(OAuth2Properties.SCOPE, scope);
+        props.put("header.Polaris-Realm", realm);
+        props.put(CatalogProperties.WAREHOUSE_LOCATION, catalogName);
 
         LOG.info("Polaris catalog properties: {}", props);
 
