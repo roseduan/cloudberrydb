@@ -35,6 +35,8 @@ std::string logicalTypeBase::getColTypeName(unsigned int type)
 			return "interval";
 		case TIMESTAMPOID:
 			return "timestamp";
+		case TIMESTAMPTZOID:
+			return "timestamptz";
 		case NUMERICOID:
 			return "numeric<decimal>";
 		case CHAROID:
@@ -326,7 +328,7 @@ std::string ParquetLogicalType::getTypeMappingSupported()
 		" float4,float8       |  float,   double\n"
 		" interval            |  byteArray\n"
 		" time                |  byteArray\n"
-		" timestamp           |  int96, int64, int32\n"
+		" timestamp,timestamptz|  int96, int64, int32\n"
 		" numeric             |  int96\n"
 		" char(n),varchar(n)  |  byteArray,  fixlenbyteArray\n"
 		" bytea,text          |  byteArray,  fixlenbyteArray\n";

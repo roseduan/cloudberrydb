@@ -575,7 +575,8 @@ void parquetFileWriter::writeToField(int index, const void* data)
                 }
                 break;
             }
-            case TIMESTAMPOID: {
+            case TIMESTAMPOID:
+            case TIMESTAMPTZOID: {
                 columnBatch<int64_t> * val = reinterpret_cast<columnBatch<int64_t>*>(batchField[i]);
                 if (!isNULL)
                 {
@@ -923,11 +924,14 @@ void parquetFileWriter::writeToBatch(int rows)
                 writer->WriteBatchSpaced(rows, definition_level, nullptr, valid_bits.data(), 0, val->buffer);
                 break;
             }
-            case TIMESTAMPOID: {
+            case TIMESTAMPOID:
+            case TIMESTAMPTZOID: {
                 /*
-                 * Write timestamp as INT64 microseconds since Unix epoch.
-                 * PG stores timestamps as microseconds since PG epoch (2000-01-01).
-                 * Convert: unix_usecs = pg_timestamp + UNIX_TO_PG_EPOCH_USECS
+                 * Write timestamp/timestamptz as INT64 microseconds since Unix epoch.
+                 * PG stores both as microseconds since PG epoch (2000-01-01); for
+                 * timestamptz the stored value is already UTC, which matches the
+                 * Iceberg Timestamp(adjustedToUTC=true) logical type set up in the
+                 * Parquet schema.
                  */
                 static const int64_t UNIX_TO_PG_EPOCH_USECS =
                     ((int64_t)(POSTGRES_EPOCH_JDATE - UNIX_EPOCH_JDATE)) * SECS_PER_DAY * USECS_PER_SEC;
