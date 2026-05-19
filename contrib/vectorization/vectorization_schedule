@@ -27,6 +27,11 @@ test: tpch/tpch_drop
 #test: agg/vec_prepare
 #test: agg/vec_normal agg/vec_filter agg/vec_agg  agg/vec_agg_nulls  agg/vec_agg_empty agg/vec_regress_agg
 #test: agg/vec_end
+
+# Regression for rewrite_tl_keys (Const-only targetList collapsing to
+# ScalarAggregateNode with 0 kernels). Self-contained: creates and drops
+# its own tables, requires GPORCA.
+test: agg/vec_const_targetlist
 #
 #test: seqscan/heap_table_ss_1
 #test: seqscan/heap_table_ss_2

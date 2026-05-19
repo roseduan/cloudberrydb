@@ -3500,7 +3500,7 @@ rewrite_tl_keys(List *targetList, PlanBuildContext *pcontext)
 
 	j = 0;
 	keys = palloc(length * sizeof(gchar *));
-	foreach(l, targetList)  
+	foreach(l, targetList)
 	{
 		TargetEntry *tle = lfirst(l);
 		Node *node = (Node *)tle->expr;
@@ -3538,8 +3538,38 @@ rewrite_tl_keys(List *targetList, PlanBuildContext *pcontext)
 		if (!find)
 			keys[j++] = cur;
 	}
-	pcontext->keys = keys;	
-	pcontext->nkey = j;	
+
+	/*
+	 * If the loop above collected no key (j == 0), the targetList contained
+	 * no Var that referenced a grouping column -- e.g. a UNION ALL branch
+	 * that projects only a literal label like SELECT 'A' FROM t GROUP BY k
+	 * where GPORCA pruned k out of the output.
+	 *
+	 * Overwriting pcontext->keys/nkey with the empty result wipes the keys
+	 * established by build_agg_project_options. Downstream effect: the
+	 * synthetic plain_distinct branch in BuildAggregatation is gated on
+	 * (pcontext->nkey > 0) and gets skipped; the Arrow agg is then built
+	 * with empty keys + empty aggregations and routes to
+	 * ScalarAggregateNode (aggregate_node.cc:3027). Its Finish() hard-codes
+	 * ExecBatch{values={}, length=1}, so each segment emits a single
+	 * 1-row, 0-column batch regardless of the true group count, and the
+	 * partial agg above counts N segments instead of the real cardinality
+	 * (the reproducer SQL in agg/vec_const_targetlist returned A=3, B=3
+	 * instead of A=100, B=200 on a 3-segment cluster).
+	 *
+	 * Keep the original keys in that case. Guarding on j (the loop's
+	 * actual output) rather than on a pre-loop "does targetList contain
+	 * Var" probe keeps the check valid if future changes to the loop add
+	 * further filtering of Var entries.
+	 */
+	if (j == 0)
+	{
+		pfree(keys);
+		return;
+	}
+
+	pcontext->keys = keys;
+	pcontext->nkey = j;
 }
 
 
