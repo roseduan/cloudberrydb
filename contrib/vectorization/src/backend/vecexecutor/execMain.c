@@ -42,6 +42,28 @@
 #include "miscadmin.h"
 #include "pgstat.h"
 
+#include <dlfcn.h>
+
+/* Resolve PaxCanFastFilterC from pax.so at runtime via dlsym to avoid
+ * a hard link-time dependency on the pax_storage library. */
+typedef bool (*PaxCanFastFilterFn)(Node *qual, TupleDesc desc);
+static PaxCanFastFilterFn pax_can_fast_filter_fn = NULL;
+static bool pax_can_fast_filter_resolved = false;
+
+static bool
+PaxCanFastFilterC(Node *qual, TupleDesc desc)
+{
+	if (!pax_can_fast_filter_resolved)
+	{
+		pax_can_fast_filter_fn =
+			(PaxCanFastFilterFn) dlsym(RTLD_DEFAULT, "PaxCanFastFilterC");
+		pax_can_fast_filter_resolved = true;
+	}
+	if (pax_can_fast_filter_fn)
+		return pax_can_fast_filter_fn(qual, desc);
+	return false;  /* pax.so not loaded, treat as non-fast-filterable */
+}
+
 typedef struct VecAggInfo
 {
 	Aggref *aggref;
@@ -1907,6 +1929,37 @@ BuildVecPlan(PlanState *planstate, VecExecuteState *estate)
 			else
 				curnode = BuildSource(&pcontext);
 		}
+		/*
+		 * For parallel scan (PAX SeqScan), split quals into fast filter
+		 * quals (handled by PAX storage layer) and arrow quals (handled
+		 * by Arrow FilterNode). Only pass arrow quals to BuildProject.
+		 */
+		if (pcontext.parallel_scan && qualList && IsA(planstate, SeqScanState))
+		{
+			VecSeqScanState *scanstate = (VecSeqScanState *)planstate;
+			TupleDesc desc = RelationGetDescr(scanstate->base.ss.ss_currentRelation);
+			List *arrowQuals = NIL;
+			List *flatQuals = qualList;
+			ListCell *lc;
+
+			/* Unwrap single BoolExpr(AND) wrapper if present */
+			if (list_length(flatQuals) == 1 && IsA(linitial(flatQuals), BoolExpr))
+			{
+				BoolExpr *boolexpr = (BoolExpr *)linitial(flatQuals);
+				if (boolexpr->boolop == AND_EXPR)
+					flatQuals = boolexpr->args;
+			}
+
+			foreach(lc, flatQuals)
+			{
+				Node *qual = (Node *)lfirst(lc);
+				if (!PaxCanFastFilterC(qual, desc))
+					arrowQuals = lappend(arrowQuals, qual);
+			}
+
+			qualList = arrowQuals;
+		}
+
 		tmpnode = BuildProject(targetList, qualList, curnode, &pcontext);
 		garrow_store_ptr(curnode, tmpnode);
 		

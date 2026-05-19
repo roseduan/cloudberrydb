@@ -56,6 +56,7 @@ set(pax_storage_src
     storage/columns/pax_vec_numeric_column.cc
     storage/oper/pax_oper_udf.cc
     storage/filter/pax_filter.cc
+    storage/filter/pax_fast_filter.cc
     storage/filter/pax_row_filter.cc
     storage/filter/pax_sparse_filter.cc
     storage/filter/pax_sparse_pg_path.cc

@@ -164,6 +164,9 @@ class OrcReader : public MicroPartitionReader {
 
   std::unique_ptr<MicroPartitionReader::Group> ReadGroup(size_t group_index) override;
 
+  std::unique_ptr<MicroPartitionReader::Group> ReadGroup(
+      size_t group_index, const std::vector<bool> &proj_cols) override;
+
   std::unique_ptr<ColumnStatsProvider> GetGroupStatsInfo(
       size_t group_index) override;
 

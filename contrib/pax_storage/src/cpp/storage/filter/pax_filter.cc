@@ -36,12 +36,14 @@
 #include "comm/log.h"
 #include "comm/pax_memory.h"
 #include "comm/paxc_wrappers.h"
+#include "storage/filter/pax_fast_filter.h"
 #include "storage/filter/pax_row_filter.h"
 #include "storage/filter/pax_sparse_filter.h"
 
 namespace pax {
 
-PaxFilter::PaxFilter() : sparse_filter_(nullptr), row_filter_(nullptr) {}
+PaxFilter::PaxFilter()
+    : sparse_filter_(nullptr), row_filter_(nullptr), fast_filter_(nullptr) {}
 
 void PaxFilter::InitSparseFilter(Relation relation, List *quals,
                                  ScanKey key, int nkeys,
@@ -131,7 +133,18 @@ void PaxFilter::InitRowFilter(Relation relation, PlanState *ps,
   }
 }
 
+void PaxFilter::InitFastFilter(Relation relation, List *qual,
+                                    const std::vector<bool> &projection) {
+  Assert(!fast_filter_);
+  fast_filter_ = std::make_shared<PaxFastFilter>();
+  if (!fast_filter_->Initialize(relation, qual, projection)) {
+    fast_filter_ = nullptr;
+  }
+}
+
 std::shared_ptr<PaxRowFilter> PaxFilter::GetRowFilter() { return row_filter_; }
+
+std::shared_ptr<PaxFastFilter> PaxFilter::GetFastFilter() { return fast_filter_; }
 
 void PaxFilter::LogStatistics() const {
   if (sparse_filter_) {

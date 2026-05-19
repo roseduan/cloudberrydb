@@ -99,5 +99,10 @@ MicroPartitionReaderProxy::ReadGroup(size_t index) {
   return reader_->ReadGroup(index);
 }
 
+std::unique_ptr<MicroPartitionReader::Group>
+MicroPartitionReaderProxy::ReadGroup(size_t index,
+                                      const std::vector<bool> &proj_cols) {
+  return reader_->ReadGroup(index, proj_cols);
+}
 
 }  // namespace pax

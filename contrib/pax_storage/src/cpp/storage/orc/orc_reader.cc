@@ -170,6 +170,29 @@ std::unique_ptr<MicroPartitionReader::Group> OrcReader::ReadGroup(
   return group;
 }
 
+std::unique_ptr<MicroPartitionReader::Group> OrcReader::ReadGroup(
+    size_t group_index, const std::vector<bool> &proj_cols) {
+  Assert(group_index < GetGroupNums());
+
+  // Read stripe with the caller-specified projection (no prefetch).
+  auto pax_columns = format_reader_.ReadStripe(group_index, proj_cols);
+
+  std::unique_ptr<MicroPartitionReader::Group> group;
+  size_t group_offset = format_reader_.GetStripeOffset(group_index);
+
+  // Pass nullptr for proj_col_index: GetColumnValue does not use it,
+  // and it avoids lifetime issues with a locally-built index vector.
+  if (COLUMN_STORAGE_FORMAT_IS_VEC(pax_columns))
+    group = std::make_unique<OrcVecGroup>(std::move(pax_columns), group_offset,
+                                          nullptr);
+  else
+    group = std::make_unique<OrcGroup>(std::move(pax_columns), group_offset,
+                                       nullptr);
+
+  group->SetVisibilityMap(visibility_bitmap_);
+  return group;
+}
+
 size_t OrcReader::GetGroupNums() { return format_reader_.GetStripeNums(); }
 
 size_t OrcReader::GetTupleCountsInGroup(size_t group_index) {

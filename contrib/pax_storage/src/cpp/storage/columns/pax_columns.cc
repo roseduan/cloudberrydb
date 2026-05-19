@@ -73,6 +73,30 @@ void PaxColumns::Append(std::unique_ptr<PaxColumn> &&column) {
   columns_.emplace_back(std::move(column));
 }
 
+void PaxColumns::MergeColumnsFrom(PaxColumns *other) {
+  Assert(other);
+  Assert(GetColumns() == other->GetColumns());
+  for (size_t i = 0; i < columns_.size(); i++) {
+    if (!columns_[i] && other->columns_[i]) {
+      columns_[i] = std::move(other->columns_[i]);
+    }
+  }
+  // Columns do NOT own their data — they point into the PaxColumns::data_
+  // shared buffer (created with mem_take_over=false in ReadStripe).
+  // Keep the source's data_ alive so moved columns don't become dangling.
+  if (other->data_) {
+    data_holder_.push_back(other->data_);
+  }
+  // Also preserve any data_holder_ entries from the source.  When the
+  // interleaved fast-filter phase merges single-column groups one by one,
+  // the accumulated filter_group carries earlier buffers in data_holder_.
+  // Without transferring them, those buffers are freed when the source is
+  // destroyed, leaving the moved columns with dangling pointers.
+  for (auto &holder : other->data_holder_) {
+    data_holder_.push_back(std::move(holder));
+  }
+}
+
 void PaxColumns::Append(char * /*buffer*/, size_t /*size*/) {
   CBDB_RAISE(cbdb::CException::ExType::kExTypeLogicError);
 }

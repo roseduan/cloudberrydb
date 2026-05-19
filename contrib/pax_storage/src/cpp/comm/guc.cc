@@ -78,6 +78,8 @@ bool pax_enable_iouring = true;
 
 bool pax_enable_rle_batch_encoding = false;
 
+bool pax_enable_fast_filter = true;
+
 }  // namespace pax
 
 namespace paxc {
@@ -218,6 +220,11 @@ void DefineGUCs() {
   DefineCustomBoolVariable("pax.log_filter_tree", "Log the filter tree", NULL,
                            &pax::pax_log_filter_tree, false, PGC_USERSET, 0,
                            NULL, NULL, NULL);
+
+  DefineCustomBoolVariable("pax.enable_fast_filter",
+                           "enable fast native comparison filter for simple predicates",
+                           NULL, &pax::pax_enable_fast_filter, true,
+                           PGC_USERSET, GUC_GPDB_NEED_SYNC, NULL, NULL, NULL);
 }
 
 }  // namespace paxc

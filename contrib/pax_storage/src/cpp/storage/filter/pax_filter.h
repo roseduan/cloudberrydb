@@ -42,6 +42,7 @@
 namespace pax {
 class PaxSparseFilter;
 class PaxRowFilter;
+class PaxFastFilter;
 class ColumnStatsProvider;
 
 class PaxFilter final {
@@ -71,16 +72,22 @@ class PaxFilter final {
   void SetColumnProjection(std::vector<bool> &&proj_cols);
   void SetColumnProjection(const std::vector<int> &cols, int natts);
 
-  // The row filter
+  // The row filter (row engine path)
   void InitRowFilter(Relation relation, PlanState *ps,
                      const std::vector<bool> &projection);
   std::shared_ptr<PaxRowFilter> GetRowFilter();
+
+  // The fast filter (vec engine path)
+  void InitFastFilter(Relation relation, List *qual,
+                          const std::vector<bool> &projection);
+  std::shared_ptr<PaxFastFilter> GetFastFilter();
 
   void LogStatistics() const;
 
  private:
   std::shared_ptr<PaxSparseFilter> sparse_filter_;
   std::shared_ptr<PaxRowFilter> row_filter_;
+  std::shared_ptr<PaxFastFilter> fast_filter_;
 
   // projection
   std::vector<bool> proj_;

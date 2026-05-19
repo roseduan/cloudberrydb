@@ -204,8 +204,8 @@ bool PGGetOperatorNo(Oid opno, NameData *oprname, Oid *oprleft, Oid *oprright,
     elog(ERROR, "cache lookup failed for operator %u", opno);
   op = (Form_pg_operator)GETSTRUCT(tup);
   *oprname = op->oprname;
-  *oprleft = op->oprleft;
-  *oprright = op->oprright;
+  if (oprleft) *oprleft = op->oprleft;
+  if (oprright) *oprright = op->oprright;
 
   fmgr_info_cxt(op->oprcode, finfo ? finfo : &dummy, CurrentMemoryContext);
   ReleaseSysCache(tup);

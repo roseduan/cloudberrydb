@@ -49,6 +49,11 @@ class PaxColumns : public PaxColumn {
 
   void Append(std::unique_ptr<PaxColumn> &&column);
 
+  // Merge non-null columns from `other` into this PaxColumns at positions
+  // where this has nullptr. Used for two-phase column reading: Phase 1
+  // reads filter columns, Phase 2 reads remaining columns, then merge.
+  void MergeColumnsFrom(PaxColumns *other);
+
   void Append(char *buffer, size_t size) override;
 
   void AppendToast(char *buffer, size_t size) override;

@@ -250,6 +250,14 @@ class MicroPartitionReader {
 
   virtual std::unique_ptr<Group> ReadGroup(size_t group_index) = 0;
 
+  // ReadGroup with a custom column projection. This allows reading only a
+  // subset of columns (e.g., filter-only columns for two-phase row filtering).
+  // Default implementation ignores proj_cols and delegates to ReadGroup.
+  virtual std::unique_ptr<Group> ReadGroup(
+      size_t group_index, const std::vector<bool> &proj_cols) {
+    return ReadGroup(group_index);
+  }
+
   virtual std::unique_ptr<ColumnStatsProvider> GetGroupStatsInfo(
       size_t group_index) = 0;
 
@@ -293,6 +301,9 @@ class MicroPartitionReaderProxy : public MicroPartitionReader {
       size_t group_index) override;
 
   std::unique_ptr<Group> ReadGroup(size_t index) override;
+
+  std::unique_ptr<Group> ReadGroup(
+      size_t index, const std::vector<bool> &proj_cols) override;
 
   void SetReader(std::unique_ptr<MicroPartitionReader> &&reader);
   MicroPartitionReader *GetReader() { return reader_.get(); }

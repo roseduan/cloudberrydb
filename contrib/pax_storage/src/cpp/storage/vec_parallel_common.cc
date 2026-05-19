@@ -32,6 +32,7 @@
 
 #include "catalog/pax_catalog.h"
 #include "comm/cbdb_wrappers.h"
+#include "comm/guc.h"
 #include "comm/paxc_wrappers.h"
 #include "comm/vec_numeric.h"
 #include "storage/file_system.h"
@@ -137,9 +138,8 @@ bool PaxFragmentInterface::OpenFile() {
   if (auto name = m->GetToastName(); !name.empty()) {
     toast_file = file_system->Open(name, fs::kReadMode, desc->GetFileSystemOptions());
   }
-  auto reader = std::make_unique<OrcReader>(std::move(data_file), 
+  auto reader = std::make_unique<OrcReader>(std::move(data_file),
     std::move(toast_file));
-
 
   reader_ = std::make_unique<PaxVecReader>(std::move(reader), adapter_, filter);
   reader_->Open(options);
@@ -242,6 +242,11 @@ arrow::Status ParallelScanDesc::Initialize(Relation relation,
   CalculateScanColumns(table_names);
   if (pax_enable_sparse_filter)
     pax_filter_->InitSparseFilter(relation, ps->plan->qual, nullptr, 0);
+
+  if (gp_enable_predicate_pushdown && pax_enable_fast_filter) {
+    pax_filter_->InitFastFilter(relation, ps->plan->qual,
+                                     pax_filter_->GetColumnProjection());
+  }
 
   while (it.HasNext()) {
     auto meta = it.Next();

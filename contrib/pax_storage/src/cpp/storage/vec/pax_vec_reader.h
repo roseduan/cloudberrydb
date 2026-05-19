@@ -26,6 +26,7 @@
  */
 
 #pragma once
+#include "comm/bitmap.h"
 #include "storage/micro_partition.h"
 #include "storage/vec/arrow_wrapper.h"
 
@@ -82,6 +83,18 @@ class PaxVecReader : public MicroPartitionReaderProxy {
   // TopK Runtime Filter: evaluate whether this group can be skipped
   bool EvalTopKThresholdSkip(const ColumnStatsProvider& stats, TupleDesc desc);
 
+  // Result of fast filter evaluation on a group.
+  struct FastFilterResult {
+    std::unique_ptr<Bitmap8> bitmap;  // bit=1 → row filtered out; nullptr → all pass
+    std::unique_ptr<MicroPartitionReader::Group> filter_group;  // Phase 1 columns
+    bool all_filtered;  // true if all visible rows were rejected
+  };
+
+  // Column-at-a-time fast filter with two-phase support.
+  // Returns the filter bitmap, the Phase 1 column group, and whether
+  // all visible rows were filtered out.
+  FastFilterResult FastFilterGroup(size_t group_index);
+
   std::shared_ptr<VecAdapter> adapter_;
 
   std::unique_ptr<MicroPartitionReader::Group> working_group_;
@@ -91,6 +104,9 @@ class PaxVecReader : public MicroPartitionReaderProxy {
 
   // TopK Runtime Filter (raw pointer, not owned)
   arrow::compute::TopKThresholdState* topk_threshold_ = nullptr;
+
+  // Visibility bitmap for checking deleted-but-not-vacuumed rows
+  std::shared_ptr<Bitmap8> micro_partition_visibility_bitmap_;
 };
 
 }  // namespace pax
