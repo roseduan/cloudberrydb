@@ -21,20 +21,11 @@
 #include "access/genam.h"
 #include "access/xact.h"
 #include "executor/tuptable.h"
-#include "catalog/heap.h"
-#include "catalog/index.h"
+#include "catalog/index.h"		/* FormIndexDatum() */
 #include "catalog/indexing.h"
 #include "catalog/namespace.h"
-#include "catalog/pg_opclass.h"
-#include "catalog/pg_type.h"
-#include "catalog/pg_tablespace.h"
-#include "catalog/pg_authid.h"
-#include "catalog/pg_am.h"
-#include "commands/defrem.h"
 #include "fmgr.h"
 #include "miscadmin.h"
-#include "nodes/makefuncs.h"
-#include "storage/lmgr.h"
 #include "utils/builtins.h"
 #include "utils/syscache.h"
 #include "utils/rel.h"
@@ -42,157 +33,13 @@
 #include "include/pg_iceberg_metadata.h"
 
 /*
- * CreateIcebergMetadataTable
- *		Create the global iceberg.pg_iceberg_metadata catalog table.
- *
- * This function creates a catalog table in the iceberg schema with
- * the following schema:
- *	 - relid: OID of the relation (primary key/index)
- *	 - metadata_location: TEXT - current metadata file location
- *	 - previous_metadata_location: TEXT - previous metadata file location
- *	 - is_internal: BOOL - flag indicating if table is internal
- *	 - default_spec_id: INT4 - default partition spec id
- *
- * This table stores metadata for all iceberg tables in the system.
- * The iceberg schema must be created before calling this function.
- * It should be called during extension installation phase.
+ * The iceberg.pg_iceberg_metadata table is now created from
+ * datalake_fdw--1.0.sql as a plain CREATE TABLE so the DDL gets dispatched
+ * to QEs (see issue #324).  The previous CreateIcebergMetadataTable()
+ * helper and its SQL-callable wrapper were removed; the data-path
+ * functions below continue to look the relation up by name via
+ * get_relname_relid().
  */
-void
-CreateIcebergMetadataTable(void)
-{
-	TupleDesc	tupdesc;
-	Oid			metadata_relid = InvalidOid;
-	Oid			metadata_idxid = InvalidOid;
-	Oid			namespaceid;
-	IndexInfo  *indexInfo;
-	List	   *indexColNames;
-	Oid		   *classObjectId;
-	int16	   *coloptions;
-	Oid		   *collationObjectId;
-	Relation	metadata_rel;
-
-	tupdesc = CreateTemplateTupleDesc(5);
-	
-	TupleDescInitEntry(tupdesc, (AttrNumber) 1,
-					   "relid",
-					   OIDOID,
-					   -1, 0);
-	TupleDescInitEntry(tupdesc, (AttrNumber) 2,
-					   "metadata_location",
-					   TEXTOID,
-					   -1, 0);
-	TupleDescInitEntry(tupdesc, (AttrNumber) 3,
-					   "previous_metadata_location",
-					   TEXTOID,
-					   -1, 0);
-	TupleDescInitEntry(tupdesc, (AttrNumber) 4,
-					   "is_internal",
-					   BOOLOID,
-					   -1, 0);
-	TupleDescInitEntry(tupdesc, (AttrNumber) 5,
-					   "default_spec_id",
-					   INT4OID,
-					   -1, 0);
-
-	namespaceid = get_namespace_oid(PG_ICEBERG_SCHEMA_NAME, false);
-	metadata_relid = heap_create_with_catalog(PG_ICEBERG_METADATA_TABLE_NAME,
-											  namespaceid,
-											  DEFAULTTABLESPACE_OID,
-											  InvalidOid,
-											  InvalidOid,
-											  InvalidOid,
-											  BOOTSTRAP_SUPERUSERID,
-											  HEAP_TABLE_AM_OID,
-											  tupdesc,
-											  NIL,
-											  RELKIND_RELATION,
-											  RELPERSISTENCE_PERMANENT,
-											  false,  /* shared_relation */
-											  false,  /* mapped_relation */
-											  ONCOMMIT_NOOP,
-											  NULL,   /* GP Policy */
-											  (Datum) 0,
-											  false,  /* use_user_acl */
-											  true,   /* allow_system_table_mods */
-											  true,   /* is_internal */
-											  InvalidOid,
-											  NULL,   /* typeaddress */
-											  false); /* valid_opts */
-
-	/* Make this table visible, else index creation will fail */
-	CommandCounterIncrement();
-
-	metadata_rel = table_open(metadata_relid, ShareLock);
-
-	/* Setup index information - unique index on relid column */
-	indexInfo = makeNode(IndexInfo);
-	indexInfo->ii_NumIndexAttrs = 1;
-	indexInfo->ii_NumIndexKeyAttrs = 1;
-	indexInfo->ii_IndexAttrNumbers[0] = 1; /* relid is first column */
-	indexInfo->ii_Expressions = NIL;
-	indexInfo->ii_ExpressionsState = NIL;
-	indexInfo->ii_Predicate = NIL;
-	indexInfo->ii_PredicateState = NULL;
-	indexInfo->ii_Unique = true; /* relid should be unique - one entry per table */
-	indexInfo->ii_ReadyForInserts = true;
-	indexInfo->ii_Concurrent = false;
-	indexInfo->ii_BrokenHotChain = false;
-	indexInfo->ii_ParallelWorkers = 0;
-	indexInfo->ii_Am = BTREE_AM_OID;
-	indexInfo->ii_AmCache = NULL;
-	indexInfo->ii_Context = CurrentMemoryContext;
-
-	indexColNames = list_make1("relid");
-	classObjectId = (Oid *) palloc(sizeof(Oid));
-	classObjectId[0] = OID_BTREE_OPS_OID;
-	collationObjectId = (Oid *) palloc0(sizeof(Oid));
-	coloptions = (int16 *) palloc0(sizeof(int16));
-
-	/* Create the unique index on relid - use same tablespace as table */
-	metadata_idxid = index_create(metadata_rel,
-								  PG_ICEBERG_METADATA_INDEX_NAME,
-								  InvalidOid,
-								  InvalidOid,
-								  InvalidOid,
-								  InvalidOid,
-								  indexInfo,
-								  indexColNames,
-								  BTREE_AM_OID,
-								  DEFAULTTABLESPACE_OID,
-								  collationObjectId,
-								  classObjectId,
-								  coloptions,
-								  (Datum) 0,
-								  INDEX_CREATE_IS_PRIMARY,
-								  0,
-								  true,   /* allow_system_table_mods */
-								  true,   /* is_internal */
-								  NULL);
-
-	table_close(metadata_rel, ShareLock);
-	UnlockRelationOid(metadata_idxid, AccessExclusiveLock);
-
-	/*
-	 * Make changes visible
-	 */
-	CommandCounterIncrement();
-}
-
-PG_FUNCTION_INFO_V1(pg_iceberg_create_metadata_table);
-Datum
-pg_iceberg_create_metadata_table(PG_FUNCTION_ARGS)
-{
-	/* Check if we have permission to create tables */
-	if (!superuser())
-		ereport(ERROR,
-				(errcode(ERRCODE_INSUFFICIENT_PRIVILEGE),
-				 errmsg("must be superuser to create iceberg metadata table")));
-
-	/* Create the iceberg.pg_iceberg_metadata table */
-	CreateIcebergMetadataTable();
-
-	PG_RETURN_VOID();
-}
 
 void
 pg_iceberg_add_metadata(Oid relid, char *metadata_location,

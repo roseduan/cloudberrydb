@@ -33,20 +33,10 @@
 #include "access/heapam.h"
 #include "access/genam.h"
 #include "access/xact.h"
-#include "catalog/heap.h"
-#include "catalog/index.h"
 #include "catalog/indexing.h"
 #include "catalog/namespace.h"
-#include "catalog/pg_opclass.h"
-#include "catalog/pg_type.h"
-#include "catalog/pg_tablespace.h"
-#include "catalog/pg_authid.h"
-#include "catalog/pg_collation.h"
-#include "catalog/pg_am.h"
 #include "fmgr.h"
 #include "miscadmin.h"
-#include "nodes/makefuncs.h"
-#include "storage/lmgr.h"
 #include "utils/builtins.h"
 #include "utils/rel.h"
 #include "utils/lsyscache.h"
@@ -94,154 +84,12 @@ open_deletion_queue_rel(Relation *rel_out, Oid *index_oid_out,
 			PG_ICEBERG_DELETION_QUEUE_INDEX_NAME, namespaceid);
 }
 
-/* ================================================================
- * Table Creation
- * ================================================================
- */
-
 /*
- * CreateIcebergDeletionQueueTable
- *		Create the iceberg.pg_iceberg_deletion_queue catalog table.
- *
- * Schema:
- *   path           TEXT   PRIMARY KEY
- *   table_name     OID
- *   orphaned_at    TIMESTAMPTZ
- *   retry_count    INT4
- *   deletion_type  INT4
+ * The iceberg.pg_iceberg_deletion_queue table is now created from
+ * datalake_fdw--1.0.sql as a plain CREATE TABLE so the DDL gets dispatched
+ * to QEs (see issue #324).  The previous CreateIcebergDeletionQueueTable()
+ * helper and its SQL-callable wrapper were removed.
  */
-void
-CreateIcebergDeletionQueueTable(void)
-{
-	TupleDesc	tupdesc;
-	Oid			queue_relid = InvalidOid;
-	Oid			queue_idxid = InvalidOid;
-	Oid			namespaceid;
-	IndexInfo  *indexInfo;
-	List	   *indexColNames;
-	Oid		   *classObjectId;
-	int16	   *coloptions;
-	Oid		   *collationObjectId;
-	Relation	queue_rel;
-
-	tupdesc = CreateTemplateTupleDesc(Natts_deletion_queue);
-
-	TupleDescInitEntry(tupdesc, (AttrNumber) Anum_deletion_queue_path,
-					   "path",
-					   TEXTOID,
-					   -1, 0);
-	TupleDescInitEntry(tupdesc, (AttrNumber) Anum_deletion_queue_table_name,
-					   "table_name",
-					   REGCLASSOID,
-					   -1, 0);
-	TupleDescInitEntry(tupdesc, (AttrNumber) Anum_deletion_queue_orphaned_at,
-					   "orphaned_at",
-					   TIMESTAMPTZOID,
-					   -1, 0);
-	TupleDescInitEntry(tupdesc, (AttrNumber) Anum_deletion_queue_retry_count,
-					   "retry_count",
-					   INT4OID,
-					   -1, 0);
-	TupleDescInitEntry(tupdesc, (AttrNumber) Anum_deletion_queue_deletion_type,
-					   "deletion_type",
-					   INT4OID,
-					   -1, 0);
-
-	namespaceid = get_namespace_oid(PG_ICEBERG_SCHEMA_NAME, false);
-	queue_relid = heap_create_with_catalog(PG_ICEBERG_DELETION_QUEUE_TABLE_NAME,
-										   namespaceid,
-										   DEFAULTTABLESPACE_OID,
-										   InvalidOid,
-										   InvalidOid,
-										   InvalidOid,
-										   BOOTSTRAP_SUPERUSERID,
-										   HEAP_TABLE_AM_OID,
-										   tupdesc,
-										   NIL,
-										   RELKIND_RELATION,
-										   RELPERSISTENCE_PERMANENT,
-										   false,  /* shared_relation */
-										   false,  /* mapped_relation */
-										   ONCOMMIT_NOOP,
-										   NULL,   /* GP Policy */
-										   (Datum) 0,
-										   false,  /* use_user_acl */
-										   true,   /* allow_system_table_mods */
-										   true,   /* is_internal */
-										   InvalidOid,
-										   NULL,   /* typeaddress */
-										   false); /* valid_opts */
-
-	/* Make this table visible, else index creation will fail */
-	CommandCounterIncrement();
-
-	queue_rel = table_open(queue_relid, ShareLock);
-
-	/* Setup unique index on path column (TEXT) */
-	indexInfo = makeNode(IndexInfo);
-	indexInfo->ii_NumIndexAttrs = 1;
-	indexInfo->ii_NumIndexKeyAttrs = 1;
-	indexInfo->ii_IndexAttrNumbers[0] = Anum_deletion_queue_path;  /* path is first column */
-	indexInfo->ii_Expressions = NIL;
-	indexInfo->ii_ExpressionsState = NIL;
-	indexInfo->ii_Predicate = NIL;
-	indexInfo->ii_PredicateState = NULL;
-	indexInfo->ii_Unique = true;
-	indexInfo->ii_ReadyForInserts = true;
-	indexInfo->ii_Concurrent = false;
-	indexInfo->ii_BrokenHotChain = false;
-	indexInfo->ii_ParallelWorkers = 0;
-	indexInfo->ii_Am = BTREE_AM_OID;
-	indexInfo->ii_AmCache = NULL;
-	indexInfo->ii_Context = CurrentMemoryContext;
-
-	indexColNames = list_make1("path");
-	classObjectId = (Oid *) palloc(sizeof(Oid));
-	classObjectId[0] = TEXT_BTREE_OPS_OID;  /* btree opclass for text */
-	collationObjectId = (Oid *) palloc(sizeof(Oid));
-	collationObjectId[0] = DEFAULT_COLLATION_OID;
-	coloptions = (int16 *) palloc0(sizeof(int16));
-
-	queue_idxid = index_create(queue_rel,
-							   PG_ICEBERG_DELETION_QUEUE_INDEX_NAME,
-							   InvalidOid,
-							   InvalidOid,
-							   InvalidOid,
-							   InvalidOid,
-							   indexInfo,
-							   indexColNames,
-							   BTREE_AM_OID,
-							   DEFAULTTABLESPACE_OID,
-							   collationObjectId,
-							   classObjectId,
-							   coloptions,
-							   (Datum) 0,
-							   INDEX_CREATE_IS_PRIMARY,
-							   0,
-							   true,   /* allow_system_table_mods */
-							   true,   /* is_internal */
-							   NULL);
-
-	table_close(queue_rel, ShareLock);
-	UnlockRelationOid(queue_idxid, AccessExclusiveLock);
-
-	/* Make changes visible */
-	CommandCounterIncrement();
-}
-
-PG_FUNCTION_INFO_V1(pg_iceberg_create_deletion_queue_table);
-Datum
-pg_iceberg_create_deletion_queue_table(PG_FUNCTION_ARGS)
-{
-	if (!superuser())
-		ereport(ERROR,
-				(errcode(ERRCODE_INSUFFICIENT_PRIVILEGE),
-				 errmsg("must be superuser to create iceberg deletion queue table")));
-
-	CreateIcebergDeletionQueueTable();
-
-	PG_RETURN_VOID();
-}
 
 /* ================================================================
  * Insert

@@ -181,20 +181,31 @@ LANGUAGE C STRICT;
 -- Create iceberg schema to organize all iceberg-related objects
 CREATE SCHEMA iceberg;
 
--- Function to create iceberg.pg_iceberg_metadata catalog table
-CREATE FUNCTION iceberg.pg_iceberg_create_metadata_table()
-RETURNS void
-AS 'MODULE_PATHNAME'
-LANGUAGE C STRICT;
+-- Catalog tables for iceberg metadata.
+--
+-- These were previously created from C via heap_create_with_catalog(), invoked
+-- from `SELECT iceberg.pg_iceberg_create_*_table()` calls inside this script.
+-- That pattern only ran on the QD (a SELECT of a plain function is not a
+-- utility statement and is not dispatched to QEs), so the tables ended up
+-- existing on the coordinator but missing on every segment.  pg_dump's
+-- LOCK TABLE iceberg.pg_iceberg_metadata then failed on segments.  See #324.
+--
+-- Using plain CREATE TABLE makes this go through ProcessUtility ->
+-- CdbDispatchUtilityStatement, so QD and all QEs stay in sync.  The C-level
+-- access paths (pg_iceberg_add_metadata / get_metadata_info / deletion queue
+-- helpers) keep looking up the relation by name, so no OID needs to be fixed.
+CREATE TABLE iceberg.pg_iceberg_metadata (
+    relid                       oid  PRIMARY KEY,
+    metadata_location           text,
+    previous_metadata_location  text,
+    is_internal                 bool,
+    default_spec_id             int4
+);
 
--- Create the iceberg.pg_iceberg_metadata catalog table
-SELECT iceberg.pg_iceberg_create_metadata_table();
-
--- Function to create iceberg.pg_iceberg_deletion_queue catalog table
-CREATE FUNCTION iceberg.pg_iceberg_create_deletion_queue_table()
-RETURNS void
-AS 'MODULE_PATHNAME'
-LANGUAGE C STRICT;
-
--- Create the iceberg.pg_iceberg_deletion_queue catalog table
-SELECT iceberg.pg_iceberg_create_deletion_queue_table();
+CREATE TABLE iceberg.pg_iceberg_deletion_queue (
+    path           text     PRIMARY KEY,
+    table_name     regclass,
+    orphaned_at    timestamptz,
+    retry_count    int4,
+    deletion_type  int4
+);

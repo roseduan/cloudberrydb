@@ -22,8 +22,13 @@
 /* Metadata table name */
 #define PG_ICEBERG_METADATA_TABLE_NAME "pg_iceberg_metadata"
 
-/* Metadata table index name */
-#define PG_ICEBERG_METADATA_INDEX_NAME "pg_iceberg_metadata_relid_index"
+/*
+ * Metadata table primary-key index name.
+ *
+ * Created implicitly by the PRIMARY KEY constraint on iceberg.pg_iceberg_metadata
+ * in datalake_fdw--1.0.sql; PostgreSQL synthesises the name as <table>_pkey.
+ */
+#define PG_ICEBERG_METADATA_INDEX_NAME "pg_iceberg_metadata_pkey"
 
 /*
  * IcebergMetadataInfo - stores metadata information for an Iceberg table
@@ -35,12 +40,6 @@ typedef struct IcebergMetadataInfo
 	bool is_internal;                 /* Flag indicating if table is internal */
 	int32 default_spec_id;            /* Default partition spec id */
 } IcebergMetadataInfo;
-
-/* Function to create global iceberg metadata system catalog table */
-extern void CreateIcebergMetadataTable(void);
-
-/* SQL-callable wrapper function for creating metadata table */
-extern Datum pg_iceberg_create_metadata_table(PG_FUNCTION_ARGS);
 
 /* Helper to retrieve iceberg metadata information */
 extern IcebergMetadataInfo *pg_iceberg_get_metadata_info(Oid relid);

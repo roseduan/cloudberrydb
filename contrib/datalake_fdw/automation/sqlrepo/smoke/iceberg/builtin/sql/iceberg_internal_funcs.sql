@@ -43,30 +43,6 @@ SELECT gp_toolkit.__gopher_free_all_cache();
 SELECT COUNT(*) FROM if_cache_tbl;
 
 -- ============================================================
--- Test 2: Deletion queue table (pg_iceberg_deletion_queue.c)
--- ============================================================
-DO $$
-BEGIN
-    PERFORM iceberg.pg_iceberg_create_deletion_queue_table();
-    RAISE NOTICE 'deletion_queue: created';
-EXCEPTION WHEN OTHERS THEN
-    RAISE NOTICE 'deletion_queue: already exists';
-END;
-$$;
-
--- ============================================================
--- Test 3: Metadata table (pg_iceberg_metadata.c)
--- ============================================================
-DO $$
-BEGIN
-    PERFORM iceberg.pg_iceberg_create_metadata_table();
-    RAISE NOTICE 'metadata_table: created';
-EXCEPTION WHEN OTHERS THEN
-    RAISE NOTICE 'metadata_table: already exists';
-END;
-$$;
-
--- ============================================================
 -- Test 4: ANALYZE uses sample_rows internally
 -- ============================================================
 ANALYZE if_cache_tbl;

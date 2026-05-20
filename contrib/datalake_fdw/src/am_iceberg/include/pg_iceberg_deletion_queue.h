@@ -24,8 +24,13 @@
 /* Deletion queue table name (in iceberg schema) */
 #define PG_ICEBERG_DELETION_QUEUE_TABLE_NAME	"pg_iceberg_deletion_queue"
 
-/* Deletion queue index name */
-#define PG_ICEBERG_DELETION_QUEUE_INDEX_NAME	"pg_iceberg_deletion_queue_path_index"
+/*
+ * Deletion queue primary-key index name.
+ *
+ * Created implicitly by the PRIMARY KEY on iceberg.pg_iceberg_deletion_queue in
+ * datalake_fdw--1.0.sql; PostgreSQL synthesises the name as <table>_pkey.
+ */
+#define PG_ICEBERG_DELETION_QUEUE_INDEX_NAME	"pg_iceberg_deletion_queue_pkey"
 
 /*
  * DeletionType - indicates how the path should be processed
@@ -63,17 +68,6 @@ typedef struct DeletionQueueEntry
 	int32			retry_count;	/* number of failed removal attempts */
 	DeletionType	deletion_type;	/* how to process the path */
 } DeletionQueueEntry;
-
-/* ----------------------------------------------------------------
- * Table creation
- * ----------------------------------------------------------------
- */
-
-/* Create the iceberg.pg_iceberg_deletion_queue catalog table */
-extern void CreateIcebergDeletionQueueTable(void);
-
-/* SQL-callable wrapper for creating the deletion queue table */
-extern Datum pg_iceberg_create_deletion_queue_table(PG_FUNCTION_ARGS);
 
 /* ----------------------------------------------------------------
  * Insert / Update / Delete  (catalog API)
