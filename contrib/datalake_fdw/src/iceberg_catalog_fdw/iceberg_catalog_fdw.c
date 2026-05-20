@@ -1372,8 +1372,16 @@ icebergCatalogEndForeignInsert(EState *estate,
     IcebergCatalogState *catalogState = (IcebergCatalogState *)fdwState->catalogHandle;
     if (catalogState->agentHandle)
     {
-        agent_cli_wrapper_destroy(catalogState->agentHandle);
+        /*
+         * Null-before-destroy: agent_cli_wrapper_destroy() reaches into the
+         * C++ cleanup path (and pfree), either of which can ereport.  A
+         * longjmp out of destroy with the field still set would let an
+         * error-recovery re-entry call destroy on the same handle a second
+         * time -- a double free.  Detach the pointer first, then destroy.
+         */
+        AgentCliHandle *handle = catalogState->agentHandle;
         catalogState->agentHandle = NULL;
+        agent_cli_wrapper_destroy(handle);
     }
 
     /*
@@ -1423,12 +1431,14 @@ icebergCatalogEndForeignScan(ForeignScanState *node)
         return;
     }
 
-    /* See icebergCatalogEndForeignInsert for the rationale. */
+    /* See icebergCatalogEndForeignInsert for the rationale (including the
+     * null-before-destroy ordering). */
     IcebergCatalogState *catalogState = (IcebergCatalogState *)fdwState->catalogHandle;
     if (catalogState->agentHandle)
     {
-        agent_cli_wrapper_destroy(catalogState->agentHandle);
+        AgentCliHandle *handle = catalogState->agentHandle;
         catalogState->agentHandle = NULL;
+        agent_cli_wrapper_destroy(handle);
     }
 
     if (fdwState->fdwContext)
