@@ -82,6 +82,18 @@ char *datalakeGetExternalWriteLocation(Oid relid)
 
 	if (opts->format == DL_ICEBERG_TABLE)
 	{
+		/*
+		 * Issue #330: catalog_type and (in the non-hive/polaris path)
+		 * table_identifier are required for iceberg writes.  Without these
+		 * guards the pg_strcasecmp and datalakeSplitString2 calls below
+		 * dereference NULL and crash the backend at INSERT plan time.
+		 */
+		if (opts->catalog_type == NULL)
+			ereport(ERROR,
+					(errcode(ERRCODE_FDW_OPTION_NAME_NOT_FOUND),
+					 errmsg("foreign table option \"catalog_type\" is required for iceberg format"),
+					 errhint("Specify catalog_type (e.g. 'hive' or 'polaris') in CREATE FOREIGN TABLE OPTIONS.")));
+
 		if (pg_strcasecmp(opts->catalog_type, "hive") == 0 || pg_strcasecmp(opts->catalog_type, "polaris") == 0)
 		{
 			List *locations = convert_iceberg_hudi_options(opts);
@@ -93,6 +105,13 @@ char *datalakeGetExternalWriteLocation(Oid relid)
 		}
 		else
 		{
+			if (opts->table_identifier == NULL)
+				ereport(ERROR,
+						(errcode(ERRCODE_FDW_OPTION_NAME_NOT_FOUND),
+						 errmsg("foreign table option \"table_identifier\" is required for iceberg format with catalog_type \"%s\"",
+								opts->catalog_type),
+						 errhint("Specify table_identifier (e.g. 'schema.table') in CREATE FOREIGN TABLE OPTIONS.")));
+
 			if (opts->prefix)
 				appendStringInfoString(&filePrefix, opts->prefix);
 			if (filePrefix.len == 0 || filePrefix.data[filePrefix.len - 1] != '/')
