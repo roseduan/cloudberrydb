@@ -323,6 +323,23 @@ convert_iceberg_hudi_options(dataLakeOptions *options)
 	List			*result = NIL;
 	StringInfoData	buf;
 
+	/*
+	 * Issue #330: catalog_type is mandatory for iceberg/hudi.  The write path
+	 * has its own up-front check, but this helper is also invoked from the
+	 * SELECT path (datalakeGetExternalFragmentList) and from
+	 * datalakeGetTableStatistics(), neither of which guarded the option.
+	 * Without this check appendStringInfo("%s", NULL) is technically
+	 * undefined behaviour (on glibc it materialises as "(null)" and the
+	 * user later sees an opaque dlproxy "Internal Server Error" instead
+	 * of a clear message about the missing option).  Fail fast here so
+	 * every caller gets the same diagnostic.
+	 */
+	if (options->catalog_type == NULL)
+		ereport(ERROR,
+				(errcode(ERRCODE_FDW_OPTION_NAME_NOT_FOUND),
+				 errmsg("foreign table option \"catalog_type\" is required for iceberg format"),
+				 errhint("Specify catalog_type (e.g. 'hive' or 'polaris') in CREATE FOREIGN TABLE OPTIONS.")));
+
 	initStringInfo(&buf);
 	appendStringInfo(&buf, "datalake://%s catalog_type=%s server_name=%s",
 					 options->filePath, options->catalog_type,
