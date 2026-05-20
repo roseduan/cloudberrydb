@@ -200,7 +200,7 @@ CREATE TABLE iceberg.pg_iceberg_metadata (
     previous_metadata_location  text,
     is_internal                 bool,
     default_spec_id             int4
-);
+) DISTRIBUTED BY (relid);
 
 CREATE TABLE iceberg.pg_iceberg_deletion_queue (
     path           text     PRIMARY KEY,
@@ -208,4 +208,4 @@ CREATE TABLE iceberg.pg_iceberg_deletion_queue (
     orphaned_at    timestamptz,
     retry_count    int4,
     deletion_type  int4
-);
+) DISTRIBUTED BY (path);

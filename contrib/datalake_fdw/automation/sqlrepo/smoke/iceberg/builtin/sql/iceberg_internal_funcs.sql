@@ -43,6 +43,20 @@ SELECT gp_toolkit.__gopher_free_all_cache();
 SELECT COUNT(*) FROM if_cache_tbl;
 
 -- ============================================================
+-- Test 2 (regression guard for issue #324):
+-- The two iceberg catalog tables must exist on every QE segment.
+-- Before the dispatched-DDL fix they were created QD-only and
+-- pg_dump's LOCK TABLE failed on segments; this assertion catches
+-- a regression back to that state.  Expressed as a boolean so the
+-- expected output is independent of the test cluster's segment count.
+-- ============================================================
+SELECT relname, count(*) > 0 AS on_qe
+  FROM gp_dist_random('pg_class')
+ WHERE relname IN ('pg_iceberg_metadata', 'pg_iceberg_deletion_queue')
+ GROUP BY relname
+ ORDER BY relname;
+
+-- ============================================================
 -- Test 4: ANALYZE uses sample_rows internally
 -- ============================================================
 ANALYZE if_cache_tbl;
