@@ -340,6 +340,25 @@ convert_iceberg_hudi_options(dataLakeOptions *options)
 				 errmsg("foreign table option \"catalog_type\" is required for iceberg/hudi format"),
 				 errhint("Specify catalog_type (e.g. 'hive' or 'polaris') in CREATE FOREIGN TABLE OPTIONS.")));
 
+	/*
+	 * filePath and server_name are likewise interpolated with %s below.
+	 * Both are de facto required for iceberg/hudi (every sample in
+	 * sql/iceberg_* and sql/hudi_* sets them); the option-name validator
+	 * does not enforce presence, so guard here for the same reason as
+	 * catalog_type.
+	 */
+	if (options->filePath == NULL)
+		ereport(ERROR,
+				(errcode(ERRCODE_FDW_OPTION_NAME_NOT_FOUND),
+				 errmsg("foreign table option \"filePath\" is required for iceberg/hudi format"),
+				 errhint("Specify filePath in CREATE FOREIGN TABLE OPTIONS.")));
+
+	if (options->server_name == NULL)
+		ereport(ERROR,
+				(errcode(ERRCODE_FDW_OPTION_NAME_NOT_FOUND),
+				 errmsg("foreign table option \"server_name\" is required for iceberg/hudi format"),
+				 errhint("Specify server_name in CREATE FOREIGN TABLE OPTIONS.")));
+
 	initStringInfo(&buf);
 	appendStringInfo(&buf, "datalake://%s catalog_type=%s server_name=%s",
 					 options->filePath, options->catalog_type,
