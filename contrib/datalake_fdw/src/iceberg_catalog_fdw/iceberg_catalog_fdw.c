@@ -1360,7 +1360,21 @@ icebergCatalogEndForeignInsert(EState *estate,
         return;
     }
 
-    /* Resource cleanup now handled automatically by agent_cli_wrapper */
+    /*
+     * Destroy the C++ AgentCliHandle before deleting the palloc context.
+     * MemoryContextDelete only frees palloc'd bytes; the C++ AgentContext /
+     * AgentClient / HttpClient (including persistent CURL handles and the
+     * libcurl connection cache) live on the C++ heap and must be released
+     * explicitly. Missing this call caused linear RSS + FD growth (~1-5 MB
+     * and ~3 sockets per INSERT) under JDBC executeBatch workloads. See
+     * issue #323.
+     */
+    IcebergCatalogState *catalogState = (IcebergCatalogState *)fdwState->catalogHandle;
+    if (catalogState->agentHandle)
+    {
+        agent_cli_wrapper_destroy(catalogState->agentHandle);
+        catalogState->agentHandle = NULL;
+    }
 
     /* Destroy memory context */
     if (fdwState->fdwContext)
@@ -1403,7 +1417,13 @@ icebergCatalogEndForeignScan(ForeignScanState *node)
         return;
     }
 
-    /* Resource cleanup now handled automatically by agent_cli_wrapper */
+    /* See icebergCatalogEndForeignInsert for the rationale. */
+    IcebergCatalogState *catalogState = (IcebergCatalogState *)fdwState->catalogHandle;
+    if (catalogState->agentHandle)
+    {
+        agent_cli_wrapper_destroy(catalogState->agentHandle);
+        catalogState->agentHandle = NULL;
+    }
 
     /* Destroy memory context */
     if (fdwState->fdwContext)
