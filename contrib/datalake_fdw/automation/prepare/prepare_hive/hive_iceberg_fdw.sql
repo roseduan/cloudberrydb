@@ -12,7 +12,7 @@
 --   --conf spark.sql.extensions=org.apache.iceberg.spark.extensions.IcebergSparkSessionExtensions
 --   --conf spark.sql.catalog.ic=org.apache.iceberg.spark.SparkCatalog
 --   --conf spark.sql.catalog.ic.type=hive
---   --conf spark.sql.catalog.ic.uri=thrift://lakehouse:9083
+--   --conf spark.sql.catalog.ic.uri=thrift://hive-metastore:9083
 
 DROP TABLE IF EXISTS ic.default.iceberg_fdw_test;
 

@@ -4,7 +4,7 @@
 # end-to-end: CREATE/INSERT/SELECT/UPDATE/DELETE/multi-row UPDATE with the
 # warehouse layout `s3a://bucket/<warehouse_location_prefix>/<ns>/<table>/`.
 #
-# Requires the singlecluster lakehouse stack (MinIO at lakehouse:9100,
+# Requires the singlecluster lakehouse stack (MinIO at minio:9000,
 # admin/password, bucket "warehouse").
 
 PGXS := $(shell pg_config --pgxs)

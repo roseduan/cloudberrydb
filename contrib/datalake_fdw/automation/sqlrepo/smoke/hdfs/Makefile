@@ -6,7 +6,7 @@ include $(PGXS)
 AUTOMATION_DIR = $(shell cd ../../.. && pwd)
 HDFS_PREPARE_SQL = $(AUTOMATION_DIR)/prepare/prepare_hdfs/hdfs_smoke.sql
 
-# Ensure hdfs CLI uses our core-site.xml (lakehouse:8020) instead of system config
+# Ensure hdfs CLI uses our core-site.xml (hadoop:8020) instead of system config
 export HADOOP_CONF_DIR = $(AUTOMATION_DIR)/tools/conf/hadoop
 
 REGRESS = 01_connection 02_text_basic 03_parquet_basic 04_orc_basic \
@@ -26,7 +26,7 @@ installcheck:
 	@$(HDFS_CMD) -rm -r -f -skipTrash /test/basic 2>/dev/null || true
 	@echo "=== Re-prepare HDFS test data via beeline ==="
 	@if [ -f "$(HDFS_PREPARE_SQL)" ]; then \
-		beeline -u "jdbc:hive2://lakehouse:10000/default" -n hive --silent=true \
+		beeline -u "jdbc:hive2://hiveserver2:10000/default" -n hive --silent=true \
 			-f "$(HDFS_PREPARE_SQL)" 2>&1 | grep -vE '^(SLF4J|WARNING:|INFO|Connecting|Closing)' | tail -10; \
 	else \
 		echo "WARNING: HDFS prepare SQL not found at $(HDFS_PREPARE_SQL)"; \

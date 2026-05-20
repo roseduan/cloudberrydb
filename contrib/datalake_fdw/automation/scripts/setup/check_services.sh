@@ -70,9 +70,9 @@ fi
 log_info "Checking Hive Metastore..."
 if wait_for_service "Hive Metastore" "${HIVE_HOST}" "${HIVE_METASTORE_PORT}" 3 1; then
     log_success "Hive Metastore is accessible at ${HIVE_HOST}:${HIVE_METASTORE_PORT}"
-    # Also check Hive Server
-    if wait_for_service "Hive Server" "${HIVE_HOST}" "${HIVE_PORT}" 3 1; then
-        log_success "Hive Server is accessible at ${HIVE_HOST}:${HIVE_PORT}"
+    # Also check Hive Server (may be a separate container from metastore)
+    if wait_for_service "Hive Server" "${HIVE_SERVER_HOST:-$HIVE_HOST}" "${HIVE_PORT}" 3 1; then
+        log_success "Hive Server is accessible at ${HIVE_SERVER_HOST:-$HIVE_HOST}:${HIVE_PORT}"
         SERVICE_HIVE=true
     else
         log_warn "Hive Server is not accessible — Hive tests will be skipped"

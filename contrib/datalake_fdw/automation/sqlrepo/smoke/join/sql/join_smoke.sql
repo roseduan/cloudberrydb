@@ -20,10 +20,10 @@ SET datestyle = ISO, MDY;
 -- ============================================================
 CREATE SERVER join_s3_server
     FOREIGN DATA WRAPPER datalake_fdw
-    OPTIONS (host 'lakehouse', protocol 's3', isvirtual 'false', ishttps 'false');
+    OPTIONS (host 'hadoop', protocol 's3', isvirtual 'false', ishttps 'false');
 CREATE USER MAPPING FOR gpadmin
     SERVER join_s3_server
-    OPTIONS (user 'gpadmin', accesskey 'admin', secretkey 'password');
+    OPTIONS (user 'gpadmin', accesskey 'admin', secretkey 'admin12345');
 
 -- ============================================================
 -- Setup: Iceberg builtin catalog + volume
@@ -38,7 +38,7 @@ CREATE SERVER join_volume_server
 FOREIGN DATA WRAPPER iceberg_volume_fdw
 OPTIONS (
     type 's3',
-    endpoint 'http://lakehouse:9100',
+    endpoint 'http://minio:9000',
     region 'us-east-1',
     bucket_name 'warehouse',
     path_style_access 'true'
@@ -47,7 +47,7 @@ CREATE USER MAPPING FOR current_user
 SERVER join_volume_server
 OPTIONS (
     access_key_id 'admin',
-    secret_access_key 'password');
+    secret_access_key 'admin12345');
 CREATE FOREIGN VOLUME join_volume SERVER join_volume_server OPTIONS(base_path '/join_volume/');
 SET iceberg_default_volume = 'join_volume';
 

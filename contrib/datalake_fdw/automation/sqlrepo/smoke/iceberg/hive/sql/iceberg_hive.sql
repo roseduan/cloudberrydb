@@ -16,7 +16,7 @@ CREATE SERVER hive_catalog_server
 FOREIGN DATA WRAPPER iceberg_catalog_fdw
 OPTIONS (
     type 'hive',
-    url 'thrift://lakehouse:9083'
+    url 'thrift://hive-metastore:9083'
 );
 CREATE USER MAPPING FOR current_user SERVER hive_catalog_server;
 CREATE FOREIGN CATALOG hive_catalog SERVER hive_catalog_server;
@@ -27,7 +27,7 @@ CREATE SERVER hive_volume_server
 FOREIGN DATA WRAPPER iceberg_volume_fdw
 OPTIONS (
     type 's3',
-    endpoint 'http://lakehouse:9100',
+    endpoint 'http://minio:9000',
     region 'us-east-1',
     bucket_name 'warehouse',
     path_style_access 'true'
@@ -36,7 +36,7 @@ CREATE USER MAPPING FOR current_user
 SERVER hive_volume_server
 OPTIONS (
     access_key_id 'admin',
-    secret_access_key 'password');
+    secret_access_key 'admin12345');
 CREATE FOREIGN VOLUME hive_volume SERVER hive_volume_server OPTIONS(base_path '/hive_volume/');
 SET iceberg_default_volume = 'hive_volume';
 

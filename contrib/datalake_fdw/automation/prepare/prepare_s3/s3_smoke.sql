@@ -17,7 +17,7 @@ DROP TABLE IF EXISTS s3_test_csv;
 -- Parquet
 CREATE EXTERNAL TABLE s3_test_parquet (id INT, name STRING, amount DECIMAL(10,2))
 STORED AS PARQUET
-LOCATION 's3://warehouse/s3-smoke-hive-parquet/'
+LOCATION 's3a://warehouse/s3-smoke-hive-parquet/'
 TBLPROPERTIES ('external.table.purge'='true');
 
 INSERT INTO s3_test_parquet VALUES
@@ -30,7 +30,7 @@ SELECT * FROM s3_test_parquet;
 -- Avro
 CREATE EXTERNAL TABLE s3_test_avro (id INT, name STRING)
 STORED AS AVRO
-LOCATION 's3://warehouse/s3-smoke-hive-avro/'
+LOCATION 's3a://warehouse/s3-smoke-hive-avro/'
 TBLPROPERTIES ('external.table.purge'='true');
 
 INSERT INTO s3_test_avro VALUES
@@ -43,7 +43,7 @@ SELECT * FROM s3_test_avro;
 -- ORC
 CREATE EXTERNAL TABLE s3_test_orc (id INT, name STRING, amount DECIMAL(10,2))
 STORED AS ORC
-LOCATION 's3://warehouse/s3-smoke-hive-orc/'
+LOCATION 's3a://warehouse/s3-smoke-hive-orc/'
 TBLPROPERTIES ('external.table.purge'='true');
 
 INSERT INTO s3_test_orc VALUES
@@ -57,7 +57,7 @@ SELECT * FROM s3_test_orc;
 CREATE EXTERNAL TABLE s3_test_text (id INT, name STRING, amount DECIMAL(10,2))
 ROW FORMAT DELIMITED FIELDS TERMINATED BY ','
 STORED AS TEXTFILE
-LOCATION 's3://warehouse/s3-smoke-hive-text/'
+LOCATION 's3a://warehouse/s3-smoke-hive-text/'
 TBLPROPERTIES ('external.table.purge'='true');
 
 INSERT INTO s3_test_text VALUES
@@ -72,7 +72,7 @@ CREATE EXTERNAL TABLE s3_test_csv (id STRING, name STRING, amount STRING)
 ROW FORMAT SERDE 'org.apache.hadoop.hive.serde2.OpenCSVSerde'
 WITH SERDEPROPERTIES ('separatorChar'=',', 'quoteChar'='"')
 STORED AS TEXTFILE
-LOCATION 's3://warehouse/s3-smoke-hive-csv/'
+LOCATION 's3a://warehouse/s3-smoke-hive-csv/'
 TBLPROPERTIES ('external.table.purge'='true');
 
 INSERT INTO s3_test_csv VALUES

@@ -7,7 +7,7 @@
 # Requires the singlecluster stack (lakehouse + singlecluster-polaris-1
 # containers) running, with:
 #   - Polaris reachable at polaris:8181/api/catalog (creds root/s3cr3t)
-#   - MinIO at lakehouse:9100 (admin/password), bucket "warehouse"
+#   - MinIO at minio:9000 (admin/password), bucket "warehouse"
 
 PGXS := $(shell pg_config --pgxs)
 include $(PGXS)

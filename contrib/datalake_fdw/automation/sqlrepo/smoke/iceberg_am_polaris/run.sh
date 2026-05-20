@@ -1,7 +1,7 @@
 #!/bin/bash
 # Run the Polaris-catalog basic functional smoke for Iceberg AM inside the
 # CBDB development container. Requires the singlecluster stack (Polaris on
-# polaris:8181 + MinIO on lakehouse:9100) running and reachable from the
+# polaris:8181 + MinIO on minio:9000) running and reachable from the
 # container's network.
 #
 # Before running this script the test cleans any stale "polaris_smoke"
@@ -33,7 +33,7 @@ docker exec "$POLARIS" bash -lc '
 
 # --- 2. Pre-clean MinIO objects under the table prefix ---
 docker exec "$LAKEHOUSE" bash -lc '
-    mc alias set local http://127.0.0.1:9100 admin password >/dev/null 2>&1
+    mc alias set local http://127.0.0.1:9100 admin admin12345 >/dev/null 2>&1
     mc rm --recursive --force local/warehouse/public/polaris_smoke/ >/dev/null 2>&1
 ' >/dev/null 2>&1 || true
 

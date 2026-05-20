@@ -18,25 +18,25 @@ HIVE_ICEBERG_PREPARE_SQL  = $(AUTOMATION_DIR)/prepare/prepare_hive/hive_iceberg_
 SPARK_SQL ?= spark-sql
 SPARK_CONF = \
 	--master local[*] \
-	--conf spark.hadoop.hive.metastore.uris=thrift://lakehouse:9083 \
-	--conf spark.hadoop.fs.s3a.endpoint=http://lakehouse:9100 \
+	--conf spark.sql.legacy.createHiveTableByDefault=true \
+	--conf spark.hadoop.hive.metastore.uris=thrift://hive-metastore:9083 \
+	--conf spark.hadoop.fs.s3a.endpoint=http://minio:9000 \
 	--conf spark.hadoop.fs.s3a.access.key=admin \
-	--conf spark.hadoop.fs.s3a.secret.key=password \
+	--conf spark.hadoop.fs.s3a.secret.key=admin12345 \
 	--conf spark.hadoop.fs.s3a.path.style.access=true \
 	--conf spark.hadoop.fs.s3a.aws.credentials.provider=org.apache.hadoop.fs.s3a.SimpleAWSCredentialsProvider \
 	--conf spark.sql.extensions=org.apache.iceberg.spark.extensions.IcebergSparkSessionExtensions \
 	--conf spark.sql.catalog.ic=org.apache.iceberg.spark.SparkCatalog \
 	--conf spark.sql.catalog.ic.type=hive \
-	--conf spark.sql.catalog.ic.uri=thrift://lakehouse:9083
+	--conf spark.sql.catalog.ic.uri=thrift://hive-metastore:9083
 
 installcheck:
-	@echo "Loading Hive test data..."
-	@if [ -f "$(HIVE_PREPARE_SQL)" ]; then \
-		echo "Found SQL file: $(HIVE_PREPARE_SQL)"; \
-		beeline -u "jdbc:hive2://lakehouse:10000/default" -n hive -f "$(HIVE_PREPARE_SQL)" 2>&1 || \
-		echo "WARNING: Failed to load Hive test data (beeline not available or Hive not ready)"; \
+	@echo "Loading Hive test data via spark-sql (avoids hive INSERT MR/YARN requirement)..."
+	@if [ -f "$(HIVE_PREPARE_SQL)" ] && command -v $(SPARK_SQL) >/dev/null 2>&1; then \
+		$(SPARK_SQL) $(SPARK_CONF) -f "$(HIVE_PREPARE_SQL)" 2>&1 | tail -20 || \
+		echo "WARNING: Failed to load Hive test data"; \
 	else \
-		echo "WARNING: Hive prepare SQL not found at $(HIVE_PREPARE_SQL)"; \
+		echo "WARNING: skipping Hive prep (spark-sql or SQL file missing)"; \
 	fi
 	@echo "Loading Iceberg-on-Hive fixture (default.iceberg_fdw_test)..."
 	@if [ -f "$(HIVE_ICEBERG_PREPARE_SQL)" ] && command -v $(SPARK_SQL) >/dev/null 2>&1; then \

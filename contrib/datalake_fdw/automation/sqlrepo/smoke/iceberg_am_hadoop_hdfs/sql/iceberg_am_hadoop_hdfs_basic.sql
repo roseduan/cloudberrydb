@@ -12,12 +12,12 @@ CREATE SERVER hd_hdfs_cat_srv FOREIGN DATA WRAPPER iceberg_catalog_fdw
     OPTIONS (type 'hadoop');
 CREATE USER MAPPING FOR current_user SERVER hd_hdfs_cat_srv;
 CREATE FOREIGN CATALOG hd_hdfs_cat SERVER hd_hdfs_cat_srv
-    OPTIONS (warehouse_location_prefix 'hdfs://lakehouse:8020/iceberg_hadoop_hdfs_smoke/');
+    OPTIONS (warehouse_location_prefix 'hdfs://hadoop:8020/iceberg_hadoop_hdfs_smoke/');
 SET iceberg_default_catalog = 'hd_hdfs_cat';
 
 DROP SERVER IF EXISTS hd_hdfs_vol_srv CASCADE;
 CREATE SERVER hd_hdfs_vol_srv FOREIGN DATA WRAPPER iceberg_volume_fdw
-    OPTIONS (type 'hdfs', endpoint 'hdfs://lakehouse:8020');
+    OPTIONS (type 'hdfs', endpoint 'hdfs://hadoop:8020');
 CREATE USER MAPPING FOR current_user SERVER hd_hdfs_vol_srv
     OPTIONS (username 'gpadmin');
 CREATE FOREIGN VOLUME hd_hdfs_vol SERVER hd_hdfs_vol_srv

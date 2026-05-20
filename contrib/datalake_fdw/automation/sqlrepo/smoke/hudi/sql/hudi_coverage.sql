@@ -24,7 +24,7 @@ SET datestyle = ISO, MDY;
 CREATE SERVER hudi_cov_server
     FOREIGN DATA WRAPPER datalake_fdw
     OPTIONS (
-        hdfs_namenodes 'lakehouse',
+        hdfs_namenodes 'hadoop',
         hdfs_port '8020',
         protocol 'hdfs',
         hdfs_auth_method 'simple',

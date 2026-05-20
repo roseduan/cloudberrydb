@@ -12,10 +12,10 @@ CREATE FOREIGN DATA WRAPPER datalake_fdw
 DROP SERVER IF EXISTS s3_server CASCADE;
 CREATE SERVER s3_server
     FOREIGN DATA WRAPPER datalake_fdw
-    OPTIONS (host 'lakehouse:9100', protocol 's3', isvirtual 'false', ishttps 'false');
+    OPTIONS (host 'minio:9000', protocol 's3', isvirtual 'false', ishttps 'false');
 CREATE USER MAPPING FOR gpadmin
     SERVER s3_server
-    OPTIONS (user 'gpadmin', accesskey 'admin', secretkey 'password');
+    OPTIONS (user 'gpadmin', accesskey 'admin', secretkey 'admin12345');
 
 -- ============================================================
 -- Test 1: Hive Parquet -> CB read

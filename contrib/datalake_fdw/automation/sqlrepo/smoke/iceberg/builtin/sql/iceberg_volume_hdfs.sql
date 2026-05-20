@@ -20,7 +20,7 @@ BEGIN
         FOREIGN DATA WRAPPER iceberg_volume_fdw
         OPTIONS (
             type ''hdfs'',
-            hdfs_namenodes ''lakehouse:8020'',
+            hdfs_namenodes ''hadoop:8020'',
             hdfs_auth_method ''simple'',
             hadoop_rpc_protection ''authentication''
         )';
@@ -85,7 +85,7 @@ BEGIN
             is_ha_supported ''true'',
             dfs_nameservices ''mycluster'',
             dfs_ha_namenodes ''nn1,nn2'',
-            dfs_namenode_rpc_address ''lakehouse:8020,lakehouse:8020'',
+            dfs_namenode_rpc_address ''hadoop:8020,hadoop:8020'',
             dfs_client_failover_proxy_provider ''org.apache.hadoop.hdfs.server.namenode.ha.ConfiguredFailoverProxyProvider''
         )';
 

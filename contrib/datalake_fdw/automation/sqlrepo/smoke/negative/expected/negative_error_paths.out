@@ -61,7 +61,7 @@ NOTICE:  invalid oss opt: invalid oss option "bogus_oss_opt".
 CREATE SERVER err_s3_server FOREIGN DATA WRAPPER datalake_fdw
 OPTIONS (host 'localhost:9100', protocol 's3', isvirtual 'false', ishttps 'false');
 CREATE USER MAPPING FOR current_user SERVER err_s3_server
-OPTIONS (user 'gpadmin', accesskey 'admin', secretkey 'password');
+OPTIONS (user 'gpadmin', accesskey 'admin', secretkey 'admin12345');
 DO $$
 BEGIN
     EXECUTE 'CREATE FOREIGN TABLE err_ft1 (id int) SERVER err_s3_server OPTIONS (filePath ''/bucket/path/'', format ''invalid_fmt'')';

@@ -13,6 +13,25 @@
 \i ../../../lib/sql/common_setup.sql
 
 -- ===== Polaris REST catalog server + S3 volume =====
+-- Volume server must exist before FOREIGN CATALOG creation: the catalog FDW
+-- derives Polaris's storageConfigInfo from the bound volume, and Polaris
+-- rejects catalog creation with "storageConfig cannot be null or empty" when
+-- it's missing.
+DROP SERVER IF EXISTS polaris_smoke_vol_srv CASCADE;
+CREATE SERVER polaris_smoke_vol_srv FOREIGN DATA WRAPPER iceberg_volume_fdw
+    OPTIONS (
+        type 's3',
+        endpoint 'http://minio:9000',
+        region 'us-east-1',
+        bucket_name 'warehouse',
+        path_style_access 'true'
+    );
+CREATE USER MAPPING FOR current_user SERVER polaris_smoke_vol_srv
+    OPTIONS (access_key_id 'admin', secret_access_key 'admin12345');
+CREATE FOREIGN VOLUME polaris_smoke_vol SERVER polaris_smoke_vol_srv
+    OPTIONS (base_path '/polaris_smoke/', allow_writes 'true');
+SET iceberg_default_volume = 'polaris_smoke_vol';
+
 DROP SERVER IF EXISTS polaris_smoke_cat_srv CASCADE;
 CREATE SERVER polaris_smoke_cat_srv FOREIGN DATA WRAPPER iceberg_catalog_fdw
     OPTIONS (type 'polaris', url 'http://polaris:8181/api/catalog');
@@ -21,21 +40,6 @@ CREATE USER MAPPING FOR current_user SERVER polaris_smoke_cat_srv
 CREATE FOREIGN CATALOG polaris_smoke_cat SERVER polaris_smoke_cat_srv
     OPTIONS (catalog_name 'polaris_default_catalog', default_namespace 'public');
 SET iceberg_default_catalog = 'polaris_smoke_cat';
-
-DROP SERVER IF EXISTS polaris_smoke_vol_srv CASCADE;
-CREATE SERVER polaris_smoke_vol_srv FOREIGN DATA WRAPPER iceberg_volume_fdw
-    OPTIONS (
-        type 's3',
-        endpoint 'http://lakehouse:9100',
-        region 'us-east-1',
-        bucket_name 'warehouse',
-        path_style_access 'true'
-    );
-CREATE USER MAPPING FOR current_user SERVER polaris_smoke_vol_srv
-    OPTIONS (access_key_id 'admin', secret_access_key 'password');
-CREATE FOREIGN VOLUME polaris_smoke_vol SERVER polaris_smoke_vol_srv
-    OPTIONS (base_path '/polaris_smoke/', allow_writes 'true');
-SET iceberg_default_volume = 'polaris_smoke_vol';
 
 -- ===== Schema + initial INSERT =====
 DROP TABLE IF EXISTS polaris_smoke;

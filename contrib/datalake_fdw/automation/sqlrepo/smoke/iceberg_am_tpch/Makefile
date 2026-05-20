@@ -5,7 +5,7 @@
 #   COUNT/JOIN/aggregate/UPDATE/DELETE sanity checks.
 #
 # Requires the singlecluster stack (lakehouse container) running with MinIO
-# at lakehouse:9100 (admin/password) and bucket "warehouse".
+# at minio:9000 (admin/password) and bucket "warehouse".
 
 PGXS := $(shell pg_config --pgxs)
 include $(PGXS)

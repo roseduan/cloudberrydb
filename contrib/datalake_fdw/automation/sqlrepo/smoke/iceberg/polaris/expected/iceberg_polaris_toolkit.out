@@ -6,7 +6,7 @@ CREATE EXTENSION IF NOT EXISTS datalake_fdw;
 NOTICE:  extension "datalake_fdw" already exists, skipping
 -- Polaris catalog setup
 CREATE SERVER ptk_catalog_server FOREIGN DATA WRAPPER iceberg_catalog_fdw
-OPTIONS (type 'polaris', url 'http://singlecluster-polaris-1:8181/api/catalog');
+OPTIONS (type 'polaris', url 'http://polaris:8181/api/catalog');
 CREATE USER MAPPING FOR current_user SERVER ptk_catalog_server
 OPTIONS (client_id 'root', client_secret 's3cr3t', scope 'PRINCIPAL_ROLE:ALL');
 CREATE FOREIGN CATALOG ptk_catalog SERVER ptk_catalog_server
@@ -14,10 +14,10 @@ OPTIONS (catalog_name 'polaris_default_catalog');
 SET iceberg_default_catalog = 'ptk_catalog';
 -- Volume setup
 CREATE SERVER ptk_volume_server FOREIGN DATA WRAPPER iceberg_volume_fdw
-OPTIONS (type 's3', endpoint 'http://lakehouse:9100', region 'us-west-2',
+OPTIONS (type 's3', endpoint 'http://minio:9000', region 'us-west-2',
          bucket_name 'warehouse', path_style_access 'true');
 CREATE USER MAPPING FOR current_user SERVER ptk_volume_server
-OPTIONS (access_key_id 'admin', secret_access_key 'password');
+OPTIONS (access_key_id 'admin', secret_access_key 'admin12345');
 CREATE FOREIGN VOLUME ptk_volume SERVER ptk_volume_server OPTIONS(base_path '/');
 SET iceberg_default_volume = 'ptk_volume';
 -- Create test table

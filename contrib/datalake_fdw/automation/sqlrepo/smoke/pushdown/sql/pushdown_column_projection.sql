@@ -15,7 +15,7 @@ CREATE SERVER proj_volume_server
 FOREIGN DATA WRAPPER iceberg_volume_fdw
 OPTIONS (
     type 's3',
-    endpoint 'http://lakehouse:9100',
+    endpoint 'http://minio:9000',
     region 'us-east-1',
     bucket_name 'warehouse',
     path_style_access 'true'
@@ -24,7 +24,7 @@ CREATE USER MAPPING FOR current_user
 SERVER proj_volume_server
 OPTIONS (
     access_key_id 'admin',
-    secret_access_key 'password');
+    secret_access_key 'admin12345');
 CREATE FOREIGN VOLUME proj_volume SERVER proj_volume_server OPTIONS(base_path '/proj_volume/');
 SET iceberg_default_volume = 'proj_volume';
 

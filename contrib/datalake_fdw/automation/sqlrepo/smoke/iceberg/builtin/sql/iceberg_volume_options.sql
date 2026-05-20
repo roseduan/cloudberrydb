@@ -20,7 +20,7 @@ CREATE SERVER volopt_s3_server
 FOREIGN DATA WRAPPER iceberg_volume_fdw
 OPTIONS (
     type 's3',
-    endpoint 'http://lakehouse:9100',
+    endpoint 'http://minio:9000',
     region 'us-east-1',
     bucket_name 'warehouse',
     path_style_access 'true'
@@ -29,7 +29,7 @@ CREATE USER MAPPING FOR current_user
 SERVER volopt_s3_server
 OPTIONS (
     access_key_id 'admin',
-    secret_access_key 'password');
+    secret_access_key 'admin12345');
 CREATE FOREIGN VOLUME volopt_s3_vol SERVER volopt_s3_server
 OPTIONS (base_path '/volopt_s3/');
 
@@ -46,7 +46,7 @@ CREATE SERVER volopt_s3_full_server
 FOREIGN DATA WRAPPER iceberg_volume_fdw
 OPTIONS (
     type 's3',
-    endpoint 'http://lakehouse:9100',
+    endpoint 'http://minio:9000',
     region 'us-east-2',
     bucket_name 'warehouse',
     path_style_access 'true',
@@ -63,7 +63,7 @@ CREATE USER MAPPING FOR current_user
 SERVER volopt_s3_full_server
 OPTIONS (
     access_key_id 'admin',
-    secret_access_key 'password');
+    secret_access_key 'admin12345');
 CREATE FOREIGN VOLUME volopt_s3_full_vol SERVER volopt_s3_full_server
 OPTIONS (
     base_path '/volopt_s3_full/',
@@ -84,7 +84,7 @@ CREATE SERVER volopt_vhost_server
 FOREIGN DATA WRAPPER iceberg_volume_fdw
 OPTIONS (
     type 's3',
-    endpoint 'http://lakehouse:9100',
+    endpoint 'http://minio:9000',
     region 'us-east-1',
     bucket_name 'warehouse',
     path_style_access 'false'
@@ -93,7 +93,7 @@ CREATE USER MAPPING FOR current_user
 SERVER volopt_vhost_server
 OPTIONS (
     access_key_id 'admin',
-    secret_access_key 'password');
+    secret_access_key 'admin12345');
 CREATE FOREIGN VOLUME volopt_vhost_vol SERVER volopt_vhost_server
 OPTIONS (base_path '/volopt_vhost/');
 
@@ -110,7 +110,7 @@ CREATE SERVER volopt_bp_server_1
 FOREIGN DATA WRAPPER iceberg_volume_fdw
 OPTIONS (
     type 's3',
-    endpoint 'http://lakehouse:9100',
+    endpoint 'http://minio:9000',
     region 'us-east-1',
     bucket_name 'warehouse',
     path_style_access 'true'
@@ -119,7 +119,7 @@ CREATE USER MAPPING FOR current_user
 SERVER volopt_bp_server_1
 OPTIONS (
     access_key_id 'admin',
-    secret_access_key 'password');
+    secret_access_key 'admin12345');
 CREATE FOREIGN VOLUME volopt_bp_multi_slash SERVER volopt_bp_server_1
 OPTIONS (base_path '///multi/slash/path/');
 
@@ -146,7 +146,7 @@ CREATE SERVER volopt_username_server
 FOREIGN DATA WRAPPER iceberg_volume_fdw
 OPTIONS (
     type 's3',
-    endpoint 'http://lakehouse:9100',
+    endpoint 'http://minio:9000',
     region 'us-east-1',
     bucket_name 'warehouse',
     path_style_access 'true'
@@ -156,7 +156,7 @@ SERVER volopt_username_server
 OPTIONS (
     username 'gpadmin',
     access_key_id 'admin',
-    secret_access_key 'password');
+    secret_access_key 'admin12345');
 CREATE FOREIGN VOLUME volopt_username_vol SERVER volopt_username_server
 OPTIONS (base_path '/volopt_username/');
 

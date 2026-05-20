@@ -13,9 +13,9 @@ HERE_IN_CONTAINER="/workspace/database/contrib/datalake_fdw/automation/sqlrepo/s
 
 # --- Pre-clean HDFS warehouse path and ensure it's writable ---
 docker exec "$LAKEHOUSE" bash -lc "
-    /opt/hadoop/bin/hdfs dfs -fs hdfs://lakehouse:8020 -rm -r -f $HDFS_WAREHOUSE >/dev/null 2>&1 || true
-    /opt/hadoop/bin/hdfs dfs -fs hdfs://lakehouse:8020 -mkdir -p $HDFS_WAREHOUSE >/dev/null 2>&1
-    /opt/hadoop/bin/hdfs dfs -fs hdfs://lakehouse:8020 -chmod -R 777 $HDFS_WAREHOUSE >/dev/null 2>&1
+    /opt/hadoop/bin/hdfs dfs -fs hdfs://hadoop:8020 -rm -r -f $HDFS_WAREHOUSE >/dev/null 2>&1 || true
+    /opt/hadoop/bin/hdfs dfs -fs hdfs://hadoop:8020 -mkdir -p $HDFS_WAREHOUSE >/dev/null 2>&1
+    /opt/hadoop/bin/hdfs dfs -fs hdfs://hadoop:8020 -chmod -R 777 $HDFS_WAREHOUSE >/dev/null 2>&1
 " >/dev/null 2>&1 || true
 
 docker exec -u gpadmin "$CONTAINER" bash -c "

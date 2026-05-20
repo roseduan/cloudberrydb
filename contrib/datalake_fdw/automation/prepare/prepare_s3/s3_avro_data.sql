@@ -8,7 +8,7 @@
 DROP TABLE IF EXISTS avro_basic_temp;
 CREATE TABLE avro_basic_temp (id INT, name STRING)
 USING avro
-LOCATION 's3://test-data/avro/basic/';
+LOCATION 's3a://test-data/avro/basic/';
 
 INSERT INTO avro_basic_temp VALUES
     (1, 'Alice'),
@@ -30,7 +30,7 @@ CREATE TABLE avro_types_temp (
     str_val STRING
 )
 USING avro
-LOCATION 's3://test-data/avro/types/';
+LOCATION 's3a://test-data/avro/types/';
 
 INSERT INTO avro_types_temp VALUES
     (1, 100, 9999999999, 3.14, 2.718281828, 'hello'),
@@ -45,7 +45,7 @@ DROP TABLE avro_types_temp;
 DROP TABLE IF EXISTS avro_nulls_temp;
 CREATE TABLE avro_nulls_temp (id INT, val1 STRING, val2 INT)
 USING avro
-LOCATION 's3://test-data/avro/nulls/';
+LOCATION 's3a://test-data/avro/nulls/';
 
 INSERT INTO avro_nulls_temp VALUES
     (1, 'has_val', 100),

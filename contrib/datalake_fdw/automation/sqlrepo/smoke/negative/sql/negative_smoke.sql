@@ -20,10 +20,10 @@ SET datestyle = ISO, MDY;
 -- ============================================================
 CREATE SERVER s3_neg_server
     FOREIGN DATA WRAPPER datalake_fdw
-    OPTIONS (host 'lakehouse:9100', protocol 's3', isvirtual 'false', ishttps 'false');
+    OPTIONS (host 'minio:9000', protocol 's3', isvirtual 'false', ishttps 'false');
 CREATE USER MAPPING FOR gpadmin
     SERVER s3_neg_server
-    OPTIONS (user 'gpadmin', accesskey 'admin', secretkey 'password');
+    OPTIONS (user 'gpadmin', accesskey 'admin', secretkey 'admin12345');
 
 -- ============================================================
 -- Test 1: Non-existent file path
@@ -185,7 +185,7 @@ CREATE SERVER neg_iceberg_volume
 FOREIGN DATA WRAPPER iceberg_volume_fdw
 OPTIONS (
     type 's3',
-    endpoint 'http://lakehouse:9100',
+    endpoint 'http://minio:9000',
     region 'us-east-1',
     bucket_name 'warehouse',
     path_style_access 'true'
@@ -194,7 +194,7 @@ CREATE USER MAPPING FOR current_user
 SERVER neg_iceberg_volume
 OPTIONS (
     access_key_id 'admin',
-    secret_access_key 'password');
+    secret_access_key 'admin12345');
 CREATE FOREIGN VOLUME neg_volume SERVER neg_iceberg_volume OPTIONS(base_path '/neg_volume/');
 SET iceberg_default_volume = 'neg_volume';
 

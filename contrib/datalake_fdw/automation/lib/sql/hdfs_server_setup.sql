@@ -3,13 +3,13 @@
 -- Requires: common_setup.sql to be loaded first
 --
 -- This file creates HDFS namenode connection
--- Default endpoint: lakehouse:8020 (HDFS namenode)
+-- Default endpoint: hadoop:8020 (HDFS namenode)
 
 -- Create server for HDFS
 CREATE SERVER IF NOT EXISTS hdfs_server
     FOREIGN DATA WRAPPER datalake_fdw
     OPTIONS (
-        host 'lakehouse',
+        host 'hadoop',
         port '8020',
         protocol 'hdfs'
     );

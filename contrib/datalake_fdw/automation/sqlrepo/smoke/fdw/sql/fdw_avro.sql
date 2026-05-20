@@ -11,10 +11,10 @@ CREATE FOREIGN DATA WRAPPER datalake_fdw
     OPTIONS (mpp_execute 'all segments');
 CREATE SERVER fdw_avro_server
     FOREIGN DATA WRAPPER datalake_fdw
-    OPTIONS (host 'lakehouse:9100', protocol 's3', isvirtual 'false', ishttps 'false');
+    OPTIONS (host 'minio:9000', protocol 's3', isvirtual 'false', ishttps 'false');
 CREATE USER MAPPING FOR gpadmin
     SERVER fdw_avro_server
-    OPTIONS (user 'gpadmin', accesskey 'admin', secretkey 'password');
+    OPTIONS (user 'gpadmin', accesskey 'admin', secretkey 'admin12345');
 
 -- ============================================================
 -- Test 1: Basic Avro write + read

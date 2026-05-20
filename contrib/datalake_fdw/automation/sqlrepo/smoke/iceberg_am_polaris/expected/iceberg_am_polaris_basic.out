@@ -1,0 +1,163 @@
+-- Polaris-catalog basic functional smoke for Iceberg AM
+--
+-- Verifies CREATE ICEBERG TABLE / INSERT / SELECT / UPDATE / DELETE work
+-- end-to-end against a Polaris REST catalog + S3 (MinIO) volume.
+--
+-- The Polaris-managed table goes through a different code path than the
+-- builtin catalog: the C-side tracker treats is_internal=true tables on a
+-- non-builtin catalog as "external for commit purposes" and routes through
+-- the dedicated commitAppend / commitUpdate agent endpoints so Polaris's
+-- current-metadata pointer actually advances. Regression coverage for the
+-- ebdd74af903 fix.
+\i ../../../lib/sql/common_setup.sql
+-- common_setup.sql
+-- Base setup for all datalake_fdw tests
+-- This file should be included at the beginning of all test SQL files
+-- Create required extensions
+CREATE EXTENSION IF NOT EXISTS datalake_fdw;
+CREATE EXTENSION IF NOT EXISTS hive_connector;
+-- gp_exttable_delimiter may not be available in all environments.
+-- Silence the "already exists, skipping" NOTICE emitted in CI where the
+-- extension has been created by an earlier test or initdb step.
+SET client_min_messages = WARNING;
+DO $$ BEGIN
+    CREATE EXTENSION IF NOT EXISTS gp_exttable_delimiter;
+EXCEPTION WHEN OTHERS THEN
+    -- Extension not available, skip silently
+END $$;
+RESET client_min_messages;
+-- Create foreign data wrapper if not already present
+-- Note: CREATE FOREIGN DATA WRAPPER does not support IF NOT EXISTS syntax
+DO $$ BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_foreign_data_wrapper WHERE fdwname = 'datalake_fdw') THEN
+        EXECUTE 'CREATE FOREIGN DATA WRAPPER datalake_fdw
+            HANDLER datalake_fdw_handler
+            VALIDATOR datalake_fdw_validator
+            OPTIONS (mpp_execute ''all segments'')';
+    END IF;
+END $$;
+-- Set standard date style for consistent output
+SET datestyle = ISO, MDY;
+-- Create logging utility function
+CREATE OR REPLACE FUNCTION test_log(message text)
+RETURNS void AS $$
+BEGIN
+    RAISE NOTICE '[TEST] %', message;
+END;
+$$ LANGUAGE plpgsql;
+-- Log setup completion
+SELECT test_log('Common setup completed');
+NOTICE:  [TEST] Common setup completed
+ test_log 
+----------
+ 
+(1 row)
+
+-- ===== Polaris REST catalog server + S3 volume =====
+-- Volume server must exist before FOREIGN CATALOG creation: the catalog FDW
+-- derives Polaris's storageConfigInfo from the bound volume, and Polaris
+-- rejects catalog creation with "storageConfig cannot be null or empty" when
+-- it's missing.
+DROP SERVER IF EXISTS polaris_smoke_vol_srv CASCADE;
+NOTICE:  server "polaris_smoke_vol_srv" does not exist, skipping
+CREATE SERVER polaris_smoke_vol_srv FOREIGN DATA WRAPPER iceberg_volume_fdw
+    OPTIONS (
+        type 's3',
+        endpoint 'http://minio:9000',
+        region 'us-east-1',
+        bucket_name 'warehouse',
+        path_style_access 'true'
+    );
+CREATE USER MAPPING FOR current_user SERVER polaris_smoke_vol_srv
+    OPTIONS (access_key_id 'admin', secret_access_key 'admin12345');
+CREATE FOREIGN VOLUME polaris_smoke_vol SERVER polaris_smoke_vol_srv
+    OPTIONS (base_path '/polaris_smoke/', allow_writes 'true');
+SET iceberg_default_volume = 'polaris_smoke_vol';
+DROP SERVER IF EXISTS polaris_smoke_cat_srv CASCADE;
+NOTICE:  server "polaris_smoke_cat_srv" does not exist, skipping
+CREATE SERVER polaris_smoke_cat_srv FOREIGN DATA WRAPPER iceberg_catalog_fdw
+    OPTIONS (type 'polaris', url 'http://polaris:8181/api/catalog');
+CREATE USER MAPPING FOR current_user SERVER polaris_smoke_cat_srv
+    OPTIONS (client_id 'root', client_secret 's3cr3t', scope 'PRINCIPAL_ROLE:ALL');
+CREATE FOREIGN CATALOG polaris_smoke_cat SERVER polaris_smoke_cat_srv
+    OPTIONS (catalog_name 'polaris_default_catalog', default_namespace 'public');
+SET iceberg_default_catalog = 'polaris_smoke_cat';
+-- ===== Schema + initial INSERT =====
+DROP TABLE IF EXISTS polaris_smoke;
+NOTICE:  table "polaris_smoke" does not exist, skipping
+CREATE ICEBERG TABLE polaris_smoke (id INT, name VARCHAR(50), val DECIMAL(10,2));
+\echo === T1 INSERT seed (5 rows) ===
+=== T1 INSERT seed (5 rows) ===
+INSERT INTO polaris_smoke
+    VALUES (1, 'alpha',   1.50),
+           (2, 'beta',    2.75),
+           (3, 'gamma',   3.14),
+           (4, 'delta',   4.20),
+           (5, 'epsilon', 5.00);
+SELECT count(*) AS after_seed FROM polaris_smoke;
+ after_seed 
+------------
+          5
+(1 row)
+
+-- ===== T2 single-row UPDATE =====
+\echo === T2 single-row UPDATE id=2 ===
+=== T2 single-row UPDATE id=2 ===
+UPDATE polaris_smoke SET val = 99.99 WHERE id = 2;
+SELECT id, name, val FROM polaris_smoke WHERE id = 2;
+ id | name |  val  
+----+------+-------
+  2 | beta | 99.99
+(1 row)
+
+-- ===== T3 single-row DELETE =====
+\echo === T3 single-row DELETE id=4 ===
+=== T3 single-row DELETE id=4 ===
+DELETE FROM polaris_smoke WHERE id = 4;
+SELECT count(*) AS after_delete FROM polaris_smoke;
+ after_delete 
+--------------
+            4
+(1 row)
+
+-- ===== T4 incremental INSERT =====
+\echo === T4 incremental INSERT (2 rows) ===
+=== T4 incremental INSERT (2 rows) ===
+INSERT INTO polaris_smoke VALUES (6, 'zeta', 6.66), (7, 'eta', 7.77);
+SELECT count(*) AS after_second_insert FROM polaris_smoke;
+ after_second_insert 
+---------------------
+                   6
+(1 row)
+
+-- ===== T5 multi-row UPDATE =====
+\echo === T5 multi-row UPDATE id<=3 (3 rows) ===
+=== T5 multi-row UPDATE id<=3 (3 rows) ===
+UPDATE polaris_smoke SET name = name || '_v2' WHERE id <= 3;
+-- ===== Final state should be exactly 6 rows in this layout =====
+\echo === final ordered state ===
+=== final ordered state ===
+SELECT id, name, val FROM polaris_smoke ORDER BY id;
+ id |   name   |  val  
+----+----------+-------
+  1 | alpha_v2 |  1.50
+  2 | beta_v2  | 99.99
+  3 | gamma_v2 |  3.14
+  5 | epsilon  |  5.00
+  6 | zeta     |  6.66
+  7 | eta      |  7.77
+(6 rows)
+
+\echo === final aggregate ===
+=== final aggregate ===
+SELECT count(*) AS final_rows,
+       count(*) FILTER (WHERE name LIKE '%\_v2' ESCAPE '\') AS rows_with_v2_suffix,
+       sum(val) AS sum_val
+FROM polaris_smoke;
+ final_rows | rows_with_v2_suffix | sum_val 
+------------+---------------------+---------
+          6 |                   3 |  124.06
+(1 row)
+
+-- ===== Cleanup =====
+DROP TABLE polaris_smoke;

@@ -61,7 +61,7 @@ $$;
 CREATE SERVER err_s3_server FOREIGN DATA WRAPPER datalake_fdw
 OPTIONS (host 'localhost:9100', protocol 's3', isvirtual 'false', ishttps 'false');
 CREATE USER MAPPING FOR current_user SERVER err_s3_server
-OPTIONS (user 'gpadmin', accesskey 'admin', secretkey 'password');
+OPTIONS (user 'gpadmin', accesskey 'admin', secretkey 'admin12345');
 
 DO $$
 BEGIN

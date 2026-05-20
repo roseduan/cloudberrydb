@@ -20,7 +20,7 @@ CREATE SERVER hdfs_server
     FOREIGN DATA WRAPPER datalake_fdw
     OPTIONS (
         protocol 'hdfs',
-        hdfs_namenodes 'lakehouse',
+        hdfs_namenodes 'hadoop',
         hdfs_port '8020',
         hdfs_auth_method 'simple',
         hadoop_rpc_protection 'authentication'
@@ -31,10 +31,10 @@ CREATE USER MAPPING FOR gpadmin
 
 -- Test 3: Create server (Hive)
 CREATE SERVER hive_server
-        FOREIGN DATA WRAPPER datalake_fdw OPTIONS (host 'lakehouse:9100', protocol 's3', isvirtual 'false', ishttps 'false');
+        FOREIGN DATA WRAPPER datalake_fdw OPTIONS (host 'minio:9000', protocol 's3', isvirtual 'false', ishttps 'false');
 CREATE USER MAPPING FOR gpadmin
         SERVER hive_server
-        OPTIONS (user 'gpadmin', accesskey 'admin', secretkey 'password');
+        OPTIONS (user 'gpadmin', accesskey 'admin', secretkey 'admin12345');
 
 -- Test 4: Verify servers
 SELECT srvname, srvoptions FROM pg_foreign_server WHERE srvname IN ('hdfs_server', 'hive_server');

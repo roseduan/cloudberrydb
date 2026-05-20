@@ -11,14 +11,14 @@ HUDI_PREPARE_COV = $(AUTOMATION_DIR)/prepare/prepare_hudi/hudi_coverage.sql
 SPARK_SQL ?= spark-sql
 
 # S3A credentials (for Spark to access MinIO)
-S3A_ENDPOINT ?= http://lakehouse:9100
+S3A_ENDPOINT ?= http://minio:9000
 S3A_ACCESS_KEY ?= admin
-S3A_SECRET_KEY ?= password
+S3A_SECRET_KEY ?= admin12345
 
 # Service endpoints (matching test_config.env)
-HDFS_NAMENODE ?= lakehouse
+HDFS_NAMENODE ?= hadoop
 HDFS_PORT ?= 8020
-HIVE_METASTORE_HOST ?= lakehouse
+HIVE_METASTORE_HOST ?= hive-metastore
 HIVE_METASTORE_PORT ?= 9083
 
 # Spark conf: local mode + Hudi 0.13 extensions + S3A + KryoSerializer

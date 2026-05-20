@@ -12,12 +12,12 @@ S3_VERIFY_SQL = $(AUTOMATION_DIR)/prepare/prepare_s3/s3_verify_cb_write.sql
 # that so the smoke suite does not depend on a system-wide Hive install
 # under /workspace/share.
 BEELINE ?= $(AUTOMATION_DIR)/tools/bin/beeline
-BEELINE_URL = jdbc:hive2://lakehouse:10000/default
+BEELINE_URL = jdbc:hive2://hiveserver2:10000/default
 
 # MinIO endpoint (path-style, non-TLS)
-MC_ALIAS_URL = http://lakehouse:9100
+MC_ALIAS_URL = http://minio:9000
 MC_ALIAS_KEY = admin
-MC_ALIAS_SECRET = password
+MC_ALIAS_SECRET = admin12345
 
 REGRESS = s3_smoke s3_write_smoke
 PGPORT ?= 7000

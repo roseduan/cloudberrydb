@@ -18,7 +18,7 @@ HERE_IN_CONTAINER="/workspace/database/contrib/datalake_fdw/automation/sqlrepo/s
 
 # --- Pre-clean MinIO objects under the warehouse prefix ---
 docker exec "$LAKEHOUSE" bash -lc '
-    mc alias set local http://127.0.0.1:9100 admin password >/dev/null 2>&1
+    mc alias set local http://127.0.0.1:9100 admin admin12345 >/dev/null 2>&1
     mc rm --recursive --force local/warehouse/iceberg_s3_smoke/ >/dev/null 2>&1
 ' >/dev/null 2>&1 || true
 

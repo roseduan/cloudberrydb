@@ -1,5 +1,5 @@
 -- HDFS Smoke Test Data Preparation
--- Run via beeline: beeline -u jdbc:hive2://lakehouse:10000/default -n hive -f hdfs_smoke.sql
+-- Run via beeline: beeline -u jdbc:hive2://hiveserver2:10000/default -n hive -f hdfs_smoke.sql
 -- Creates test data on HDFS that GPHDFS external tables can read.
 --
 -- IMPORTANT: Use EXTERNAL TABLE with external.table.purge=true so
@@ -15,7 +15,7 @@ DROP TABLE IF EXISTS hdfs_smoke_text_simple;
 CREATE EXTERNAL TABLE hdfs_smoke_text_simple (id INT, col STRING, col2 DECIMAL(10,2))
 ROW FORMAT DELIMITED FIELDS TERMINATED BY '\t'
 STORED AS TEXTFILE
-LOCATION 'hdfs://lakehouse:8020/test/basic/text/simple'
+LOCATION 'hdfs://hadoop:8020/test/basic/text/simple'
 TBLPROPERTIES ('external.table.purge'='true');
 
 INSERT INTO hdfs_smoke_text_simple VALUES
@@ -52,7 +52,7 @@ CREATE EXTERNAL TABLE hdfs_smoke_datatypes (
     ts_val TIMESTAMP
 )
 STORED AS PARQUET
-LOCATION 'hdfs://lakehouse:8020/test/basic/datatypes/preload_parquet'
+LOCATION 'hdfs://hadoop:8020/test/basic/datatypes/preload_parquet'
 TBLPROPERTIES ('external.table.purge'='true');
 
 INSERT INTO hdfs_smoke_datatypes VALUES
@@ -80,7 +80,7 @@ CREATE EXTERNAL TABLE hdfs_smoke_edge (
     ts_boundary TIMESTAMP
 )
 STORED AS ORC
-LOCATION 'hdfs://lakehouse:8020/test/basic/edge/preload_orc'
+LOCATION 'hdfs://hadoop:8020/test/basic/edge/preload_orc'
 TBLPROPERTIES ('external.table.purge'='true');
 
 INSERT INTO hdfs_smoke_edge VALUES

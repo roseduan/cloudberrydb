@@ -1,6 +1,6 @@
 -- S3 Performance Test Data Preparation
 -- Run via beeline:
---   beeline -u 'jdbc:hive2://lakehouse:10000/default' -n gpadmin -f s3_perf_data.sql
+--   beeline -u 'jdbc:hive2://hiveserver2:10000/default' -n gpadmin -f s3_perf_data.sql
 --
 -- Creates 10K-row ORC and Parquet tables at the paths expected by
 -- sqlrepo/performance/format/sql/s3_format_compare.sql and

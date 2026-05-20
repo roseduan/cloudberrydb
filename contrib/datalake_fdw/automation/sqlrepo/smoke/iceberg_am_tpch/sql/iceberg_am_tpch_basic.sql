@@ -5,7 +5,7 @@
 
 \i ../../../lib/sql/common_setup.sql
 
--- ===== Catalog (builtin) + Volume (S3/MinIO @ lakehouse:9100) =====
+-- ===== Catalog (builtin) + Volume (S3/MinIO @ minio:9000) =====
 DROP SERVER IF EXISTS am_tpch_cat_srv CASCADE;
 CREATE SERVER am_tpch_cat_srv FOREIGN DATA WRAPPER iceberg_catalog_fdw;
 CREATE USER MAPPING FOR current_user SERVER am_tpch_cat_srv;
@@ -17,13 +17,13 @@ DROP SERVER IF EXISTS am_tpch_vol_srv CASCADE;
 CREATE SERVER am_tpch_vol_srv FOREIGN DATA WRAPPER iceberg_volume_fdw
     OPTIONS (
         type 's3',
-        endpoint 'http://lakehouse:9100',
+        endpoint 'http://minio:9000',
         region 'us-east-1',
         bucket_name 'warehouse',
         path_style_access 'true'
     );
 CREATE USER MAPPING FOR current_user SERVER am_tpch_vol_srv
-    OPTIONS (access_key_id 'admin', secret_access_key 'password');
+    OPTIONS (access_key_id 'admin', secret_access_key 'admin12345');
 CREATE FOREIGN VOLUME am_tpch_vol SERVER am_tpch_vol_srv
     OPTIONS (base_path '/iceberg_am_tpch/', allow_writes 'true');
 SET iceberg_default_volume = 'am_tpch_vol';

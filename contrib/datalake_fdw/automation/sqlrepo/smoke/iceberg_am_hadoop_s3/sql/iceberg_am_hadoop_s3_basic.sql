@@ -20,13 +20,13 @@ DROP SERVER IF EXISTS hd_s3_vol_srv CASCADE;
 CREATE SERVER hd_s3_vol_srv FOREIGN DATA WRAPPER iceberg_volume_fdw
     OPTIONS (
         type 's3',
-        endpoint 'http://lakehouse:9100',
+        endpoint 'http://minio:9000',
         region 'us-east-1',
         bucket_name 'warehouse',
         path_style_access 'true'
     );
 CREATE USER MAPPING FOR current_user SERVER hd_s3_vol_srv
-    OPTIONS (access_key_id 'admin', secret_access_key 'password');
+    OPTIONS (access_key_id 'admin', secret_access_key 'admin12345');
 CREATE FOREIGN VOLUME hd_s3_vol SERVER hd_s3_vol_srv
     OPTIONS (base_path '/iceberg_hadoop_s3_smoke/', allow_writes 'true');
 SET iceberg_default_volume = 'hd_s3_vol';

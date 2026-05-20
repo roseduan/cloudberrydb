@@ -3,14 +3,14 @@
 -- Requires: common_setup.sql to be loaded first
 --
 -- This file creates S3 server with MinIO defaults from docker-compose.yml
--- Default endpoint: lakehouse:9100 (MinIO service)
+-- Default endpoint: minio:9000 (MinIO service)
 -- Default credentials: admin/password
 
 -- Create server for MinIO (S3-compatible storage)
 CREATE SERVER IF NOT EXISTS minio_server
     FOREIGN DATA WRAPPER datalake_fdw
     OPTIONS (
-        host 'lakehouse',
+        host 'hadoop',
         protocol 's3',
         isvirtual 'false',
         ishttps 'false'
@@ -22,7 +22,7 @@ CREATE USER MAPPING IF NOT EXISTS FOR gpadmin
     OPTIONS (
         user 'gpadmin',
         accesskey 'admin',
-        secretkey 'password'
+        secretkey 'admin12345'
     );
 
 -- Log server creation

@@ -4,9 +4,9 @@ PGXS := $(shell pg_config --pgxs)
 include $(PGXS)
 
 # MinIO endpoint (path-style, non-TLS)
-MC_ALIAS_URL = http://lakehouse:9100
+MC_ALIAS_URL = http://minio:9000
 MC_ALIAS_KEY = admin
-MC_ALIAS_SECRET = password
+MC_ALIAS_SECRET = admin12345
 
 # HDFS
 HDFS_CMD = hdfs dfs

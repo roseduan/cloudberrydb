@@ -15,10 +15,10 @@ CREATE FOREIGN DATA WRAPPER datalake_fdw
     OPTIONS (mpp_execute 'all segments');
 CREATE SERVER fdw_vec_server
     FOREIGN DATA WRAPPER datalake_fdw
-    OPTIONS (host 'lakehouse:9100', protocol 's3', isvirtual 'false', ishttps 'false');
+    OPTIONS (host 'minio:9000', protocol 's3', isvirtual 'false', ishttps 'false');
 CREATE USER MAPPING FOR gpadmin
     SERVER fdw_vec_server
-    OPTIONS (user 'gpadmin', accesskey 'admin', secretkey 'password');
+    OPTIONS (user 'gpadmin', accesskey 'admin', secretkey 'admin12345');
 -- ============================================================
 -- Test 1: ORC with bigint types (avoids int32/int64 mismatch in GArrow)
 -- ============================================================
@@ -100,7 +100,7 @@ SELECT COUNT(*) FROM fdw_vec_types_r;
 (1 row)
 
 SELECT * FROM fdw_vec_types_r WHERE col_bigint <= 3 ORDER BY col_bigint NULLS LAST;
-ERROR:  Execute plan for garrow_record_batch_reader_read_next error: [record-batch-reader][read-next]: Invalid: Referenced field col_ts(att5) was timestamp[ns] but should have been timestamp[us]. (execMain.c:2089)  (seg0 slice1 172.18.0.2:7002 pid=1756612) (execMain.c:2089)
+ERROR:  Execute plan for garrow_record_batch_reader_read_next error: [record-batch-reader][read-next]: Invalid: Referenced field col_ts(att5) was timestamp[ns] but should have been timestamp[us]. (execMain.c:2173)  (seg0 slice1 172.18.0.2:7002 pid=274604) (execMain.c:2173)
 SELECT COUNT(*) FROM fdw_vec_types_r WHERE col_double > 0.5;
  count 
 -------

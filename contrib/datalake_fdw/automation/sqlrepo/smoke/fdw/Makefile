@@ -8,9 +8,9 @@
 PGXS := $(shell pg_config --pgxs)
 include $(PGXS)
 
-MC_ALIAS_URL = http://lakehouse:9100
+MC_ALIAS_URL = http://minio:9000
 MC_ALIAS_KEY = admin
-MC_ALIAS_SECRET = password
+MC_ALIAS_SECRET = admin12345
 
 TESTS = fdw_parquet fdw_orc fdw_avro fdw_text_csv fdw_compression fdw_filters fdw_types fdw_multiformat \
         fdw_orc_types fdw_avro_types fdw_filter_pushdown fdw_coverage_boost fdw_vectorized_orc fdw_error_read

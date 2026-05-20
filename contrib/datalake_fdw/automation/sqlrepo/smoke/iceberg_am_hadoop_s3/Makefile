@@ -4,7 +4,7 @@
 # type='hadoop'. Verifies the new agent branch in processServerResource
 # routes hadoop catalog requests through processS3OrHadoopServerResource.
 #
-# Requires the singlecluster lakehouse stack (MinIO at lakehouse:9100).
+# Requires the singlecluster lakehouse stack (MinIO at minio:9000).
 
 PGXS := $(shell pg_config --pgxs)
 include $(PGXS)

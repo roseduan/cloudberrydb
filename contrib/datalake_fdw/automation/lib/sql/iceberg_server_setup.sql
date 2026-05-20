@@ -35,7 +35,7 @@ CREATE SERVER IF NOT EXISTS iceberg_catalog_server
     FOREIGN DATA WRAPPER iceberg_catalog_fdw
     OPTIONS (
         server_type 'hive',
-        hive_metastore_uri 'thrift://lakehouse:9083'
+        hive_metastore_uri 'thrift://hive-metastore:9083'
     );
 
 -- Create user mapping for catalog
@@ -63,7 +63,7 @@ CREATE SERVER IF NOT EXISTS iceberg_volume_server
     FOREIGN DATA WRAPPER iceberg_volume_fdw
     OPTIONS (
         server_type 's3',
-        endpoint 'http://lakehouse:9100',
+        endpoint 'http://minio:9000',
         region 'us-east-1',
         bucket_name 'warehouse',
         path_style_access 'true'
@@ -75,7 +75,7 @@ CREATE USER MAPPING IF NOT EXISTS FOR current_user
     OPTIONS (
         username 'gpadmin',
         aws_access_key_id 'admin',
-        aws_secret_access_key 'password'
+        aws_secret_access_key 'admin12345'
     );
 
 -- Create foreign volume
