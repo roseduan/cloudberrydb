@@ -337,7 +337,7 @@ convert_iceberg_hudi_options(dataLakeOptions *options)
 	if (options->catalog_type == NULL)
 		ereport(ERROR,
 				(errcode(ERRCODE_FDW_OPTION_NAME_NOT_FOUND),
-				 errmsg("foreign table option \"catalog_type\" is required for iceberg format"),
+				 errmsg("foreign table option \"catalog_type\" is required for iceberg/hudi format"),
 				 errhint("Specify catalog_type (e.g. 'hive' or 'polaris') in CREATE FOREIGN TABLE OPTIONS.")));
 
 	initStringInfo(&buf);
