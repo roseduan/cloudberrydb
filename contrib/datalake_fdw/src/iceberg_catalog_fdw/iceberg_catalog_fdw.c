@@ -1376,11 +1376,17 @@ icebergCatalogEndForeignInsert(EState *estate,
         catalogState->agentHandle = NULL;
     }
 
-    /* Destroy memory context */
+    /*
+     * Destroy memory context.  catalogState is palloc'd inside fdwContext,
+     * so deleting the context frees it; null catalogHandle in the same
+     * step so a second call (e.g. an error-recovery retry) hits the entry
+     * guard instead of dereferencing freed memory.
+     */
     if (fdwState->fdwContext)
     {
         MemoryContextDelete(fdwState->fdwContext);
         fdwState->fdwContext = NULL;
+        fdwState->catalogHandle = NULL;
     }
 }
 
@@ -1425,11 +1431,11 @@ icebergCatalogEndForeignScan(ForeignScanState *node)
         catalogState->agentHandle = NULL;
     }
 
-    /* Destroy memory context */
     if (fdwState->fdwContext)
     {
         MemoryContextDelete(fdwState->fdwContext);
         fdwState->fdwContext = NULL;
+        fdwState->catalogHandle = NULL;
     }
 }
 
