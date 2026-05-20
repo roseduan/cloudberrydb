@@ -159,8 +159,10 @@ CPhysicalInnerNLJoin::Ped(CMemoryPool *mp, CExpressionHandle &exprhdl,
 			GPOS_NEW(mp) CDistributionSpecNonReplicated(), dmatch);
 	}
 
-	return GPOS_NEW(mp)
-		CEnfdDistribution(GPOS_NEW(mp) CDistributionSpecNonSingleton(), dmatch);
+	return GPOS_NEW(mp) CEnfdDistribution(
+		GPOS_NEW(mp) CDistributionSpecNonSingleton(
+			true /*fAllowReplicated*/, true /*fAllowWorker*/),
+		dmatch);
 }
 
 // EOF

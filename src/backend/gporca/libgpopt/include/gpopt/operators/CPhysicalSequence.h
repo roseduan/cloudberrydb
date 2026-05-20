@@ -146,6 +146,10 @@ public:
 		return false;
 	}
 
+	// check if optimization contexts is valid
+	// Reject if first child distribution is worker
+	BOOL FValidContext(CMemoryPool *mp, COptimizationContext *poc,
+					   COptimizationContextArray *pdrgpocChild) const override;
 
 };	// class CPhysicalSequence
 

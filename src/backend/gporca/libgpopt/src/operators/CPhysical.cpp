@@ -29,6 +29,10 @@
 #include "gpopt/operators/CExpressionHandle.h"
 #include "gpopt/operators/CScalarIdent.h"
 
+#include "gpopt/base/CCostContext.h"
+#include "gpopt/base/COptimizationContext.h"
+#include "gpopt/search/CGroupExpression.h"
+
 using namespace gpopt;
 
 //---------------------------------------------------------------------------
@@ -1047,6 +1051,57 @@ CPhysical::PppsDerive(CMemoryPool *mp, CExpressionHandle &exprhdl) const
 	}
 
 	return pps_result;
+}
+
+//---------------------------------------------------------------------------
+//	@function:
+//		CPhysical::FHasParallelUnionAllOrPartSelectorChild
+//
+//	@doc:
+//		Check if any child's best cost context is a parallel operator
+//		that requires worker-level coordination (e.g., Parallel Union All,
+//		Parallel Partition Selector). Non-parallel operators should reject
+//		such children because they cannot handle worker-level execution.
+//
+//---------------------------------------------------------------------------
+BOOL
+CPhysical::FHasParallelUnionAllOrPartSelectorChild(
+	COptimizationContextArray *pdrgpocChild)
+{
+	if (nullptr == pdrgpocChild)
+	{
+		return false;
+	}
+
+	for (ULONG ul = 0; ul < pdrgpocChild->Size(); ul++)
+	{
+		COptimizationContext *pocChild = (*pdrgpocChild)[ul];
+		if (nullptr == pocChild)
+		{
+			continue;
+		}
+
+		CCostContext *pccBest = pocChild->PccBest();
+		if (nullptr == pccBest)
+		{
+			continue;
+		}
+
+		CGroupExpression *pgexprChild = pccBest->Pgexpr();
+		if (nullptr == pgexprChild)
+		{
+			continue;
+		}
+
+		COperator::EOperatorId eopid = pgexprChild->Pop()->Eopid();
+		if (COperator::EopPhysicalParallelUnionAll == eopid ||
+			COperator::EopPhysicalParallelPartitionSelector == eopid)
+		{
+			return true;
+		}
+	}
+
+	return false;
 }
 
 // EOF

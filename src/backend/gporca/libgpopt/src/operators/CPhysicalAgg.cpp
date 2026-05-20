@@ -793,4 +793,27 @@ CPhysicalAgg::OsPrint(IOstream &os) const
 	return os;
 }
 
+//---------------------------------------------------------------------------
+//	@function:
+//		CPhysicalAgg::FValidContext
+//
+//	@doc:
+//		Non-parallel aggregate should reject parallel children that require
+//		worker-level coordination (e.g., Parallel Union All, Parallel
+//		Partition Selector).
+//
+//---------------------------------------------------------------------------
+BOOL
+CPhysicalAgg::FValidContext(CMemoryPool *,				// mp
+							COptimizationContext *,		// poc
+							COptimizationContextArray *pdrgpocChild) const
+{
+	if (FHasParallelUnionAllOrPartSelectorChild(pdrgpocChild))
+	{
+		return false;
+	}
+
+	return true;
+}
+
 // EOF

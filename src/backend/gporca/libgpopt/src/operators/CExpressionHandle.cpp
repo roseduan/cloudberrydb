@@ -33,6 +33,7 @@
 #include "gpopt/operators/COperator.h"
 #include "gpopt/operators/CPattern.h"
 #include "gpopt/operators/CPhysicalCTEConsumer.h"
+#include "gpopt/operators/CPhysicalParallelCTEConsumer.h"
 #include "gpopt/operators/CPhysicalScan.h"
 #include "naucrates/statistics/CStatisticsUtils.h"
 
@@ -685,6 +686,17 @@ CExpressionHandle::DerivePlanPropsForCostContext()
 			pdpctxtplan->CopyCTEProducerProps(pdpplan, ulCTEId);
 		}
 	}
+	else if (COperator::EopPhysicalParallelCTEConsumer == pop->Eopid())
+	{
+		// copy producer plan properties to passed derived plan properties context
+		ULONG ulCTEId = CPhysicalParallelCTEConsumer::PopConvert(pop)->UlCTEId();
+		CDrvdPropPlan *pdpplan =
+			m_pcc->Poc()->Prpp()->Pcter()->Pdpplan(ulCTEId);
+		if (nullptr != pdpplan)
+		{
+			pdpctxtplan->CopyCTEProducerProps(pdpplan, ulCTEId);
+		}
+	}
 
 	// create/derive local properties
 	m_pdpplan = Pop()->PdpCreate(m_mp);
@@ -1168,6 +1180,20 @@ CExpressionHandle::Prpp(ULONG child_index) const
 	GPOS_ASSERT(prp->FPlan() && "Unexpected property type");
 
 	return CReqdPropPlan::Prpp(prp);
+}
+
+
+CDrvdPropPlan *
+CExpressionHandle::PdpplanCTEProducer(ULONG ulCTEId) const
+{
+	if (nullptr == m_pcc)
+		return nullptr;
+
+	CCTEReq *pcter = m_pcc->Poc()->Prpp()->Pcter();
+	if (nullptr == pcter)
+		return nullptr;
+
+	return pcter->Pdpplan(ulCTEId);
 }
 
 

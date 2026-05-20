@@ -457,7 +457,7 @@ CPartitionPropagationSpec::AppendEnforcers(CMemoryPool *mp,
 			if (pop_scan)
 				ulParallelWorkers = CPhysicalParallelTableScan::PopConvert(pop_scan)->UlParallelWorkers();
 			else
-				ulParallelWorkers = CUtils::UlExtractWorkersFromGroup(expr->Pgexpr()->Pgroup());
+				ulParallelWorkers = CUtils::UlExtractWorkersFromGroup(expr->Pgexpr()->Pgroup(), false);
 
 			part_selector = GPOS_NEW(mp)
 				CExpression(mp,

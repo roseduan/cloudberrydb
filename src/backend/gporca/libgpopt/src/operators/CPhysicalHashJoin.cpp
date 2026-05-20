@@ -302,7 +302,8 @@ CPhysicalHashJoin::PdsMatch(CMemoryPool *mp, CDistributionSpec *pds,
 			if (EceoRightToLeft == eceo)
 			{
 				GPOS_ASSERT(1 == ulSourceChildIndex);
-				return GPOS_NEW(mp) CDistributionSpecNonSingleton();
+				return GPOS_NEW(mp) CDistributionSpecNonSingleton(
+					true /*fAllowReplicated*/, true /*fAllowWorker*/);
 			}
 
 			GPOS_ASSERT(0 == ulSourceChildIndex);
@@ -347,7 +348,8 @@ CPhysicalHashJoin::PdsMatch(CMemoryPool *mp, CDistributionSpec *pds,
 						CDistributionSpecSingleton::EstSegment);
 				}
 				// inner child is replicated, request outer child to have non-singleton distribution
-				return GPOS_NEW(mp) CDistributionSpecNonSingleton();
+				return GPOS_NEW(mp) CDistributionSpecNonSingleton(
+					true /*fAllowReplicated*/, true /*fAllowWorker*/);
 			}
 
 			GPOS_ASSERT(0 == ulSourceChildIndex);
@@ -833,7 +835,8 @@ CPhysicalHashJoin::PdsRequiredReplicate(
 	GPOS_ASSERT(CDistributionSpec::EdtStrictReplicated == pdsInner->Edt() ||
 				CDistributionSpec::EdtTaintedReplicated == pdsInner->Edt() ||
 				CDistributionSpec::EdtReplicatedWorkers == pdsInner->Edt());
-	return GPOS_NEW(mp) CDistributionSpecNonSingleton();
+	return GPOS_NEW(mp) CDistributionSpecNonSingleton(
+		true /*fAllowReplicated*/, true /*fAllowWorker*/);
 }
 
 
@@ -1201,11 +1204,15 @@ CPhysicalHashJoin::FValidContext(CMemoryPool *,  // mp
 								 COptimizationContext *,  // poc
 								 COptimizationContextArray *pdrgpocChild) const
 {
-	// Regular hash join should reject WorkerRandom distributions from children.
-	// Only ParallelHashJoin can handle WorkerRandom distributions.
+	// Regular hash join should reject parallel children and worker distributions.
+	// Only ParallelHashJoin can handle worker-level execution.
+	if (FHasParallelUnionAllOrPartSelectorChild(pdrgpocChild))
+	{
+		return false;
+	}
+
 	if (nullptr != pdrgpocChild)
 	{
-		// Check both children's derived distributions
 		for (ULONG ul = 0; ul < pdrgpocChild->Size(); ul++)
 		{
 			COptimizationContext *pocChild = (*pdrgpocChild)[ul];
@@ -1214,14 +1221,6 @@ CPhysicalHashJoin::FValidContext(CMemoryPool *,  // mp
 				CCostContext *pccBest = pocChild->PccBest();
 				if (nullptr != pccBest)
 				{
-					// Reject if child is a Parallel Partition Selector
-					CGroupExpression *pgexprChild = pccBest->Pgexpr();
-					if (nullptr != pgexprChild &&
-						COperator::EopPhysicalParallelPartitionSelector == pgexprChild->Pop()->Eopid())
-					{
-						return false;
-					}
-
 					CDrvdPropPlan *pdpplan = pccBest->Pdpplan();
 					if (nullptr != pdpplan)
 					{
@@ -1229,9 +1228,6 @@ CPhysicalHashJoin::FValidContext(CMemoryPool *,  // mp
 						if (CDistributionSpec::EdtWorkerRandom == pds->Edt() ||
 							CDistributionSpec::EdtHashedWorker == pds->Edt())
 						{
-							// Regular HashJoin cannot handle WorkerRandom input
-							// Reject this context so ORCA will try ParallelHashJoin or add Motion
-							// GPOS_TRACE(GPOS_WSZ_LIT("Regular HashJoin cannot handle WorkerRandom input"));
 							return false;
 						}
 					}

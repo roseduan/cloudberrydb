@@ -428,6 +428,34 @@ CCTEInfo::UlConsumers(ULONG ulCTEId) const
 
 //---------------------------------------------------------------------------
 //	@function:
+//		CCTEInfo::UlNestedProducers
+//
+//	@doc:
+//		Count CTE producers whose body references at least one other CTE
+//		consumer. Used as a coarse proxy for nested-CTE complexity to gate
+//		ORCA's parallel CTE planning against pathological depths.
+//
+//---------------------------------------------------------------------------
+ULONG
+CCTEInfo::UlNestedProducers() const
+{
+	ULONG ulNested = 0;
+	UlongToCTEInfoEntryMapIter hmulei(m_phmulcteinfoentry);
+	while (hmulei.Advance())
+	{
+		const CCTEInfoEntry *pcteinfoentry = hmulei.Value();
+		ULONG ulCTEId = pcteinfoentry->UlCTEId();
+		if (nullptr != m_phmulprodconsmap->Find(&ulCTEId))
+		{
+			ulNested++;
+		}
+	}
+	return ulNested;
+}
+
+
+//---------------------------------------------------------------------------
+//	@function:
 //		CCTEInfo::FUsed
 //
 //	@doc:

@@ -425,6 +425,13 @@ public:
 		CReqdPropPlan *prppInput, ULONG child_index,
 		CDrvdPropArray *pdrgpdpCtxt, ULONG ulOptReq);
 
+	// check if any child's best cost context is a parallel operator
+	// that requires worker-level coordination (e.g., Parallel Union All,
+	// Parallel Partition Selector). Non-parallel operators should reject
+	// such children because they cannot handle worker-level execution.
+	static BOOL FHasParallelUnionAllOrPartSelectorChild(
+		COptimizationContextArray *pdrgpocChild);
+
 	// check if optimization contexts is valid
 	virtual BOOL
 	FValidContext(CMemoryPool *,			   // mp

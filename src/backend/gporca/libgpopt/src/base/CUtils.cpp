@@ -45,12 +45,16 @@
 #include "gpopt/operators/CLogicalUnary.h"
 #include "gpopt/operators/CPhysicalAgg.h"
 #include "gpopt/operators/CPhysicalCTEConsumer.h"
+#include "gpopt/operators/CPhysicalParallelCTEConsumer.h"
 #include "gpopt/operators/CPhysicalCTEProducer.h"
+#include "gpopt/operators/CPhysicalParallelCTEProducer.h"
 #include "gpopt/operators/CPhysicalMotionRandom.h"
 #include "gpopt/operators/CPhysicalNLJoin.h"
 #include "gpopt/operators/CPhysicalParallelHashJoin.h"
 #include "gpopt/operators/CPhysicalParallelTableScan.h"
 #include "gpopt/operators/CPhysicalParallelBitmapTableScan.h"
+#include "gpopt/operators/CPhysicalParallelIndexScan.h"
+#include "gpopt/operators/CPhysicalParallelIndexOnlyScan.h"
 #include "gpopt/operators/CPhysicalParallelAppendTableScan.h"
 #include "gpopt/operators/CPredicateUtils.h"
 #include "gpopt/operators/CScalarArray.h"
@@ -1406,6 +1410,7 @@ CUtils::UlExtractWorkersFromGroupInternal(
 	// Scan through all physical expressions in the child group
 	CGroupProxy gpChild(pgroup);
 	CGroupExpression *pgexprChild = gpChild.PgexprFirst();
+	ULONG ulMinWorkers = 0;
 
 	while (nullptr != pgexprChild)
 	{
@@ -1426,10 +1431,18 @@ CUtils::UlExtractWorkersFromGroupInternal(
 			return popScan->UlParallelWorkers();
 		}
 
-		// If requested, stop at Motion nodes (don't propagate workers across Motion)
-		if (fStopAtMotion && FPhysicalMotion(popChild))
+		if (COperator::EopPhysicalParallelIndexScan == popChild->Eopid())
 		{
-			return 0;
+			CPhysicalParallelIndexScan *popScan =
+				CPhysicalParallelIndexScan::PopConvert(popChild);
+			return popScan->UlParallelWorkers();
+		}
+
+		if (COperator::EopPhysicalParallelIndexOnlyScan == popChild->Eopid())
+		{
+			CPhysicalParallelIndexOnlyScan *popScan =
+				CPhysicalParallelIndexOnlyScan::PopConvert(popChild);
+			return popScan->UlParallelWorkers();
 		}
 
 		if (COperator::EopPhysicalParallelAppendTableScan == popChild->Eopid())
@@ -1439,16 +1452,60 @@ CUtils::UlExtractWorkersFromGroupInternal(
 			return popScan->UlParallelWorkers();
 		}
 
-		// Recursively check all children (Motion nodes, joins, etc.)
-		for (ULONG ul = 0; ul < pgexprChild->Arity(); ul++)
+		if (COperator::EopPhysicalParallelCTEConsumer == popChild->Eopid())
 		{
-			ULONG ulChildWorkers = UlExtractWorkersFromGroupInternal(
-				(*pgexprChild)[ul], visited_groups, fStopAtMotion);
-			if (ulChildWorkers > 0)
+			CPhysicalParallelCTEConsumer *popCteConsumer =
+				CPhysicalParallelCTEConsumer::PopConvert(popChild);
+			return popCteConsumer->UlParallelWorkers();
+		}
+
+		// If requested, stop at Motion nodes (don't propagate workers across Motion)
+		if (fStopAtMotion && FPhysicalMotion(popChild))
+		{
+			return 0;
+		}
+
+		/*
+		 * Recursively check children to find parallel worker count.
+		 *
+		 * For joins, check all children and require every side to have
+		 * parallel workers (take the minimum).  For non-join operators
+		 * (Filter, Sort, Agg, etc.), only follow the first (outer) child
+		 * -- the inner side (e.g., broadcast of a small table) does not
+		 * need to carry parallel workers.
+		 */
+		if (FPhysicalJoin(popChild))
+		{
+			for (ULONG ul = 0; ul < pgexprChild->Arity(); ul++)
 			{
-				return ulChildWorkers;
+				ULONG ulChildWorkers = UlExtractWorkersFromGroupInternal(
+					(*pgexprChild)[ul], visited_groups, fStopAtMotion);
+				if (ulChildWorkers < 1)
+				{
+					return 0;
+				}
+				if (ulMinWorkers == 0 || ulChildWorkers < ulMinWorkers)
+				{
+					ulMinWorkers = ulChildWorkers;
+				}
 			}
 		}
+		else
+		{
+			if (pgexprChild->Arity() > 0)
+			{
+				ULONG ulChildWorkers = UlExtractWorkersFromGroupInternal(
+					(*pgexprChild)[0], visited_groups, fStopAtMotion);
+				if (ulChildWorkers > 0)
+				{
+					return ulChildWorkers;
+				}
+			}
+		}
+
+		if (ulMinWorkers > 0)
+			return ulMinWorkers;
+
 
 		pgexprChild = gpChild.PgexprNext(pgexprChild);
 	}
@@ -4676,9 +4733,30 @@ CUtils::ValidateCTEProducerConsumerLocality(
 		ULONG ulCTEID = CPhysicalCTEProducer::PopConvert(pop)->UlCTEId();
 		phmulul->Insert(GPOS_NEW(mp) ULONG(ulCTEID), GPOS_NEW(mp) ULONG(eelt));
 	}
+	else if (COperator::EopPhysicalParallelCTEProducer == pop->Eopid())
+	{
+		// record the location (either master or segment or singleton)
+		// where the CTE producer is being executed
+		ULONG ulCTEID = CPhysicalParallelCTEProducer::PopConvert(pop)->UlCTEId();
+		phmulul->Insert(GPOS_NEW(mp) ULONG(ulCTEID), GPOS_NEW(mp) ULONG(eelt));
+	}
 	else if (COperator::EopPhysicalCTEConsumer == pop->Eopid())
 	{
 		ULONG ulCTEID = CPhysicalCTEConsumer::PopConvert(pop)->UlCTEId();
+		ULONG *pulLocProducer = phmulul->Find(&ulCTEID);
+
+		// check if the CTEConsumer is being executed in the same location
+		// as the CTE Producer
+		if (nullptr == pulLocProducer || *pulLocProducer != (ULONG) eelt)
+		{
+			phmulul->Release();
+			GPOS_RAISE(gpopt::ExmaGPOPT,
+					   gpopt::ExmiCTEProducerConsumerMisAligned, ulCTEID);
+		}
+	}
+	else if (COperator::EopPhysicalParallelCTEConsumer == pop->Eopid())
+	{
+		ULONG ulCTEID = CPhysicalParallelCTEConsumer::PopConvert(pop)->UlCTEId();
 		ULONG *pulLocProducer = phmulul->Find(&ulCTEID);
 
 		// check if the CTEConsumer is being executed in the same location
@@ -4698,7 +4776,9 @@ CUtils::ValidateCTEProducerConsumerLocality(
 	}
 	else if (COperator::EopPhysicalMotionHashDistribute == pop->Eopid() ||
 			 COperator::EopPhysicalMotionRandom == pop->Eopid() ||
-			 COperator::EopPhysicalMotionBroadcast == pop->Eopid())
+			 COperator::EopPhysicalMotionBroadcast == pop->Eopid() ||
+			 COperator::EopPhysicalMotionHashDistributeWorkers == pop->Eopid() ||
+			 COperator::EopPhysicalMotionBroadcastWorkers == pop->Eopid())
 	{
 		// For any of these physical motions, the outer child's execution needs to be
 		// tracked for depending upon the distribution spec

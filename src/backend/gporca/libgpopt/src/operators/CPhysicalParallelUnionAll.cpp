@@ -22,6 +22,7 @@
 #include "gpopt/base/CCostContext.h"
 #include "gpopt/base/CDistributionSpecNonSingleton.h"
 #include "gpopt/base/CDistributionSpecRandom.h"
+#include "gpopt/base/CDistributionSpecWorkerRandom.h"
 #include "gpopt/base/COptimizationContext.h"
 #include "gpopt/base/CUtils.h"
 #include "gpopt/operators/CExpressionHandle.h"
@@ -64,7 +65,8 @@ CPhysicalParallelUnionAll::PdsRequired(CMemoryPool *mp, CExpressionHandle &,
 	GPOS_ASSERT(child_index < PdrgpdrgpcrInput()->Size());
 	GPOS_ASSERT(1 > ulOptReq);
 
-	return GPOS_NEW(mp) CDistributionSpecNonSingleton(false /*fAllowReplicated*/);
+	return GPOS_NEW(mp) CDistributionSpecNonSingleton(
+		false /*fAllowReplicated*/, true /*fAllowWorker*/);
 }
 
 CEnfdDistribution::EDistributionMatching
@@ -81,6 +83,47 @@ CDistributionSpec *
 CPhysicalParallelUnionAll::PdsDerive(CMemoryPool *mp,
 									 CExpressionHandle &exprhdl) const
 {
+	// If every non-scalar child derives a worker-level random distribution
+	// with the same worker count, expose that worker-level distribution to
+	// the parent.  This lets a downstream operator (e.g. Parallel Hash Join)
+	// that requires WORKER_RANDOM[base:NonSingleton] satisfy its outer
+	// directly from the Parallel UnionAll without inserting a Motion
+	// enforcer.  A Motion would erase partition propagation (Motion is a
+	// hard barrier for Ppps), preventing Parallel Partition Selectors from
+	// being plumbed through a UNION ALL that combines partition tables.
+	const ULONG arity = exprhdl.Arity();
+	BOOL fAllWorkerRandom = (arity > 0);
+	ULONG ulWorkers = 0;
+	for (ULONG ul = 0; fAllWorkerRandom && ul < arity; ul++)
+	{
+		if (exprhdl.FScalarChild(ul))
+		{
+			continue;
+		}
+		CDistributionSpec *pdsChild = exprhdl.Pdpplan(ul)->Pds();
+		if (CDistributionSpec::EdtWorkerRandom != pdsChild->Edt())
+		{
+			fAllWorkerRandom = false;
+			break;
+		}
+		CDistributionSpecWorkerRandom *pdsWR =
+			CDistributionSpecWorkerRandom::PdsConvert(pdsChild);
+		if (0 == ulWorkers)
+		{
+			ulWorkers = pdsWR->UlWorkers();
+		}
+		else if (ulWorkers != pdsWR->UlWorkers())
+		{
+			fAllWorkerRandom = false;
+			break;
+		}
+	}
+	if (fAllWorkerRandom && ulWorkers > 0)
+	{
+		return CDistributionSpecWorkerRandom::PdsCreateWorkerRandom(
+			mp, ulWorkers, GPOS_NEW(mp) CDistributionSpecRandom());
+	}
+
 	return CPhysicalUnionAll::PdsDerive(mp, exprhdl);
 }
 
@@ -93,6 +136,10 @@ CPhysicalParallelUnionAll::PdsDerive(CMemoryPool *mp,
 //		with Parallel Union All:
 //		- Motion operators (except duplicate-sensitive random motions)
 //		- Parallel hash joins (require barrier sync, can cause deadlock)
+//		- CTE consumers (parallel or serial): multiple CTE consumers of the
+//		  same CTE share a scan_barrier in the executor; Parallel Append
+//		  splits workers across children, so different workers arrive at the
+//		  barrier for different consumers simultaneously, causing deadlock
 //
 //---------------------------------------------------------------------------
 static BOOL
@@ -139,6 +186,16 @@ FHasIncompatibleOps(CCostContext *pcc)
 
 	// Check for parallel hash join (barrier sync can deadlock under Parallel Append)
 	if (CUtils::FParallelHashJoin(pop))
+	{
+		return true;
+	}
+
+	// Check for CTE consumers (ShareInputScan in executor).  Multiple CTE
+	// consumers sharing the same CTE use a common scan_barrier that requires
+	// ALL workers to arrive.  Under Parallel Append, workers are split across
+	// children, preventing the barrier from completing -> deadlock.
+	if (COperator::EopPhysicalCTEConsumer == pop->Eopid() ||
+		COperator::EopPhysicalParallelCTEConsumer == pop->Eopid())
 	{
 		return true;
 	}

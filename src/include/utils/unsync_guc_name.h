@@ -479,6 +479,7 @@
 		"optimizer_minidump",
 		"optimizer_multilevel_partitioning",
 		"optimizer_nestloop_factor",
+		"optimizer_parallel_cte_max_nested_producers",
 		"optimizer_parallel_union",
 		"optimizer_partition_selection_log",
 		"optimizer_penalize_broadcast_threshold",

@@ -80,6 +80,14 @@ public:
 						   CDrvdPropArray *pdrgpdpCtxt,
 						   ULONG ulDistrReq) override;
 
+	// Walk outer subtree (stop at Motions) for a CPhysicalParallelCTEConsumer
+	// and return its worker count, or 0 when none is present.
+	static ULONG UlExtractParallelCTEConsumerWorkers(CGroup *pgroup);
+
+	// True when parent's required distribution allows this join's slice to
+	// be worker-level (ReplicatedWorkers upgrade is safe).
+	static BOOL FParentAllowsWorkerLevelGang(CReqdPropPlan *prppInput);
+
 	// execution order of children
 	EChildExecOrder
 	Eceo() const override

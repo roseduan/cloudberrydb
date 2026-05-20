@@ -300,6 +300,12 @@ public:
 		const COperator::EOperatorId *rgeopidReject = nullptr,
 		ULONG ulRejectCount = 0);
 
+	// check if table descriptor set contains a foreign table
+	static BOOL FContainsForeignTable(CTableDescriptorHashSet *ptabdescset);
+
+	// check if table descriptor set contains a replicated table
+	static BOOL FContainsReplicatedTable(CTableDescriptorHashSet *ptabdescset);
+
 	// extract foreign key
 	static CColRefSet *PcrsFKey(CMemoryPool *mp, CExpressionArray *pdrgpexpr,
 								CColRefSet *prcsOutput, CColRefSet *pcrsKey);

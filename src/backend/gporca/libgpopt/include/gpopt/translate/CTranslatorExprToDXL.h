@@ -295,7 +295,17 @@ private:
 							   CDistributionSpecArray *pdrgpdsBaseTables,
 							   ULONG *pulNonGatherMotions, BOOL *pfDML);
 
+	CDXLNode *PdxlnParallelCTEProducer(CExpression *pexprCTEProducer,
+							   CColRefArray *colref_array,
+							   CDistributionSpecArray *pdrgpdsBaseTables,
+							   ULONG *pulNonGatherMotions, BOOL *pfDML);
+
 	CDXLNode *PdxlnCTEConsumer(CExpression *pexprCTEConsumer,
+							   CColRefArray *colref_array,
+							   CDistributionSpecArray *pdrgpdsBaseTables,
+							   ULONG *pulNonGatherMotions, BOOL *pfDML);
+
+	CDXLNode *PdxlnParallelCTEConsumer(CExpression *pexprCTEConsumer,
 							   CColRefArray *colref_array,
 							   CDistributionSpecArray *pdrgpdsBaseTables,
 							   ULONG *pulNonGatherMotions, BOOL *pfDML);
@@ -336,6 +346,12 @@ private:
 
 	// translate a sequence expression
 	CDXLNode *PdxlnSequence(CExpression *pexprSequence,
+							CColRefArray *colref_array,
+							CDistributionSpecArray *pdrgpdsBaseTables,
+							ULONG *pulNonGatherMotions, BOOL *pfDML);
+
+	// translate a sequence expression
+	CDXLNode *PdxlnParallelSequence(CExpression *pexprSequence,
 							CColRefArray *colref_array,
 							CDistributionSpecArray *pdrgpdsBaseTables,
 							ULONG *pulNonGatherMotions, BOOL *pfDML);

@@ -61,12 +61,15 @@ private:
 		// plan properties of corresponding producer
 		CDrvdPropPlan *m_pdpplan;
 
+		// is it a parallel CTE
+		BOOL m_fParallel;
+
 	public:
 		CCTEReqEntry(const CCTEReqEntry &) = delete;
 
 		// ctor
 		CCTEReqEntry(ULONG id, CCTEMap::ECteType ect, BOOL fRequired,
-					 CDrvdPropPlan *pdpplan);
+					 CDrvdPropPlan *pdpplan, BOOL fParallel = false);
 
 		// dtor
 		~CCTEReqEntry() override;
@@ -97,6 +100,13 @@ private:
 		PdpplanProducer() const
 		{
 			return m_pdpplan;
+		}
+
+		// parallel flag
+		BOOL
+		FParallel() const
+		{
+			return m_fParallel;
 		}
 
 		// hash function
@@ -155,7 +165,10 @@ public:
 
 	// insert a new entry, no entry with the same id can already exist
 	void Insert(ULONG ulCteId, CCTEMap::ECteType ect, BOOL fRequired,
-				CDrvdPropPlan *pdpplan);
+				CDrvdPropPlan *pdpplan, BOOL fParallel = false);
+
+	// return the parallel flag associated with the given ID in the requirements
+	BOOL FParallel(ULONG ulCteId) const;
 
 	// insert a new consumer entry with the given id. The plan properties are
 	// taken from the given context
@@ -176,6 +189,11 @@ public:
 	// check if the given CTE is in the requirements
 	BOOL FContainsRequirement(const ULONG id,
 							  const CCTEMap::ECteType ect) const;
+
+	// check if the given CTE with matching parallel flag is in the requirements
+	BOOL FContainsRequirementWithParallel(const ULONG id,
+										   const CCTEMap::ECteType ect,
+										   BOOL fParallel) const;
 
 	// hash function
 	ULONG HashValue() const;

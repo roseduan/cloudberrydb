@@ -421,11 +421,22 @@ CPhysicalJoin::PdsDerive(CMemoryPool *mp, CExpressionHandle &exprhdl) const
 
 	if ((CDistributionSpec::EdtStrictReplicated == pdsOuter->Edt() ||
 		 CDistributionSpec::EdtTaintedReplicated == pdsOuter->Edt() ||
-		 CDistributionSpec::EdtUniversal == pdsOuter->Edt()) &&
+		 CDistributionSpec::EdtUniversal == pdsOuter->Edt() ||
+		 CDistributionSpec::EdtReplicatedWorkers == pdsOuter->Edt()) &&
 		CDistributionSpec::EdtUniversal != pdsInner->Edt())
 	{
 		// if outer is replicated/universal and inner is not universal
-		// then return inner distribution
+		// then return inner distribution.
+		//
+		// EdtReplicatedWorkers is included: BroadcastWorkers delivers
+		// each tuple to exactly one worker per segment at runtime
+		// (nodeMotion.c: MOTIONTYPE_BROADCAST_WORKERS), so at segment
+		// level the outer is fully available just like plain Replicated;
+		// the join output is therefore partitioned the same way as the
+		// inner (hashed per segment).  Without this case the derived
+		// distribution bubbles up as ReplicatedWorkers, which upstream
+		// Motions collapse into a singleton-sender slice, causing the
+		// non-parallel inner IndexScan to see only one segment's data.
 		pds = pdsInner;
 	}
 	else

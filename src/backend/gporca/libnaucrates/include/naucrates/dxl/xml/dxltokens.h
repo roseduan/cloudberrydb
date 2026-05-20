@@ -126,6 +126,7 @@ enum Edxltoken
 	EdxltokenPhysicalMaterialize,
 	EdxltokenPhysicalDynamicForeignScan,
 	EdxltokenPhysicalSequence,
+	EdxltokenPhysicalParallelSequence,
 	EdxltokenPhysicalDynamicTableScan,
 	EdxltokenPhysicalDynamicIndexScan,
 	EdxltokenPhysicalTVF,
@@ -142,6 +143,8 @@ enum Edxltoken
 	EdxltokenPartCols,
 	EdxltokenSortCols,
 	EdxltokenN,
+	EdxltokenPhysicalParallelCTEProducer,
+	EdxltokenPhysicalParallelCTEConsumer,
 
 	EdxltokenDuplicateSensitive,
 

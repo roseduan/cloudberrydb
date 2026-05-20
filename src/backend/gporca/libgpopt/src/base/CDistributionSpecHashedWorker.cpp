@@ -23,6 +23,7 @@
 #include "gpopt/base/CDistributionSpecHashedWorker.h"
 
 #include "gpopt/base/CColRefSet.h"
+#include "gpopt/base/CDistributionSpecNonSingleton.h"
 #include "gpopt/base/CDrvdPropPlan.h"
 #include "gpopt/base/COptCtxt.h"
 #include "gpopt/base/CUtils.h"
@@ -107,8 +108,11 @@ CDistributionSpecHashedWorker::FSatisfies(const CDistributionSpec *pds) const
 	}
 
 	// Can satisfy general non-restrictive requirements
-	return EdtAny == pds->Edt() || EdtNonSingleton == pds->Edt() ||
-		   EdtNonReplicated == pds->Edt();
+	if (EdtNonSingleton == pds->Edt())
+	{
+		return CDistributionSpecNonSingleton::PdsConvert(pds)->FAllowWorker();
+	}
+	return EdtAny == pds->Edt() || EdtNonReplicated == pds->Edt();
 }
 
 //---------------------------------------------------------------------------
@@ -217,6 +221,65 @@ CDistributionSpecHashedWorker::AppendEnforcers(CMemoryPool *mp,
 	{
 		pdrgpexpr->Append(pexprMotion);
 	}
+}
+
+//---------------------------------------------------------------------------
+//	@function:
+//		CDistributionSpecHashedWorker::PdsCopyWithRemappedColumns
+//
+//	@doc:
+//		Return a copy of the distribution spec with remapped columns,
+//		preserving HashedWorker type and worker count
+//
+//---------------------------------------------------------------------------
+CDistributionSpec *
+CDistributionSpecHashedWorker::PdsCopyWithRemappedColumns(
+	CMemoryPool *mp, UlongToColRefMap *colref_mapping, BOOL must_exist)
+{
+	CExpressionArray *pdrgpexprOrig = Pdrgpexpr();
+	CExpressionArray *pdrgpexpr = GPOS_NEW(mp) CExpressionArray(mp);
+	const ULONG length = pdrgpexprOrig->Size();
+	for (ULONG ul = 0; ul < length; ul++)
+	{
+		CExpression *pexpr = (*pdrgpexprOrig)[ul];
+		pdrgpexpr->Append(
+			pexpr->PexprCopyWithRemappedColumns(mp, colref_mapping, must_exist));
+	}
+
+	IMdIdArray *opfamilies = nullptr;
+	if (nullptr != Opfamilies())
+	{
+		Opfamilies()->AddRef();
+		opfamilies = Opfamilies();
+	}
+
+	return GPOS_NEW(mp) CDistributionSpecHashedWorker(
+		pdrgpexpr, FNullsColocated(), m_ulWorkers, opfamilies);
+}
+
+//---------------------------------------------------------------------------
+//	@function:
+//		CDistributionSpecHashedWorker::StripEquivColumns
+//
+//	@doc:
+//		Return a copy stripping equivalent columns,
+//		preserving HashedWorker type and worker count
+//
+//---------------------------------------------------------------------------
+CDistributionSpec *
+CDistributionSpecHashedWorker::StripEquivColumns(CMemoryPool *mp)
+{
+	Pdrgpexpr()->AddRef();
+
+	IMdIdArray *opfamilies = nullptr;
+	if (nullptr != Opfamilies())
+	{
+		Opfamilies()->AddRef();
+		opfamilies = Opfamilies();
+	}
+
+	return GPOS_NEW(mp) CDistributionSpecHashedWorker(
+		Pdrgpexpr(), FNullsColocated(), m_ulWorkers, opfamilies);
 }
 
 //---------------------------------------------------------------------------

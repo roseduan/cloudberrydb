@@ -56,6 +56,10 @@ protected:
 	// Called by PdsDerive on first invocation
 	void ExtractWorkersIfNeeded(CExpressionHandle &exprhdl) const;
 
+	ULONG UlExtractWorkersFromGroupInternal(CGroup *pgroup, CBitSet *visited_groups) const;
+
+	ULONG UlExtractWorkersFromGroup(CGroup *pgroup) const;
+
 private:
 
 	// Compute required redistribute distribution spec for the n-th child
@@ -88,8 +92,6 @@ public:
 
 	// dtor
 	~CPhysicalParallelHashJoin() override;
-
-	//void CreateOptRequests(CMemoryPool *mp) override;
 
 	ULONG UlProbeWorkers(CExpressionHandle &exprhdl) {
 		ExtractWorkersIfNeeded(exprhdl);

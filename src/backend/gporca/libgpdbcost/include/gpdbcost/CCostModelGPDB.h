@@ -146,8 +146,18 @@ private:
 								 const CCostModelGPDB *pcmgpdb,
 								 const SCostingInfo *pci);
 
+	// cost of parallel CTE producer
+	static CCost CostParallelCTEProducer(CMemoryPool *mp, CExpressionHandle &exprhdl,
+								 const CCostModelGPDB *pcmgpdb,
+								 const SCostingInfo *pci);	
+
 	// cost of CTE consumer
 	static CCost CostCTEConsumer(CMemoryPool *mp, CExpressionHandle &exprhdl,
+								 const CCostModelGPDB *pcmgpdb,
+								 const SCostingInfo *pci);
+
+	// cost of parallel CTE consumer
+	static CCost CostParallelCTEConsumer(CMemoryPool *mp, CExpressionHandle &exprhdl,
 								 const CCostModelGPDB *pcmgpdb,
 								 const SCostingInfo *pci);
 
@@ -191,6 +201,11 @@ private:
 							  const CCostModelGPDB *pcmgpdb,
 							  const SCostingInfo *pci);
 
+	// cost of parallel sequence
+	static CCost CostParallelSequence(CMemoryPool *mp, CExpressionHandle &exprhdl,
+							  const CCostModelGPDB *pcmgpdb,
+							  const SCostingInfo *pci);
+	
 	// cost of sort
 	static CCost CostSort(CMemoryPool *mp, CExpressionHandle &exprhdl,
 						  const CCostModelGPDB *pcmgpdb,

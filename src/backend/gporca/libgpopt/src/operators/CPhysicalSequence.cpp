@@ -462,5 +462,77 @@ CPhysicalSequence::EpetRewindability(CExpressionHandle &,		 // exprhdl
 	return CEnfdProp::EpetRequired;
 }
 
+//---------------------------------------------------------------------------
+//	@function:
+//		CPhysicalSequence::FValidContext
+//
+//	@doc:
+//		Check if optimization contexts is valid.  Reject two cases:
+//		  1. first child is not a CTE producer (CPhysicalSequence is only
+//		     emitted for CTE plans);
+//		  2. any child delivers a worker-level distribution
+//		     (CPhysicalSequence is a serial operator and cannot drive
+//		     per-worker execution).  This check replaces the previous
+//		     request-time enforcement via fAllowWorker=false, which
+//		     caused memo-context duplication in nested CTE queries.
+//
+//---------------------------------------------------------------------------
+BOOL
+CPhysicalSequence::FValidContext(CMemoryPool *,
+								 COptimizationContext *,
+								 COptimizationContextArray *pdrgpocChild) const
+{
+	if (nullptr == pdrgpocChild)
+	{
+		return true;
+	}
+
+	const ULONG arity = pdrgpocChild->Size();
+	if (0 == arity)
+	{
+		return true;
+	}
+
+	// First child must be a CTE producer.
+	CCostContext *pccBest0 = (*pdrgpocChild)[0]->PccBest();
+	if (nullptr != pccBest0 &&
+		COperator::EopPhysicalCTEProducer != pccBest0->Pgexpr()->Pop()->Eopid())
+	{
+		return false;
+	}
+
+	// Reject if any child delivers a worker-level distribution.
+	for (ULONG ul = 0; ul < arity; ul++)
+	{
+		CCostContext *pccBest = (*pdrgpocChild)[ul]->PccBest();
+		if (nullptr == pccBest)
+		{
+			continue;
+		}
+
+		CDrvdPropPlan *pdpplan = pccBest->Pdpplan();
+		if (nullptr == pdpplan)
+		{
+			continue;
+		}
+
+		CDistributionSpec *pds = pdpplan->Pds();
+		if (nullptr == pds)
+		{
+			continue;
+		}
+
+		const CDistributionSpec::EDistributionType edt = pds->Edt();
+		if (CDistributionSpec::EdtWorkerRandom == edt ||
+			CDistributionSpec::EdtHashedWorker == edt ||
+			CDistributionSpec::EdtReplicatedWorkers == edt)
+		{
+			return false;
+		}
+	}
+
+	return true;
+}
+
 
 // EOF

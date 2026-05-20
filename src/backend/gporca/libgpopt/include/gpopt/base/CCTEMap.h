@@ -84,12 +84,16 @@ private:
 		// derived plan properties if entry corresponds to CTE producer
 		CDrvdPropPlan *m_pdpplan;
 
+		// is it a parallel CTE
+		BOOL m_fParallel;
+
 	public:
 		CCTEMapEntry(const CCTEMapEntry &) = delete;
 
 		// ctor
-		CCTEMapEntry(ULONG id, CCTEMap::ECteType ect, CDrvdPropPlan *pdpplan)
-			: m_id(id), m_ect(ect), m_pdpplan(pdpplan)
+		CCTEMapEntry(ULONG id, CCTEMap::ECteType ect, CDrvdPropPlan *pdpplan,
+					 BOOL fParallel)
+			: m_id(id), m_ect(ect), m_pdpplan(pdpplan), m_fParallel(fParallel)
 		{
 			GPOS_ASSERT(EctSentinel > ect);
 			GPOS_ASSERT_IMP(EctProducer == ect, nullptr != pdpplan);
@@ -122,13 +126,22 @@ private:
 			return m_pdpplan;
 		}
 
+		// parallel flag
+		BOOL
+		FParallel() const
+		{
+			return m_fParallel;
+		}
+
 		// hash function
 		ULONG
 		HashValue() const
 		{
-			return gpos::CombineHashes(
+			ULONG ulHash = gpos::CombineHashes(
 				gpos::HashValue<ULONG>(&m_id),
 				gpos::HashValue<CCTEMap::ECteType>(&m_ect));
+			return gpos::CombineHashes(ulHash,
+									   gpos::HashValue<BOOL>(&m_fParallel));
 		}
 
 		// print function
@@ -136,6 +149,10 @@ private:
 		OsPrint(IOstream &os) const
 		{
 			os << m_id << (EctProducer == m_ect ? "p" : "c");
+			if (m_fParallel)
+			{
+				os << "(parallel)";
+			}
 			if (nullptr != m_pdpplan)
 			{
 				os << "(" << *m_pdpplan << ")";
@@ -183,8 +200,12 @@ public:
 	// return the CTE type associated with the given ID in the map
 	ECteType Ect(const ULONG id) const;
 
+	// return the parallel flag associated with the given ID in the map
+	BOOL FParallel(const ULONG id) const;
+
 	// inserting a new map entry, no entry with the same id can already exist
-	void Insert(ULONG ulCteId, ECteType ect, CDrvdPropPlan *pdpplan);
+	void Insert(ULONG ulCteId, ECteType ect, CDrvdPropPlan *pdpplan,
+				BOOL fParallel = false);
 
 	// hash function
 	ULONG HashValue() const;

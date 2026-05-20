@@ -98,6 +98,11 @@ public:
 	// does this distribution satisfy the given one
 	BOOL FSatisfies(const CDistributionSpec *pds) const override;
 
+	// return a copy of the distribution spec with remapped columns
+	CDistributionSpec *PdsCopyWithRemappedColumns(
+		CMemoryPool *mp, UlongToColRefMap *colref_mapping,
+		BOOL must_exist) override;
+
 	// append enforcers to dynamic array for the given plan properties
 	void AppendEnforcers(CMemoryPool *mp, CExpressionHandle &exprhdl,
 						 CReqdPropPlan *prpp, CExpressionArray *pdrgpexpr,

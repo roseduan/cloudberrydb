@@ -95,6 +95,16 @@ public:
 						 CReqdPropPlan *prpp, CExpressionArray *pdrgpexpr,
 						 CExpression *pexpr) override;
 
+	// return a copy of the distribution spec with remapped columns,
+	// preserving HashedWorker type and worker count
+	CDistributionSpec *PdsCopyWithRemappedColumns(
+		CMemoryPool *mp, UlongToColRefMap *colref_mapping,
+		BOOL must_exist) override;
+
+	// return a copy stripping equivalent columns,
+	// preserving HashedWorker type and worker count
+	CDistributionSpec *StripEquivColumns(CMemoryPool *mp) override;
+
 	// hash function
 	ULONG HashValue() const override;
 

@@ -196,6 +196,9 @@ public:
 	// required plan props of n-th child
 	CReqdPropPlan *Prpp(ULONG child_index) const;
 
+	// lookup CTE producer plan properties from the optimization context
+	CDrvdPropPlan *PdpplanCTEProducer(ULONG ulCTEId) const;
+
 	// arity function
 	ULONG Arity() const;
 

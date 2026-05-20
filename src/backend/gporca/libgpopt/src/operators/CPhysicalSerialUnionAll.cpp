@@ -122,7 +122,8 @@ CPhysicalSerialUnionAll::PdsRequired(
 		{
 			// Request 2: NON-SINGLETON from outer child
 			return GPOS_NEW(mp)
-				CDistributionSpecNonSingleton(false /*fAllowReplicated*/);
+				CDistributionSpecNonSingleton(
+					false /*fAllowReplicated*/, true /*fAllowWorker*/);
 		}
 		else
 		{
@@ -163,8 +164,8 @@ CPhysicalSerialUnionAll::PdsRequired(
 	// we need to the inner child to be distributed across segments that does
 	// not generate duplicate results. That is, inner child should not be replicated.
 
-	return GPOS_NEW(mp)
-		CDistributionSpecNonSingleton(false /*fAllowReplicated*/);
+	return GPOS_NEW(mp) CDistributionSpecNonSingleton(
+		false /*fAllowReplicated*/, true /*fAllowWorker*/);
 }
 
 

@@ -44,6 +44,7 @@
 #include "gpopt/operators/CPhysicalParallelTableScan.h"
 #include "gpopt/search/CGroupProxy.h"
 #include "gpopt/operators/CPhysicalParallelAppendTableScan.h"
+#include "gpopt/operators/CPhysicalParallelCTEConsumer.h"
 
 using namespace gpopt;
 
@@ -69,8 +70,22 @@ CPhysicalParallelHashJoin::CPhysicalParallelHashJoin(
 {
 	// m_ulProbeWorkers and m_ulBuildWorkers will be extracted in FValidContext()
 	// from child groups when optimization contexts are available
-	ULONG ulDistrReqs = 1 + NumDistrReq();
-	SetDistrRequests(ulDistrReqs);
+
+	// Parallel hash join uses one redistribute request plus the base hash
+	// distribute requests; the base class' GPOPT_NON_HASH_DIST_REQUESTS
+	// (hashed/broadcast, non-singleton/broadcast, singleton/singleton)
+	// variants do not apply to the parallel variant.
+	SetDistrRequests(1 + NumDistrReq());
+
+	// Parallel hash join may force a Motion on either child (HashDistribute /
+	// BroadcastWorkers), and a Motion is a hard barrier for partition
+	// propagation.  With only the DPE request (ulOptReq=0 in
+	// PppsRequiredForJoins) the child contexts always carry a consumer or
+	// propagator requirement that cannot be satisfied across a worker Motion,
+	// causing the optimizer to fall back to the Postgres planner.  Generate
+	// the non-DPE alternative as well so a parallel plan without partition
+	// propagation can be considered.
+	SetPartPropagateRequests(2);
 }
 
 //---------------------------------------------------------------------------
@@ -285,10 +300,11 @@ CPhysicalParallelHashJoin::PdsRequiredReplicateWorkers(
 		}
 	}
 
-	// Fallback: should not reach here if inner child is properly optimized
-	// Return non-singleton for safety
-	return CDistributionSpecWorkerRandom::PdsCreateWorkerRandom(
-      mp, ulWorkers, GPOS_NEW(mp) CDistributionSpecNonSingleton());
+	// Fallback: request worker-level non-singleton so HashedWorker,
+	// ReplicatedWorkers and WorkerRandom can all satisfy it without
+	// forcing a redistribute motion.
+	return GPOS_NEW(mp) CDistributionSpecNonSingleton(true /*fAllowReplicated*/,
+													 true /*fAllowWorker*/);
 }
 
 //---------------------------------------------------------------------------
@@ -697,6 +713,33 @@ CPhysicalParallelHashJoin::FValidContext(
 		{
 			// Invalid worker counts extracted - reject this optimization context
 			return false;
+		}
+	}
+
+	/* Reject when a child's best plan delivers singleton distribution.
+	 * A parallel hash join needs both children to run in a parallel context
+	 * with workers.  If a child (e.g. full hash join of two universal
+	 * relations) delivers SINGLETON, the parallel context has 0 workers and
+	 * BroadcastWorkers motion targets would be 0, causing "cannot execute
+	 * inactive Motion" errors at runtime. */
+	if (nullptr != pdrgpocChild && pdrgpocChild->Size() >= 2)
+	{
+		for (ULONG ul = 0; ul < 2; ul++)
+		{
+			COptimizationContext *pocChild = (*pdrgpocChild)[ul];
+			if (nullptr != pocChild && nullptr != pocChild->PccBest())
+			{
+				CDrvdPropPlan *pdpplan = pocChild->PccBest()->Pdpplan();
+				if (nullptr != pdpplan)
+				{
+					CDistributionSpec *pds = pdpplan->Pds();
+					if (pds->FSingletonOrStrictSingleton() ||
+						CDistributionSpec::EdtUniversal == pds->Edt())
+					{
+						return false;
+					}
+				}
+			}
 		}
 	}
 

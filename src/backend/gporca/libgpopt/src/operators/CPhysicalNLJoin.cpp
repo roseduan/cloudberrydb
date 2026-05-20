@@ -203,4 +203,27 @@ CPhysicalNLJoin::EpetOrder(CExpressionHandle &exprhdl,
 }
 
 
+//---------------------------------------------------------------------------
+//	@function:
+//		CPhysicalNLJoin::FValidContext
+//
+//	@doc:
+//		Non-parallel NL join should reject parallel children that require
+//		worker-level coordination (e.g., Parallel Union All, Parallel
+//		Partition Selector).
+//
+//---------------------------------------------------------------------------
+BOOL
+CPhysicalNLJoin::FValidContext(CMemoryPool *,			   // mp
+							   COptimizationContext *,	   // poc
+							   COptimizationContextArray *pdrgpocChild) const
+{
+	if (FHasParallelUnionAllOrPartSelectorChild(pdrgpocChild))
+	{
+		return false;
+	}
+
+	return true;
+}
+
 // EOF

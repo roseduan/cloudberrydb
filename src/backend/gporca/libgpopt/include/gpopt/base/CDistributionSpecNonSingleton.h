@@ -14,6 +14,7 @@
 #define GPOPT_CDistributionSpecNonSingleton_H
 
 #include "gpos/base.h"
+#include "gpos/utils.h"
 
 #include "gpopt/base/CDistributionSpec.h"
 
@@ -36,6 +37,9 @@ private:
 	// should Replicated distribution satisfy current distribution
 	BOOL m_fAllowReplicated{true};
 
+	// should worker-level distribution satisfy current distribution
+	BOOL m_fAllowWorker{false};
+
 public:
 	CDistributionSpecNonSingleton(const CDistributionSpecNonSingleton &) =
 		delete;
@@ -46,6 +50,9 @@ public:
 	//ctor
 	explicit CDistributionSpecNonSingleton(BOOL fAllowReplicated);
 
+	//ctor
+	CDistributionSpecNonSingleton(BOOL fAllowReplicated, BOOL fAllowWorker);
+
 	// should Replicated distribution satisfy current distribution
 	BOOL
 	FAllowReplicated() const
@@ -53,11 +60,41 @@ public:
 		return m_fAllowReplicated;
 	}
 
+	// should worker-level distribution satisfy current distribution
+	BOOL
+	FAllowWorker() const
+	{
+		return m_fAllowWorker;
+	}
+
 	// accessor
 	EDistributionType
 	Edt() const override
 	{
 		return CDistributionSpec::EdtNonSingleton;
+	}
+
+	// Distinguish specs by both m_fAllowWorker and m_fAllowReplicated so
+	// serial/parallel NonSingleton requests (e.g. CPhysicalSequence vs
+	// CPhysicalParallelSequence) and replicated-allowing vs non-replicated
+	// requests are not deduped into the same OptCtxt by CReqdPropPlan.
+	ULONG
+	HashValue() const override
+	{
+		return gpos::CombineHashes(
+			gpos::CombineHashes(CDistributionSpec::HashValue(), m_fAllowWorker),
+			m_fAllowReplicated);
+	}
+
+	BOOL
+	Matches(const CDistributionSpec *pds) const override
+	{
+		if (Edt() != pds->Edt())
+		{
+			return false;
+		}
+		return m_fAllowWorker == PdsConvert(pds)->m_fAllowWorker &&
+			   m_fAllowReplicated == PdsConvert(pds)->m_fAllowReplicated;
 	}
 
 	// does current distribution satisfy the given one

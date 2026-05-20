@@ -599,6 +599,12 @@ CPhysicalSequenceProject::FValidContext(
 		return false;
 	}
 
+	// Non-parallel SequenceProject cannot handle parallel children
+	if (FHasParallelUnionAllOrPartSelectorChild(pdrgpocChild))
+	{
+		return false;
+	}
+
 	return true;
 }
 

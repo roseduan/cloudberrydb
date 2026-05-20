@@ -3,8 +3,10 @@
 #include "gpos/error/CAutoTrace.h"
 
 #include "gpopt/base/CColRefSetIter.h"
+#include "gpopt/base/CDistributionSpecHashedWorker.h"
 #include "gpopt/base/CDistributionSpecReplicated.h"
 #include "gpopt/base/CDistributionSpecStrictRandom.h"
+#include "gpopt/base/CDistributionSpecWorkerRandom.h"
 #include "gpopt/base/CDrvdPropCtxtPlan.h"
 #include "gpopt/operators/CExpressionHandle.h"
 #include "gpopt/operators/CHashedDistributions.h"
@@ -411,6 +413,104 @@ CPhysicalUnionAll::PdsDerive(CMemoryPool *mp, CExpressionHandle &exprhdl) const
 		// succeeded in deriving output distribution from child distributions
 		pds->AddRef();
 		return pds;
+	}
+
+	// Preserve worker count across a UnionAll boundary when any non-scalar
+	// child is worker-level; otherwise it falls back to plain Random and
+	// downstream worker-aware planning forces unnecessary motion enforcers.
+	// Mirrors CPhysicalParallelUnionAll::PdsDerive.
+	const ULONG arity = exprhdl.Arity();
+	ULONG ulWorkers = 0;
+	BOOL fAllHashedWorker = true;
+	BOOL fAnyNonScalar = false;
+	for (ULONG ul = 0; ul < arity; ul++)
+	{
+		if (exprhdl.FScalarChild(ul))
+		{
+			continue;
+		}
+		fAnyNonScalar = true;
+		CDistributionSpec *pdsChild = exprhdl.Pdpplan(ul)->Pds();
+		CDistributionSpec::EDistributionType edt = pdsChild->Edt();
+		ULONG ulChildWorkers = 0;
+		if (CDistributionSpec::EdtHashedWorker == edt)
+		{
+			ulChildWorkers =
+				CDistributionSpecHashedWorker::PdsConvert(pdsChild)->UlWorkers();
+		}
+		else if (CDistributionSpec::EdtWorkerRandom == edt)
+		{
+			ulChildWorkers =
+				CDistributionSpecWorkerRandom::PdsConvert(pdsChild)->UlWorkers();
+			fAllHashedWorker = false;
+		}
+		else
+		{
+			fAllHashedWorker = false;
+		}
+		if (ulChildWorkers > ulWorkers)
+		{
+			ulWorkers = ulChildWorkers;
+		}
+	}
+
+	// If every non-scalar child is HashedWorker and all hash keys map to the
+	// same UnionAll output column positions, preserve the HashedWorker spec.
+	if (fAnyNonScalar && fAllHashedWorker && ulWorkers > 0)
+	{
+		ULongPtrArray *pdrgpulOuter = nullptr;
+		CDistributionSpecHashed *pdsHashed =
+			CDistributionSpecHashed::PdsConvert(exprhdl.Pdpplan(0)->Pds());
+		while (pdsHashed && nullptr == pdrgpulOuter)
+		{
+			pdrgpulOuter = PdrgpulMap(mp, pdsHashed->Pdrgpexpr(), 0);
+			pdsHashed = pdsHashed->PdshashedEquiv();
+		}
+
+		if (nullptr != pdrgpulOuter)
+		{
+			BOOL fAllMatch = true;
+			for (ULONG ulChild = 1; fAllMatch && ulChild < arity; ulChild++)
+			{
+				CDistributionSpecHashed *pdsChildHashed =
+					CDistributionSpecHashed::PdsConvert(
+						exprhdl.Pdpplan(ulChild)->Pds());
+				BOOL fMatch = false;
+				while (pdsChildHashed && !fMatch)
+				{
+					ULongPtrArray *pdrgpulChild = PdrgpulMap(
+						mp, pdsChildHashed->Pdrgpexpr(), ulChild);
+					fMatch = (nullptr != pdrgpulChild) &&
+							 Equals(pdrgpulOuter, pdrgpulChild);
+					CRefCount::SafeRelease(pdrgpulChild);
+					pdsChildHashed = pdsChildHashed->PdshashedEquiv();
+				}
+				fAllMatch = fMatch;
+			}
+
+			if (fAllMatch)
+			{
+				const ULONG num_cols = pdrgpulOuter->Size();
+				CExpressionArray *pdrgpexpr =
+					GPOS_NEW(mp) CExpressionArray(mp);
+				for (ULONG ulCol = 0; ulCol < num_cols; ulCol++)
+				{
+					ULONG idx = *(*pdrgpulOuter)[ulCol];
+					pdrgpexpr->Append(CUtils::PexprScalarIdent(
+						mp, (*PdrgpcrOutput())[idx]));
+				}
+				pdrgpulOuter->Release();
+				return GPOS_NEW(mp) CDistributionSpecHashedWorker(
+					pdrgpexpr, true /*fNullsColocated*/, ulWorkers);
+			}
+			pdrgpulOuter->Release();
+		}
+	}
+
+	if (ulWorkers > 0)
+	{
+		return CDistributionSpecWorkerRandom::PdsCreateWorkerRandom(
+			mp, ulWorkers, GPOS_NEW(mp) CDistributionSpecRandom());
 	}
 
 	// output has unknown distribution on all segments

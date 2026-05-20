@@ -60,6 +60,9 @@ private:
 	// derived cte map
 	CCTEMap *m_pcm{nullptr};
 
+	// true when plan properties came from a parallel CTE producer
+	BOOL m_fParallelCTEProducer{false};
+
 	// copy CTE producer plan properties from given context to current object
 	void CopyCTEProducerPlanProps(CMemoryPool *mp, CDrvdPropCtxt *pdpctxt,
 								  COperator *pop);
@@ -119,6 +122,12 @@ public:
 	GetCostModel() const
 	{
 		return m_pcm;
+	}
+
+	BOOL
+	FParallelCTEProducer() const
+	{
+		return m_fParallelCTEProducer;
 	}
 
 	// hash function

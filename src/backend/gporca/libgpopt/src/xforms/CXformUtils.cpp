@@ -65,6 +65,7 @@
 #include "naucrates/base/CDatumInt8GPDB.h"
 #include "naucrates/md/CMDIdGPDB.h"
 #include "naucrates/md/IMDCheckConstraint.h"
+#include "naucrates/md/IMDRelation.h"
 #include "naucrates/md/IMDScalarOp.h"
 #include "naucrates/md/IMDTypeBool.h"
 #include "naucrates/md/IMDTypeInt4.h"
@@ -139,9 +140,14 @@ CXformUtils::FHasParallelIncompatibleOps(
 		{
 			COperator::EOperatorId eopid = pgexpr->Pop()->Eopid();
 
-			// Check for CTE-related operators (incompatible with parallel execution)
-			if (COperator::EopLogicalCTEProducer == eopid ||
-				COperator::EopLogicalSequence == eopid)
+			/* CTE Producer and Sequence are only incompatible with parallel
+			 * execution in DML queries (CTAS/INSERT/UPDATE/DELETE).  In DML,
+			 * the Sequence runs on the coordinator entry slice while CTE
+			 * consumers run on segments, so SharedTuplestore DSM cannot be
+			 * shared.  For normal SELECT queries, parallel CTE is safe. */
+			if (COptCtxt::PoctxtFromTLS()->FDMLQuery() &&
+				(COperator::EopLogicalCTEProducer == eopid ||
+				 COperator::EopLogicalSequence == eopid))
 			{
 				return true;
 			}
@@ -208,6 +214,40 @@ CXformUtils::FHasParallelIncompatibleOps(
 
 	CMemo *pmemo = pgroup->Pmemo();
 	return FHasParallelIncompatibleOps(pmemo, rgeopidReject, ulRejectCount);
+}
+
+BOOL
+CXformUtils::FContainsForeignTable(CTableDescriptorHashSet *ptabdescset)
+{
+	CTableDescriptorHashSetIter iter(ptabdescset);
+	while (iter.Advance())
+	{
+		const CTableDescriptor *ptabdesc = iter.Get();
+		if (ptabdesc->RetrieveRelStorageType() ==
+			IMDRelation::ErelstorageForeign)
+		{
+			return true;
+		}
+	}
+
+	return false;
+}
+
+BOOL
+CXformUtils::FContainsReplicatedTable(CTableDescriptorHashSet *ptabdescset)
+{
+	CTableDescriptorHashSetIter iter(ptabdescset);
+	while (iter.Advance())
+	{
+		const CTableDescriptor *ptabdesc = iter.Get();
+		if (ptabdesc->GetRelDistribution() ==
+			IMDRelation::EreldistrReplicated)
+		{
+			return true;
+		}
+	}
+
+	return false;
 }
 
 

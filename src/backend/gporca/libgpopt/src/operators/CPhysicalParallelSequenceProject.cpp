@@ -140,7 +140,8 @@ CPhysicalParallelSequenceProject::PdsRequired(
 	// Local phase: accept any distribution, each worker processes independently
 	if (COperator::EsptypeLocal == m_sptype)
 	{
-		return GPOS_NEW(mp) CDistributionSpecNonSingleton(false);
+		return GPOS_NEW(mp) CDistributionSpecNonSingleton(
+			false /* fAllowReplicated */, true /* fAllowWorker */);
 	}
 
 	// Global phases (OneStep/TwoStep): construct EdtHashedWorker from PARTITION BY columns

@@ -19,6 +19,7 @@
 
 #include "gpopt/base/CDistributionSpecReplicatedWorkers.h"
 
+#include "gpopt/base/CDistributionSpecNonSingleton.h"
 #include "gpopt/base/COptCtxt.h"
 #include "gpopt/base/CUtils.h"
 #include "gpopt/operators/CExpressionHandle.h"
@@ -113,9 +114,13 @@ CDistributionSpecReplicatedWorkers::FSatisfies(const CDistributionSpec *pds) con
 	}
 
 	// ReplicatedWorkers satisfies universal requirements
-	if (EdtAny == pds->Edt() || EdtNonSingleton == pds->Edt())
+	if (EdtAny == pds->Edt())
 	{
 		return true;
+	}
+	if (EdtNonSingleton == pds->Edt())
+	{
+		return CDistributionSpecNonSingleton::PdsConvert(pds)->FAllowWorker();
 	}
 
 	return false;

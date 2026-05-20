@@ -13,8 +13,10 @@
 #include "gpopt/base/CDistributionSpecHashed.h"
 #include "gpopt/base/CDistributionSpecNonSingleton.h"
 #include "gpopt/base/CDistributionSpecReplicated.h"
+#include "gpopt/base/CDistributionSpecReplicatedWorkers.h"
 #include "gpopt/exception.h"
 #include "gpopt/operators/CExpressionHandle.h"
+#include "gpopt/operators/CPhysicalInnerIndexNLJoin.h"
 #include "gpopt/operators/CPredicateUtils.h"
 
 using namespace gpopt;
@@ -170,8 +172,35 @@ CPhysicalLeftOuterIndexNLJoin::Ped(CMemoryPool *mp, CExpressionHandle &exprhdl,
 		return GPOS_NEW(mp) CEnfdDistribution(pdshashed, dmatch);
 	}
 
-	// otherwise, require outer child to be replicated
+	// otherwise, require outer child to be replicated.
+	// See CPhysicalInnerIndexNLJoin::Ped for the full rationale: when the
+	// outer subtree contains a CPhysicalParallelCTEConsumer (i.e. the join
+	// runs inside a worker-level parallel gang driven by a parallel CTE),
+	// upgrade the requirement to EdtReplicatedWorkers so the enforcer picks
+	// BroadcastWorkers, which delivers each outer tuple to exactly one
+	// worker per segment at runtime and avoids duplicating the non-parallel
+	// inner IndexScan's output.
 	// this will end up generating an invalid plan, but we reject it in EpetDistribution
+	if (0 == child_index &&
+		CPhysicalInnerIndexNLJoin::FParentAllowsWorkerLevelGang(prppInput))
+	{
+		CGroupExpression *pgexpr = exprhdl.Pgexpr();
+		if (nullptr != pgexpr && child_index < pgexpr->Arity())
+		{
+			CGroup *pgroupOuter = (*pgexpr)[child_index];
+			ULONG ulWorkers =
+				CPhysicalInnerIndexNLJoin::UlExtractParallelCTEConsumerWorkers(
+					pgroupOuter);
+			if (0 < ulWorkers)
+			{
+				return GPOS_NEW(mp) CEnfdDistribution(
+					CDistributionSpecReplicatedWorkers::PdsCreate(
+						mp, ulWorkers, false /*ignore_broadcast_threshold*/),
+					CEnfdDistribution::EDistributionMatching::EdmSatisfy);
+			}
+		}
+	}
+
 	return GPOS_NEW(mp) CEnfdDistribution(
 		GPOS_NEW(mp)
 			CDistributionSpecReplicated(CDistributionSpec::EdtReplicated),

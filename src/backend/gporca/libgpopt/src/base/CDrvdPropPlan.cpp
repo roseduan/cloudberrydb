@@ -19,6 +19,7 @@
 #include "gpopt/operators/CExpressionHandle.h"
 #include "gpopt/operators/CPhysical.h"
 #include "gpopt/operators/CPhysicalCTEConsumer.h"
+#include "gpopt/operators/CPhysicalParallelCTEConsumer.h"
 #include "gpopt/operators/CScalar.h"
 
 
@@ -86,7 +87,8 @@ CDrvdPropPlan::Derive(CMemoryPool *mp, CExpressionHandle &exprhdl,
 {
 	CPhysical *popPhysical = CPhysical::PopConvert(exprhdl.Pop());
 	if (nullptr != pdpctxt &&
-		COperator::EopPhysicalCTEConsumer == popPhysical->Eopid())
+		(COperator::EopPhysicalCTEConsumer == popPhysical->Eopid() || 
+		COperator::EopPhysicalParallelCTEConsumer == popPhysical->Eopid()))
 	{
 		CopyCTEProducerPlanProps(mp, pdpctxt, popPhysical);
 	}
@@ -100,6 +102,9 @@ CDrvdPropPlan::Derive(CMemoryPool *mp, CExpressionHandle &exprhdl,
 
 		GPOS_ASSERT(CDistributionSpec::EdtAny != m_pds->Edt() &&
 					"CDistributionAny is a require-only, cannot be derived");
+
+		if (COperator::EopPhysicalParallelCTEProducer == popPhysical->Eopid())
+			m_fParallelCTEProducer = true;
 	}
 
 	m_pcm = popPhysical->PcmDerive(mp, exprhdl);
@@ -118,12 +123,26 @@ void
 CDrvdPropPlan::CopyCTEProducerPlanProps(CMemoryPool *mp, CDrvdPropCtxt *pdpctxt,
 										COperator *pop)
 {
+	ULONG ulCTEId = 0;
+	UlongToColRefMap *colref_mapping = nullptr;
+
 	CDrvdPropCtxtPlan *pdpctxtplan =
 		CDrvdPropCtxtPlan::PdpctxtplanConvert(pdpctxt);
-	CPhysicalCTEConsumer *popCTEConsumer =
-		CPhysicalCTEConsumer::PopConvert(pop);
-	ULONG ulCTEId = popCTEConsumer->UlCTEId();
-	UlongToColRefMap *colref_mapping = popCTEConsumer->Phmulcr();
+	if (COperator::EopPhysicalCTEConsumer == pop->Eopid())
+	{
+		CPhysicalCTEConsumer *popCTEConsumer =
+			CPhysicalCTEConsumer::PopConvert(pop);
+		ulCTEId = popCTEConsumer->UlCTEId();
+		colref_mapping = popCTEConsumer->Phmulcr();
+	}
+	else if (COperator::EopPhysicalParallelCTEConsumer == pop->Eopid())
+	{
+		CPhysicalParallelCTEConsumer *popCTEConsumer =
+			CPhysicalParallelCTEConsumer::PopConvert(pop);
+		ulCTEId = popCTEConsumer->UlCTEId();
+		colref_mapping = popCTEConsumer->Phmulcr();
+	}
+
 	CDrvdPropPlan *pdpplan = pdpctxtplan->PdpplanCTEProducer(ulCTEId);
 	if (nullptr != pdpplan)
 	{
@@ -140,6 +159,8 @@ CDrvdPropPlan::CopyCTEProducerPlanProps(CMemoryPool *mp, CDrvdPropCtxt *pdpctxt,
 		// no need to copy the part index map. return an empty one. This is to
 		// distinguish between a CTE consumer and the inlined expression
 		m_ppps = GPOS_NEW(mp) CPartitionPropagationSpec(mp);
+
+		m_fParallelCTEProducer = pdpplan->FParallelCTEProducer();
 
 		GPOS_ASSERT(CDistributionSpec::EdtAny != m_pds->Edt() &&
 					"CDistributionAny is a require-only, cannot be derived");

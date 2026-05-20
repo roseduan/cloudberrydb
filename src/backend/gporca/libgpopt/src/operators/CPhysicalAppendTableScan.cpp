@@ -108,4 +108,17 @@ CPhysicalAppendTableScan::PppsDerive(CMemoryPool *mp, CExpressionHandle &) const
 	return pps;
 }
 
+CEnfdProp::EPropEnforcingType
+CPhysicalAppendTableScan::EpetRewindability(CExpressionHandle &exprhdl,
+											const CEnfdRewindability *per) const
+{
+	CRewindabilitySpec *prs = CDrvdPropPlan::Pdpplan(exprhdl.Pdp())->Prs();
+	if (per->FCompatible(prs))
+	{
+		return CEnfdProp::EpetUnnecessary;
+	}
+
+	return CEnfdProp::EpetRequired;
+}
+
 //	EOF

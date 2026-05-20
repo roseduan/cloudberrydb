@@ -364,6 +364,7 @@ bool		optimizer_enable_parallel_hashjoin;
 bool		optimizer_enable_parallel_hashagg;
 bool		optimizer_enable_parallel_groupagg;
 bool		optimizer_enable_parallel_window;
+int			optimizer_parallel_cte_max_nested_producers;
 bool		optimizer_enable_dynamictablescan;
 bool		optimizer_enable_dynamicindexscan;
 bool		optimizer_enable_dynamicindexonlyscan;
@@ -4592,6 +4593,17 @@ struct config_int ConfigureNamesInt_gp[] =
 		},
 		&optimizer_cte_inlining_bound,
 		0, 0, INT_MAX,
+		NULL, NULL, NULL
+	},
+
+	{
+		{"optimizer_parallel_cte_max_nested_producers", PGC_USERSET, QUERY_TUNING_METHOD,
+			gettext_noop("Maximum number of nested CTE producers beyond which ORCA falls back to the Postgres planner when parallel mode is on (0 = unlimited). A producer is counted as nested if its body references at least one other CTE consumer."),
+			NULL,
+			GUC_NOT_IN_SAMPLE
+		},
+		&optimizer_parallel_cte_max_nested_producers,
+		5, 0, INT_MAX,
 		NULL, NULL, NULL
 	},
 

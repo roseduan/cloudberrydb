@@ -29,6 +29,7 @@
 
 #include "gpopt/base/CColRefSet.h"
 #include "gpopt/base/CDistributionSpecHashed.h"
+#include "gpopt/base/CDistributionSpecNonSingleton.h"
 #include "gpopt/base/CDistributionSpecStrictRandom.h"
 #include "gpopt/base/COptCtxt.h"
 #include "gpopt/base/CUtils.h"
@@ -55,7 +56,7 @@ CDistributionSpecWorkerRandom::CDistributionSpecWorkerRandom(ULONG ulWorkers, CD
 {
 	GPOS_ASSERT(ulWorkers > 0);
 	GPOS_ASSERT(nullptr != pdsSegmentBase &&
-				"pdsSegmentBase must be non-null. Use PdsCreateWorkerRandom factory method.");
+		"pdsSegmentBase must be non-null. Use PdsCreateWorkerRandom factory method.");
 
 	m_pdsSegmentBase->AddRef();
 
@@ -169,8 +170,11 @@ CDistributionSpecWorkerRandom::FSatisfies(const CDistributionSpec *pds) const
 	}
 
 	// Standard satisfaction logic for other distribution types
-	return EdtAny == pds->Edt() || EdtNonSingleton == pds->Edt() ||
-		   EdtNonReplicated == pds->Edt();
+	if (EdtNonSingleton == pds->Edt())
+	{
+		return CDistributionSpecNonSingleton::PdsConvert(pds)->FAllowWorker();
+	}
+	return EdtAny == pds->Edt() || EdtNonReplicated == pds->Edt();
 }
 
 //---------------------------------------------------------------------------
@@ -320,6 +324,30 @@ CDistributionSpecWorkerRandom::AppendEnforcers(CMemoryPool *mp,
 	if (nullptr != pexprMotion)
 	{
 		pdrgpexpr->Append(pexprMotion);
+	}
+}
+
+//---------------------------------------------------------------------------
+//	@function:
+//		CDistributionSpecWorkerRandom::PdsCopyWithRemappedColumns
+//
+//	@doc:
+//		Return a copy of the distribution spec with remapped columns to Hashed pdsBase
+//
+//---------------------------------------------------------------------------
+CDistributionSpec *
+CDistributionSpecWorkerRandom::PdsCopyWithRemappedColumns(
+	CMemoryPool *mp, UlongToColRefMap *colref_mapping, BOOL must_exist)
+{
+	if (EdtHashed == this->m_pdsSegmentBase->Edt())
+	{
+		CDistributionSpec *pds = this->m_pdsSegmentBase->PdsCopyWithRemappedColumns(mp, colref_mapping, must_exist);
+		return CDistributionSpecWorkerRandom::PdsCreateWorkerRandom(mp, this->UlWorkers(), pds);
+	}
+	else
+	{
+		this->AddRef();
+		return this;
 	}
 }
 

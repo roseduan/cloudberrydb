@@ -20,7 +20,9 @@
 #include "gpos/io/CFileDescriptor.h"
 
 #include "gpopt/base/CAutoOptCtxt.h"
+#include "gpopt/base/CCTEInfo.h"
 #include "gpopt/base/CDrvdPropCtxtPlan.h"
+#include "gpopt/base/COptCtxt.h"
 #include "gpopt/base/CQueryContext.h"
 #include "gpopt/cost/ICostModel.h"
 #include "gpopt/engine/CEngine.h"
@@ -42,6 +44,15 @@
 #include "naucrates/dxl/operators/CDXLNode.h"
 #include "naucrates/md/IMDProvider.h"
 #include "naucrates/traceflags/traceflags.h"
+
+namespace gpdb
+{
+bool IsParallelModeOK(void);
+}
+
+// GUC threshold for nested-CTE producer count; above this ORCA falls back
+// to the Postgres planner when parallel mode is on (0 = unlimited).
+extern int optimizer_parallel_cte_max_nested_producers;
 
 using namespace gpos;
 using namespace gpdxl;
@@ -430,6 +441,25 @@ CExpression *
 COptimizer::PexprOptimize(CMemoryPool *mp, CQueryContext *pqc,
 						  CSearchStageArray *search_stage_array)
 {
+	// Safety gate: deeply nested CTE plans under parallel mode can blow up
+	// ORCA's memo exploration. When the number of nested CTE producers
+	// exceeds a configured threshold, fall back to the Postgres planner.
+	if (gpdb::IsParallelModeOK() &&
+		0 < optimizer_parallel_cte_max_nested_producers)
+	{
+		CCTEInfo *pcteinfo = COptCtxt::PoctxtFromTLS()->Pcteinfo();
+		if (nullptr != pcteinfo &&
+			pcteinfo->UlNestedProducers() >
+				(ULONG) optimizer_parallel_cte_max_nested_producers)
+		{
+			GPOS_RAISE(
+				gpopt::ExmaGPOPT, gpopt::ExmiUnsupportedOp,
+				GPOS_WSZ_LIT(
+					"nested CTE depth exceeds "
+					"optimizer_parallel_cte_max_nested_producers"));
+		}
+	}
+
 	CEngine eng(mp);
 	eng.Init(pqc, search_stage_array);
 	eng.Optimize();

@@ -543,6 +543,7 @@ extern bool optimizer_enable_parallel_hashjoin;
 extern bool optimizer_enable_parallel_hashagg;
 extern bool optimizer_enable_parallel_groupagg;
 extern bool optimizer_enable_parallel_window;
+extern int	optimizer_parallel_cte_max_nested_producers;
 extern bool optimizer_enable_dynamictablescan;
 extern bool optimizer_enable_dynamicindexscan;
 extern bool optimizer_enable_dynamicindexonlyscan;

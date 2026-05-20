@@ -49,6 +49,21 @@ CDistributionSpecNonSingleton::CDistributionSpecNonSingleton(
 
 
 //---------------------------------------------------------------------------
+//     @function:
+//             CDistributionSpecNonSingleton::CDistributionSpecNonSingleton
+//
+//     @doc:
+//             Ctor
+//
+//---------------------------------------------------------------------------
+CDistributionSpecNonSingleton::CDistributionSpecNonSingleton(
+	BOOL fAllowReplicated, BOOL fAllowWorker)
+	: m_fAllowReplicated(fAllowReplicated), m_fAllowWorker(fAllowWorker)
+{
+}
+
+
+//---------------------------------------------------------------------------
 //	@function:
 //		CDistributionSpecNonSingleton::FSatisfies
 //
@@ -147,6 +162,10 @@ CDistributionSpecNonSingleton::OsPrint(IOstream &os) const
 	if (!m_fAllowReplicated)
 	{
 		os << " (NON-REPLICATED)";
+	}
+	if (m_fAllowWorker)
+	{
+		os << " (ALLOW-WORKER)";
 	}
 	return os;
 }

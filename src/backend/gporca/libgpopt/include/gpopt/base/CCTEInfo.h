@@ -274,6 +274,10 @@ public:
 	// number of CTE consumers of given CTE
 	ULONG UlConsumers(ULONG ulCTEId) const;
 
+	// number of CTE producers whose body references at least one other
+	// CTE consumer (proxy for nested-CTE depth)
+	ULONG UlNestedProducers() const;
+
 	// logical cte consumer with given id
 	COperatorArray *PopCTEConsumer(ULONG ulCTEId) const;
 
