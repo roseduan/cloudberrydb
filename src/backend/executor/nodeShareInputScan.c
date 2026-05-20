@@ -72,6 +72,9 @@
 #include "utils/resowner.h"
 #include "utils/tuplestore.h"
 #include "port/atomics.h"
+#include "access/parallel.h"
+#include "storage/dsm.h"
+#include "utils/sharedtuplestore.h"
 
 /*
  * In a cross-slice ShareinputScan, the producer and consumer processes
@@ -105,6 +108,7 @@ typedef struct shareinput_Xslice_state
 	int			refcount;		/* reference count of this entry */
 	pg_atomic_uint32	ready;	/* is the input fully materialized and ready to be read? */
 	pg_atomic_uint32	ndone;	/* # of consumers that have finished the scan */
+	pg_atomic_uint32	producer_failed; /* producer slice hit ERROR before ready */
 
 	/*
 	 * ready_done_cv is used for signaling when the scan becomes "ready", and
@@ -115,6 +119,12 @@ typedef struct shareinput_Xslice_state
 	 */
 	ConditionVariable ready_done_cv;
 
+	/*
+	 * For cross-slice parallel mode: the producer stores the DSM handle of
+	 * the SharedTuplestore here so consumer slices can attach.
+	 */
+	dsm_handle	sts_dsm_handle;		/* DSM handle for SharedTuplestore, or DSM_HANDLE_INVALID */
+	int			nparticipants;		/* number of STS participants (P == C) */
 } shareinput_Xslice_state;
 
 /* shared memory hash table holding 'shareinput_Xslice_state' entries */
@@ -180,6 +190,12 @@ typedef struct shareinput_local_state
 
 	/* Tuplestore that holds the result */
 	Tuplestorestate *ts_state;
+
+	/* Parallel state set by producer, used by consumers via share_id */
+	ParallelShareInputState *parallel_state;
+
+	/* DSM segment created by producer, reused by consumers in same process */
+	dsm_segment *parallel_seg;
 } shareinput_local_state;
 
 static shareinput_Xslice_reference *get_shareinput_reference(int share_id);
@@ -196,6 +212,32 @@ static void shareinput_writer_waitdone(shareinput_Xslice_reference *ref, int nco
 
 static void ExecShareInputScanExplainEnd(PlanState *planstate, struct StringInfoData *buf);
 
+/*
+ * Raise ERROR if the in-slice producer/leader of a parallel ShareInputScan has
+ * flagged failure.  Called from wait loops so waiters don't hang forever when
+ * their broadcaster died before signaling ready.
+ */
+static void
+check_parallel_producer_failed(ParallelShareInputState *pstate)
+{
+	if (pg_atomic_read_u32(&pstate->producer_failed))
+		ereport(ERROR,
+				(errcode(ERRCODE_INTERNAL_ERROR),
+				 errmsg("parallel ShareInputScan producer failed before signaling ready")));
+}
+
+/*
+ * Cross-slice variant: raise ERROR if the producer slice flagged failure.
+ */
+static void
+check_xslice_producer_failed(shareinput_Xslice_state *state)
+{
+	if (pg_atomic_read_u32(&state->producer_failed))
+		ereport(ERROR,
+				(errcode(ERRCODE_INTERNAL_ERROR),
+				 errmsg("cross-slice ShareInputScan producer slice failed before signaling ready")));
+}
+
 
 /*
  * init_tuplestore_state
@@ -208,7 +250,7 @@ init_tuplestore_state(ShareInputScanState *node)
 	EState	   *estate = node->ss.ps.state;
 	ShareInputScan *sisc = (ShareInputScan *) node->ss.ps.plan;
 	shareinput_local_state *local_state = node->local_state;
-	Tuplestorestate *ts;
+	Tuplestorestate *ts = NULL;
 	int			tsptrno;
 	TupleTableSlot *outerslot;
 
@@ -224,26 +266,394 @@ init_tuplestore_state(ShareInputScanState *node)
 
 	if (!local_state->ready)
 	{
-		if (currentSliceId == sisc->producer_slice_id || estate->es_plannedstmt->numSlices == 1)
+		/* parallel */
+		if (node->parallel_state != NULL && sisc->scan.plan.parallel_aware)
 		{
-			/* We are the producer */
+			/* cross slice */
 			if (sisc->cross_slice)
 			{
-				char		rwfile_prefix[100];
+				/* producer */
+				if (currentSliceId == sisc->producer_slice_id ||
+					estate->es_plannedstmt->numSlices == 1)
+				{
+					ParallelShareInputState *pstate = node->parallel_state;
+					shareinput_Xslice_state *xslice_state = node->ref->xslice_state;
+					char		sts_name[64];
+					dsm_segment *seg;
+					SharedTuplestore *shared_ts;
 
-				elog((Debug_shareinput_xslice ? LOG : DEBUG1), "SISC WRITER (shareid=%d, slice=%d): No tuplestore yet, creating tuplestore",
-					 sisc->share_id, currentSliceId);
+					PG_TRY();
+					{
+						shareinput_create_bufname_prefix(sts_name, sizeof(sts_name),
+														 sisc->share_id);
 
-				ts = tuplestore_begin_heap(true, /* randomAccess */
-										   false, /* interXact */
-										   10); /* maxKBytes FIXME */
+						if (ParallelWorkerNumberOfSlice == 0)
+						{
+							/* Leader: create pinned DSM + SharedTuplestore */
+							Size	sz = sts_estimate(TotalParallelWorkerNumberOfSlice);
 
-				shareinput_create_bufname_prefix(rwfile_prefix, sizeof(rwfile_prefix), sisc->share_id);
-				tuplestore_make_shared(ts,
-									   get_shareinput_fileset(),
-									   rwfile_prefix);
+							seg = dsm_create(sz, 0);
+							dsm_pin_segment(seg);
+							dsm_pin_mapping(seg);
+							pstate->sts_handle = dsm_segment_handle(seg);
+							shared_ts = dsm_segment_address(seg);
+
+							node->sts_seg = seg;
+							node->sts_accessor = sts_initialize(shared_ts,
+																TotalParallelWorkerNumberOfSlice,
+																ParallelWorkerNumberOfSlice, 0, 0,
+																get_shareinput_fileset(),
+																sts_name);
+
+							/* Publish to cross-slice shared state */
+							xslice_state->sts_dsm_handle = dsm_segment_handle(seg);
+							xslice_state->nparticipants = TotalParallelWorkerNumberOfSlice;
+
+							/* Signal intra-slice workers */
+							pg_atomic_write_u32(&pstate->ready, 1);
+							ConditionVariableBroadcast(&pstate->ready_cv);
+						}
+						else
+						{
+							/* Worker: wait for leader to create STS, then attach */
+							while (pg_atomic_read_u32(&pstate->ready) == 0)
+							{
+								check_parallel_producer_failed(pstate);
+								ConditionVariableSleep(&pstate->ready_cv,
+													   WAIT_EVENT_SHAREINPUT_SCAN);
+							}
+							ConditionVariableCancelSleep();
+							check_parallel_producer_failed(pstate);
+
+							seg = dsm_attach(pstate->sts_handle);
+							if (seg == NULL)
+								ereport(ERROR,
+										(errmsg("could not attach to cross-slice SharedTuplestore DSM for share %d",
+												sisc->share_id)));
+							dsm_pin_mapping(seg);
+
+							shared_ts = dsm_segment_address(seg);
+							node->sts_seg = seg;
+							node->sts_accessor = sts_attach(shared_ts,
+															ParallelWorkerNumberOfSlice,
+															get_shareinput_fileset());
+						}
+
+						/* All workers materialize in parallel */
+						for (;;)
+						{
+							bool		shouldFree;
+							MinimalTuple tuple;
+
+							outerslot = ExecProcNode(local_state->childState);
+							if (TupIsNull(outerslot))
+								break;
+							tuple = ExecFetchSlotMinimalTuple(outerslot, &shouldFree);
+							sts_puttuple(node->sts_accessor, NULL, tuple);
+							if (shouldFree)
+								heap_free_minimal_tuple(tuple);
+						}
+
+						sts_end_write(node->sts_accessor);
+
+						/* Wait for all writers to finish */
+						BarrierArriveAndWait(&pstate->write_barrier,
+											 WAIT_EVENT_SHAREINPUT_SCAN);
+
+						/*
+						 * All workers signal consumers idempotently.  Doing this on
+						 * every worker (rather than only the leader) ensures the
+						 * 'ready' flag is set even if the leader is interrupted
+						 * after the barrier but before reaching the signal -- e.g.,
+						 * by a cancel raised inside BarrierArriveAndWait's CFI on
+						 * the consumer side.  Atomic writes and broadcasts are
+						 * idempotent so multiple writers cause no harm.
+						 */
+						pg_atomic_write_u32(&xslice_state->ready, 1);
+						ConditionVariableBroadcast(&xslice_state->ready_done_cv);
+						pg_atomic_write_u32(&pstate->ready, TotalParallelWorkerNumberOfSlice);
+						ConditionVariableBroadcast(&pstate->ready_cv);
+					}
+					PG_CATCH();
+					{
+						/*
+						 * Unblock any in-slice workers waiting on pstate->ready
+						 * and any cross-slice consumers waiting on
+						 * xslice_state->ready, so they ERROR out instead of
+						 * hanging on a producer that died before signaling.
+						 */
+						pg_atomic_write_u32(&pstate->producer_failed, 1);
+						ConditionVariableBroadcast(&pstate->ready_cv);
+						pg_atomic_write_u32(&xslice_state->producer_failed, 1);
+						ConditionVariableBroadcast(&xslice_state->ready_done_cv);
+						PG_RE_THROW();
+					}
+					PG_END_TRY();
+
+					/* Store DSM segment for within-slice consumers in same process */
+					local_state->parallel_seg = node->sts_seg;
+					local_state->ready = true;
+					node->ts_state = NULL;
+					node->ts_pos = -1;
+					node->isready = true;
+					return;
+				}
+				/* consumer */
+				else
+				{
+					/*
+					 * Cross-slice parallel consumer: each consumer slice creates its
+					 * own private copy of the SharedTuplestore metadata so that the
+					 * slice has independent read_page tracking.  Workers within the
+					 * consumer slice share the copy and do parallel scan.  Different
+					 * consumer slices each read the full dataset independently.
+					 *
+					 * The slice leader creates the copy and publishes the DSM handle
+					 * via ParallelShareInputState; other workers wait and attach.
+					 */
+					ParallelShareInputState *pstate = node->parallel_state;
+					shareinput_Xslice_state *xslice_state = node->ref->xslice_state;
+
+					PG_TRY();
+					{
+						/* Wait for producer to finish materializing */
+						shareinput_reader_waitready(node->ref);
+
+						if (ParallelWorkerNumberOfSlice == 0)
+						{
+							/* Leader: create a private STS copy for this consumer slice */
+							dsm_segment *producer_seg;
+							dsm_segment *my_seg;
+							SharedTuplestore *producer_sts;
+							SharedTuplestore *my_sts;
+							int			nparticipants = xslice_state->nparticipants;
+							Size		sz = sts_estimate(nparticipants);
+
+							producer_seg = dsm_attach(xslice_state->sts_dsm_handle);
+							if (producer_seg == NULL)
+								ereport(ERROR,
+										(errmsg("could not attach to cross-slice SharedTuplestore DSM for share %d",
+												sisc->share_id)));
+							producer_sts = dsm_segment_address(producer_seg);
+
+							my_seg = dsm_create(sz, 0);
+							dsm_pin_segment(my_seg);
+							dsm_pin_mapping(my_seg);
+							my_sts = dsm_segment_address(my_seg);
+							memcpy(my_sts, producer_sts, sz);
+							sts_reinit_locks(my_sts, nparticipants);
+
+							dsm_detach(producer_seg);
+
+							node->sts_seg = my_seg;
+							node->sts_accessor = sts_attach(my_sts,
+															ParallelWorkerNumberOfSlice,
+															get_shareinput_fileset());
+							sts_reinitialize(node->sts_accessor);
+
+							/* Publish handle for other workers in this consumer slice */
+							pstate->sts_handle = dsm_segment_handle(my_seg);
+							pg_atomic_write_u32(&pstate->ready, 1);
+							ConditionVariableBroadcast(&pstate->ready_cv);
+
+							local_state->parallel_seg = my_seg;
+						}
+						else
+						{
+							/* Worker: wait for leader to create the STS copy */
+							dsm_segment *seg;
+							SharedTuplestore *my_sts;
+
+							while (pg_atomic_read_u32(&pstate->ready) == 0)
+							{
+								check_parallel_producer_failed(pstate);
+								ConditionVariableSleep(&pstate->ready_cv,
+													   WAIT_EVENT_SHAREINPUT_SCAN);
+							}
+							ConditionVariableCancelSleep();
+							check_parallel_producer_failed(pstate);
+
+							seg = dsm_attach(pstate->sts_handle);
+							if (seg == NULL)
+								ereport(ERROR,
+										(errmsg("could not attach to consumer STS copy DSM for share %d",
+												sisc->share_id)));
+							dsm_pin_mapping(seg);
+
+							my_sts = dsm_segment_address(seg);
+							node->sts_seg = seg;
+							node->sts_accessor = sts_attach(my_sts,
+															ParallelWorkerNumberOfSlice,
+															get_shareinput_fileset());
+
+							local_state->parallel_seg = seg;
+						}
+
+						sts_begin_parallel_scan(node->sts_accessor);
+					}
+					PG_CATCH();
+					{
+						/*
+						 * Unblock the rest of this consumer slice's workers
+						 * waiting on pstate->ready: if the leader (or any
+						 * worker) hits ERROR here, others must not hang.
+						 */
+						pg_atomic_write_u32(&pstate->producer_failed, 1);
+						ConditionVariableBroadcast(&pstate->ready_cv);
+						PG_RE_THROW();
+					}
+					PG_END_TRY();
+
+					node->parallel_scan_started = true;
+
+					local_state->ready = true;
+					node->ts_state = NULL;
+					node->ts_pos = -1;
+					node->isready = true;
+					return;
+				}
+			}
+			/* Intra slice */
+			else
+			{
+				/* producer */
+				if (currentSliceId == sisc->producer_slice_id ||
+					estate->es_plannedstmt->numSlices == 1)
+				{
+					ParallelShareInputState *pstate = node->parallel_state;
+					char		sts_name[64];
+					dsm_segment *seg;
+					SharedTuplestore *shared_ts;
+
+					PG_TRY();
+					{
+						shareinput_create_bufname_prefix(sts_name, sizeof(sts_name),
+														 sisc->share_id);
+
+						if (ParallelWorkerNumberOfSlice == 0)
+						{
+							/* Leader: create SharedTuplestore */
+							Size	sz = sts_estimate(TotalParallelWorkerNumberOfSlice);
+
+							seg = dsm_create(sz, 0);
+							dsm_pin_mapping(seg);
+							pstate->sts_handle = dsm_segment_handle(seg);
+							shared_ts = dsm_segment_address(seg);
+
+							node->sts_seg = seg;
+							node->sts_accessor = sts_initialize(shared_ts,
+																TotalParallelWorkerNumberOfSlice,
+																ParallelWorkerNumberOfSlice, 0, 0,
+																get_shareinput_fileset(),
+																sts_name);
+
+							/* Signal other workers that STS is created */
+							pg_atomic_write_u32(&pstate->ready, 1);
+							ConditionVariableBroadcast(&pstate->ready_cv);
+						}
+						else
+						{
+							/* Worker: wait for leader to create STS, then attach */
+							while (pg_atomic_read_u32(&pstate->ready) == 0)
+							{
+								check_parallel_producer_failed(pstate);
+								ConditionVariableSleep(&pstate->ready_cv,
+													   WAIT_EVENT_SHAREINPUT_SCAN);
+							}
+							ConditionVariableCancelSleep();
+							check_parallel_producer_failed(pstate);
+
+							seg = dsm_attach(pstate->sts_handle);
+							if (seg == NULL)
+								ereport(ERROR,
+										(errmsg("could not attach to SharedTuplestore DSM for share %d",
+												sisc->share_id)));
+							dsm_pin_mapping(seg);
+
+							shared_ts = dsm_segment_address(seg);
+							node->sts_seg = seg;
+							node->sts_accessor = sts_attach(shared_ts,
+															ParallelWorkerNumberOfSlice,
+															get_shareinput_fileset());
+						}
+
+						/* All workers materialize tuples in parallel */
+						for (;;)
+						{
+							bool		shouldFree;
+							MinimalTuple tuple;
+
+							outerslot = ExecProcNode(local_state->childState);
+							if (TupIsNull(outerslot))
+								break;
+							tuple = ExecFetchSlotMinimalTuple(outerslot, &shouldFree);
+							sts_puttuple(node->sts_accessor, NULL, tuple);
+							if (shouldFree)
+								heap_free_minimal_tuple(tuple);
+						}
+
+						sts_end_write(node->sts_accessor);
+
+						/* Wait for all writers to finish */
+						BarrierArriveAndWait(&pstate->write_barrier,
+											 WAIT_EVENT_SHAREINPUT_SCAN);
+
+						/*
+						 * Signal consumers idempotently from every worker, not
+						 * only the leader, so the ready flag is still set if the
+						 * leader is interrupted between the barrier and the
+						 * signal.  See the cross-slice path for details.
+						 */
+						pg_atomic_write_u32(&pstate->ready, TotalParallelWorkerNumberOfSlice);
+						ConditionVariableBroadcast(&pstate->ready_cv);
+
+						sts_begin_parallel_scan(node->sts_accessor);
+					}
+					PG_CATCH();
+					{
+						pg_atomic_write_u32(&pstate->producer_failed, 1);
+						ConditionVariableBroadcast(&pstate->ready_cv);
+						PG_RE_THROW();
+					}
+					PG_END_TRY();
+
+					node->parallel_scan_started = true;
+
+					/* Store DSM segment for consumers in same process */
+					local_state->parallel_seg = node->sts_seg;
+					local_state->ready = true;
+					node->ts_state = NULL;
+					node->ts_pos = -1;
+					node->isready = true;
+					return;
+				}
+				/* There is no consumer in intra-slice when local_state->ready is false */
+			}
+		}
+		/* non parallel */
+		else
+		{
+			/* producer */
+			if (currentSliceId == sisc->producer_slice_id || estate->es_plannedstmt->numSlices == 1)
+			{
+				/* We are the producer */
+				if (sisc->cross_slice)
+				{
+					char		rwfile_prefix[100];
+
+					elog((Debug_shareinput_xslice ? LOG : DEBUG1), "SISC WRITER (shareid=%d, slice=%d): No tuplestore yet, creating tuplestore",
+						 sisc->share_id, currentSliceId);
+
+					ts = tuplestore_begin_heap(true, /* randomAccess */
+											   false, /* interXact */
+											   10); /* maxKBytes FIXME */
+
+					shareinput_create_bufname_prefix(rwfile_prefix, sizeof(rwfile_prefix), sisc->share_id);
+					tuplestore_make_shared(ts,
+										   get_shareinput_fileset(),
+										   rwfile_prefix);
 #ifdef FAULT_INJECTOR
-				if (SIMPLE_FAULT_INJECTOR("sisc_xslice_temp_files") == FaultInjectorTypeSkip)
+					if (SIMPLE_FAULT_INJECTOR("sisc_xslice_temp_files") == FaultInjectorTypeSkip)
 				{
 					const char *filename = tuplestore_get_buffilename(ts);
 					if (!filename)
@@ -256,70 +666,194 @@ init_tuplestore_state(ShareInputScanState *node)
 						ereport(NOTICE, (errmsg("sisc_xslice: Unexpected prefix of the tablespace path")));
 				}
 #endif
+				}
+				else
+				{
+					/* intra-slice */
+					ts = tuplestore_begin_heap(true, /* randomAccess */
+											   false, /* interXact */
+											   PlanStateOperatorMemKB((PlanState *) node));
+
+					/*
+					 * Offer extra memory usage info for EXPLAIN ANALYZE.
+					 *
+					 * If this is a cross-slice share, the tuplestore uses very
+					 * little memory, because it has to materialize the result on
+					 * a file anyway, so that it can be shared across processes.
+					 * In that case, reporting memory usage doesn't make much
+					 * sense. The "work_mem wanted" value would particularly
+					 * non-sensical, as we we would write to a file regardless of
+					 * work_mem. So only track memory usage in the non-cross-slice
+					 * case.
+					 */
+					if (node->ss.ps.instrument && node->ss.ps.instrument->need_cdb)
+					{
+						/* Let the tuplestore share our Instrumentation object. */
+						tuplestore_set_instrument(ts, node->ss.ps.instrument);
+
+						/* Request a callback at end of query. */
+						node->ss.ps.cdbexplainfun = ExecShareInputScanExplainEnd;
+					}
+				}
+
+				for (;;)
+				{
+					outerslot = ExecProcNode(local_state->childState);
+					if (TupIsNull(outerslot))
+						break;
+					tuplestore_puttupleslot(ts, outerslot);
+				}
+
+				if (sisc->cross_slice)
+				{
+					tuplestore_freeze(ts);
+					shareinput_writer_notifyready(node->ref);
+				}
+
+				tuplestore_rescan(ts);
 			}
+			/* consumer */
 			else
 			{
-				/* intra-slice */
-				ts = tuplestore_begin_heap(true, /* randomAccess */
-										   false, /* interXact */
-										   PlanStateOperatorMemKB((PlanState *) node));
-
 				/*
-				 * Offer extra memory usage info for EXPLAIN ANALYZE.
-				 *
-				 * If this is a cross-slice share, the tuplestore uses very
-				 * little memory, because it has to materialize the result on
-				 * a file anyway, so that it can be shared across processes.
-				 * In that case, reporting memory usage doesn't make much
-				 * sense. The "work_mem wanted" value would particularly
-				 * non-sensical, as we we would write to a file regardless of
-				 * work_mem. So only track memory usage in the non-cross-slice
-				 * case.
+				 * We are a consumer slice. Wait for the producer to create the
+				 * tuplestore.
 				 */
-				if (node->ss.ps.instrument && node->ss.ps.instrument->need_cdb)
-				{
-					/* Let the tuplestore share our Instrumentation object. */
-					tuplestore_set_instrument(ts, node->ss.ps.instrument);
+				char		rwfile_prefix[100];
 
-					/* Request a callback at end of query. */
-					node->ss.ps.cdbexplainfun = ExecShareInputScanExplainEnd;
-				}
+				Assert(sisc->cross_slice);
+
+				shareinput_reader_waitready(node->ref);
+
+				shareinput_create_bufname_prefix(rwfile_prefix, sizeof(rwfile_prefix), sisc->share_id);
+				ts = tuplestore_open_shared(get_shareinput_fileset(), rwfile_prefix);
 			}
-
-			for (;;)
-			{
-				outerslot = ExecProcNode(local_state->childState);
-				if (TupIsNull(outerslot))
-					break;
-				tuplestore_puttupleslot(ts, outerslot);
-			}
-
-			if (sisc->cross_slice)
-			{
-				tuplestore_freeze(ts);
-				shareinput_writer_notifyready(node->ref);
-			}
-
-			tuplestore_rescan(ts);
 		}
-		else
-		{
-			/*
-			 * We are a consumer slice. Wait for the producer to create the
-			 * tuplestore.
-			 */
-			char		rwfile_prefix[100];
 
-			Assert(sisc->cross_slice);
-
-			shareinput_reader_waitready(node->ref);
-
-			shareinput_create_bufname_prefix(rwfile_prefix, sizeof(rwfile_prefix), sisc->share_id);
-			ts = tuplestore_open_shared(get_shareinput_fileset(), rwfile_prefix);
-		}
 		local_state->ts_state = ts;
 		local_state->ready = true;
 		tsptrno = 0;
+	}
+	else if (node->parallel_state != NULL && sisc->scan.plan.parallel_aware)
+	{
+		if (!sisc->cross_slice || (sisc->cross_slice && currentSliceId == sisc->producer_slice_id))
+		{
+			/*
+			 * Consumer in parallel mode: producer already materialized into
+			 * SharedTuplestore. Attach and begin parallel scan.
+			 */
+			ParallelShareInputState *pstate = node->parallel_state;
+			dsm_segment *seg;
+			SharedTuplestore *shared_ts;
+
+			/* Wait for all producers to finish materialization */
+			while (pg_atomic_read_u32(&pstate->ready) < TotalParallelWorkerNumberOfSlice)
+			{
+				check_parallel_producer_failed(pstate);
+				ConditionVariableSleep(&pstate->ready_cv,
+									   WAIT_EVENT_SHAREINPUT_SCAN);
+			}
+			ConditionVariableCancelSleep();
+			check_parallel_producer_failed(pstate);
+
+			/*
+			 * Reuse the DSM segment from local_state if available (same process
+			 * as producer), otherwise attach.
+			 */
+			if (local_state->parallel_seg != NULL)
+			{
+				seg = local_state->parallel_seg;
+			}
+			else
+			{
+				seg = dsm_attach(pstate->sts_handle);
+				if (seg == NULL)
+					ereport(ERROR,
+							(errmsg("could not attach to SharedTuplestore DSM for share %d",
+									sisc->share_id)));
+				dsm_pin_mapping(seg);
+			}
+
+			shared_ts = dsm_segment_address(seg);
+			node->sts_seg = seg;
+			node->sts_accessor = sts_attach(shared_ts, ParallelWorkerNumberOfSlice,
+											get_shareinput_fileset());
+
+			/*
+			 * Synchronize all workers before starting a new parallel scan.
+			 * This ensures that any prior consumer group's scan is fully
+			 * complete across all workers before we reset the shared read
+			 * state.  Without this, a fast worker could start scanning while
+			 * a slower worker resets read_page, causing data loss or duplication.
+			 */
+			BarrierArriveAndWait(&pstate->scan_barrier,
+								 WAIT_EVENT_SHAREINPUT_SCAN);
+
+			/* One worker reinitializes shared read counters */
+			if (ParallelWorkerNumberOfSlice == 0)
+				sts_reinitialize(node->sts_accessor);
+
+			/* Wait for reinitialize to complete before anyone starts scanning */
+			BarrierArriveAndWait(&pstate->scan_barrier,
+								 WAIT_EVENT_SHAREINPUT_SCAN);
+
+			sts_begin_parallel_scan(node->sts_accessor);
+			node->parallel_scan_started = true;
+
+			node->ts_state = NULL;
+			node->ts_pos = -1;
+			node->isready = true;
+			return;
+		}
+		else if (sisc->cross_slice && currentSliceId != sisc->producer_slice_id)
+		{
+			/*
+			 * Cross-slice parallel consumer, second+ reader in the same slice.
+			 * The first consumer already created a private STS copy for this
+			 * consumer slice; reuse it.  Each ShareInputScan node has its own
+			 * ParallelShareInputState (and therefore its own scan_barrier), so
+			 * workers synchronize independently per node.
+			 *
+			 * Because the hash join builds the inner side fully before probing
+			 * the outer side, the prior consumer's parallel scan is guaranteed
+			 * to be complete by this point.
+			 */
+			ParallelShareInputState *pstate = node->parallel_state;
+			dsm_segment *seg;
+			SharedTuplestore *shared_ts;
+
+			Assert(local_state->parallel_seg != NULL);
+
+			seg = local_state->parallel_seg;
+			shared_ts = dsm_segment_address(seg);
+			node->sts_seg = seg;
+			node->sts_accessor = sts_attach(shared_ts,
+											ParallelWorkerNumberOfSlice,
+											get_shareinput_fileset());
+
+			/*
+			 * Synchronize all workers before reinitializing shared read state,
+			 * so the prior consumer's scan is fully done across all workers.
+			 */
+			BarrierArriveAndWait(&pstate->scan_barrier,
+								 WAIT_EVENT_SHAREINPUT_SCAN);
+
+			/* One worker resets the shared read counters */
+			if (ParallelWorkerNumberOfSlice == 0)
+				sts_reinitialize(node->sts_accessor);
+
+			/* Wait for reinitialize to complete before scanning */
+			BarrierArriveAndWait(&pstate->scan_barrier,
+								 WAIT_EVENT_SHAREINPUT_SCAN);
+
+			sts_begin_parallel_scan(node->sts_accessor);
+			node->parallel_scan_started = true;
+
+			node->ts_state = NULL;
+			node->ts_pos = -1;
+			node->isready = true;
+			return;
+		}
 	}
 	else
 	{
@@ -375,6 +909,21 @@ ExecShareInputScan(PlanState *pstate)
 	 */
 	if (sisc->discard_output)
 		return NULL;
+
+	/* Parallel scan mode: use SharedTuplestore for parallel reading */
+	if (node->parallel_scan_started && node->sts_accessor != NULL)
+	{
+		MinimalTuple tuple;
+
+		slot = node->ss.ps.ps_ResultTupleSlot;
+		tuple = sts_parallel_scan_next(node->sts_accessor, NULL);
+		if (tuple == NULL)
+			return ExecClearTuple(slot);
+
+		SIMPLE_FAULT_INJECTOR("execshare_input_next");
+
+		return ExecStoreMinimalTuple(tuple, slot, false);
+	}
 
 	slot = node->ss.ps.ps_ResultTupleSlot;
 
@@ -454,6 +1003,13 @@ ExecInitShareInputScan(ShareInputScan *node, EState *estate, int eflags)
 	ExecInitResultTupleSlotTL(&sisstate->ss.ps, &TTSOpsMinimalTuple);
 
 	sisstate->ss.ps.ps_ProjInfo = NULL;
+
+	/* Initialize parallel state fields */
+	sisstate->parallel_state = NULL;
+	sisstate->parallel_state_len = 0;
+	sisstate->sts_accessor = NULL;
+	sisstate->sts_seg = NULL;
+	sisstate->parallel_scan_started = false;
 
 	/*
 	 * When doing EXPLAIN only, we won't actually execute anything, so don't
@@ -555,30 +1111,147 @@ ExecEndShareInputScan(ShareInputScanState *node)
 
 	if (node->ref)
 	{
+		bool		is_producer = (outerPlanState(node) != NULL);
+
 		if (sisc->this_slice_id == currentSliceId || estate->es_plannedstmt->numSlices == 1)
 		{
 			/*
 			 * The producer needs to wait for all the consumers to finish.
 			 * Consumers signal the producer that they're done reading,
 			 * but are free to exit immediately after that.
+			 *
+			 * Use outerPlanState to distinguish the actual producer from a
+			 * within-slice consumer that happens to be in the producer's
+			 * slice (both have currentSliceId == producer_slice_id).
 			 */
-			if (currentSliceId == sisc->producer_slice_id)
+			if (is_producer)
 			{
 				if (!local_state->ready)
 					init_tuplestore_state(node);
+
+				/*
+				 * Defensive: ensure the cross-slice 'ready' flag is set
+				 * before waiting on consumers.  If init_tuplestore_state ran
+				 * on a non-leader worker via the squelch path while the
+				 * leader was interrupted after its barrier arrival, the
+				 * post-barrier signal could have been skipped.  Writing it
+				 * here is safe (the data is materialized; local_state->ready
+				 * implies the STS is complete) and idempotent.
+				 */
+				if (sisc->scan.plan.parallel_aware && sisc->cross_slice &&
+					node->ref->xslice_state != NULL &&
+					!pg_atomic_read_u32(&node->ref->xslice_state->ready))
+				{
+					pg_atomic_write_u32(&node->ref->xslice_state->ready, 1);
+					ConditionVariableBroadcast(&node->ref->xslice_state->ready_done_cv);
+				}
+
 				shareinput_writer_waitdone(node->ref, sisc->nconsumers);
 			}
-			else
+			else if (currentSliceId != sisc->producer_slice_id)
 			{
 				if (!local_state->closed)
 				{
-					shareinput_reader_notifydone(node->ref, sisc->nconsumers);
-					local_state->closed = true;
+					/*
+					 * In parallel mode, each worker is a separate process
+					 * with its own local_state.  Only worker 0 (the main
+					 * QE) sends notifydone — it runs ExecEnd after all
+					 * launched workers have exited, so one notification
+					 * per consumer slice is guaranteed.
+					 *
+					 * We cannot access node->parallel_state here because
+					 * the ParallelContext DSM may already be freed.
+					 */
+					if (ParallelWorkerNumberOfSlice <= 0)
+					{
+						shareinput_reader_notifydone(node->ref, sisc->nconsumers);
+						local_state->closed = true;
+					}
 				}
 			}
+			/* else: within-slice consumer in producer's slice — no cross-slice
+			 * notification needed; cleanup handled via local_state. */
 		}
 		release_shareinput_reference(node->ref, false);
 		node->ref = NULL;
+	}
+
+	/* Clean up parallel STS resources (intra- and cross-slice) */
+	if (sisc->scan.plan.parallel_aware && node->sts_seg)
+	{
+		bool	is_producer = (outerPlanState(node) != NULL);
+
+		if (sisc->cross_slice)
+		{
+			bool	is_xslice_consumer = (!is_producer &&
+										  currentSliceId != sisc->producer_slice_id);
+
+			/*
+			 * Only detach for producer and cross-slice consumers.
+			 * Within-slice consumers reuse the producer's DSM via
+			 * local_state->parallel_seg and must not detach it.
+			 */
+			if (is_producer || is_xslice_consumer)
+			{
+				bool	should_detach = true;
+
+				/*
+				 * Multiple cross-slice consumer nodes in the same slice share
+				 * a single DSM segment via local_state->parallel_seg.  Use it
+				 * as a guard so we only detach once: the first node to clean
+				 * up clears the pointer and performs the detach; subsequent
+				 * nodes skip it.
+				 */
+				if (is_xslice_consumer && local_state)
+				{
+					if (local_state->parallel_seg == NULL)
+						should_detach = false;
+					else
+						local_state->parallel_seg = NULL;
+				}
+
+				if (should_detach)
+				{
+					/*
+					 * Only worker 0 (main QE) unpins the DSM segment.
+					 * For producer: worker 0 created and pinned the STS DSM.
+					 * For cross-slice consumer: worker 0 created and pinned
+					 * the private STS copy.  The pin keeps the segment alive
+					 * even after other workers detach; worker 0 runs ExecEnd
+					 * last.
+					 */
+					if (ParallelWorkerNumberOfSlice == 0)
+						dsm_unpin_segment(dsm_segment_handle(node->sts_seg));
+					dsm_detach(node->sts_seg);
+				}
+			}
+		}
+		else
+		{
+			/*
+			 * Intra-slice parallel: the producer owns the DSM mapping (from
+			 * dsm_create in the leader or its own dsm_attach in workers).
+			 * Within-slice consumer nodes that reused the producer's mapping
+			 * via local_state->parallel_seg share the producer's pointer and
+			 * must not double-detach.  Consumers that did their own
+			 * dsm_attach (producer ran in another worker) own an independent
+			 * mapping and must detach it.
+			 */
+			bool	should_detach = true;
+
+			if (!is_producer && local_state &&
+				local_state->parallel_seg == node->sts_seg)
+				should_detach = false;
+
+			if (should_detach)
+				dsm_detach(node->sts_seg);
+		}
+
+		if (node->parallel_scan_started && node->sts_accessor)
+			sts_end_parallel_scan(node->sts_accessor);
+		node->sts_seg = NULL;
+		node->sts_accessor = NULL;
+		node->parallel_scan_started = false;
 	}
 
 	if (local_state && local_state->ts_state)
@@ -620,7 +1293,6 @@ ExecReScanShareInputScan(ShareInputScanState *node)
 void
 ExecSquelchShareInputScan(ShareInputScanState *node, bool force)
 {
-	EState	   *estate = node->ss.ps.state;
 	ShareInputScan *sisc = (ShareInputScan *) node->ss.ps.plan;
 	shareinput_local_state *local_state = node->local_state;
 
@@ -644,7 +1316,9 @@ ExecSquelchShareInputScan(ShareInputScanState *node, bool force)
 	 */
 	if (sisc->cross_slice && node->ref)
 	{
-		if (currentSliceId == sisc->producer_slice_id || estate->es_plannedstmt->numSlices == 1)
+		bool		is_producer = (outerPlanState(node) != NULL);
+
+		if (is_producer)
 		{
 			/*
 			 * We are the producer. If we haven't materialized the tuplestore
@@ -659,7 +1333,7 @@ ExecSquelchShareInputScan(ShareInputScanState *node, bool force)
 				init_tuplestore_state(node);
 			}
 		}
-		else
+		else if (currentSliceId != sisc->producer_slice_id)
 		{
 			/* We are a consumer. Let the producer know that we're done. */
 			Assert(!local_state->closed);
@@ -668,11 +1342,28 @@ ExecSquelchShareInputScan(ShareInputScanState *node, bool force)
 
 			if (local_state->ndone == local_state->nsharers)
 			{
-				shareinput_reader_notifydone(node->ref, sisc->nconsumers);
-				local_state->closed = true;
+				/*
+				 * In parallel mode, only worker 0 (main QE) sends
+				 * notifydone.  The dsm_pin_segment on the STS copy
+				 * keeps it alive for other workers; worker 0 unpins
+				 * and notifies when all workers are squelched.
+				 */
+				if (ParallelWorkerNumberOfSlice <= 0)
+				{
+					shareinput_reader_notifydone(node->ref, sisc->nconsumers);
+					local_state->closed = true;
+				}
 			}
 			release_shareinput_reference(node->ref, true);
 			node->ref = NULL;
+
+			/*
+			 * Defer all DSM/STS cleanup to ExecEndShareInputScan.  Multiple
+			 * consumer nodes in the same slice share a single DSM segment
+			 * via local_state->parallel_seg; detaching here in one node's
+			 * squelch path would invalidate that pointer and cause the
+			 * next consumer node to fail its parallel_seg lookup.
+			 */
 		}
 	}
 	node->ss.ps.squelched = true;
@@ -837,8 +1528,11 @@ get_shareinput_reference(int share_id)
 		xslice_state->refcount = 0;
 		pg_atomic_init_u32(&xslice_state->ready, 0);
 		pg_atomic_init_u32(&xslice_state->ndone, 0);
+		pg_atomic_init_u32(&xslice_state->producer_failed, 0);
 
 		ConditionVariableInit(&xslice_state->ready_done_cv);
+		xslice_state->sts_dsm_handle = DSM_HANDLE_INVALID;
+		xslice_state->nparticipants = 0;
 		elog((Debug_shareinput_xslice ? LOG : DEBUG1), "SISC (shareid=%d, slice=%d): initialized xslice state",
 			 share_id, currentSliceId);
 	}
@@ -958,10 +1652,12 @@ shareinput_reader_waitready(shareinput_Xslice_reference *ref)
 		int ready = pg_atomic_read_u32(&state->ready);
 		if (ready)
 			break;
+		check_xslice_producer_failed(state);
 
 		ConditionVariableSleep(&state->ready_done_cv, WAIT_EVENT_SHAREINPUT_SCAN);
 	}
 	ConditionVariableCancelSleep();
+	check_xslice_producer_failed(state);
 
 	/* it's ready now */
 	elog((Debug_shareinput_xslice ? LOG : DEBUG1), "SISC READER (shareid=%d, slice=%d): Wait ready got writer's handshake",
@@ -1051,7 +1747,12 @@ shareinput_writer_waitdone(shareinput_Xslice_reference *ref, int nconsumers)
 			continue;
 		}
 		ConditionVariableCancelSleep();
-		if (ndone > nconsumers)
+		/*
+		 * In parallel mode, each consumer slice may have multiple workers
+		 * that each call shareinput_reader_notifydone, so ndone can exceed
+		 * nconsumers.  Only warn in non-parallel mode.
+		 */
+		if (ndone > nconsumers && state->nparticipants == 0)
 			elog(WARNING, "%d sharers of ShareInputScan reported to be done, but only %d were expected",
 				 ndone, nconsumers);
 		break;
@@ -1061,4 +1762,139 @@ shareinput_writer_waitdone(shareinput_Xslice_reference *ref, int nconsumers)
 		 ref->share_id, currentSliceId, nconsumers);
 
 	/* it's all done now */
+}
+
+/* ----------------------------------------------------------------
+ *		Parallel ShareInputScan Support
+ * ----------------------------------------------------------------
+ */
+
+/*
+ * ExecShareInputScanEstimate
+ *		Estimate space needed for parallel coordination info.
+ */
+void
+ExecShareInputScanEstimate(ShareInputScanState *node, ParallelContext *pcxt)
+{
+	ShareInputScan *sisc = (ShareInputScan *) node->ss.ps.plan;
+
+	if (!sisc->scan.plan.parallel_aware)
+		return;
+
+	/*
+	 * Producer (has child node) allocates shared state.
+	 * Cross-slice consumer (different slice from producer) also needs its
+	 * own ParallelShareInputState for intra-slice coordination, so that
+	 * the leader can publish the private STS copy's DSM handle.
+	 */
+	if (outerPlan(sisc) == NULL &&
+		!(sisc->cross_slice && sisc->this_slice_id != sisc->producer_slice_id))
+		return;
+
+	node->parallel_state_len = sizeof(ParallelShareInputState);
+	shm_toc_estimate_chunk(&pcxt->estimator, node->parallel_state_len);
+	shm_toc_estimate_keys(&pcxt->estimator, 1);
+}
+
+/*
+ * ExecShareInputScanInitializeDSM
+ *		Initialize parallel coordination info in DSM.
+ */
+void
+ExecShareInputScanInitializeDSM(ShareInputScanState *node, ParallelContext *pcxt)
+{
+	ShareInputScan *sisc = (ShareInputScan *) node->ss.ps.plan;
+	ParallelShareInputState *pstate;
+	bool	is_xslice_consumer;
+
+	if (!sisc->scan.plan.parallel_aware)
+		return;
+
+	is_xslice_consumer = (outerPlan(sisc) == NULL &&
+						   sisc->cross_slice &&
+						   sisc->this_slice_id != sisc->producer_slice_id);
+
+	/*
+	 * Within-slice consumer: get parallel_state from local_state
+	 * (set by the producer in the same slice).
+	 */
+	if (outerPlan(sisc) == NULL && !is_xslice_consumer)
+	{
+		node->parallel_state = node->local_state->parallel_state;
+		return;
+	}
+
+	/*
+	 * Producer or cross-slice consumer: allocate and initialize
+	 * parallel state in DSM.
+	 */
+	pstate = shm_toc_allocate(pcxt->toc, node->parallel_state_len);
+	memset(pstate, 0, node->parallel_state_len);
+
+	pstate->sts_handle = DSM_HANDLE_INVALID;
+	pg_atomic_init_u32(&pstate->ready, 0);
+	pg_atomic_init_u32(&pstate->ndone, 0);
+	pg_atomic_init_u32(&pstate->producer_failed, 0);
+	ConditionVariableInit(&pstate->ready_cv);
+	BarrierInit(&pstate->write_barrier, TotalParallelWorkerNumberOfSlice);
+	BarrierInit(&pstate->scan_barrier, TotalParallelWorkerNumberOfSlice);
+
+	shm_toc_insert(pcxt->toc, node->ss.ps.plan->plan_node_id, pstate);
+
+	node->parallel_state = pstate;
+	node->local_state->parallel_state = pstate;
+}
+
+/*
+ * ExecShareInputScanReInitializeDSM
+ *		Re-initialize parallel coordination info for a fresh scan.
+ */
+void
+ExecShareInputScanReInitializeDSM(ShareInputScanState *node, ParallelContext *pcxt)
+{
+	ParallelShareInputState *pstate = node->parallel_state;
+
+	if (pstate == NULL)
+		return;
+
+	pstate->sts_handle = DSM_HANDLE_INVALID;
+	pg_atomic_write_u32(&pstate->ready, 0);
+	pg_atomic_write_u32(&pstate->ndone, 0);
+	pg_atomic_write_u32(&pstate->producer_failed, 0);
+	BarrierInit(&pstate->write_barrier, TotalParallelWorkerNumberOfSlice);
+	BarrierInit(&pstate->scan_barrier, TotalParallelWorkerNumberOfSlice);
+
+	if (node->parallel_scan_started && node->sts_accessor)
+		sts_end_parallel_scan(node->sts_accessor);
+	node->parallel_scan_started = false;
+}
+
+/*
+ * ExecShareInputScanInitializeWorker
+ *		Initialize parallel coordination info in a worker process.
+ */
+void
+ExecShareInputScanInitializeWorker(ShareInputScanState *node,
+									ParallelWorkerContext *pwcxt)
+{
+	ShareInputScan *sisc = (ShareInputScan *) node->ss.ps.plan;
+
+	if (!sisc->scan.plan.parallel_aware)
+		return;
+
+	/*
+	 * Try to find our pstate in the TOC.  This succeeds for the producer
+	 * and for cross-slice consumers (both registered their own pstate
+	 * under their plan_node_id).  It returns NULL for within-slice
+	 * consumers that share the producer's pstate via local_state.
+	 */
+	node->parallel_state = shm_toc_lookup(pwcxt->toc,
+										  node->ss.ps.plan->plan_node_id,
+										  true);  /* missing_ok */
+
+	if (node->parallel_state != NULL)
+		node->local_state->parallel_state = node->parallel_state;
+	else
+		/* Within-slice consumer: get from local_state (set by producer) */
+		node->parallel_state = node->local_state->parallel_state;
 }

@@ -1,0 +1,274 @@
+--
+-- Tests for parallel SharedInputScan lifecycle management.
+--
+-- Validates that in parallel mode:
+-- 1. Within-slice parallel ShareInputScan works correctly
+-- 2. Cross-slice parallel ShareInputScan with a single consumer works
+-- 3. Cross-slice parallel ShareInputScan with multiple consumers works
+-- 4. DSM segment cleanup is coordinated: the producer waits for all
+--    consumer slices, and within a consumer slice only the last worker
+--    unpins the DSM.
+--
+CREATE SCHEMA parallel_shared_scan;
+SET search_path = parallel_shared_scan;
+SET optimizer = on;
+SET enable_parallel = on;
+CREATE TABLE t1 (a int, b float4) DISTRIBUTED BY (a);
+INSERT INTO t1 SELECT i, i * 1.1 FROM generate_series(1, 100) i;
+ANALYZE t1;
+-- Larger table to increase chance of hitting parallel race conditions
+CREATE TABLE t2 (a int, b float4) DISTRIBUTED BY (a);
+INSERT INTO t2 SELECT i, i * 0.7 FROM generate_series(1, 5000) i;
+ANALYZE t2;
+-- ============================================================
+-- Test 1: Within-slice parallel ShareInputScan
+-- CTE referenced multiple times in the same slice.
+-- ============================================================
+EXPLAIN (COSTS OFF)
+WITH cte AS (SELECT a, sum(b) AS total FROM t1 GROUP BY a)
+SELECT count(*) FROM (
+    SELECT c1.a FROM cte c1 JOIN cte c2 ON c1.a = c2.a
+) sub;
+                                           QUERY PLAN                                            
+-------------------------------------------------------------------------------------------------
+ Gather Motion 6:1  (slice1; segments: 6)
+   ->  Parallel Sequence
+         ->  Parallel Shared Scan (share slice:id 1:0)
+               ->  HashAggregate
+                     Group Key: t1.a
+                     ->  Redistribute Motion 6:6  (slice2; segments: 6)
+                           Hash Key: t1.a
+                           Hash Module: 3
+                           ->  Parallel Seq Scan on t1
+         ->  Redistribute Motion 1:6  (slice3)
+               Hash Module: 3
+               ->  Finalize Aggregate
+                     ->  Gather Motion 6:1  (slice4; segments: 6)
+                           ->  Partial Aggregate
+                                 ->  Parallel Hash Join
+                                       Hash Cond: (share0_ref3.a = share0_ref2.a)
+                                       ->  Redistribute Motion 6:6  (slice5; segments: 6)
+                                             Hash Key: share0_ref3.a
+                                             Hash Module: 3
+                                             ->  Parallel Shared Scan (share slice:id 5:0)
+                                       ->  Parallel Hash
+                                             ->  Redistribute Motion 6:6  (slice6; segments: 6)
+                                                   Hash Key: share0_ref2.a
+                                                   Hash Module: 3
+                                                   ->  Parallel Shared Scan (share slice:id 6:0)
+ Optimizer: GPORCA
+(26 rows)
+
+WITH cte AS (SELECT a, sum(b) AS total FROM t1 GROUP BY a)
+SELECT count(*) FROM (
+    SELECT c1.a FROM cte c1 JOIN cte c2 ON c1.a = c2.a
+) sub;
+ count 
+-------
+   100
+(1 row)
+
+-- ============================================================
+-- Test 2: Cross-slice with single consumer
+-- percentile_cont forces a cross-slice ShareInputScan.
+-- ============================================================
+EXPLAIN (COSTS OFF)
+SELECT percentile_cont(0.5) WITHIN GROUP (ORDER BY b) FROM t1;
+                                                          QUERY PLAN                                                           
+-------------------------------------------------------------------------------------------------------------------------------
+ Gather Motion 6:1  (slice1; segments: 6)
+   ->  Parallel Sequence
+         ->  Parallel Shared Scan (share slice:id 1:0)
+               ->  HashAggregate
+                     Group Key: t1.b
+                     ->  Redistribute Motion 6:6  (slice2; segments: 6)
+                           Hash Key: t1.b
+                           Hash Module: 3
+                           ->  Parallel Seq Scan on t1
+         ->  Redistribute Motion 1:6  (slice3)
+               Hash Module: 3
+               ->  Aggregate
+                     ->  Limit
+                           ->  Gather Motion 6:1  (slice4; segments: 6)
+                                 Merge Key: share0_ref3.b
+                                 ->  Sort
+                                       Sort Key: share0_ref3.b
+                                       ->  Nested Loop
+                                             Join Filter: true
+                                             ->  Parallel Shared Scan (share slice:id 4:0)
+                                             ->  Materialize
+                                                   ->  Result
+                                                         ->  Broadcast Motion 1:6  (slice5)
+                                                               ->  Finalize Aggregate
+                                                                     ->  Gather Motion 6:1  (slice6; segments: 6)
+                                                                           ->  Partial Aggregate
+                                                                                 ->  Parallel Shared Scan (share slice:id 6:0)
+ Optimizer: GPORCA
+(28 rows)
+
+SELECT percentile_cont(0.5) WITHIN GROUP (ORDER BY b) FROM t1;
+  percentile_cont  
+-------------------
+ 55.54999923706055
+(1 row)
+
+-- ============================================================
+-- Test 3: Cross-slice with multiple consumers
+-- percentile_cont + sum creates multiple consumer slices for
+-- the same shared scan.
+-- ============================================================
+-- sum(b::numeric)::int: float4 sum is reduce-order dependent under parallel mode.
+EXPLAIN (COSTS OFF)
+SELECT percentile_cont(0.5) WITHIN GROUP (ORDER BY b),
+       sum(b::numeric)::int AS sum
+FROM t1;
+                                                                QUERY PLAN                                                                 
+-------------------------------------------------------------------------------------------------------------------------------------------
+ Gather Motion 6:1  (slice1; segments: 6)
+   ->  Result
+         ->  Parallel Sequence
+               ->  Parallel Shared Scan (share slice:id 1:0)
+                     ->  HashAggregate
+                           Group Key: t1.b
+                           ->  Redistribute Motion 6:6  (slice2; segments: 6)
+                                 Hash Key: t1.b
+                                 Hash Module: 3
+                                 ->  Parallel Seq Scan on t1
+               ->  Redistribute Motion 1:6  (slice3)
+                     Hash Module: 3
+                     ->  Nested Loop
+                           Join Filter: true
+                           ->  Aggregate
+                                 ->  Limit
+                                       ->  Gather Motion 6:1  (slice5; segments: 6)
+                                             Merge Key: share0_ref3.b
+                                             ->  Sort
+                                                   Sort Key: share0_ref3.b
+                                                   ->  Nested Loop
+                                                         Join Filter: true
+                                                         ->  Parallel Shared Scan (share slice:id 5:0)
+                                                         ->  Materialize
+                                                               ->  Result
+                                                                     ->  Broadcast Motion 1:6  (slice6)
+                                                                           ->  Finalize Aggregate
+                                                                                 ->  Gather Motion 6:1  (slice7; segments: 6)
+                                                                                       ->  Partial Aggregate
+                                                                                             ->  Parallel Shared Scan (share slice:id 7:0)
+                           ->  Materialize
+                                 ->  Finalize Aggregate
+                                       ->  Gather Motion 6:1  (slice4; segments: 6)
+                                             ->  Partial Aggregate
+                                                   ->  Parallel Seq Scan on t1 t1_1
+ Optimizer: GPORCA
+(36 rows)
+
+SELECT percentile_cont(0.5) WITHIN GROUP (ORDER BY b),
+       sum(b::numeric)::int AS sum
+FROM t1;
+  percentile_cont  | sum  
+-------------------+------
+ 55.54999923706055 | 5555
+(1 row)
+
+-- ============================================================
+-- Test 4: Stress test — repeated execution to catch race conditions.
+-- The original bug was intermittent (~20% failure rate).
+-- ============================================================
+-- Cross-slice multiple consumers (stress)
+DO $$
+BEGIN
+  FOR i IN 1..50 LOOP
+    PERFORM percentile_cont(0.5) WITHIN GROUP (ORDER BY b), sum(b) FROM parallel_shared_scan.t1;
+  END LOOP;
+END;
+$$;
+-- Cross-slice single consumer (stress)
+DO $$
+BEGIN
+  FOR i IN 1..50 LOOP
+    PERFORM percentile_cont(0.5) WITHIN GROUP (ORDER BY b) FROM parallel_shared_scan.t1;
+  END LOOP;
+END;
+$$;
+-- Within-slice (stress)
+DO $$
+BEGIN
+  FOR i IN 1..50 LOOP
+    PERFORM count(*) FROM (
+      WITH cte AS (SELECT a, sum(b) AS total FROM parallel_shared_scan.t1 GROUP BY a)
+      SELECT c1.a FROM cte c1 JOIN cte c2 ON c1.a = c2.a
+    ) sub;
+  END LOOP;
+END;
+$$;
+-- ============================================================
+-- Test 5: Cross-slice multiple consumers with larger dataset
+-- ============================================================
+EXPLAIN (COSTS OFF)
+SELECT percentile_cont(0.5) WITHIN GROUP (ORDER BY b),
+       sum(b::numeric)::int AS sum
+FROM t2;
+                                                                QUERY PLAN                                                                 
+-------------------------------------------------------------------------------------------------------------------------------------------
+ Gather Motion 6:1  (slice1; segments: 6)
+   ->  Result
+         ->  Parallel Sequence
+               ->  Parallel Shared Scan (share slice:id 1:0)
+                     ->  HashAggregate
+                           Group Key: t2.b
+                           ->  Redistribute Motion 6:6  (slice2; segments: 6)
+                                 Hash Key: t2.b
+                                 Hash Module: 3
+                                 ->  Parallel Seq Scan on t2
+               ->  Redistribute Motion 1:6  (slice3)
+                     Hash Module: 3
+                     ->  Nested Loop
+                           Join Filter: true
+                           ->  Aggregate
+                                 ->  Limit
+                                       ->  Gather Motion 6:1  (slice5; segments: 6)
+                                             Merge Key: share0_ref3.b
+                                             ->  Sort
+                                                   Sort Key: share0_ref3.b
+                                                   ->  Nested Loop
+                                                         Join Filter: true
+                                                         ->  Parallel Shared Scan (share slice:id 5:0)
+                                                         ->  Materialize
+                                                               ->  Result
+                                                                     ->  Broadcast Motion 1:6  (slice6)
+                                                                           ->  Finalize Aggregate
+                                                                                 ->  Gather Motion 6:1  (slice7; segments: 6)
+                                                                                       ->  Partial Aggregate
+                                                                                             ->  Parallel Shared Scan (share slice:id 7:0)
+                           ->  Materialize
+                                 ->  Finalize Aggregate
+                                       ->  Gather Motion 6:1  (slice4; segments: 6)
+                                             ->  Partial Aggregate
+                                                   ->  Parallel Seq Scan on t2 t2_1
+ Optimizer: GPORCA
+(36 rows)
+
+SELECT percentile_cont(0.5) WITHIN GROUP (ORDER BY b),
+       sum(b::numeric)::int AS sum
+FROM t2;
+  percentile_cont   |   sum   
+--------------------+---------
+ 1750.3499755859375 | 8751750
+(1 row)
+
+DO $$
+BEGIN
+  FOR i IN 1..30 LOOP
+    PERFORM percentile_cont(0.5) WITHIN GROUP (ORDER BY b), sum(b) FROM parallel_shared_scan.t2;
+  END LOOP;
+END;
+$$;
+-- ============================================================
+-- Cleanup
+-- ============================================================
+DROP SCHEMA parallel_shared_scan CASCADE;
+NOTICE:  drop cascades to 2 other objects
+DETAIL:  drop cascades to table t1
+drop cascades to table t2
+RESET optimizer;
+RESET enable_parallel;

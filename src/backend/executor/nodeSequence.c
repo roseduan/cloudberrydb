@@ -23,6 +23,10 @@
 #include "executor/executor.h"
 #include "miscadmin.h"
 
+#include "access/parallel.h"
+#include "storage/barrier.h"
+#include "utils/wait_event.h"
+
 SequenceState *
 ExecInitSequence(Sequence *node, EState *estate, int eflags)
 {
@@ -59,7 +63,12 @@ ExecInitSequence(Sequence *node, EState *estate, int eflags)
 	}
 
 	sequenceState->initState = true;
-	
+
+	/* Initialize parallel state fields */
+	sequenceState->pstate = NULL;
+	sequenceState->pstate_len = 0;
+	sequenceState->my_participant_id = -1;
+
 	/* Sequence does not need projection. */
 	sequenceState->ps.ps_ProjInfo = NULL;
 
@@ -93,17 +102,43 @@ TupleTableSlot *
 ExecSequence(PlanState *pstate)
 {
 	SequenceState *node = castNode(SequenceState, pstate);
+
 	/*
 	 * If no subplan has been executed yet, execute them here, except for
 	 * the last subplan.
 	 */
 	if (node->initState)
 	{
-		for(int no = 0; no < node->numSubplans - 1; no++)
+		if (node->pstate != NULL)
 		{
-			completeSubplan(node->subplans[no]);
+			/*
+			 * Parallel mode: only participant 0 executes producer subplans
+			 * to completion. Other participants trigger initialization only
+			 * (e.g., ShareInputScan with discard_output=true returns NULL).
+			 * All synchronize via barrier before reading the last subplan.
+			 */
+			ParallelSequenceState *ps = node->pstate;
 
-			CHECK_FOR_INTERRUPTS();
+			for (int no = 0; no < node->numSubplans - 1; no++)
+			{
+				if (node->my_participant_id == 0)
+					completeSubplan(node->subplans[no]);
+				else
+					ExecProcNode(node->subplans[no]);
+
+				BarrierArriveAndWait(&ps->sync_barrier,
+									 WAIT_EVENT_PARALLEL_FINISH);
+				CHECK_FOR_INTERRUPTS();
+			}
+		}
+		else
+		{
+			/* Non-parallel: original sequential execution */
+			for (int no = 0; no < node->numSubplans - 1; no++)
+			{
+				completeSubplan(node->subplans[no]);
+				CHECK_FOR_INTERRUPTS();
+			}
 		}
 
 		node->initState = false;
@@ -165,4 +200,66 @@ ExecSquelchSequence(SequenceState *node, bool force)
 	node->ps.squelched = true;
 	for (int i = 0; i < node->numSubplans; i++)
 		ExecSquelchNode(node->subplans[i], force);
+}
+
+/* ----------------------------------------------------------------
+ *		Parallel Sequence Support
+ * ----------------------------------------------------------------
+ */
+
+/*
+ * ExecSequenceEstimate
+ *		Estimate the amount of space needed for parallel coordination info.
+ */
+void
+ExecSequenceEstimate(SequenceState *node, ParallelContext *pcxt)
+{
+	node->pstate_len = sizeof(ParallelSequenceState);
+	shm_toc_estimate_chunk(&pcxt->estimator, node->pstate_len);
+	shm_toc_estimate_keys(&pcxt->estimator, 1);
+}
+
+/*
+ * ExecSequenceInitializeDSM
+ *		Initialize parallel coordination info in DSM.
+ */
+void
+ExecSequenceInitializeDSM(SequenceState *node, ParallelContext *pcxt)
+{
+	ParallelSequenceState *pstate;
+
+	pstate = shm_toc_allocate(pcxt->toc, node->pstate_len);
+	memset(pstate, 0, node->pstate_len);
+
+	pstate->nworkers = pcxt->nworkers;
+	BarrierInit(&pstate->sync_barrier, pstate->nworkers);
+
+	shm_toc_insert(pcxt->toc, node->ps.plan->plan_node_id, pstate);
+	node->pstate = pstate;
+	node->my_participant_id = 0;  /* Leader is participant 0 */
+}
+
+/*
+ * ExecSequenceReInitializeDSM
+ *		Re-initialize parallel coordination info for a fresh scan.
+ */
+void
+ExecSequenceReInitializeDSM(SequenceState *node, ParallelContext *pcxt)
+{
+	if (node->pstate == NULL)
+		return;
+
+	BarrierInit(&node->pstate->sync_barrier, node->pstate->nworkers);
+}
+
+/*
+ * ExecSequenceInitializeWorker
+ *		Initialize parallel coordination info in a worker process.
+ */
+void
+ExecSequenceInitializeWorker(SequenceState *node, ParallelWorkerContext *pwcxt)
+{
+	node->pstate = shm_toc_lookup(pwcxt->toc,
+								  node->ps.plan->plan_node_id, false);
+	node->my_participant_id = pwcxt->worker_id;
 }

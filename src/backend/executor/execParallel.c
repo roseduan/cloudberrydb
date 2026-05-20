@@ -39,6 +39,8 @@
 #include "executor/nodeMemoize.h"
 #include "executor/nodePartitionSelector.h"
 #include "executor/nodeSeqscan.h"
+#include "executor/nodeSequence.h"
+#include "executor/nodeShareInputScan.h"
 #include "executor/nodeSort.h"
 #include "executor/nodeSubplan.h"
 #include "executor/tqueue.h"
@@ -301,6 +303,16 @@ ExecParallelEstimate(PlanState *planstate, ExecParallelEstimateContext *e)
 			/* even when not parallel-aware, for EXPLAIN ANALYZE */
 			ExecMemoizeEstimate((MemoizeState *) planstate, e->pcxt);
 			break;
+		case T_SequenceState:
+			if (planstate->plan->parallel_aware)
+				ExecSequenceEstimate((SequenceState *) planstate,
+									 e->pcxt);
+			break;
+		case T_ShareInputScanState:
+			if (planstate->plan->parallel_aware)
+				ExecShareInputScanEstimate((ShareInputScanState *) planstate,
+										   e->pcxt);
+			break;
 		default:
 			break;
 	}
@@ -524,6 +536,16 @@ ExecParallelInitializeDSM(PlanState *planstate,
 		case T_MemoizeState:
 			/* even when not parallel-aware, for EXPLAIN ANALYZE */
 			ExecMemoizeInitializeDSM((MemoizeState *) planstate, d->pcxt);
+			break;
+		case T_SequenceState:
+			if (planstate->plan->parallel_aware)
+				ExecSequenceInitializeDSM((SequenceState *) planstate,
+										  d->pcxt);
+			break;
+		case T_ShareInputScanState:
+			if (planstate->plan->parallel_aware)
+				ExecShareInputScanInitializeDSM((ShareInputScanState *) planstate,
+												d->pcxt);
 			break;
 		default:
 			break;
@@ -1005,6 +1027,16 @@ ExecParallelReInitializeDSM(PlanState *planstate,
 		case T_PartitionSelectorState:
 			/* these nodes have DSM state, but no reinitialization is required */
 			break;
+		case T_SequenceState:
+			if (planstate->plan->parallel_aware)
+				ExecSequenceReInitializeDSM((SequenceState *) planstate,
+											pcxt);
+			break;
+		case T_ShareInputScanState:
+			if (planstate->plan->parallel_aware)
+				ExecShareInputScanReInitializeDSM((ShareInputScanState *) planstate,
+												  pcxt);
+			break;
 
 		default:
 			break;
@@ -1371,6 +1403,16 @@ ExecParallelInitializeWorker(PlanState *planstate, ParallelWorkerContext *pwcxt)
 			/* even when not parallel-aware, for EXPLAIN ANALYZE */
 			ExecMemoizeInitializeWorker((MemoizeState *) planstate, pwcxt);
 			break;
+		case T_SequenceState:
+			if (planstate->plan->parallel_aware)
+				ExecSequenceInitializeWorker((SequenceState *) planstate,
+											 pwcxt);
+			break;
+		case T_ShareInputScanState:
+			if (planstate->plan->parallel_aware)
+				ExecShareInputScanInitializeWorker((ShareInputScanState *) planstate,
+												   pwcxt);
+			break;
 		default:
 			break;
 	}
@@ -1556,6 +1598,14 @@ EstimateGpParallelDSMEntrySize(PlanState *planstate, ParallelContext *pctx)
 		case T_PartitionSelectorState:
 			ExecPartitionSelectorEstimate((PartitionSelectorState *) planstate, pctx);
 			break;
+		case T_SequenceState:
+			if (planstate->plan->parallel_aware)
+				ExecSequenceEstimate((SequenceState *) planstate, pctx);
+			break;
+		case T_ShareInputScanState:
+			if (planstate->plan->parallel_aware)
+				ExecShareInputScanEstimate((ShareInputScanState *) planstate, pctx);
+			break;
 		default:
 			break;
 
@@ -1612,6 +1662,14 @@ InitializeGpParallelWorkers(PlanState *planstate, ParallelWorkerContext *pwcxt)
 		case T_PartitionSelectorState:
 			if (planstate->plan->parallel_aware)
 				ExecPartitionSelectorInitializeWorker((PartitionSelectorState *) planstate, pwcxt);
+			break;
+		case T_SequenceState:
+			if (planstate->plan->parallel_aware)
+				ExecSequenceInitializeWorker((SequenceState *) planstate, pwcxt);
+			break;
+		case T_ShareInputScanState:
+			if (planstate->plan->parallel_aware)
+				ExecShareInputScanInitializeWorker((ShareInputScanState *) planstate, pwcxt);
 			break;
 		default:
 			break;
@@ -1674,6 +1732,14 @@ InitializeGpParallelDSMEntry(PlanState *planstate, ParallelContext *pctx)
 		case T_PartitionSelectorState:
 			/* even when not parallel-aware, for EXPLAIN ANALYZE */
 			ExecPartitionSelectorInitializeDSM((PartitionSelectorState *) planstate, pctx);
+			break;
+		case T_SequenceState:
+			if (planstate->plan->parallel_aware)
+				ExecSequenceInitializeDSM((SequenceState *) planstate, pctx);
+			break;
+		case T_ShareInputScanState:
+			if (planstate->plan->parallel_aware)
+				ExecShareInputScanInitializeDSM((ShareInputScanState *) planstate, pctx);
 			break;
 		default:
 			break;

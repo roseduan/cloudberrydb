@@ -107,6 +107,114 @@ select * from t1 where a in (
     )
 );
 
+-- =============================================================
+-- Test: Non-parallel operators should NOT sit above Parallel Append
+-- (Parallel Union All). When a UNION ALL subquery is used as input
+-- to joins, aggregations, or window functions, the parent operator
+-- must be the parallel variant (e.g., Parallel Hash Join, not Hash Join).
+-- =============================================================
+
+-- Setup: two tables with parallel_workers enabled
+drop table if exists pu_t1;
+drop table if exists pu_t2;
+drop table if exists pu_t3;
+
+create table pu_t1(a int, b int) with(parallel_workers=2) distributed by (a);
+create table pu_t2(c int, d int) with(parallel_workers=2) distributed by (c);
+create table pu_t3(e int, f text) with(parallel_workers=2) distributed by (e);
+
+insert into pu_t1 select i, i+1 from generate_series(1, 10000) i;
+insert into pu_t2 select i, i+2 from generate_series(1, 10000) i;
+insert into pu_t3 select i, 'val_' || i from generate_series(1, 10000) i;
+analyze pu_t1;
+analyze pu_t2;
+analyze pu_t3;
+
+-- Test 1: Hash Join over UNION ALL
+-- The join above the union all must be Parallel Hash Join, NOT Hash Join.
+explain (costs off)
+select *
+from (select a as k, b as v from pu_t1
+      union all
+      select c as k, d as v from pu_t2) u
+join pu_t3 on u.k = pu_t3.e;
+
+-- Test 2: Aggregation over UNION ALL
+-- The aggregate over the union all result should use parallel aggregation.
+explain (costs off)
+select k, count(*), sum(v)
+from (select a as k, b as v from pu_t1
+      union all
+      select c as k, d as v from pu_t2) u
+group by k;
+
+-- Test 3: Window function over UNION ALL
+-- The window function should not be a non-parallel SequenceProject above
+-- Parallel Append.
+explain (costs off)
+select k, v, row_number() over (partition by k order by v) as rn
+from (select a as k, b as v from pu_t1
+      union all
+      select c as k, d as v from pu_t2) u;
+
+-- Test 4: Hash Join with UNION ALL on both sides
+-- Both sides of the join contain union all; both should be under
+-- parallel operators.
+explain (costs off)
+select *
+from (select a as k, b as v from pu_t1
+      union all
+      select c as k, d as v from pu_t2) u1
+join (select a as k, b as v from pu_t1
+      union all
+      select e as k, e as v from pu_t3) u2
+on u1.k = u2.k;
+
+-- Test 5: Multi-level: Agg over Join over UNION ALL
+-- Both join and agg should use parallel variants.
+explain (costs off)
+select u.k, count(*)
+from (select a as k, b as v from pu_t1
+      union all
+      select c as k, d as v from pu_t2) u
+join pu_t3 on u.k = pu_t3.e
+group by u.k;
+
+-- Test 6: Correctness check - verify results match serial execution
+-- Run the actual query and compare counts to ensure correct results.
+set optimizer_enable_parallel_append = off;
+select count(*) as serial_count
+from (select a as k, b as v from pu_t1
+      union all
+      select c as k, d as v from pu_t2) u
+join pu_t3 on u.k = pu_t3.e;
+
+set optimizer_enable_parallel_append = on;
+select count(*) as parallel_count
+from (select a as k, b as v from pu_t1
+      union all
+      select c as k, d as v from pu_t2) u
+join pu_t3 on u.k = pu_t3.e;
+
+-- Test 7: Correctness check - aggregation results
+set optimizer_enable_parallel_append = off;
+select sum(total) as serial_sum from (
+    select k, count(*) as total
+    from (select a as k from pu_t1
+          union all
+          select c as k from pu_t2) u
+    group by k
+) t;
+
+set optimizer_enable_parallel_append = on;
+select sum(total) as parallel_sum from (
+    select k, count(*) as total
+    from (select a as k from pu_t1
+          union all
+          select c as k from pu_t2) u
+    group by k
+) t;
+
 reset enable_parallel;
 reset max_parallel_workers_per_gather;
 reset parallel_setup_cost;

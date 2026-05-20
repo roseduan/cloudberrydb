@@ -14386,7 +14386,6 @@ ON t1.tradingday = t2.tradingday;
  Optimizer: GPORCA
 (23 rows)
 
-RESET optimizer_enable_hashjoin;
 SELECT * FROM(
   SELECT tradingday, 1 AS ins_SpanInsArbitrageRatio
   FROM t_clientinstrumentind2 t
@@ -14399,14 +14398,13 @@ INNER JOIN (
   WHERE t.tradingday BETWEEN'20190715'AND '20190715'
   GROUP BY t.tradingday)t2
 ON t1.tradingday = t2.tradingday;
-INFO:  GPORCA failed to produce a plan, falling back to Postgres-based planner
-DETAIL:  Falling back to Postgres-based planner because no plan has been computed for required properties in GPORCA
  tradingday | ins_spaninsarbitrageratio | tradingday | prod_spaninsarbitrageratio 
 ------------+---------------------------+------------+----------------------------
  20190715   |                         1 | 20190715   |               0.9233716475
 (1 row)
 
 DROP TABLE t_clientinstrumentind2, t_clientproductind2;
+RESET optimizer_enable_hashjoin;
 -- Test ORCA not falling back to Postgres planner during
 -- SimplifySelectOnOuterJoin stage. Previously, we could get assertion error
 -- trying to EberEvaluate() strict function with zero arguments.

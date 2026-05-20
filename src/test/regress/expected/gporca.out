@@ -14354,7 +14354,6 @@ ON t1.tradingday = t2.tradingday;
  Optimizer: Postgres query optimizer
 (23 rows)
 
-RESET optimizer_enable_hashjoin;
 SELECT * FROM(
   SELECT tradingday, 1 AS ins_SpanInsArbitrageRatio
   FROM t_clientinstrumentind2 t
@@ -14373,6 +14372,7 @@ ON t1.tradingday = t2.tradingday;
 (1 row)
 
 DROP TABLE t_clientinstrumentind2, t_clientproductind2;
+RESET optimizer_enable_hashjoin;
 -- Test ORCA not falling back to Postgres planner during
 -- SimplifySelectOnOuterJoin stage. Previously, we could get assertion error
 -- trying to EberEvaluate() strict function with zero arguments.

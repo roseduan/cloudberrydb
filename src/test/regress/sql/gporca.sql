@@ -3473,7 +3473,6 @@ INNER JOIN (
   WHERE t.tradingday BETWEEN'20190715'AND '20190715'
   GROUP BY t.tradingday)t2
 ON t1.tradingday = t2.tradingday;
-RESET optimizer_enable_hashjoin;
 
 SELECT * FROM(
   SELECT tradingday, 1 AS ins_SpanInsArbitrageRatio
@@ -3489,6 +3488,7 @@ INNER JOIN (
 ON t1.tradingday = t2.tradingday;
 
 DROP TABLE t_clientinstrumentind2, t_clientproductind2;
+RESET optimizer_enable_hashjoin;
 
 -- Test ORCA not falling back to Postgres planner during
 -- SimplifySelectOnOuterJoin stage. Previously, we could get assertion error

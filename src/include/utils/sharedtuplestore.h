@@ -47,6 +47,8 @@ extern void sts_end_write(SharedTuplestoreAccessor *accessor);
 
 extern void sts_reinitialize(SharedTuplestoreAccessor *accessor);
 
+extern void sts_reinit_locks(SharedTuplestore *sts, int nparticipants);
+
 extern void sts_begin_parallel_scan(SharedTuplestoreAccessor *accessor);
 
 extern void sts_end_parallel_scan(SharedTuplestoreAccessor *accessor);

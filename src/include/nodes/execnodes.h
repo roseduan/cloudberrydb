@@ -1410,6 +1410,16 @@ struct AppendState
 };
 
 /*
+ * ParallelSequenceState
+ *		Shared state for parallel Sequence execution in DSM
+ */
+typedef struct ParallelSequenceState
+{
+	int				nworkers;			/* total participants (leader + workers) */
+	Barrier			sync_barrier;		/* synchronize producer/consumer phases */
+} ParallelSequenceState;
+
+/*
  * SequenceState
  */
 typedef struct SequenceState
@@ -1422,6 +1432,11 @@ typedef struct SequenceState
 	 * True if no subplan has been executed.
 	 */
 	bool		initState;
+
+	/* Parallel execution support */
+	ParallelSequenceState *pstate;		/* shared state in DSM, or NULL */
+	Size		pstate_len;				/* size of parallel coordination info */
+	int			my_participant_id;		/* this worker's participant ID (0=leader) */
 } SequenceState;
 
 /* ----------------
@@ -2589,6 +2604,22 @@ struct shareinput_local_state;
 struct shareinput_Xslice_reference;
 struct NTupleStore;
 struct NTupleStoreAccessor;
+struct dsm_segment;
+
+/*
+ * ParallelShareInputState
+ *		Shared state for parallel ShareInputScan within a slice
+ */
+typedef struct ParallelShareInputState
+{
+	uint32			sts_handle;			/* DSM handle for SharedTuplestore */
+	pg_atomic_uint32 ready;				/* is tuplestore fully materialized? */
+	pg_atomic_uint32 ndone;				/* number of workers finished reading */
+	pg_atomic_uint32 producer_failed;	/* producer/leader hit ERROR before ready */
+	ConditionVariable ready_cv;			/* signal when materialization complete */
+	Barrier			write_barrier;		/* synchronize all writers before notifying consumers */
+	Barrier			scan_barrier;		/* synchronize consumer scan transitions for sts_reinitialize */
+} ParallelShareInputState;
 
 typedef struct ShareInputScanState
 {
@@ -2601,6 +2632,13 @@ typedef struct ShareInputScanState
 	struct shareinput_Xslice_reference *ref;
 
 	bool		isready;
+
+	/* Parallel execution support */
+	ParallelShareInputState *parallel_state;	/* shared state in DSM, or NULL */
+	Size		parallel_state_len;				/* size of parallel coordination info */
+	struct SharedTuplestoreAccessor *sts_accessor;	/* parallel tuplestore accessor */
+	struct dsm_segment *sts_seg;				/* DSM segment for SharedTuplestore */
+	bool		parallel_scan_started;			/* have we started parallel scan? */
 } ShareInputScanState;
 
 /* XXX Should move into buf file */

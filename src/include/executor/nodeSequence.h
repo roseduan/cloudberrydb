@@ -17,11 +17,18 @@
 
 #include "executor/tuptable.h"
 #include "nodes/execnodes.h"
+#include "access/parallel.h"
 
 extern SequenceState *ExecInitSequence(Sequence *node, EState *estate, int eflags);
 extern TupleTableSlot *ExecSequence(PlanState *pstate);
 extern void ExecReScanSequence(SequenceState *node);
 extern void ExecEndSequence(SequenceState *node);
 extern void ExecSquelchSequence(SequenceState *node, bool force);
+
+/* parallel support */
+extern void ExecSequenceEstimate(SequenceState *node, ParallelContext *pcxt);
+extern void ExecSequenceInitializeDSM(SequenceState *node, ParallelContext *pcxt);
+extern void ExecSequenceReInitializeDSM(SequenceState *node, ParallelContext *pcxt);
+extern void ExecSequenceInitializeWorker(SequenceState *node, ParallelWorkerContext *pwcxt);
 
 #endif

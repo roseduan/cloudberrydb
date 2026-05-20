@@ -224,6 +224,23 @@ sts_end_write(SharedTuplestoreAccessor *accessor)
 }
 
 /*
+ * Reinitialize the per-participant LWLocks of a SharedTuplestore that was
+ * cloned by byte-wise copy (e.g. memcpy) rather than sts_initialize().
+ *
+ * LWLocks are not memcpy-safe by contract: every lock must be brought into
+ * existence via LWLockInitialize() in its final memory location.  Callers
+ * that clone a SharedTuplestore by copying its bytes must invoke this helper
+ * before any process attaches to the new copy.
+ */
+void
+sts_reinit_locks(SharedTuplestore *sts, int nparticipants)
+{
+	for (int i = 0; i < nparticipants; ++i)
+		LWLockInitialize(&sts->participants[i].lock,
+						 LWTRANCHE_SHARED_TUPLESTORE);
+}
+
+/*
  * Prepare to rescan.  Only one participant must call this.  After it returns,
  * all participants may call sts_begin_parallel_scan() and then loop over
  * sts_parallel_scan_next().  This function must not be called concurrently
