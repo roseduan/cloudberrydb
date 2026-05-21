@@ -847,8 +847,18 @@ UPDATE reason SET r_note = 'filled-in' WHERE r_reason_sk = 11;
 SELECT r_reason_sk, r_note FROM reason
 WHERE r_reason_sk IN (1, 11) ORDER BY r_reason_sk;
 
-SELECT test_log('CHECK 29: ALTER TABLE DROP COLUMN');
-ALTER TABLE reason DROP COLUMN r_note;
+SELECT test_log('CHECK 29: ALTER TABLE DROP COLUMN is rejected (issue #334)');
+DO $$
+BEGIN
+    BEGIN
+        ALTER TABLE reason DROP COLUMN r_note;
+        RAISE EXCEPTION 'expected ALTER TABLE DROP COLUMN to be rejected on Iceberg tables';
+    EXCEPTION
+        WHEN feature_not_supported THEN
+            RAISE NOTICE 'CHECK 29 PASS: DROP COLUMN rejected as expected';
+    END;
+END $$;
+-- Column was not dropped; row count is unchanged and the column is still present.
 SELECT count(*) AS rows_after_drop_col FROM reason;
 
 SELECT test_log('CHECK 30: date arithmetic and extraction');

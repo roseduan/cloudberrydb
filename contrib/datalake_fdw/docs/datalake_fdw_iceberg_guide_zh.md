@@ -544,12 +544,12 @@ SELECT * FROM orders;
 | 子命令 | 状态 | 说明 |
 |--------|------|------|
 | `ADD COLUMN` | ✅ 支持 | 新列对老数据文件读出 NULL；新写入文件含新列；CI 覆盖 |
-| `DROP COLUMN` | ⚠️ 仅 PG 元数据生效 | `pg_attribute` 标记列 dropped，新写入不再带该列；但**不会**触发 Iceberg metadata 的 schema 演化（无 AT_* 钩子）。其它引擎（Spark/Trino）读到的 schema 仍含该列 |
-| `RENAME COLUMN` | ⚠️ 仅 PG 元数据生效 | 同上；Iceberg 端列名不变，跨引擎读会出现列名不一致 |
-| `ALTER COLUMN TYPE`（类型提升） | ⚠️ 仅 PG 元数据生效 | 同上 |
-| `ADD CONSTRAINT` / `SET NOT NULL` / DEFAULT 等 | ⚠️ 仅 PG 元数据生效 | 不传播到 Iceberg metadata |
+| `DROP COLUMN` | ❌ 不支持，会报错 | 历史上半生效（PG 端打 dropped，Iceberg metadata 未变），跨引擎读 schema 不一致；现已显式拒绝 |
+| `RENAME COLUMN` | ❌ 不支持，会报错 | 同上；Iceberg 端列名不变会造成跨引擎列名不一致；现已显式拒绝 |
+| `ALTER COLUMN TYPE` | ❌ 不支持，会报错 | 有数据时会触发 PG rewrite 路径并踩到 Iceberg AM 的空 stub（曾导致 SIGSEGV，详见 issue #334）；现已显式拒绝 |
+| `SET / DROP NOT NULL` / `SET / DROP DEFAULT` / `ADD CONSTRAINT` / `OWNER TO` / `SET STORAGE` 等 | ❌ 不支持，会报错 | 均不传播到 Iceberg metadata，已统一在 `datalake_ProcessUtility` 层拒绝 |
 
-> 实现层面：`pg_iceberg_ddl.c` 仅注册了 `OAT_POST_CREATE` 和 `OAT_DROP` 两个对象访问钩子，没有 `AT_*` 子命令分发。除 `ADD COLUMN` 外的 schema 变更只改 PG 端 catalog，Iceberg metadata 不会同步更新。需要其它引擎也看到结构变更时，请在 Spark/Trino/Flink 端用 Iceberg DDL 完成。
+> 实现层面：除 `ADD COLUMN`（含 `AT_AddColumnRecurse`）外，所有 `AlterTableStmt` 子命令以及 `RenameStmt(OBJECT_COLUMN)` 都在 `datalake_fdw.c` 的 `datalake_ProcessUtility` 里被显式拦截，报 `ERRCODE_FEATURE_NOT_SUPPORTED`。需要做 `DROP / RENAME / 改类型` 等 schema 演化，请在 Spark/Trino/Flink 端通过 Iceberg DDL 完成，或在 Cloudberry 端 `DROP TABLE` 后重建。
 
 ### 4.8 VACUUM（压缩）
 

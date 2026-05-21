@@ -35,6 +35,7 @@
 #endif
 #include "commands/defrem.h"
 #include "commands/explain.h"
+#include "commands/tablecmds.h"
 #include "commands/vacuum.h"
 #include "executor/spi.h"
 #include "executor/tstoreReceiver.h"
@@ -459,6 +460,63 @@ all_vacuum_rels_are_iceberg(List *rels)
 	return true;
 }
 
+/*
+ * Lightweight check using syscache (no relation_open) so we can probe early
+ * in ProcessUtility without taking extra locks beyond what the caller
+ * already acquired via AlterTableLookupRelation / RangeVarGetRelid.
+ */
+static bool
+relid_is_iceberg(Oid relid)
+{
+	HeapTuple	tup;
+	bool		is_iceberg;
+
+	if (!OidIsValid(relid))
+		return false;
+
+	tup = SearchSysCache1(RELOID, ObjectIdGetDatum(relid));
+	if (!HeapTupleIsValid(tup))
+		return false;
+
+	is_iceberg = (((Form_pg_class) GETSTRUCT(tup))->relam == ICEBERG_AM_OID);
+	ReleaseSysCache(tup);
+	return is_iceberg;
+}
+
+/*
+ * Iceberg tables in datalake_fdw currently only implement ADD COLUMN as a
+ * functional schema-evolution path (relies on Iceberg field-id mapping; old
+ * data files read NULL for the new column).  All other AT_* subcommands are
+ * either unimplemented or only half-applied (PG catalog updated while Iceberg
+ * metadata stays stale), and ALTER COLUMN TYPE in particular crashes the
+ * backend by driving the standard PG rewrite path into empty AM stubs
+ * (iceberg_relation_set_new_filenode / iceberg_relation_copy_data) and
+ * uninitialized DML state.  Reject everything except ADD COLUMN here so the
+ * crash and the silent half-applied DDLs are turned into clean errors.
+ */
+static void
+reject_unsupported_iceberg_alter(List *cmds)
+{
+	ListCell   *lc;
+
+	foreach(lc, cmds)
+	{
+		AlterTableCmd *cmd = (AlterTableCmd *) lfirst(lc);
+
+		switch (cmd->subtype)
+		{
+			case AT_AddColumn:
+			case AT_AddColumnRecurse:
+				continue;
+			default:
+				ereport(ERROR,
+						(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+						 errmsg("ALTER TABLE on Iceberg tables only supports ADD COLUMN"),
+						 errhint("Use Spark/Trino/Flink to perform Iceberg schema evolution, or recreate the table.")));
+		}
+	}
+}
+
 static void
 datalake_ProcessUtility(PlannedStmt *pstmt,
 						const char *queryString,
@@ -521,6 +579,48 @@ datalake_ProcessUtility(PlannedStmt *pstmt,
 				ereport(NOTICE,
 						(errmsg("ANALYZE is a no-op for Iceberg tables; planner stats come from Iceberg catalog metadata")));
 				return;
+			}
+			break;
+		}
+		case T_AlterTableStmt:
+		{
+			AlterTableStmt *atstmt = (AlterTableStmt *) pstmt->utilityStmt;
+			LOCKMODE	lockmode;
+			Oid			relid;
+
+			/*
+			 * Use the same lock semantics core uses; this also resolves the
+			 * relation OID via the standard AlterTable RangeVar callback.
+			 */
+			lockmode = AlterTableGetLockLevel(atstmt->cmds);
+			relid = AlterTableLookupRelation(atstmt, lockmode);
+
+			if (relid_is_iceberg(relid))
+				reject_unsupported_iceberg_alter(atstmt->cmds);
+			break;
+		}
+		case T_RenameStmt:
+		{
+			RenameStmt *rnstmt = (RenameStmt *) pstmt->utilityStmt;
+
+			/*
+			 * RENAME COLUMN goes through RenameStmt (not AlterTableStmt).
+			 * Iceberg currently has no schema-evolution hook for column rename;
+			 * the rename would only touch pg_attribute while Iceberg metadata
+			 * keeps the old column name -- silently desyncs PG vs Spark/Trino
+			 * readers.  Reject explicitly.
+			 */
+			if (rnstmt->renameType == OBJECT_COLUMN && rnstmt->relation != NULL)
+			{
+				Oid		relid;
+
+				relid = RangeVarGetRelid(rnstmt->relation, AccessShareLock,
+										 rnstmt->missing_ok);
+				if (relid_is_iceberg(relid))
+					ereport(ERROR,
+							(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+							 errmsg("RENAME COLUMN is not supported on Iceberg tables"),
+							 errhint("Recreate the table with the desired column name, or rename the column via Spark/Trino/Flink.")));
 			}
 			break;
 		}

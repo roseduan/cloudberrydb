@@ -11,7 +11,8 @@ REGRESS = iceberg_buildin iceberg_buildin_statistics iceberg_buildin_vacuum iceb
           iceberg_analyze iceberg_delete_filters iceberg_toolkit_ops \
           iceberg_write_types iceberg_delete_coverage iceberg_volume_ops \
           iceberg_catalog_ops iceberg_toolkit_errors iceberg_fragment_cache \
-          iceberg_coverage_boost iceberg_deep_coverage iceberg_internal_funcs
+          iceberg_coverage_boost iceberg_deep_coverage iceberg_internal_funcs \
+          iceberg_alter_unsupported
 
 installcheck:
 	$(pg_regress_installcheck) $(REGRESS)
