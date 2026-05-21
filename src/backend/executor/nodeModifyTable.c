@@ -2815,11 +2815,11 @@ ExecModifyTable(PlanState *pstate)
 				 * PAX_STORAGE_FIXME(gongxun):we reuse the logic of the AO table to implement ExecUpdate,
 				 * If there is a better implementation, we need to revert it
 				 */
-				if (AttributeNumberIsValid(resultRelInfo->ri_WholeRowNo) &&
-					((operation == CMD_UPDATE && RelationIsNonblockRelation(resultRelInfo->ri_RelationDesc)) ||
-					 (operation == CMD_DELETE && RelationIsIceberg(resultRelInfo->ri_RelationDesc))))
+				if (operation == CMD_UPDATE && RelationIsNonblockRelation(resultRelInfo->ri_RelationDesc) &&
+					AttributeNumberIsValid(resultRelInfo->ri_WholeRowNo))
 				{
 					/* ri_WholeRowNo refers to a wholerow attribute */
+					Assert(AttributeNumberIsValid(resultRelInfo->ri_WholeRowNo));
 					datum = ExecGetJunkAttribute(slot,
 								     resultRelInfo->ri_WholeRowNo,
 								     &isNull);
@@ -3328,15 +3328,8 @@ ExecInitModifyTable(ModifyTable *node, EState *estate, int eflags)
 				if (!AttributeNumberIsValid(resultRelInfo->ri_RowIdAttNo))
 					elog(ERROR, "could not find junk ctid column");
 
-				/*
-				 * Extra GPDB junk columns: wholerow.  UPDATE on AO/AOCS/PAX
-				 * uses it to avoid an extra seqscan to materialize the OLD row
-				 * for the unchanged columns; DELETE on Iceberg uses it so that
-				 * DELETE ... RETURNING can populate the OLD row without a
-				 * single-row re-fetch (Iceberg has no random-access fetch).
-				 */
-				if ((operation == CMD_UPDATE && RelationIsNonblockRelation(resultRelInfo->ri_RelationDesc)) ||
-					(operation == CMD_DELETE && RelationIsIceberg(resultRelInfo->ri_RelationDesc)))
+				/* extra GPDB junk columns for update AO table */
+				if (operation == CMD_UPDATE && RelationIsNonblockRelation(resultRelInfo->ri_RelationDesc))
 				{
 					resultRelInfo->ri_WholeRowNo =
 						ExecFindJunkAttributeInTlist(subplan->targetlist, "wholerow");
