@@ -51,6 +51,11 @@ void parquetFileWriter::createColumnBatch()
     {
         Oid typeId = tupdesc->attrs[i].atttypid;
         std::string columnName = tupdesc->attrs[i].attname.data;
+        if (tupdesc->attrs[i].attisdropped)
+        {
+            batchField.push_back(nullptr);
+            continue;
+        }
         switch (typeId)
         {
             case BOOLOID: {
@@ -154,6 +159,8 @@ std::shared_ptr<parquet::schema::GroupNode> parquetFileWriter::setupSchema()
     {
         Oid typeId = tupdesc->attrs[i].atttypid;
         std::string columnName = tupdesc->attrs[i].attname.data;
+        if (tupdesc->attrs[i].attisdropped)
+            continue;
         switch (typeId)
         {
             case BOOLOID: {
@@ -483,6 +490,8 @@ void parquetFileWriter::writeToField(int index, const void* data)
 		Datum tts_values = slot->tts_values[i];
 		bool isNULL = slot->tts_isnull[i];
 
+        if (tupdesc->attrs[i].attisdropped)
+            continue;
         switch (tupdesc->attrs[i].atttypid) {
             case BOOLOID: {
                 columnBatch<bool> * val = reinterpret_cast<columnBatch<bool>*>(batchField[i]);
@@ -826,13 +835,17 @@ void parquetFileWriter::writeToBatch(int rows)
         rg_writer->Close();
         rg_writer = file_writer->AppendBufferedRowGroup();
     }
+    int parquetCol = 0;
     for (int i = 0; i < ncolumns; i++)
     {
         Oid typeID = tupdesc->attrs[i].atttypid;
+        if (tupdesc->attrs[i].attisdropped)
+            continue;
+        int col = parquetCol++;
         switch (tupdesc->attrs[i].atttypid) {
             case BOOLOID: {
                 columnBatch<bool> * val = reinterpret_cast<columnBatch<bool>*>(batchField[i]);
-                parquet::BoolWriter* writer = static_cast<parquet::BoolWriter*>(rg_writer->column(i));
+                parquet::BoolWriter* writer = static_cast<parquet::BoolWriter*>(rg_writer->column(col));
                 std::vector<uint8_t> valid_bits(parquet_arrow::bit_util::BytesForBits(BATCH_WRITE_SIZE), 255);
                 for (int row = 0; row < rows; row++)
                 {
@@ -853,7 +866,7 @@ void parquetFileWriter::writeToBatch(int rows)
             case INT2OID:
             case INT4OID: {
                 columnBatch<int32_t> * val = reinterpret_cast<columnBatch<int32_t>*>(batchField[i]);
-                parquet::Int32Writer* writer = static_cast<parquet::Int32Writer*>(rg_writer->column(i));
+                parquet::Int32Writer* writer = static_cast<parquet::Int32Writer*>(rg_writer->column(col));
                 std::vector<uint8_t> valid_bits(parquet_arrow::bit_util::BytesForBits(BATCH_WRITE_SIZE), 255);
                 for (int row = 0; row < rows; row++)
                 {
@@ -873,7 +886,7 @@ void parquetFileWriter::writeToBatch(int rows)
             }
             case INT8OID: {
                 columnBatch<int64_t> * val = reinterpret_cast<columnBatch<int64_t>*>(batchField[i]);
-                parquet::Int64Writer* writer = static_cast<parquet::Int64Writer*>(rg_writer->column(i));
+                parquet::Int64Writer* writer = static_cast<parquet::Int64Writer*>(rg_writer->column(col));
                 std::vector<uint8_t> valid_bits(parquet_arrow::bit_util::BytesForBits(BATCH_WRITE_SIZE), 255);
                 for (int row = 0; row < rows; row++)
                 {
@@ -893,7 +906,7 @@ void parquetFileWriter::writeToBatch(int rows)
             }
             case FLOAT4OID: {
                 columnBatch<float> * val = reinterpret_cast<columnBatch<float>*>(batchField[i]);
-                parquet::FloatWriter* writer = static_cast<parquet::FloatWriter*>(rg_writer->column(i));
+                parquet::FloatWriter* writer = static_cast<parquet::FloatWriter*>(rg_writer->column(col));
                 std::vector<uint8_t> valid_bits(parquet_arrow::bit_util::BytesForBits(BATCH_WRITE_SIZE), 255);
                 for (int row = 0; row < rows; row++)
                 {
@@ -913,7 +926,7 @@ void parquetFileWriter::writeToBatch(int rows)
             }
             case FLOAT8OID: {
                 columnBatch<double> * val = reinterpret_cast<columnBatch<double>*>(batchField[i]);
-                parquet::DoubleWriter* writer = static_cast<parquet::DoubleWriter*>(rg_writer->column(i));
+                parquet::DoubleWriter* writer = static_cast<parquet::DoubleWriter*>(rg_writer->column(col));
                 std::vector<uint8_t> valid_bits(parquet_arrow::bit_util::BytesForBits(BATCH_WRITE_SIZE), 255);
                 for (int row = 0; row < rows; row++)
                 {
@@ -933,7 +946,7 @@ void parquetFileWriter::writeToBatch(int rows)
             }
             case DATEOID: {
                 columnBatch<int32_t> * val = reinterpret_cast<columnBatch<int32_t>*>(batchField[i]);
-                parquet::Int32Writer* writer = static_cast<parquet::Int32Writer*>(rg_writer->column(i));
+                parquet::Int32Writer* writer = static_cast<parquet::Int32Writer*>(rg_writer->column(col));
                 std::vector<uint8_t> valid_bits(parquet_arrow::bit_util::BytesForBits(BATCH_WRITE_SIZE), 255);
                 for (int row = 0; row < rows; row++)
                 {
@@ -966,7 +979,7 @@ void parquetFileWriter::writeToBatch(int rows)
                     ((int64_t)(POSTGRES_EPOCH_JDATE - UNIX_EPOCH_JDATE)) * SECS_PER_DAY * USECS_PER_SEC;
 
                 columnBatch<int64_t> * val = reinterpret_cast<columnBatch<int64_t>*>(batchField[i]);
-                parquet::Int64Writer* writer = static_cast<parquet::Int64Writer*>(rg_writer->column(i));
+                parquet::Int64Writer* writer = static_cast<parquet::Int64Writer*>(rg_writer->column(col));
                 std::vector<uint8_t> valid_bits(parquet_arrow::bit_util::BytesForBits(BATCH_WRITE_SIZE), 255);
                 for (int row = 0; row < rows; row++)
                 {
@@ -988,7 +1001,7 @@ void parquetFileWriter::writeToBatch(int rows)
             }
             case NUMERICOID: {
                 StringVectorBatch* val = reinterpret_cast<StringVectorBatch*>(batchField[i]);
-                parquet::FixedLenByteArrayWriter* writer = static_cast<parquet::FixedLenByteArrayWriter*>(rg_writer->column(i));
+                parquet::FixedLenByteArrayWriter* writer = static_cast<parquet::FixedLenByteArrayWriter*>(rg_writer->column(col));
                 std::vector<uint8_t> valid_bits(parquet_arrow::bit_util::BytesForBits(BATCH_WRITE_SIZE), 255);
                 for (int row = 0; row < rows; row++)
                 {
@@ -1009,7 +1022,7 @@ void parquetFileWriter::writeToBatch(int rows)
             }
             case CHAROID: {
                 StringVectorBatch* val = reinterpret_cast<StringVectorBatch*>(batchField[i]);
-                parquet::FixedLenByteArrayWriter* writer = static_cast<parquet::FixedLenByteArrayWriter*>(rg_writer->column(i));
+                parquet::FixedLenByteArrayWriter* writer = static_cast<parquet::FixedLenByteArrayWriter*>(rg_writer->column(col));
                 std::vector<uint8_t> valid_bits(parquet_arrow::bit_util::BytesForBits(BATCH_WRITE_SIZE), 255);
                 for (int row = 0; row < rows; row++)
                 {
@@ -1034,7 +1047,7 @@ void parquetFileWriter::writeToBatch(int rows)
             case CSTRINGOID:
             case TEXTOID: {
                 StringVectorBatch* val = reinterpret_cast<StringVectorBatch*>(batchField[i]);
-                parquet::ByteArrayWriter* writer = static_cast<parquet::ByteArrayWriter*>(rg_writer->column(i));
+                parquet::ByteArrayWriter* writer = static_cast<parquet::ByteArrayWriter*>(rg_writer->column(col));
                 std::vector<uint8_t> valid_bits(parquet_arrow::bit_util::BytesForBits(BATCH_WRITE_SIZE), 255);
                 for (int row = 0; row < rows; row++)
                 {
@@ -1056,7 +1069,7 @@ void parquetFileWriter::writeToBatch(int rows)
             }
             case INTERVALOID: {
                 StringVectorBatch* val = reinterpret_cast<StringVectorBatch*>(batchField[i]);
-                parquet::ByteArrayWriter* writer = static_cast<parquet::ByteArrayWriter*>(rg_writer->column(i));
+                parquet::ByteArrayWriter* writer = static_cast<parquet::ByteArrayWriter*>(rg_writer->column(col));
                 std::vector<uint8_t> valid_bits(parquet_arrow::bit_util::BytesForBits(BATCH_WRITE_SIZE), 255);
                 for (int row = 0; row < rows; row++)
                 {
@@ -1078,7 +1091,7 @@ void parquetFileWriter::writeToBatch(int rows)
             }
             case TIMEOID: {
                 StringVectorBatch* val = reinterpret_cast<StringVectorBatch*>(batchField[i]);
-                parquet::ByteArrayWriter* writer = static_cast<parquet::ByteArrayWriter*>(rg_writer->column(i));
+                parquet::ByteArrayWriter* writer = static_cast<parquet::ByteArrayWriter*>(rg_writer->column(col));
                 std::vector<uint8_t> valid_bits(parquet_arrow::bit_util::BytesForBits(BATCH_WRITE_SIZE), 255);
                 for (int row = 0; row < rows; row++)
                 {
