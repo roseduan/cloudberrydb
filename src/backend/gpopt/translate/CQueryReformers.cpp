@@ -270,7 +270,7 @@ CQueryReformers::StripCteQueryQual(Query *query, Bitmapset *diffquals)
 	ListCell *lc;
 	List *newquals = NIL;
 	List *upperquals = NIL;
-	if (IsA(query->jointree->quals, BoolExpr))
+	if (query->jointree->quals && IsA(query->jointree->quals, BoolExpr))
 	{
 		BoolExpr *joinquals = castNode(BoolExpr, query->jointree->quals);
 		int counter;
@@ -283,7 +283,19 @@ CQueryReformers::StripCteQueryQual(Query *query, Bitmapset *diffquals)
 				newquals = gpdb::LAppend(newquals, lfirst(lc));
 		}
 
-		joinquals->args = newquals;
+		/*
+		 * Normalize the residual BoolExpr: an AND/OR with 0 or 1 args is
+		 * invalid for ORCA's scalar translator (asserts in
+		 * TranslateBoolExprToDXL). Drop the BoolExpr wrapper entirely when
+		 * empty, or unwrap to the single remaining arg.
+		 */
+		int n = gpdb::ListLength(newquals);
+		if (n == 0)
+			query->jointree->quals = NULL;
+		else if (n == 1)
+			query->jointree->quals = (Node *) gpdb::ListNth(newquals, 0);
+		else
+			joinquals->args = newquals;
 	}
 	else
 	{
@@ -561,7 +573,7 @@ CQueryReformers::GroupedMatchSubquery(Query *query, List *comm_subq_refs, List *
 				Query *curquery = RTRefLC2RTE(query, lcref)->subquery;
 				Node *curqual = curquery->jointree->quals;
 
-				if (IsA(fstquals, BoolExpr))
+				if (fstquals && IsA(fstquals, BoolExpr))
 				{
 					BoolExpr *bExpr1 = castNode(BoolExpr, fstquals);
 					BoolExpr *bExpr2 = castNode(BoolExpr, curqual);
