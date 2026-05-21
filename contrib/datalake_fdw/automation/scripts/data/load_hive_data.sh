@@ -23,9 +23,13 @@ if ! command -v beeline >/dev/null 2>&1; then
     exit 1
 fi
 
-# Check if Hive is accessible
-if ! wait_for_service "Hive Server" "${HIVE_HOST}" "${HIVE_PORT}" 3 1; then
-    log_error "Hive Server is not accessible at ${HIVE_HOST}:${HIVE_PORT}"
+# Check if Hive is accessible.  beeline talks to HiveServer2; in split-
+# container topologies HiveServer2 lives on HIVE_SERVER_HOST while the
+# metastore lives on HIVE_HOST.  Fall back to HIVE_HOST for the legacy
+# all-in-one image where both services share a host.
+HIVE_HS2_HOST="${HIVE_SERVER_HOST:-$HIVE_HOST}"
+if ! wait_for_service "Hive Server" "${HIVE_HS2_HOST}" "${HIVE_PORT}" 3 1; then
+    log_error "Hive Server is not accessible at ${HIVE_HS2_HOST}:${HIVE_PORT}"
     exit 1
 fi
 
@@ -34,7 +38,7 @@ run_beeline() {
     local sql_file=$1
     log_info "Executing Hive SQL: ${sql_file}"
 
-    beeline -u "jdbc:hive2://${HIVE_HOST}:${HIVE_PORT}/default" \
+    beeline -u "jdbc:hive2://${HIVE_HS2_HOST}:${HIVE_PORT}/default" \
             -n "${HIVE_USER}" \
             -f "${sql_file}"
 

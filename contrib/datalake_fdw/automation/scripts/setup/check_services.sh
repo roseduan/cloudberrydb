@@ -134,7 +134,11 @@ if [ "${INSTALL_TOOLS:-0}" = "1" ]; then
     fi
 
     if command -v beeline >/dev/null 2>&1; then
-        local_jdbc_url="jdbc:hive2://${HIVE_HOST}:${HIVE_PORT}/default"
+        # beeline talks to HiveServer2.  In split-container topologies the
+        # metastore (HIVE_HOST) and HiveServer2 (HIVE_SERVER_HOST) live on
+        # different hosts; fall back to HIVE_HOST for the legacy all-in-one
+        # image where the two services share a host.
+        local_jdbc_url="jdbc:hive2://${HIVE_SERVER_HOST:-$HIVE_HOST}:${HIVE_PORT}/default"
         if beeline -u "${local_jdbc_url}" -n "${HIVE_USER}" \
             -e "SELECT 1;" --silent=true >/dev/null 2>&1; then
             log_success "beeline is available and connected to HiveServer2"

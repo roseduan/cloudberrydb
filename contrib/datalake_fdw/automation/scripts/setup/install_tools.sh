@@ -285,8 +285,12 @@ WRAPPER
 }
 
 configure_beeline() {
-    local jdbc_url="jdbc:hive2://${HIVE_HOST}:${HIVE_PORT}/default"
-    log_info "Verifying beeline → HiveServer2 at ${HIVE_HOST}:${HIVE_PORT}..."
+    # beeline targets HiveServer2; HIVE_SERVER_HOST is set when metastore
+    # and HiveServer2 live in separate containers, fall back to HIVE_HOST
+    # for the legacy all-in-one image.
+    local hs2_host="${HIVE_SERVER_HOST:-$HIVE_HOST}"
+    local jdbc_url="jdbc:hive2://${hs2_host}:${HIVE_PORT}/default"
+    log_info "Verifying beeline → HiveServer2 at ${hs2_host}:${HIVE_PORT}..."
 
     if beeline -u "${jdbc_url}" -n "${HIVE_USER}" \
         -e "SELECT 1;" --silent=true >/dev/null 2>&1; then

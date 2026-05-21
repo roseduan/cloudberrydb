@@ -1,5 +1,14 @@
 # Hive smoke test Makefile
 
+# Force bash + pipefail so spark-sql failures in the prep steps below
+# (which pipe into `tail`) are surfaced instead of swallowed.  Without
+# this the recipe shell is /bin/sh which lacks pipefail; tail always
+# succeeds, the `||` fallback never fires, and pg_regress runs against
+# an empty Hive metastore — failures reappear later as "relation does
+# not exist" inside individual cases, much harder to diagnose.
+SHELL := /bin/bash
+.SHELLFLAGS := -ec -o pipefail
+
 PGXS := $(shell pg_config --pgxs)
 include $(PGXS)
 
