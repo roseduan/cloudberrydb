@@ -1,0 +1,225 @@
+-- Iceberg same-transaction ACID read-your-own-writes regression test
+-- Purpose: Multiple DML statements inside one BEGIN/COMMIT must obey
+--          read-your-own-writes on Iceberg AM tables.
+-- Tracks:  issue #338.  Two UPDATEs to the same row in one transaction
+--          used to leave two rows behind (the second UPDATE read the
+--          pre-first-UPDATE snapshot, so it computed against stale data
+--          AND failed to emit a position-delete for the first UPDATE's
+--          new row).  The fix lives in the planner_hook fragment listing
+--          path added in commit 406960d6049 (#333): both the scan side
+--          (pg_iceberg_build_scan_am_private) and the modify side
+--          (pg_iceberg_list_data_fragments) now consult
+--          pg_iceberg_tracker_get_scan_metadata_location, which returns
+--          the post-previous-statement metadata location for tables
+--          already touched in the same transaction.  This test pins the
+--          contract down so future tracker / planner-hook changes can't
+--          silently regress it.
+CREATE EXTENSION IF NOT EXISTS datalake_fdw;
+NOTICE:  extension "datalake_fdw" already exists, skipping
+-- Pin DateStyle so the textual representation in the expected file is
+-- stable regardless of the cluster's default (demo cluster uses SQL,MDY).
+SET DateStyle = 'ISO, YMD';
+-- catalog + volume setup (mirrors iceberg_update_subquery)
+CREATE SERVER acid_catalog_server FOREIGN DATA WRAPPER iceberg_catalog_fdw;
+CREATE USER MAPPING FOR current_user SERVER acid_catalog_server;
+CREATE FOREIGN CATALOG acid_catalog SERVER acid_catalog_server;
+SET iceberg_default_catalog = 'acid_catalog';
+CREATE SERVER acid_volume_server FOREIGN DATA WRAPPER iceberg_volume_fdw
+OPTIONS (type 's3', endpoint 'http://minio:9000', region 'us-east-1',
+         bucket_name 'warehouse', path_style_access 'true');
+CREATE USER MAPPING FOR current_user SERVER acid_volume_server
+OPTIONS (access_key_id 'admin', secret_access_key 'admin12345');
+CREATE FOREIGN VOLUME acid_volume SERVER acid_volume_server OPTIONS(base_path '/acid_volume/');
+SET iceberg_default_volume = 'acid_volume';
+-- Twin tables: heap_baseline is the ACID oracle; ice_subject is the
+-- Iceberg AM under test.  Every case below asserts the iceberg side ends
+-- in the same state as the heap side, both in row count and in row content.
+CREATE TABLE heap_baseline (id int, n int) DISTRIBUTED BY (id);
+CREATE ICEBERG TABLE ice_subject (id int, n int);
+-- ============================================================
+-- Case A: two UPDATEs to the same row in one transaction
+-- (the exact shape from issue #338)
+-- ============================================================
+INSERT INTO heap_baseline VALUES (1, 10);
+INSERT INTO ice_subject  VALUES (1, 10);
+BEGIN;
+UPDATE heap_baseline SET n = n + 1 WHERE id = 1;
+UPDATE heap_baseline SET n = n * 2 WHERE id = 1;
+COMMIT;
+BEGIN;
+UPDATE ice_subject SET n = n + 1 WHERE id = 1;
+UPDATE ice_subject SET n = n * 2 WHERE id = 1;
+COMMIT;
+SELECT COUNT(*) AS heap_cnt, SUM(n) AS heap_sumn FROM heap_baseline;
+ heap_cnt | heap_sumn 
+----------+-----------
+        1 |        22
+(1 row)
+
+SELECT COUNT(*) AS ice_cnt,  SUM(n) AS ice_sumn  FROM ice_subject;
+ ice_cnt | ice_sumn 
+---------+----------
+       1 |       22
+(1 row)
+
+SELECT id, n FROM heap_baseline ORDER BY id, n;
+ id | n  
+----+----
+  1 | 22
+(1 row)
+
+SELECT id, n FROM ice_subject  ORDER BY id, n;
+ id | n  
+----+----
+  1 | 22
+(1 row)
+
+-- ============================================================
+-- Case B: three sequential UPDATEs (more than two) compose correctly
+-- ============================================================
+DROP TABLE heap_baseline;
+DROP TABLE ice_subject;
+CREATE TABLE heap_baseline (id int, n int) DISTRIBUTED BY (id);
+CREATE ICEBERG TABLE ice_subject (id int, n int);
+INSERT INTO heap_baseline VALUES (1, 10);
+INSERT INTO ice_subject  VALUES (1, 10);
+BEGIN;
+UPDATE heap_baseline SET n = n + 1 WHERE id = 1;
+UPDATE heap_baseline SET n = n * 2 WHERE id = 1;
+UPDATE heap_baseline SET n = n + 100 WHERE id = 1;
+COMMIT;
+BEGIN;
+UPDATE ice_subject SET n = n + 1 WHERE id = 1;
+UPDATE ice_subject SET n = n * 2 WHERE id = 1;
+UPDATE ice_subject SET n = n + 100 WHERE id = 1;
+COMMIT;
+SELECT id, n FROM heap_baseline ORDER BY id;
+ id |  n  
+----+-----
+  1 | 122
+(1 row)
+
+SELECT id, n FROM ice_subject  ORDER BY id;
+ id |  n  
+----+-----
+  1 | 122
+(1 row)
+
+-- ============================================================
+-- Case C: INSERT then UPDATE in one transaction
+-- (the inserted row must be visible to the subsequent UPDATE)
+-- ============================================================
+DROP TABLE heap_baseline;
+DROP TABLE ice_subject;
+CREATE TABLE heap_baseline (id int, n int) DISTRIBUTED BY (id);
+CREATE ICEBERG TABLE ice_subject (id int, n int);
+BEGIN;
+INSERT INTO heap_baseline VALUES (1, 10);
+UPDATE heap_baseline SET n = n * 5 WHERE id = 1;
+COMMIT;
+BEGIN;
+INSERT INTO ice_subject VALUES (1, 10);
+UPDATE ice_subject SET n = n * 5 WHERE id = 1;
+COMMIT;
+SELECT id, n FROM heap_baseline ORDER BY id;
+ id | n  
+----+----
+  1 | 50
+(1 row)
+
+SELECT id, n FROM ice_subject  ORDER BY id;
+ id | n  
+----+----
+  1 | 50
+(1 row)
+
+-- ============================================================
+-- Case D: UPDATE then DELETE same row in one transaction
+-- ============================================================
+DROP TABLE heap_baseline;
+DROP TABLE ice_subject;
+CREATE TABLE heap_baseline (id int, n int) DISTRIBUTED BY (id);
+CREATE ICEBERG TABLE ice_subject (id int, n int);
+INSERT INTO heap_baseline VALUES (1, 10), (2, 20);
+INSERT INTO ice_subject  VALUES (1, 10), (2, 20);
+BEGIN;
+UPDATE heap_baseline SET n = n + 100 WHERE id = 1;
+DELETE FROM heap_baseline WHERE id = 1;
+COMMIT;
+BEGIN;
+UPDATE ice_subject SET n = n + 100 WHERE id = 1;
+DELETE FROM ice_subject WHERE id = 1;
+COMMIT;
+SELECT id, n FROM heap_baseline ORDER BY id;
+ id | n  
+----+----
+  2 | 20
+(1 row)
+
+SELECT id, n FROM ice_subject  ORDER BY id;
+ id | n  
+----+----
+  2 | 20
+(1 row)
+
+-- ============================================================
+-- Case E: multi-row UPDATE +  follow-up UPDATE on a cross-table subquery
+-- (combines #333's Motion-inducing plan shape with #338's same-tx
+--  read-your-own-writes).  Final state must match heap exactly.
+-- ============================================================
+DROP TABLE heap_baseline;
+DROP TABLE ice_subject;
+CREATE TABLE heap_baseline (id int, n int) DISTRIBUTED BY (id);
+CREATE ICEBERG TABLE ice_subject (id int, n int);
+CREATE TABLE picks (id int) DISTRIBUTED BY (id);
+INSERT INTO heap_baseline SELECT g, g * 10 FROM generate_series(1, 20) g;
+INSERT INTO ice_subject  SELECT g, g * 10 FROM generate_series(1, 20) g;
+INSERT INTO picks VALUES (3), (10), (17);
+BEGIN;
+UPDATE heap_baseline SET n = n + 1 WHERE id IN (SELECT id FROM picks);
+UPDATE heap_baseline SET n = n * 2 WHERE id IN (SELECT id FROM picks);
+COMMIT;
+BEGIN;
+UPDATE ice_subject SET n = n + 1 WHERE id IN (SELECT id FROM picks);
+UPDATE ice_subject SET n = n * 2 WHERE id IN (SELECT id FROM picks);
+COMMIT;
+SELECT COUNT(*) AS heap_cnt, SUM(n) AS heap_sumn FROM heap_baseline;
+ heap_cnt | heap_sumn 
+----------+-----------
+       20 |      2406
+(1 row)
+
+SELECT COUNT(*) AS ice_cnt,  SUM(n) AS ice_sumn  FROM ice_subject;
+ ice_cnt | ice_sumn 
+---------+----------
+      20 |     2406
+(1 row)
+
+SELECT id, n FROM heap_baseline WHERE id IN (3, 10, 17) ORDER BY id;
+ id |  n  
+----+-----
+  3 |  62
+ 10 | 202
+ 17 | 342
+(3 rows)
+
+SELECT id, n FROM ice_subject  WHERE id IN (3, 10, 17) ORDER BY id;
+ id |  n  
+----+-----
+  3 |  62
+ 10 | 202
+ 17 | 342
+(3 rows)
+
+-- ============================================================
+-- Cleanup
+-- ============================================================
+DROP TABLE heap_baseline;
+DROP TABLE ice_subject;
+DROP TABLE picks;
+DROP VOLUME acid_volume;
+DROP USER MAPPING FOR current_user SERVER acid_volume_server;
+DROP SERVER acid_volume_server;
+DROP CATALOG acid_catalog;
+DROP USER MAPPING FOR current_user SERVER acid_catalog_server;
+DROP SERVER acid_catalog_server;
