@@ -859,18 +859,46 @@ void dataLakeAddForeignUpdateTargets(PlannerInfo *root, Index rtindex, RangeTblE
 
 /*
  * dataLakePlanForeignModify
- * 		Generate file prefix
-*/
+ * 		Generate file prefix, plus (for Iceberg UPDATE/DELETE) the complete
+ * 		fragment list that lets every QE populate the global file-ID map.
+ */
 static List *dataLakePlanForeignModify(PlannerInfo *root,
 									   ModifyTable *plan,
 									   Index resultRelation,
 									   int subplan_index)
 {
 	RangeTblEntry *rte = planner_rt_fetch(resultRelation, root);
+	char	   *filePrefix = datalakeGetExternalWriteLocation(rte->relid);
+	List	   *allFragments = NIL;
 
+	/*
+	 * Issue #333: when Redistribute Motion splits the Iceberg ForeignScan
+	 * slice from the ModifyTable slice, the writer QE never runs the scanner
+	 * and so its lazy per-reader population of datalake_iceberg_file_index_map
+	 * never happens, leaving file_id -> file_path lookups empty.  Compute the
+	 * full fragment list here (same helper the scan path uses) and dispatch
+	 * it through fdw_private so BeginForeignModify on every QE can call
+	 * icebergFileIndexMapPopulateFromAllFragments() up front.
+	 */
+	if (plan->operation == CMD_UPDATE || plan->operation == CMD_DELETE)
+	{
+		dataLakeOptions *opts = datalakeGetOptions(rte->relid);
 
-	char *filePrefix = datalakeGetExternalWriteLocation(rte->relid);
-	return list_make1(makeString(filePrefix));
+		if (FORMAT_IS_ICEBERG(opts->format))
+		{
+			Relation	rel = table_open(rte->relid, NoLock);
+
+			allFragments = datalakeGetExternalFragmentList(rel, NIL, opts, NULL);
+			table_close(rel, NoLock);
+		}
+	}
+
+	/*
+	 * Keep slot indices in sync with FdwModifyPrivateIndex.  Always append
+	 * an entry for FdwModifyAllFragments (NIL when unused) so list_nth at
+	 * BeginForeignModify is stable.
+	 */
+	return list_make2(makeString(filePrefix), allFragments);
 }
 
 

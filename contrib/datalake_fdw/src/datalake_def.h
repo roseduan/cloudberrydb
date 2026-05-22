@@ -221,6 +221,14 @@ enum datalakeFdwScanPrivateIndex
 enum FdwModifyPrivateIndex
 {
 	FdwModifyFileDir,
+	/*
+	 * Iceberg UPDATE/DELETE only: complete fragment list from the planner
+	 * (output of datalakeGetExternalFragmentList()).  Dispatched to every
+	 * QE so the global file-ID map can be populated even on writer-only
+	 * QEs whose slice contains no Iceberg ForeignScan (issue #333).
+	 * NIL for INSERT and for non-Iceberg formats.
+	 */
+	FdwModifyAllFragments,
 };
 
 /*

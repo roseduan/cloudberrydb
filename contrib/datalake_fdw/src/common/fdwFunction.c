@@ -1267,6 +1267,27 @@ void datalakefdw_begin_foreign_modify(ModifyTableState *mtstate,
 			icebergClearFileIndexMap(datalake_iceberg_file_index_map);
 			elog(DEBUG2, "datalake_fdw: Cleared existing Iceberg file index map in BeginForeignModify");
 		}
+
+		/*
+		 * Issue #333: populate the map from the complete fragment list the
+		 * planner dispatched, so writer-only QEs (whose slice contains no
+		 * ForeignScan after a Redistribute Motion) still have file_id ->
+		 * file_path entries available when decoding ctid junk columns.
+		 * Every QE iterates the same dispatched list in the same order, so
+		 * the assigned file IDs match what scanner QEs encoded into ctids.
+		 */
+		if (FORMAT_IS_ICEBERG(dataLakesstate->options->format) &&
+			datalake_iceberg_file_index_map != NULL &&
+			fdw_private != NULL &&
+			list_length(fdw_private) > FdwModifyAllFragments)
+		{
+			List *allFragments = (List *) list_nth(fdw_private,
+												   FdwModifyAllFragments);
+
+			if (allFragments != NIL)
+				icebergFileIndexMapPopulateFromAllFragments(
+					datalake_iceberg_file_index_map, allFragments);
+		}
 	}
 	fdwfunction_initModify(mtstate, resultRelInfo);
 
