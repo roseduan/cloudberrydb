@@ -46,7 +46,98 @@
 #include "include/pg_iceberg_am.h"
 #include "include/pg_iceberg_custom_scan.h"
 
+#include "access/table.h"
+#include "src/datalake_def.h"
+#include "src/provider/iceberg/iceberg_file_index.h"
+
 #define ICEBERG_CUSTOM_SCAN_NAME	"Iceberg Scan"
+
+static bool is_iceberg_relation(Oid relid);
+
+/*
+ * issue #333: walk the plan for ModifyTable nodes whose result relations
+ * use the iceberg AM, then list the data fragments and route them to every
+ * QE so the global file_id -> file_path map can be populated on writer-only
+ * QEs.
+ *
+ * Three carriers in the cache flow:
+ *   - QD planner-time:   pg_iceberg_stash_modify_fragments(relid, fragments)
+ *   - dispatched plan:   ModifyTable.fdwPrivLists[i] = list_make1(fragments)
+ *   - QE executor-time:  ExecutorStart_hook re-stashes from fdwPrivLists.
+ */
+static void
+stash_modify_fragments_for_iceberg_modifies(PlannedStmt *stmt)
+{
+	ModifyTable	   *mt;
+	ListCell	   *lc;
+	int				i;
+
+	if (stmt->planTree == NULL || !IsA(stmt->planTree, ModifyTable))
+		return;
+
+	mt = (ModifyTable *) stmt->planTree;
+	if (mt->operation != CMD_UPDATE && mt->operation != CMD_DELETE)
+		return;
+
+	/*
+	 * fdwPrivLists holds one entry per result relation, in the same order
+	 * as resultRelations.  Standard PlanForeignModify fills it for foreign
+	 * tables; for native iceberg-AM relations the slot is NIL.  We fill
+	 * those slots here with `list_make1(fragments)` so the dispatched plan
+	 * carries the data.
+	 */
+	if (mt->fdwPrivLists == NIL)
+	{
+		int rel_count = list_length(mt->resultRelations);
+
+		for (i = 0; i < rel_count; i++)
+			mt->fdwPrivLists = lappend(mt->fdwPrivLists, NIL);
+	}
+
+	i = 0;
+	foreach(lc, mt->resultRelations)
+	{
+		Index	rti = lfirst_int(lc);
+		Oid		relid;
+		List   *fragments;
+		Relation rel;
+
+		if (rti == 0 || rti > list_length(stmt->rtable))
+		{
+			i++;
+			continue;
+		}
+
+		relid = ((RangeTblEntry *) list_nth(stmt->rtable, rti - 1))->relid;
+
+		if (!is_iceberg_relation(relid))
+		{
+			i++;
+			continue;
+		}
+
+		rel = table_open(relid, NoLock);
+		fragments = pg_iceberg_list_data_fragments(rel);
+		table_close(rel, NoLock);
+
+		if (fragments != NIL)
+		{
+			ListCell *prev_cell = list_nth_cell(mt->fdwPrivLists, i);
+
+			pg_iceberg_stash_modify_fragments(relid, fragments);
+
+			/*
+			 * Splice fragments into ModifyTable.fdwPrivLists so they get
+			 * dispatched with the plan.  The list is wrapped in list_make1
+			 * to keep a single slot per relation (per ModifyTable contract);
+			 * the consumer unwraps it in datalake_executor_start_hook.
+			 */
+			lfirst(prev_cell) = list_make1(fragments);
+		}
+
+		i++;
+	}
+}
 
 extern int external_table_limit_segment_num;
 
@@ -286,7 +377,126 @@ iceberg_planner_hook(Query *parse,
 		lfirst(lc) = replace_iceberg_seqscan(sub, stmt->rtable);
 	}
 
+	stash_modify_fragments_for_iceberg_modifies(stmt);
+
 	return stmt;
+}
+
+
+/* ------------------------------------------------------------------------
+ * ExecutorStart_hook (issue #333)
+ *
+ * Runs on every segment.  For ModifyTable nodes on iceberg-AM relations,
+ * re-stash the per-relation fragments from ModifyTable.fdwPrivLists into
+ * the process-local cache so iceberg_modify_init can find them.
+ * ------------------------------------------------------------------------
+ */
+static ExecutorStart_hook_type prev_executor_start_hook = NULL;
+
+/*
+ * Pre-populate the global datalake_iceberg_file_index_map from a fragments
+ * list.  The map is created if it does not yet exist on this process.
+ *
+ * Used both on writer QEs (where iceberg_modify_init will later clear and
+ * repopulate via its own path) and on scanner-only QEs (where the map
+ * would otherwise be NULL and the scan would encode file_id=0 into every
+ * ctid -- exactly the corruption that motivated issue #333).
+ *
+ * The map is anchored in TopMemoryContext so its `entries` buffer survives
+ * statement-scoped MemoryContext resets between successive UPDATE/DELETE
+ * commands in the same transaction.  (BeginForeignModify's
+ * MemoryContextRegisterResetCallback only fires when *it* allocated the map;
+ * when we pre-create from this hook, no callback is registered and we'd
+ * otherwise leave a dangling pointer behind.)
+ */
+static void
+prepopulate_iceberg_file_index_map(List *fragments)
+{
+	if (fragments == NIL)
+		return;
+
+	if (datalake_iceberg_file_index_map == NULL)
+	{
+		MemoryContext oldcxt = MemoryContextSwitchTo(TopMemoryContext);
+
+		datalake_iceberg_file_index_map = icebergCreateFileIndexMap();
+		MemoryContextSwitchTo(oldcxt);
+	}
+
+	if (datalake_iceberg_file_index_map == NULL)
+		return;					/* OOM, give up silently */
+
+	/*
+	 * Always clear before populating: across successive UPDATE/DELETE
+	 * statements the Iceberg snapshot changes, so previously cached entries
+	 * become stale.  icebergClearFileIndexMap resets numFiles to 0 and
+	 * pfrees the path strings but keeps `entries` allocated.
+	 */
+	icebergClearFileIndexMap(datalake_iceberg_file_index_map);
+
+	icebergFileIndexMapPopulateFromAllFragments(
+		datalake_iceberg_file_index_map, fragments);
+}
+
+static void
+restash_iceberg_modify_fragments_from_plan(PlannedStmt *stmt)
+{
+	ModifyTable	   *mt;
+	ListCell	   *lc_rel;
+	ListCell	   *lc_priv;
+
+	if (stmt == NULL || stmt->planTree == NULL ||
+		!IsA(stmt->planTree, ModifyTable))
+		return;
+
+	mt = (ModifyTable *) stmt->planTree;
+	if (mt->operation != CMD_UPDATE && mt->operation != CMD_DELETE)
+		return;
+	if (mt->fdwPrivLists == NIL)
+		return;
+
+	forboth(lc_rel, mt->resultRelations,
+			lc_priv, mt->fdwPrivLists)
+	{
+		Index	rti = lfirst_int(lc_rel);
+		List   *priv = (List *) lfirst(lc_priv);
+		Oid		relid;
+		List   *fragments;
+
+		if (priv == NIL || rti == 0 || rti > list_length(stmt->rtable))
+			continue;
+
+		relid = ((RangeTblEntry *) list_nth(stmt->rtable, rti - 1))->relid;
+		if (!is_iceberg_relation(relid))
+			continue;
+
+		/* Unwrap the list_make1(fragments) wrapper from the planner_hook. */
+		fragments = (List *) linitial(priv);
+		if (fragments == NIL)
+			continue;
+
+		pg_iceberg_stash_modify_fragments(relid, fragments);
+
+		/*
+		 * Also seed the global file-index map directly.  Scanner-only QEs
+		 * never enter BeginForeignModify and so never create the map; without
+		 * this they encode file_id=0 for every row, which then resolves to
+		 * the first file on the writer QE and produces "delete went to wrong
+		 * file" data corruption rather than the original NULL-lookup error.
+		 */
+		prepopulate_iceberg_file_index_map(fragments);
+	}
+}
+
+static void
+iceberg_executor_start_hook(QueryDesc *queryDesc, int eflags)
+{
+	restash_iceberg_modify_fragments_from_plan(queryDesc->plannedstmt);
+
+	if (prev_executor_start_hook)
+		prev_executor_start_hook(queryDesc, eflags);
+	else
+		standard_ExecutorStart(queryDesc, eflags);
 }
 
 
@@ -463,4 +673,7 @@ pg_iceberg_install_custom_scan(void)
 
 	prev_planner_hook = planner_hook;
 	planner_hook = iceberg_planner_hook;
+
+	prev_executor_start_hook = ExecutorStart_hook;
+	ExecutorStart_hook = iceberg_executor_start_hook;
 }

@@ -316,6 +316,135 @@ pg_iceberg_build_scan_am_private(Relation rel, struct PlanState *ps, int random_
 	return am_private;
 }
 
+/*
+ * pg_iceberg_list_data_fragments
+ *		Return the raw fragment list ([ExternalTableMetadata, combinedTask0,
+ *		combinedTask1, ...]) for the current Iceberg snapshot of `rel`.
+ *
+ * Strips the catalog_properties / random_segments trailers that
+ * pg_iceberg_build_scan_am_private appends for the scan path, so the
+ * result is directly consumable by icebergFileIndexMapPopulateFromAllFragments.
+ *
+ * Caller MUST run this on the QD: it consults the local pg_iceberg_metadata
+ * catalog (which is QD-only populated) via pg_iceberg_get_metadata_info().
+ * Used by the planner-time hook to seed the per-statement modify-fragments
+ * cache that is then dispatched to every QE (issue #333).
+ */
+List *
+pg_iceberg_list_data_fragments(Relation rel)
+{
+	char			   *fragments;
+	char			   *scan_metadata_location;
+	bool				is_internal;
+	IcebergTableInfo   *table_info;
+	TableMetadataState *tstate;
+	List			   *result;
+
+	table_info = pg_iceberg_get_table_info(RelationGetRelid(rel));
+
+	tstate = pg_iceberg_tracker_get_table_state(RelationGetRelid(rel));
+	if (tstate != NULL)
+	{
+		scan_metadata_location =
+			pg_iceberg_tracker_get_scan_metadata_location(RelationGetRelid(rel));
+		is_internal = tstate->is_internal;
+	}
+	else
+	{
+		IcebergMetadataInfo *metadata_info;
+
+		metadata_info = pg_iceberg_get_metadata_info(RelationGetRelid(rel));
+		scan_metadata_location = pstrdup(metadata_info->metadata_location);
+		is_internal = metadata_info->is_internal;
+		pg_iceberg_free_metadata_info(metadata_info);
+	}
+
+	fragments = pg_iceberg_get_fragments_with_catalog(rel,
+													  table_info,
+													  scan_metadata_location,
+													  is_internal,
+													  NULL);
+
+	pfree(scan_metadata_location);
+	pg_iceberg_free_table_info(table_info);
+
+	result = parseIcebergFragmentResponse(fragments, strlen(fragments));
+	return result;
+}
+
+
+/* ----------------------------------------------------------------
+ * Modify-time fragments cache (issue #333)
+ *
+ * A process-local map keyed by relid that carries the fragment list
+ * for an in-flight UPDATE/DELETE statement.  The QD's planner_hook
+ * fills it via pg_iceberg_stash_modify_fragments(); on every QE an
+ * ExecutorStart_hook walks the dispatched plan and re-populates the
+ * same map from ModifyTable.fdwPrivLists.  iceberg_modify_init
+ * consumes (and removes) the entry with pg_iceberg_take_modify_fragments()
+ * so cross-statement reuse cannot leak a stale list.
+ * ----------------------------------------------------------------
+ */
+typedef struct ModifyFragmentsEntry
+{
+	Oid		relid;			/* hash key */
+	List   *fragments;
+} ModifyFragmentsEntry;
+
+static HTAB *modify_fragments_cache = NULL;
+
+static void
+modify_fragments_cache_ensure(void)
+{
+	HASHCTL ctl;
+
+	if (modify_fragments_cache != NULL)
+		return;
+
+	MemSet(&ctl, 0, sizeof(ctl));
+	ctl.keysize = sizeof(Oid);
+	ctl.entrysize = sizeof(ModifyFragmentsEntry);
+	ctl.hcxt = TopMemoryContext;
+
+	modify_fragments_cache = hash_create("iceberg modify fragments cache",
+										  16, &ctl,
+										  HASH_ELEM | HASH_BLOBS | HASH_CONTEXT);
+}
+
+void
+pg_iceberg_stash_modify_fragments(Oid relid, List *fragments)
+{
+	ModifyFragmentsEntry   *entry;
+	bool					found;
+
+	if (!OidIsValid(relid) || fragments == NIL)
+		return;
+
+	modify_fragments_cache_ensure();
+	entry = (ModifyFragmentsEntry *) hash_search(modify_fragments_cache,
+												 &relid, HASH_ENTER, &found);
+	entry->fragments = fragments;
+}
+
+List *
+pg_iceberg_take_modify_fragments(Oid relid)
+{
+	ModifyFragmentsEntry   *entry;
+	List				   *fragments;
+
+	if (modify_fragments_cache == NULL || !OidIsValid(relid))
+		return NIL;
+
+	entry = (ModifyFragmentsEntry *) hash_search(modify_fragments_cache,
+												 &relid, HASH_FIND, NULL);
+	if (entry == NULL)
+		return NIL;
+
+	fragments = entry->fragments;
+	hash_search(modify_fragments_cache, &relid, HASH_REMOVE, NULL);
+	return fragments;
+}
+
 void
 pg_iceberg_estimate_rel_size(Relation rel, int32 *attr_widths, BlockNumber *pages,
 							  double *tuples, double *allvisfrac)

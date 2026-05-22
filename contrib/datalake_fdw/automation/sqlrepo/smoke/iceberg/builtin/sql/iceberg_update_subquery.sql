@@ -9,6 +9,9 @@
 --          DELETE shares the same file-id decode path (Case D below).
 
 CREATE EXTENSION IF NOT EXISTS datalake_fdw;
+-- Pin DateStyle so the textual representation in the expected file is stable
+-- regardless of the cluster's default (the demo cluster uses SQL,MDY).
+SET DateStyle = 'ISO, YMD';
 
 -- catalog + volume setup (mirrors the other smoke tests in this dir)
 CREATE SERVER us_catalog_server FOREIGN DATA WRAPPER iceberg_catalog_fdw;
@@ -73,9 +76,14 @@ SELECT id, end_date FROM us_ice  ORDER BY id;
 -- Case C: transactional NOT EXISTS + IN (the zipper_change.sql shape
 -- from the original bug repro).  After both UPDATEs every row should
 -- carry end_date = 2020-01-03 on both the heap and iceberg sides.
+--
+-- Note: we DROP+CREATE rather than TRUNCATE here because TRUNCATE is
+-- currently a no-op on the iceberg AM (separate pre-existing issue).
 -- ============================================================
-TRUNCATE us_heap;
-TRUNCATE us_ice;
+DROP TABLE us_heap;
+DROP TABLE us_ice;
+CREATE TABLE us_heap (id BIGINT, deposit BIGINT, end_date DATE) DISTRIBUTED BY (id);
+CREATE ICEBERG TABLE us_ice  (id BIGINT, deposit BIGINT, end_date DATE);
 INSERT INTO us_heap SELECT g, 100, DATE '2999-12-31' FROM generate_series(1,10) g;
 INSERT INTO us_ice  SELECT g, 100, DATE '2999-12-31' FROM generate_series(1,10) g;
 
@@ -105,8 +113,16 @@ SELECT id, end_date FROM us_ice  ORDER BY id;
 -- ============================================================
 -- Case D: DELETE with subquery — the same file-id decode path as
 -- UPDATE (fdwFunction.c:1483 mirrors line 1395), so this also broke
--- before the fix.
+-- before the fix.  Fresh tables again so we don't tangle with prior
+-- statements' state.
 -- ============================================================
+DROP TABLE us_heap;
+DROP TABLE us_ice;
+CREATE TABLE us_heap (id BIGINT, deposit BIGINT, end_date DATE) DISTRIBUTED BY (id);
+CREATE ICEBERG TABLE us_ice  (id BIGINT, deposit BIGINT, end_date DATE);
+INSERT INTO us_heap SELECT g, 100, DATE '2999-12-31' FROM generate_series(1,10) g;
+INSERT INTO us_ice  SELECT g, 100, DATE '2999-12-31' FROM generate_series(1,10) g;
+
 DELETE FROM us_heap WHERE id IN (SELECT id FROM us_pick);
 DELETE FROM us_ice  WHERE id IN (SELECT id FROM us_pick);
 

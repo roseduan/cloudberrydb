@@ -47,6 +47,9 @@
 #include "include/pg_iceberg_catalog.h"
 #include "include/pg_iceberg_metadata.h"
 #include "include/pg_iceberg_metadata_tracker.h"
+
+#include "src/datalake_def.h"
+#include "src/provider/iceberg/iceberg_file_index.h"
 #include "../iceberg_volume_fdw/iceberg_volume_fdw.h"
 #include "src/common/fdwFunction.h"
 
@@ -246,6 +249,26 @@ iceberg_modify_init(Relation rel, IcebergDMLState *state, CmdType operation,
 								   NULL,
 								   0,
 								   begin_eflags);
+
+	/*
+	 * Issue #333: populate the global file_id -> file_path map from the
+	 * complete fragment list dispatched by the planner_hook
+	 * (iceberg_planner_hook -> stash_iceberg_modify_fragments).  Without
+	 * this, writer-only QEs whose slice has no Iceberg ForeignScan after a
+	 * Redistribute Motion would hit "Failed to get file path for file ID 0
+	 * in Iceberg update" because their lazy per-reader populator in
+	 * row_reader.c never runs.
+	 */
+	if ((operation == CMD_UPDATE || operation == CMD_DELETE) &&
+		datalake_iceberg_file_index_map != NULL)
+	{
+		List *allFragments = pg_iceberg_take_modify_fragments(RelationGetRelid(rel));
+
+		if (allFragments != NIL)
+			icebergFileIndexMapPopulateFromAllFragments(
+				datalake_iceberg_file_index_map, allFragments);
+	}
+
 	return modifyDesc;
 }
 

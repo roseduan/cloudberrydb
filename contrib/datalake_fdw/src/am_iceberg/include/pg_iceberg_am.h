@@ -86,6 +86,15 @@ extern uint64 pg_iceberg_relation_size(Relation rel, ForkNumber forkNumber);
 
 extern List *pg_iceberg_build_scan_am_private(Relation rel, struct PlanState *ps,
 											   int random_segment_num);
+extern List *pg_iceberg_list_data_fragments(Relation rel);
+
+/*
+ * Process-local cache of modify-time fragment lists, keyed by relid.
+ * See pg_iceberg_am.c for the dispatch flow (issue #333).
+ */
+extern void pg_iceberg_stash_modify_fragments(Oid relid, List *fragments);
+extern List *pg_iceberg_take_modify_fragments(Oid relid);
+
 extern char *pg_iceberg_resolve_modify_location(Relation rel, CmdType operation);
 extern int pg_iceberg_acquire_sample_rows(Relation relation, int elevel,
 										  HeapTuple *rows, int targrows,

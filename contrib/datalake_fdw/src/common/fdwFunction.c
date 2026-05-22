@@ -1269,12 +1269,17 @@ void datalakefdw_begin_foreign_modify(ModifyTableState *mtstate,
 		}
 
 		/*
-		 * Issue #333: populate the map from the complete fragment list the
-		 * planner dispatched, so writer-only QEs (whose slice contains no
-		 * ForeignScan after a Redistribute Motion) still have file_id ->
-		 * file_path entries available when decoding ctid junk columns.
-		 * Every QE iterates the same dispatched list in the same order, so
-		 * the assigned file IDs match what scanner QEs encoded into ctids.
+		 * Issue #333: foreign-table path -- dataLakePlanForeignModify()
+		 * computed the complete fragment list at plan time and dispatched
+		 * it via fdw_private.  Populate the global file_id -> file_path
+		 * map from it so writer-only QEs (whose slice contains no
+		 * ForeignScan after a Redistribute Motion) can still decode the
+		 * ctid junk column.
+		 *
+		 * The Iceberg AM path lands here with fdw_private == NULL; its
+		 * caller (iceberg_modify_init in pg_iceberg_am_handler.c) populates
+		 * the map after this function returns, using AM-specific catalog
+		 * helpers.
 		 */
 		if (FORMAT_IS_ICEBERG(dataLakesstate->options->format) &&
 			datalake_iceberg_file_index_map != NULL &&
