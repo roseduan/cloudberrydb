@@ -209,8 +209,8 @@ DROP TABLE types_single_col;
 -- Test 8: DROP COLUMN is rejected on Iceberg tables (issue #334)
 -- DROP COLUMN used to half-apply (PG catalog updated while Iceberg
 -- metadata stayed stale); ALTER COLUMN TYPE crashed the backend.
--- The Iceberg AM now rejects every ALTER subcommand except ADD COLUMN
--- in datalake_ProcessUtility; the table must remain usable afterwards.
+-- The Iceberg AM now rejects every ALTER subcommand in
+-- datalake_ProcessUtility; the table must remain usable afterwards.
 -- ============================================================
 CREATE ICEBERG TABLE types_drop_col (id int, name text, age int)
     CATALOG types_catalog VOLUME types_volume;

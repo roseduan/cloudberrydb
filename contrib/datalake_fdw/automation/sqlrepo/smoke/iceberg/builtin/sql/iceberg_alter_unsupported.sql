@@ -1,11 +1,13 @@
--- Iceberg ALTER TABLE coverage (issue #334)
--- Purpose: ADD COLUMN is the only supported ALTER subcommand on Iceberg tables.
--- All other AT_* subcommands plus RENAME COLUMN must be rejected with a
--- FEATURE_NOT_SUPPORTED error.  Historically ALTER COLUMN TYPE on a populated
--- Iceberg table caused a backend SIGSEGV (empty AM stubs + uninitialized DML
+-- Iceberg ALTER TABLE coverage (issue #334 + follow-up)
+-- Purpose: NO ALTER TABLE subcommand is supported on Iceberg AM tables.
+-- ALTER COLUMN TYPE used to SIGSEGV (empty AM stubs + uninitialized DML
 -- state during table rewrite); the others silently half-applied (PG catalog
--- changed while Iceberg metadata stayed stale).  This test pins the new
--- behavior down and verifies the table remains usable after rejection.
+-- changed while Iceberg manifest stayed stale).  ADD COLUMN was briefly
+-- allowed but offered no way to keep the Iceberg-side schema in sync, so
+-- it is now rejected too -- schema evolution must go through Spark / Trino /
+-- Flink.  RENAME COLUMN (T_RenameStmt) is rejected by a sibling hook.
+-- This test pins the full-ban contract and confirms the table stays usable
+-- after every rejection.
 
 CREATE EXTENSION IF NOT EXISTS datalake_fdw;
 
@@ -42,14 +44,11 @@ CREATE ICEBERG TABLE alter_block_t (id int, val int, name text);
 INSERT INTO alter_block_t VALUES (1, 100, 'a'), (2, 200, 'b');
 
 -- ============================================================
--- ADD COLUMN must still succeed (field-id mapping, old data reads NULL).
+-- Every ALTER subcommand must be rejected with FEATURE_NOT_SUPPORTED.
 -- ============================================================
-ALTER TABLE alter_block_t ADD COLUMN note text;
-SELECT * FROM alter_block_t ORDER BY id;
 
--- ============================================================
--- Every other ALTER subcommand: expect FEATURE_NOT_SUPPORTED.
--- ============================================================
+-- ADD COLUMN: previously the only allowed subcommand; now also rejected.
+ALTER TABLE alter_block_t ADD COLUMN note text;
 
 -- Original repro from issue #334 (this used to SIGSEGV the backend).
 ALTER TABLE alter_block_t ALTER COLUMN val TYPE bigint;
@@ -65,11 +64,11 @@ ALTER TABLE alter_block_t ADD CONSTRAINT alter_block_chk CHECK (val >= 0);
 ALTER TABLE alter_block_t RENAME COLUMN val TO val2;
 
 -- ============================================================
--- Table is still usable: schema unchanged (id int, val int, name text, note text)
--- and the rejected DDLs left no side effects on PG or Iceberg metadata.
+-- Table is still usable: schema unchanged (id int, val int, name text) and
+-- the rejected DDLs left no side effects on PG or Iceberg metadata.
 -- ============================================================
 SELECT * FROM alter_block_t ORDER BY id;
-INSERT INTO alter_block_t VALUES (3, 300, 'c', 'rush');
+INSERT INTO alter_block_t VALUES (3, 300, 'c');
 SELECT * FROM alter_block_t ORDER BY id;
 
 -- Cleanup

@@ -484,37 +484,29 @@ relid_is_iceberg(Oid relid)
 }
 
 /*
- * Iceberg tables in datalake_fdw currently only implement ADD COLUMN as a
- * functional schema-evolution path (relies on Iceberg field-id mapping; old
- * data files read NULL for the new column).  All other AT_* subcommands are
- * either unimplemented or only half-applied (PG catalog updated while Iceberg
- * metadata stays stale), and ALTER COLUMN TYPE in particular crashes the
- * backend by driving the standard PG rewrite path into empty AM stubs
- * (iceberg_relation_set_new_filenode / iceberg_relation_copy_data) and
- * uninitialized DML state.  Reject everything except ADD COLUMN here so the
- * crash and the silent half-applied DDLs are turned into clean errors.
+ * No ALTER TABLE subcommand is safe on an Iceberg AM table from inside
+ * Cloudberry: ALTER COLUMN TYPE drives the standard PG rewrite into empty AM
+ * stubs (iceberg_relation_set_new_filenode / iceberg_relation_copy_data) and
+ * SIGSEGVs the backend; every other subcommand half-applies (PG catalog
+ * updated while the Iceberg manifest stays stale) and silently desyncs PG
+ * readers from Spark/Trino/Flink ones.  ADD COLUMN superficially worked via
+ * field-id mapping but offered no way to keep the Iceberg-side schema in
+ * sync, so it is rejected here too -- schema evolution must go through an
+ * Iceberg-aware writer.
+ *
+ * RENAME COLUMN arrives as T_RenameStmt rather than T_AlterTableStmt; it is
+ * rejected in the sibling branch of datalake_ProcessUtility.
  */
 static void
 reject_unsupported_iceberg_alter(List *cmds)
 {
-	ListCell   *lc;
+	if (cmds == NIL)
+		return;
 
-	foreach(lc, cmds)
-	{
-		AlterTableCmd *cmd = (AlterTableCmd *) lfirst(lc);
-
-		switch (cmd->subtype)
-		{
-			case AT_AddColumn:
-			case AT_AddColumnRecurse:
-				continue;
-			default:
-				ereport(ERROR,
-						(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-						 errmsg("ALTER TABLE on Iceberg tables only supports ADD COLUMN"),
-						 errhint("Use Spark/Trino/Flink to perform Iceberg schema evolution, or recreate the table.")));
-		}
-	}
+	ereport(ERROR,
+			(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+			 errmsg("ALTER TABLE is not supported on Iceberg tables"),
+			 errhint("Use Spark/Trino/Flink to perform Iceberg schema evolution, or recreate the table.")));
 }
 
 static void
