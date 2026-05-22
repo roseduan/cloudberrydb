@@ -22,6 +22,7 @@
 #include "catalog/namespace.h"
 #include "catalog/pg_type.h"
 #include "catalog/pg_am.h"
+#include "commands/extension.h"		/* get_extension_oid */
 #include "commands/tablecmds.h"
 #include "executor/executor.h"
 #include "nodes/execnodes.h"
@@ -454,6 +455,17 @@ is_iceberg_rel(Relation rel)
 }
 
 void
+pg_iceberg_require_extension_installed(void)
+{
+	if (!OidIsValid(get_extension_oid("datalake_fdw", true)))
+		ereport(ERROR,
+				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+				 errmsg("the datalake_fdw extension is not installed in this database"),
+				 errdetail("Iceberg tables require the datalake_fdw extension for schema, metadata catalog tables, and access functions."),
+				 errhint("Install it first: CREATE EXTENSION IF NOT EXISTS datalake_fdw;")));
+}
+
+void
 pg_iceberg_ext_dml_init(Relation rel, CmdType operation)
 {
 	pg_iceberg_dml_init(rel, operation);
@@ -649,6 +661,17 @@ iceberg_tuple_lock(Relation rel, ItemPointer tid, Snapshot snapshot, TupleTableS
 static void
 iceberg_relation_set_new_filenode(Relation rel, const RelFileNode *newrnode, char persistence, TransactionId *freezeXid, MultiXactId *minmulti)
 {
+	/*
+	 * Issue #337: this callback is the earliest AM-level hook reached by
+	 * CREATE TABLE ... USING iceberg.  Without the datalake_fdw extension
+	 * installed the catalog tables (iceberg.pg_iceberg_metadata,
+	 * iceberg.pg_iceberg_deletion_queue) do not exist; the OAT_POST_CREATE
+	 * hook in pg_iceberg_ddl.c then silently skips registration (because
+	 * is_iceberg_rel() is checked via pg_lake_table, which is not yet
+	 * populated for the first row), leaving an orphan relation that can be
+	 * neither read nor dropped.  Fail loudly with an install hint instead.
+	 */
+	pg_iceberg_require_extension_installed();
 }
 
 static void

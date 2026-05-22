@@ -45,6 +45,15 @@ iceberg_object_access_hook(ObjectAccessType access, Oid classId, Oid objectId,
 			rel->rd_rel->relkind == RELKIND_MATVIEW) &&
 			(subId == 0) && is_iceberg_rel(rel))
 		{
+			/*
+			 * Issue #337: also guard the LakeTable / CREATE ICEBERG TABLE
+			 * path here.  iceberg_relation_set_new_filenode already covers
+			 * plain CREATE TABLE ... USING iceberg, but the lake-table
+			 * custom DDL would otherwise reach pg_iceberg_add_metadata
+			 * before the iceberg.pg_iceberg_metadata catalog table exists.
+			 */
+			pg_iceberg_require_extension_installed();
+
 			if (Gp_role == GP_ROLE_DISPATCH)
 			{
 				bool is_internal;
