@@ -9,7 +9,7 @@
 PGXS := $(shell pg_config --pgxs)
 include $(PGXS)
 
-REGRESS = iceberg_am_hadoop_s3_basic
+REGRESS = iceberg_am_hadoop_s3_basic iceberg_am_hadoop_s3_acid_double_update
 
 installcheck:
 	$(pg_regress_installcheck) $(REGRESS)

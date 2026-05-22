@@ -1,0 +1,113 @@
+-- Iceberg AM on Polaris catalog: same-transaction read-your-own-writes
+-- regression (issue #338).
+--
+-- Polaris is a non-builtin external catalog like s3/hadoop, so it shares
+-- the code path the #338 fix touched in pg_iceberg_catalog_helper.c.
+-- Without the fix, a CREATE ICEBERG TABLE with no explicit OPTIONS clause
+-- on a polaris catalog server would have is_internal=true AND
+-- server_type='polaris', taking the buildInCatalog branch in
+-- execute_get_fragments_via_fdw() while leaving request.metadataLocation
+-- unset; the JSON sent to the agent then carries no deferred-RYOW
+-- "metadata_location" property, the agent falls back to the catalog's
+-- current pointer, and same-tx UPDATE 2 reads pre-UPDATE-1 state.
+
+CREATE EXTENSION IF NOT EXISTS datalake_fdw;
+SET DateStyle = 'ISO, YMD';
+
+-- ===== Polaris REST catalog + S3 volume =====
+-- (Volume server must exist before FOREIGN CATALOG -- Polaris derives its
+--  storageConfigInfo from the bound volume.)
+DROP SERVER IF EXISTS polaris_acid_vol_srv CASCADE;
+CREATE SERVER polaris_acid_vol_srv FOREIGN DATA WRAPPER iceberg_volume_fdw
+    OPTIONS (
+        type 's3',
+        endpoint 'http://minio:9000',
+        region 'us-east-1',
+        bucket_name 'warehouse',
+        path_style_access 'true'
+    );
+CREATE USER MAPPING FOR current_user SERVER polaris_acid_vol_srv
+    OPTIONS (access_key_id 'admin', secret_access_key 'admin12345');
+CREATE FOREIGN VOLUME polaris_acid_vol SERVER polaris_acid_vol_srv
+    OPTIONS (base_path '/polaris_acid_double_update/', allow_writes 'true');
+SET iceberg_default_volume = 'polaris_acid_vol';
+
+DROP SERVER IF EXISTS polaris_acid_cat_srv CASCADE;
+CREATE SERVER polaris_acid_cat_srv FOREIGN DATA WRAPPER iceberg_catalog_fdw
+    OPTIONS (type 'polaris', url 'http://polaris:8181/api/catalog');
+CREATE USER MAPPING FOR current_user SERVER polaris_acid_cat_srv
+    OPTIONS (client_id 'root', client_secret 's3cr3t', scope 'PRINCIPAL_ROLE:ALL');
+CREATE FOREIGN CATALOG polaris_acid_cat SERVER polaris_acid_cat_srv
+    OPTIONS (catalog_name 'polaris_default_catalog', default_namespace 'public');
+SET iceberg_default_catalog = 'polaris_acid_cat';
+
+-- ============================================================
+-- Case A: raw BEGIN; UPDATE; UPDATE; COMMIT on the same row.
+-- ============================================================
+DROP TABLE IF EXISTS polaris_acid_raw;
+CREATE ICEBERG TABLE polaris_acid_raw (id int, n int);
+INSERT INTO polaris_acid_raw VALUES (1, 10);
+
+BEGIN;
+UPDATE polaris_acid_raw SET n = n + 1 WHERE id = 1;
+UPDATE polaris_acid_raw SET n = n * 2 WHERE id = 1;
+COMMIT;
+
+SELECT id, n FROM polaris_acid_raw ORDER BY n;
+SELECT COUNT(*) AS cnt, SUM(n) AS sumn FROM polaris_acid_raw;
+
+DROP TABLE polaris_acid_raw;
+
+-- ============================================================
+-- Case B: LANGUAGE plpgsql function wrapping two UPDATEs.
+-- ============================================================
+DROP TABLE IF EXISTS polaris_acid_pl;
+CREATE ICEBERG TABLE polaris_acid_pl (id int, n int);
+INSERT INTO polaris_acid_pl VALUES (1, 10);
+
+CREATE OR REPLACE FUNCTION polaris_acid_upd2_pl() RETURNS bigint AS $$
+DECLARE c bigint;
+BEGIN
+    UPDATE polaris_acid_pl SET n = n + 1 WHERE id = 1;
+    UPDATE polaris_acid_pl SET n = n * 2 WHERE id = 1;
+    SELECT count(*) INTO c FROM polaris_acid_pl WHERE id = 1;
+    RETURN c;
+END;
+$$ LANGUAGE plpgsql;
+
+SELECT polaris_acid_upd2_pl() AS rows_seen_inside_func;
+SELECT id, n FROM polaris_acid_pl ORDER BY n;
+SELECT COUNT(*) AS cnt, SUM(n) AS sumn FROM polaris_acid_pl;
+
+DROP FUNCTION polaris_acid_upd2_pl();
+DROP TABLE polaris_acid_pl;
+
+-- ============================================================
+-- Case C: LANGUAGE sql function wrapping two UPDATEs.
+-- ============================================================
+DROP TABLE IF EXISTS polaris_acid_sql;
+CREATE ICEBERG TABLE polaris_acid_sql (id int, n int);
+INSERT INTO polaris_acid_sql VALUES (1, 10);
+
+CREATE OR REPLACE FUNCTION polaris_acid_upd2_sql() RETURNS bigint AS $$
+    UPDATE polaris_acid_sql SET n = n + 1 WHERE id = 1;
+    UPDATE polaris_acid_sql SET n = n * 2 WHERE id = 1;
+    SELECT count(*) FROM polaris_acid_sql WHERE id = 1;
+$$ LANGUAGE sql;
+
+SELECT polaris_acid_upd2_sql() AS rows_seen_inside_func;
+SELECT id, n FROM polaris_acid_sql ORDER BY n;
+SELECT COUNT(*) AS cnt, SUM(n) AS sumn FROM polaris_acid_sql;
+
+DROP FUNCTION polaris_acid_upd2_sql();
+DROP TABLE polaris_acid_sql;
+
+-- ============================================================
+-- Cleanup
+-- ============================================================
+DROP CATALOG polaris_acid_cat;
+DROP USER MAPPING FOR current_user SERVER polaris_acid_cat_srv;
+DROP SERVER polaris_acid_cat_srv;
+DROP VOLUME polaris_acid_vol;
+DROP USER MAPPING FOR current_user SERVER polaris_acid_vol_srv;
+DROP SERVER polaris_acid_vol_srv;

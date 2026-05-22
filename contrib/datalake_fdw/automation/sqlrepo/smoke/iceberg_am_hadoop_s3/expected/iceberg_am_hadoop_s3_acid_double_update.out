@@ -1,0 +1,125 @@
+-- Iceberg AM on Hadoop catalog (S3 volume): same-transaction
+-- read-your-own-writes regression (issue #338).
+--
+-- Hadoop is a non-builtin external catalog, so it shares the code path
+-- the #338 fix touched in pg_iceberg_catalog_helper.c.  Before the fix,
+-- the same-tx UPDATE shape silently produced two rows; this test pins
+-- the corrected single-row outcome.
+CREATE EXTENSION IF NOT EXISTS datalake_fdw;
+SET DateStyle = 'ISO, YMD';
+DROP SERVER IF EXISTS hd_s3_acid_cat_srv CASCADE;
+NOTICE:  server "hd_s3_acid_cat_srv" does not exist, skipping
+CREATE SERVER hd_s3_acid_cat_srv FOREIGN DATA WRAPPER iceberg_catalog_fdw
+    OPTIONS (type 'hadoop');
+CREATE USER MAPPING FOR current_user SERVER hd_s3_acid_cat_srv;
+CREATE FOREIGN CATALOG hd_s3_acid_cat SERVER hd_s3_acid_cat_srv
+    OPTIONS (warehouse_location_prefix 's3a://warehouse/iceberg_hadoop_s3_acid_double_update/');
+SET iceberg_default_catalog = 'hd_s3_acid_cat';
+DROP SERVER IF EXISTS hd_s3_acid_vol_srv CASCADE;
+NOTICE:  server "hd_s3_acid_vol_srv" does not exist, skipping
+CREATE SERVER hd_s3_acid_vol_srv FOREIGN DATA WRAPPER iceberg_volume_fdw
+    OPTIONS (
+        type 's3',
+        endpoint 'http://minio:9000',
+        region 'us-east-1',
+        bucket_name 'warehouse',
+        path_style_access 'true'
+    );
+CREATE USER MAPPING FOR current_user SERVER hd_s3_acid_vol_srv
+    OPTIONS (access_key_id 'admin', secret_access_key 'admin12345');
+CREATE FOREIGN VOLUME hd_s3_acid_vol SERVER hd_s3_acid_vol_srv
+    OPTIONS (base_path '/iceberg_hadoop_s3_acid_double_update/', allow_writes 'true');
+SET iceberg_default_volume = 'hd_s3_acid_vol';
+-- Case A: raw BEGIN/UPDATE/UPDATE/COMMIT
+DROP TABLE IF EXISTS hd_s3_acid_raw;
+NOTICE:  table "hd_s3_acid_raw" does not exist, skipping
+CREATE ICEBERG TABLE hd_s3_acid_raw (id int, n int);
+INSERT INTO hd_s3_acid_raw VALUES (1, 10);
+BEGIN;
+UPDATE hd_s3_acid_raw SET n = n + 1 WHERE id = 1;
+UPDATE hd_s3_acid_raw SET n = n * 2 WHERE id = 1;
+COMMIT;
+SELECT id, n FROM hd_s3_acid_raw ORDER BY n;
+ id | n  
+----+----
+  1 | 22
+(1 row)
+
+SELECT COUNT(*) AS cnt, SUM(n) AS sumn FROM hd_s3_acid_raw;
+ cnt | sumn 
+-----+------
+   1 |   22
+(1 row)
+
+DROP TABLE hd_s3_acid_raw;
+-- Case B: plpgsql function double UPDATE
+DROP TABLE IF EXISTS hd_s3_acid_pl;
+NOTICE:  table "hd_s3_acid_pl" does not exist, skipping
+CREATE ICEBERG TABLE hd_s3_acid_pl (id int, n int);
+INSERT INTO hd_s3_acid_pl VALUES (1, 10);
+CREATE OR REPLACE FUNCTION hd_s3_acid_upd2_pl() RETURNS bigint AS $$
+DECLARE c bigint;
+BEGIN
+    UPDATE hd_s3_acid_pl SET n = n + 1 WHERE id = 1;
+    UPDATE hd_s3_acid_pl SET n = n * 2 WHERE id = 1;
+    SELECT count(*) INTO c FROM hd_s3_acid_pl WHERE id = 1;
+    RETURN c;
+END;
+$$ LANGUAGE plpgsql;
+SELECT hd_s3_acid_upd2_pl() AS rows_seen_inside_func;
+ rows_seen_inside_func 
+-----------------------
+                     1
+(1 row)
+
+SELECT id, n FROM hd_s3_acid_pl ORDER BY n;
+ id | n  
+----+----
+  1 | 22
+(1 row)
+
+SELECT COUNT(*) AS cnt, SUM(n) AS sumn FROM hd_s3_acid_pl;
+ cnt | sumn 
+-----+------
+   1 |   22
+(1 row)
+
+DROP FUNCTION hd_s3_acid_upd2_pl();
+DROP TABLE hd_s3_acid_pl;
+-- Case C: sql function double UPDATE
+DROP TABLE IF EXISTS hd_s3_acid_sql;
+NOTICE:  table "hd_s3_acid_sql" does not exist, skipping
+CREATE ICEBERG TABLE hd_s3_acid_sql (id int, n int);
+INSERT INTO hd_s3_acid_sql VALUES (1, 10);
+CREATE OR REPLACE FUNCTION hd_s3_acid_upd2_sql() RETURNS bigint AS $$
+    UPDATE hd_s3_acid_sql SET n = n + 1 WHERE id = 1;
+    UPDATE hd_s3_acid_sql SET n = n * 2 WHERE id = 1;
+    SELECT count(*) FROM hd_s3_acid_sql WHERE id = 1;
+$$ LANGUAGE sql;
+SELECT hd_s3_acid_upd2_sql() AS rows_seen_inside_func;
+ rows_seen_inside_func 
+-----------------------
+                     1
+(1 row)
+
+SELECT id, n FROM hd_s3_acid_sql ORDER BY n;
+ id | n  
+----+----
+  1 | 22
+(1 row)
+
+SELECT COUNT(*) AS cnt, SUM(n) AS sumn FROM hd_s3_acid_sql;
+ cnt | sumn 
+-----+------
+   1 |   22
+(1 row)
+
+DROP FUNCTION hd_s3_acid_upd2_sql();
+DROP TABLE hd_s3_acid_sql;
+-- Cleanup
+DROP VOLUME hd_s3_acid_vol;
+DROP USER MAPPING FOR current_user SERVER hd_s3_acid_vol_srv;
+DROP SERVER hd_s3_acid_vol_srv;
+DROP CATALOG hd_s3_acid_cat;
+DROP USER MAPPING FOR current_user SERVER hd_s3_acid_cat_srv;
+DROP SERVER hd_s3_acid_cat_srv;

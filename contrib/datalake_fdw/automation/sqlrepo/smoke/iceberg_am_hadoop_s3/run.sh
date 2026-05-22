@@ -12,6 +12,7 @@ HERE_IN_CONTAINER="/workspace/database/contrib/datalake_fdw/automation/sqlrepo/s
 docker exec "$LAKEHOUSE" bash -lc '
     mc alias set local http://127.0.0.1:9100 admin admin12345 >/dev/null 2>&1
     mc rm --recursive --force local/warehouse/iceberg_hadoop_s3_smoke/ >/dev/null 2>&1
+    mc rm --recursive --force local/warehouse/iceberg_hadoop_s3_acid_double_update/ >/dev/null 2>&1
 ' >/dev/null 2>&1 || true
 
 docker exec -u gpadmin "$CONTAINER" bash -c "
@@ -23,4 +24,5 @@ docker exec -u gpadmin "$CONTAINER" bash -c "
 SQL
   cd $HERE_IN_CONTAINER
   psql -d $DB -v ON_ERROR_STOP=1 -f sql/iceberg_am_hadoop_s3_basic.sql 2>&1 | tail -100
+  psql -d $DB -v ON_ERROR_STOP=1 -f sql/iceberg_am_hadoop_s3_acid_double_update.sql 2>&1 | tail -100
 "

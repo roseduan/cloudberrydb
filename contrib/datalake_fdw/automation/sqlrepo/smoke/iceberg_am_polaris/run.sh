@@ -21,20 +21,26 @@ POLARIS="${POLARIS:-singlecluster-polaris-1}"
 PGPORT="${PGPORT:-7000}"
 HERE_IN_CONTAINER="/workspace/database/contrib/datalake_fdw/automation/sqlrepo/smoke/iceberg_am_polaris"
 
-# --- 1. Pre-clean Polaris table registration (best effort, ignore 404) ---
+# --- 1. Pre-clean Polaris table registrations (best effort, ignore 404) ---
 docker exec "$POLARIS" bash -lc '
     TOKEN=$(curl -s -X POST http://127.0.0.1:8181/api/catalog/v1/oauth/tokens \
       -d "grant_type=client_credentials&client_id=root&client_secret=s3cr3t&scope=PRINCIPAL_ROLE:ALL" \
       | sed -n "s/.*\"access_token\":\"\\([^\"]*\\)\".*/\\1/p")
-    curl -s -X DELETE -H "Authorization: Bearer $TOKEN" \
-      "http://127.0.0.1:8181/api/catalog/v1/polaris_default_catalog/namespaces/public/tables/polaris_smoke" \
-      -o /dev/null
+    for t in polaris_smoke polaris_acid_raw polaris_acid_pl polaris_acid_sql; do
+        curl -s -X DELETE -H "Authorization: Bearer $TOKEN" \
+          "http://127.0.0.1:8181/api/catalog/v1/polaris_default_catalog/namespaces/public/tables/$t" \
+          -o /dev/null
+    done
 ' >/dev/null 2>&1 || true
 
-# --- 2. Pre-clean MinIO objects under the table prefix ---
+# --- 2. Pre-clean MinIO objects under each test's table prefix ---
 docker exec "$LAKEHOUSE" bash -lc '
     mc alias set local http://127.0.0.1:9100 admin admin12345 >/dev/null 2>&1
     mc rm --recursive --force local/warehouse/public/polaris_smoke/ >/dev/null 2>&1
+    mc rm --recursive --force local/warehouse/public/polaris_acid_raw/ >/dev/null 2>&1
+    mc rm --recursive --force local/warehouse/public/polaris_acid_pl/  >/dev/null 2>&1
+    mc rm --recursive --force local/warehouse/public/polaris_acid_sql/ >/dev/null 2>&1
+    mc rm --recursive --force local/warehouse/polaris_acid_double_update/ >/dev/null 2>&1
 ' >/dev/null 2>&1 || true
 
 # --- 3. Run the test SQL ---
@@ -55,4 +61,5 @@ docker exec -u gpadmin "$CONTAINER" bash -c "
 SQL
   cd $HERE_IN_CONTAINER
   psql -d $DB -v ON_ERROR_STOP=1 -f sql/iceberg_am_polaris_basic.sql 2>&1 | tail -120
+  psql -d $DB -v ON_ERROR_STOP=1 -f sql/iceberg_am_polaris_acid_double_update.sql 2>&1 | tail -120
 "
