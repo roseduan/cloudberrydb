@@ -6,7 +6,8 @@ include $(PGXS)
 REGRESS = iceberg_buildin iceberg_buildin_statistics iceberg_buildin_vacuum iceberg_buildin_deferred_commit \
           iceberg_buildin_distribution iceberg_buildin_meta_safety \
           iceberg_catalog_options iceberg_volume_options iceberg_ddl_types \
-          iceberg_dml_edge_cases iceberg_metadata_cache iceberg_namespace \
+          iceberg_dml_edge_cases iceberg_update_subquery \
+          iceberg_metadata_cache iceberg_namespace \
           iceberg_deferred_commit_extended iceberg_volume_hdfs iceberg_vacuum_extended \
           iceberg_analyze iceberg_delete_filters iceberg_toolkit_ops \
           iceberg_write_types iceberg_delete_coverage iceberg_volume_ops \
