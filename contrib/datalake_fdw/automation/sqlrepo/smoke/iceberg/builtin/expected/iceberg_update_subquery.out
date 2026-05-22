@@ -8,6 +8,7 @@
 --          its file index map is empty and any file_id lookup fails.
 --          DELETE shares the same file-id decode path (Case D below).
 CREATE EXTENSION IF NOT EXISTS datalake_fdw;
+NOTICE:  extension "datalake_fdw" already exists, skipping
 -- Pin DateStyle so the textual representation in the expected file is stable
 -- regardless of the cluster's default (the demo cluster uses SQL,MDY).
 SET DateStyle = 'ISO, YMD';
