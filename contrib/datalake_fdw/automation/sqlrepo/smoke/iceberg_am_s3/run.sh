@@ -16,10 +16,11 @@ LAKEHOUSE="${LAKEHOUSE:-lakehouse}"
 PGPORT="${PGPORT:-7000}"
 HERE_IN_CONTAINER="/workspace/database/contrib/datalake_fdw/automation/sqlrepo/smoke/iceberg_am_s3"
 
-# --- Pre-clean MinIO objects under the warehouse prefix ---
+# --- Pre-clean MinIO objects under each test's warehouse prefix ---
 docker exec "$LAKEHOUSE" bash -lc '
     mc alias set local http://127.0.0.1:9100 admin admin12345 >/dev/null 2>&1
     mc rm --recursive --force local/warehouse/iceberg_s3_smoke/ >/dev/null 2>&1
+    mc rm --recursive --force local/warehouse/iceberg_s3_acid_double_update/ >/dev/null 2>&1
 ' >/dev/null 2>&1 || true
 
 # --- Run the test SQL ---
@@ -32,4 +33,5 @@ docker exec -u gpadmin "$CONTAINER" bash -c "
 SQL
   cd $HERE_IN_CONTAINER
   psql -d $DB -v ON_ERROR_STOP=1 -f sql/iceberg_am_s3_basic.sql 2>&1 | tail -100
+  psql -d $DB -v ON_ERROR_STOP=1 -f sql/iceberg_am_s3_acid_double_update.sql 2>&1 | tail -100
 "

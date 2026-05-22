@@ -1,0 +1,126 @@
+-- Iceberg AM on S3 catalog: same-transaction read-your-own-writes regression.
+--
+-- Purpose: pin the fix for issue #338 (reporter-confirmed s3-catalog
+-- repro).  An Iceberg AM table on a `type='s3'` catalog used to violate
+-- ACID read-your-own-writes when two UPDATEs targeted the same row inside
+-- one BEGIN/COMMIT (or inside a SQL/plpgsql function): the second UPDATE
+-- read the pre-first-UPDATE snapshot, recomputed against stale data, and
+-- failed to emit a position-delete for the first UPDATE's new row, so
+-- COMMIT left two rows where one should remain.  The same workload on a
+-- builtin catalog already worked -- the divergence was that
+-- execute_get_fragments_via_fdw() only populated `request.metadataLocation`
+-- on the is_internal=false branch, so a non-builtin server with
+-- is_internal=true (table created with no explicit OPTIONS) sent no
+-- deferred-RYOW "metadata_location" property to the agent, and the agent
+-- fell back to the external catalog's current pointer.
+--
+-- Fix: pg_iceberg_catalog_helper.c now sets request.metadataLocation
+-- unconditionally for both GET_FRAGMENT and GET_STATISTICS reads, in
+-- addition to (not instead of) buildInCatalog.metadataLocation.
+--
+-- Requires the singlecluster lakehouse stack (MinIO at minio:9000,
+-- admin/admin12345, bucket "warehouse") + the matching pre-cleanup that
+-- iceberg_am_s3/run.sh already performs.
+
+CREATE EXTENSION IF NOT EXISTS datalake_fdw;
+SET DateStyle = 'ISO, YMD';
+
+-- ===== S3 catalog + S3 volume (same shape as iceberg_am_s3_basic) =====
+DROP SERVER IF EXISTS s3_acid_cat_srv CASCADE;
+CREATE SERVER s3_acid_cat_srv FOREIGN DATA WRAPPER iceberg_catalog_fdw
+    OPTIONS (type 's3');
+CREATE USER MAPPING FOR current_user SERVER s3_acid_cat_srv;
+CREATE FOREIGN CATALOG s3_acid_cat SERVER s3_acid_cat_srv
+    OPTIONS (warehouse_location_prefix 's3a://warehouse/iceberg_s3_acid_double_update/');
+SET iceberg_default_catalog = 's3_acid_cat';
+
+DROP SERVER IF EXISTS s3_acid_vol_srv CASCADE;
+CREATE SERVER s3_acid_vol_srv FOREIGN DATA WRAPPER iceberg_volume_fdw
+    OPTIONS (
+        type 's3',
+        endpoint 'http://minio:9000',
+        region 'us-east-1',
+        bucket_name 'warehouse',
+        path_style_access 'true'
+    );
+CREATE USER MAPPING FOR current_user SERVER s3_acid_vol_srv
+    OPTIONS (access_key_id 'admin', secret_access_key 'admin12345');
+CREATE FOREIGN VOLUME s3_acid_vol SERVER s3_acid_vol_srv
+    OPTIONS (base_path '/iceberg_s3_acid_double_update/', allow_writes 'true');
+SET iceberg_default_volume = 's3_acid_vol';
+
+-- ============================================================
+-- Case A: raw BEGIN; UPDATE; UPDATE; COMMIT on the same row.
+-- The exact shape from issue #338's original repro.
+-- ============================================================
+DROP TABLE IF EXISTS c_s3_acid_raw;
+CREATE ICEBERG TABLE c_s3_acid_raw (id int, n int);
+INSERT INTO c_s3_acid_raw VALUES (1, 10);
+
+BEGIN;
+UPDATE c_s3_acid_raw SET n = n + 1 WHERE id = 1;
+UPDATE c_s3_acid_raw SET n = n * 2 WHERE id = 1;
+COMMIT;
+
+-- expected (heap baseline): exactly one row with n=22
+SELECT id, n FROM c_s3_acid_raw ORDER BY n;
+SELECT COUNT(*) AS cnt, SUM(n) AS sumn FROM c_s3_acid_raw;
+
+DROP TABLE c_s3_acid_raw;
+
+-- ============================================================
+-- Case B: LANGUAGE plpgsql function wrapping two UPDATEs.
+-- Issue #338 follow-up comment reported the same defect for both
+-- LANGUAGE sql and LANGUAGE plpgsql; testing plpgsql here covers the
+-- common surface.
+-- ============================================================
+DROP TABLE IF EXISTS c_s3_acid_pl;
+CREATE ICEBERG TABLE c_s3_acid_pl (id int, n int);
+INSERT INTO c_s3_acid_pl VALUES (1, 10);
+
+CREATE OR REPLACE FUNCTION s3_acid_upd2_pl() RETURNS bigint AS $$
+DECLARE c bigint;
+BEGIN
+    UPDATE c_s3_acid_pl SET n = n + 1 WHERE id = 1;
+    UPDATE c_s3_acid_pl SET n = n * 2 WHERE id = 1;
+    SELECT count(*) INTO c FROM c_s3_acid_pl WHERE id = 1;
+    RETURN c;
+END;
+$$ LANGUAGE plpgsql;
+
+SELECT s3_acid_upd2_pl() AS rows_seen_inside_func;
+SELECT id, n FROM c_s3_acid_pl ORDER BY n;
+SELECT COUNT(*) AS cnt, SUM(n) AS sumn FROM c_s3_acid_pl;
+
+DROP FUNCTION s3_acid_upd2_pl();
+DROP TABLE c_s3_acid_pl;
+
+-- ============================================================
+-- Case C: LANGUAGE sql function wrapping two UPDATEs.
+-- ============================================================
+DROP TABLE IF EXISTS c_s3_acid_sql;
+CREATE ICEBERG TABLE c_s3_acid_sql (id int, n int);
+INSERT INTO c_s3_acid_sql VALUES (1, 10);
+
+CREATE OR REPLACE FUNCTION s3_acid_upd2_sql() RETURNS bigint AS $$
+    UPDATE c_s3_acid_sql SET n = n + 1 WHERE id = 1;
+    UPDATE c_s3_acid_sql SET n = n * 2 WHERE id = 1;
+    SELECT count(*) FROM c_s3_acid_sql WHERE id = 1;
+$$ LANGUAGE sql;
+
+SELECT s3_acid_upd2_sql() AS rows_seen_inside_func;
+SELECT id, n FROM c_s3_acid_sql ORDER BY n;
+SELECT COUNT(*) AS cnt, SUM(n) AS sumn FROM c_s3_acid_sql;
+
+DROP FUNCTION s3_acid_upd2_sql();
+DROP TABLE c_s3_acid_sql;
+
+-- ============================================================
+-- Cleanup
+-- ============================================================
+DROP VOLUME s3_acid_vol;
+DROP USER MAPPING FOR current_user SERVER s3_acid_vol_srv;
+DROP SERVER s3_acid_vol_srv;
+DROP CATALOG s3_acid_cat;
+DROP USER MAPPING FOR current_user SERVER s3_acid_cat_srv;
+DROP SERVER s3_acid_cat_srv;

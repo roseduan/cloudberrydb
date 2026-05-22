@@ -135,14 +135,23 @@ execute_get_fragments_via_fdw(const char *metadata_location,
 										volumeName,
 										schema);
 
+	/*
+	 * Issue #338: always populate request.metadataLocation so
+	 * createCreateRequestJson() emits the deferred-RYOW "metadata_location"
+	 * property for every catalog server type.  Without this, an Iceberg AM
+	 * table created on a non-builtin catalog (e.g. type='s3') with no
+	 * explicit OPTIONS clause has is_internal=true AND server_type !=
+	 * builtin, so the JSON sent to the agent has no metadata_location key,
+	 * the agent falls back to the external catalog's current pointer (still
+	 * pre-this-statement inside a multi-statement transaction), and same-tx
+	 * Read-Your-Own-Writes silently breaks.  buildInCatalog.metadataLocation
+	 * is also kept for the builtin-catalog properties path.
+	 */
+	fdwState->request.metadataLocation = metadata_location;
 	if (is_internal)
 	{
 		fdwState->request.buildInCatalog.metadataLocation = metadata_location;
 		fdwState->request.buildInCatalog.tableExists = true;
-	}
-	else
-	{
-		fdwState->request.metadataLocation = metadata_location;
 	}
 
 	scanstate->fdw_state = fdwState;
@@ -180,14 +189,15 @@ execute_get_statistics_via_fdw(const char *metadata_location,
 										volumeName,
 										schema);
 
+	/* Issue #338: see execute_get_fragments_via_fdw for the rationale.
+	 * Statistics during a multi-statement transaction must reflect the
+	 * uncommitted metadata location too, or planner cardinality goes stale
+	 * between the first DML and the next. */
+	fdwState->request.metadataLocation = metadata_location;
 	if (is_internal)
 	{
 		fdwState->request.buildInCatalog.metadataLocation = metadata_location;
 		fdwState->request.buildInCatalog.tableExists = true;
-	}
-	else
-	{
-		fdwState->request.metadataLocation = metadata_location;
 	}
 
 	scanstate->fdw_state = fdwState;

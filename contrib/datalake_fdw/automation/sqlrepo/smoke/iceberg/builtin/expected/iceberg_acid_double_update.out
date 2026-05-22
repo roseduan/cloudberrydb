@@ -213,6 +213,11 @@ SELECT id, n FROM ice_subject  WHERE id IN (3, 10, 17) ORDER BY id;
 
 -- ============================================================
 -- Cleanup
+-- Note: the non-builtin (s3) catalog variant of this defect (issue #338's
+-- reporter-confirmed case) is covered in the iceberg_am_s3 smoke directory
+-- under iceberg_am_s3_acid_double_update -- separate from this builtin
+-- suite because the s3 path needs the run.sh wrapper to pre-cleanup MinIO
+-- objects between runs.
 -- ============================================================
 DROP TABLE heap_baseline;
 DROP TABLE ice_subject;
