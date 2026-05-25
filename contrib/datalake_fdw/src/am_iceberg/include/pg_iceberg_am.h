@@ -84,6 +84,14 @@ extern void pg_iceberg_estimate_rel_size(Relation rel, int32 *attr_widths,
 										 double *tuples, double *allvisfrac);
 extern uint64 pg_iceberg_relation_size(Relation rel, ForkNumber forkNumber);
 
+/*
+ * Persist Iceberg catalog metadata (recordCount / bytesInDataFile) into
+ * pg_class.reltuples / pg_class.relpages.  Required because ORCA reads
+ * rel->rd_rel->reltuples directly and does not call the tableam
+ * relation_estimate_size callback.  Must run on the QD only.
+ */
+extern void pg_iceberg_refresh_pg_class_stats(Relation rel);
+
 extern List *pg_iceberg_build_scan_am_private(Relation rel, struct PlanState *ps,
 											   int random_segment_num);
 extern List *pg_iceberg_list_data_fragments(Relation rel);

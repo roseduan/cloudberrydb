@@ -14,6 +14,7 @@
 
 #include "postgres.h"
 
+#include "access/multixact.h"
 #include "access/table.h"
 #include "access/tableam.h"
 #include "catalog/oid_dispatch.h"
@@ -513,6 +514,80 @@ pg_iceberg_relation_size(Relation rel, ForkNumber forkNumber)
 	pg_iceberg_free_table_info(table_info);
 
 	return total_size;
+}
+
+/*
+ * pg_iceberg_refresh_pg_class_stats
+ *
+ * Read recordCount / bytesInDataFile from the Iceberg catalog metadata
+ * and persist them into pg_class.reltuples and pg_class.relpages so that
+ * ORCA can pick up accurate cardinality.
+ *
+ * ORCA bypasses the tableam relation_estimate_size callback and reads
+ * rel->rd_rel->reltuples directly (see CTranslatorRelcacheToDXL.cpp).
+ * Without this refresh, Iceberg tables stay at reltuples=-1 and ORCA
+ * treats them as one-row relations, producing catastrophic Broadcast
+ * Motion plans (see hashdata-lightning issue #339).
+ *
+ * The Iceberg catalog service is only reachable from the QD; callers
+ * must ensure Gp_role == GP_ROLE_DISPATCH.
+ */
+void
+pg_iceberg_refresh_pg_class_stats(Relation rel)
+{
+	IcebergTableInfo	   *table_info;
+	IcebergMetadataInfo	   *metadata_info;
+	IcebergTableStatistics *statistics;
+	BlockNumber		pages = 1;
+	double			tuples = 0.0;
+	int64			total_size = 0;
+
+	Assert(Gp_role == GP_ROLE_DISPATCH);
+
+	table_info = pg_iceberg_get_table_info(RelationGetRelid(rel));
+	metadata_info = pg_iceberg_get_metadata_info(RelationGetRelid(rel));
+	statistics = pg_iceberg_get_statistics_with_catalog(rel,
+														table_info,
+														metadata_info->metadata_location,
+														metadata_info->is_internal);
+
+	if (statistics->recordCount > 0)
+		tuples = (double) statistics->recordCount;
+
+	if (statistics->bytesInDataFile > 0)
+		total_size = statistics->bytesInDataFile;
+
+	pages = (total_size + (BLCKSZ - 1)) / BLCKSZ;
+	if (pages < 1)
+		pages = 1;
+
+	/*
+	 * Persist into pg_class.  Passing isvacuum=false treats this as an
+	 * ANALYZE-style refresh, which lets vac_update_relstats actually
+	 * write num_pages / num_tuples on the QD (the VACUUM path on QD
+	 * deliberately skips the update; see vacuum.c).  InvalidTransactionId
+	 * / InvalidMultiXactId signal "do not touch relfrozenxid/relminmxid".
+	 *
+	 * Pass the relation's current relhasindex through unchanged.  Hardcoding
+	 * `false` would cause vac_update_relstats to clear pg_class.relhasindex
+	 * whenever this refresh runs on a relation that does have indexes (the
+	 * function rewrites relhasindex on the !in_outer_xact path).  Reading
+	 * the value from rel->rd_rel matches the analyze.c convention and keeps
+	 * the write scope confined to relpages/reltuples.
+	 */
+	vac_update_relstats(rel,
+						pages,
+						tuples,
+						0,			/* num_all_visible_pages */
+						rel->rd_rel->relhasindex,
+						InvalidTransactionId,
+						InvalidMultiXactId,
+						false,		/* in_outer_xact */
+						false);		/* isvacuum */
+
+	pfree(statistics);
+	pg_iceberg_free_metadata_info(metadata_info);
+	pg_iceberg_free_table_info(table_info);
 }
 
 char *

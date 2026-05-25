@@ -75,6 +75,7 @@
 #include "am_iceberg/include/pg_iceberg_ddl.h"
 #include "am_iceberg/include/pg_iceberg_extensible.h"
 #include "am_iceberg/include/pg_iceberg_custom_scan.h"
+#include "am_iceberg/include/pg_iceberg_am.h"
 
 
 PG_MODULE_MAGIC;
@@ -555,21 +556,63 @@ datalake_ProcessUtility(PlannedStmt *pstmt,
 			VacuumStmt *vacstmt = (VacuumStmt *) pstmt->utilityStmt;
 
 			/*
-			 * Plain ANALYZE on Iceberg relations is a no-op: planner
-			 * cardinality comes from iceberg_estimate_rel_size, which reads
-			 * recordCount/bytesInDataFile directly from the Iceberg catalog
-			 * on the QD.  Short-circuit here so the kernel never dispatches
-			 * pg_relation_size() to QEs (which cannot reach the Iceberg
-			 * catalog service).  VACUUM — with or without ANALYZE — still
-			 * goes through the default path where iceberg_relation_vacuum
-			 * handles the AM work via ExtensibleNode dispatch.
+			 * Plain ANALYZE on Iceberg relations skips per-row sampling —
+			 * the Postgres planner can pick up cardinality via the tableam
+			 * relation_estimate_size callback (iceberg_estimate_rel_size),
+			 * but ORCA reads rel->rd_rel->reltuples directly and never
+			 * calls the callback.  So we refresh pg_class.reltuples and
+			 * pg_class.relpages from the Iceberg catalog metadata here,
+			 * then short-circuit before the kernel dispatches sampling to
+			 * QEs (which cannot reach the Iceberg catalog service).
+			 *
+			 * VACUUM — with or without ANALYZE — still goes through the
+			 * default path where iceberg_relation_vacuum handles the AM
+			 * work via ExtensibleNode dispatch.
+			 *
+			 * See hashdata-lightning issue #339.
 			 */
 			if (Gp_role == GP_ROLE_DISPATCH &&
 				!vacstmt->is_vacuumcmd &&
 				all_vacuum_rels_are_iceberg(vacstmt->rels))
 			{
+				ListCell   *lc;
+
+				foreach(lc, vacstmt->rels)
+				{
+					VacuumRelation *vrel = lfirst_node(VacuumRelation, lc);
+					Oid			relid;
+					Relation	rel;
+
+					if (OidIsValid(vrel->oid))
+						relid = vrel->oid;
+					else if (vrel->relation != NULL)
+						/*
+						 * Resolve the OID without taking a lock here.  The
+						 * subsequent table_open() is the sole acquirer of
+						 * ShareUpdateExclusiveLock; passing the lockmode to
+						 * RangeVarGetRelid would acquire it a second time
+						 * via LockRelationOid, and table_close() would only
+						 * release one hold -- leaking the extra lock until
+						 * transaction end.  This matches analyze.c's
+						 * expand_vacuum_rel() pattern.
+						 */
+						relid = RangeVarGetRelid(vrel->relation,
+												 NoLock,
+												 true);
+					else
+						continue;
+
+					if (!OidIsValid(relid))
+						continue;
+
+					rel = table_open(relid, ShareUpdateExclusiveLock);
+					pg_iceberg_refresh_pg_class_stats(rel);
+					table_close(rel, ShareUpdateExclusiveLock);
+				}
+
 				ereport(NOTICE,
-						(errmsg("ANALYZE is a no-op for Iceberg tables; planner stats come from Iceberg catalog metadata")));
+						(errmsg("ANALYZE on Iceberg tables refreshed pg_class.reltuples/relpages from Iceberg catalog metadata"),
+						 errhint("Column-level statistics live in the Iceberg manifests and are consulted via tableam callbacks.")));
 				return;
 			}
 			break;
