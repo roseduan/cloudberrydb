@@ -41,15 +41,17 @@ SELECT grp, count(*) FROM lha_t GROUP BY grp LIMIT 3;
          Output: grp, (count(*))
          ->  Vec Limit
                Output: grp, (count(*))
+               Vec Plan Merge:  1 child
                ->  Vec HashAggregate
                      Output: grp, count(*)
                      Group Key: lha_t.grp
                      Vec HashAgg Method:  Limit+HashAgg  Limit: 3
+                     Vec Plan Merge:  1 child
                      ->  Vec Seq Scan on vec_lha.lha_t
                            Output: grp
  Settings: optimizer = 'on'
  Optimizer: GPORCA
-(14 rows)
+(16 rows)
 
 -- 2) Same shape under the postgres planner.  Both optimizers must
 --    light up fusion identically when the segment Limit is present.
@@ -64,15 +66,17 @@ SELECT grp, count(*) FROM lha_t GROUP BY grp LIMIT 5;
          Output: grp, (count(*))
          ->  Vec Limit
                Output: grp, (count(*))
+               Vec Plan Merge:  1 child
                ->  Vec HashAggregate
                      Output: grp, count(*)
                      Group Key: lha_t.grp
                      Vec HashAgg Method:  Limit+HashAgg  Limit: 5
+                     Vec Plan Merge:  1 child
                      ->  Vec Seq Scan on vec_lha.lha_t
                            Output: grp
  Settings: optimizer = 'off'
  Optimizer: Postgres query optimizer
-(14 rows)
+(16 rows)
 
 RESET optimizer;
 -- 2a) LIMIT with OFFSET currently falls out of vectorization entirely.
@@ -127,11 +131,12 @@ SELECT grp, count(*) FROM lha_t GROUP BY grp;
          Output: grp, count(*)
          Group Key: lha_t.grp
          Vec HashAgg Method:  Sonic
+         Vec Plan Merge:  1 child
          ->  Vec Seq Scan on vec_lha.lha_t
                Output: grp
  Settings: optimizer = 'on'
  Optimizer: GPORCA
-(10 rows)
+(11 rows)
 
 -- 4) ORDER BY between Agg and Limit forces a Sort, so the Agg's
 --    immediate parent in the segment slice is Sort, not Limit.
@@ -146,19 +151,22 @@ SELECT grp, count(*) FROM lha_t GROUP BY grp ORDER BY grp LIMIT 3;
          Merge Key: grp
          ->  Vec Limit
                Output: grp, (count(*))
+               Vec Plan Merge:  1 child
                ->  Vec Sort
                      Output: grp, (count(*))
                      Sort Key: lha_t.grp
                      Vec Sort Method:  TopK  K: 3
+                     Vec Plan Merge:  1 child
                      ->  Vec HashAggregate
                            Output: grp, count(*)
                            Group Key: lha_t.grp
                            Vec HashAgg Method:  Sonic
+                           Vec Plan Merge:  1 child
                            ->  Vec Seq Scan on vec_lha.lha_t
                                  Output: grp
  Settings: optimizer = 'on'
  Optimizer: GPORCA
-(19 rows)
+(22 rows)
 
 -- 5) LIMIT over the configured cap.  Under the planner the segment
 --    Limit IS pushed (so the walker finds the parent Limit), but
@@ -179,15 +187,17 @@ SELECT grp, count(*) FROM lha_t GROUP BY grp LIMIT 101;
          Output: grp, (count(*))
          ->  Vec Limit
                Output: grp, (count(*))
+               Vec Plan Merge:  1 child
                ->  Vec HashAggregate
                      Output: grp, count(*)
                      Group Key: lha_t.grp
                      Vec HashAgg Method:  Sonic
+                     Vec Plan Merge:  1 child
                      ->  Vec Seq Scan on vec_lha.lha_t
                            Output: grp
  Settings: optimizer = 'off'
  Optimizer: Postgres query optimizer
-(14 rows)
+(16 rows)
 
 RESET vector.limit_hashagg_max_total;
 RESET optimizer;
@@ -227,15 +237,17 @@ SELECT grp, count(*) FROM lha_t GROUP BY grp LIMIT 3;
          Output: grp, (count(*))
          ->  Vec Limit
                Output: grp, (count(*))
+               Vec Plan Merge:  1 child
                ->  Vec HashAggregate
                      Output: grp, count(*)
                      Group Key: lha_t.grp
                      Vec HashAgg Method:  Sonic
+                     Vec Plan Merge:  1 child
                      ->  Vec Seq Scan on vec_lha.lha_t
                            Output: grp
  Settings: optimizer = 'on'
  Optimizer: GPORCA
-(14 rows)
+(16 rows)
 
 RESET vector.limit_hashagg_max_total;
 -- ------------------------------------------------------------------

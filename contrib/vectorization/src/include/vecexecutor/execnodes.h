@@ -43,6 +43,13 @@ typedef struct VecExecuteState
 	GArrowRecordBatchReader *reader;
 	List *resqueue;
 	GArrowExecuteContext *exectx;
+	/*
+	 * Number of child arrow plans spliced into this node by
+	 * PostBuildVecPlan()->MergeChildren.  0 means no merge happened.
+	 * Read by show_vec_merge_info at EXPLAIN VERBOSE time to display
+	 * "Vec Plan Merge:  N children".
+	 */
+	int merged_child_count;
 } VecExecuteState;
 
 typedef struct VecSeqScanState

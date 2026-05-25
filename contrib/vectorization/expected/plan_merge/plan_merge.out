@@ -1,0 +1,153 @@
+-- Regression coverage for the PostBuildVecPlan -> MergeChildren splice path.
+--
+-- PostBuildVecPlan() in execMain.c collects arrow plan fragments from a
+-- vectorized PG node's children and splices them into the node's own
+-- target arrow plan via garrow_execute_plan_merge_children().  The
+-- merged child count is recorded on VecExecuteState->merged_child_count
+-- so show_vec_merge_info (explain.c) can surface it as
+--     "Vec Plan Merge:  N children"   (or "1 child")
+-- under EXPLAIN VERBOSE.  Gated on es->verbose so plain EXPLAIN output
+-- and pre-existing vec test golden files are unchanged.
+--
+-- Each branch below leaves a distinct, diff-visible footprint:
+--   (1) 1-child   : Sort/Limit over Scan -> line on Sort with "1 child"
+--   (2) 2-child   : HashJoin                -> line with "2 children"
+--   (3) N-child   : UNION ALL Append        -> line with "N children" (N >= 3)
+--   (4) verbose-off: plain EXPLAIN          -> line absent for the same plan
+--   (5) row engine: vectorization disabled  -> line absent (prefix guard)
+--   (6) correctness: vec result matches row engine
+-- Pin to the Postgres planner so the test ships with a single expected
+-- output file; ORCA produces different plan shapes for Append and joins.
+SET optimizer = off;
+SET vector.enable_vectorization = ON;
+DROP TABLE IF EXISTS pm_t1;
+NOTICE:  table "pm_t1" does not exist, skipping
+DROP TABLE IF EXISTS pm_t2;
+NOTICE:  table "pm_t2" does not exist, skipping
+DROP TABLE IF EXISTS pm_t3;
+NOTICE:  table "pm_t3" does not exist, skipping
+CREATE TABLE pm_t1 (a int, b int) USING pax DISTRIBUTED BY (a);
+CREATE TABLE pm_t2 (a int, b int) USING pax DISTRIBUTED BY (a);
+CREATE TABLE pm_t3 (a int, b int) USING pax DISTRIBUTED BY (a);
+INSERT INTO pm_t1 SELECT g,     g     FROM generate_series(1, 30) g;
+INSERT INTO pm_t2 SELECT g,     g * 2 FROM generate_series(1, 30) g;
+INSERT INTO pm_t3 SELECT g + 100, g   FROM generate_series(1, 30) g;
+ANALYZE pm_t1; ANALYZE pm_t2; ANALYZE pm_t3;
+-- (1) Single-child merge: Sort splices its lefttree (Vec Seq Scan) in.
+EXPLAIN (verbose, costs off) SELECT a, b FROM pm_t1 ORDER BY a;
+                  QUERY PLAN                  
+----------------------------------------------
+ Vec Gather Motion 3:1  (slice1; segments: 3)
+   Output: a, b
+   Merge Key: a
+   ->  Vec Sort
+         Output: a, b
+         Sort Key: pm_t1.a
+         Vec Plan Merge:  1 child
+         ->  Vec Seq Scan on public.pm_t1
+               Output: a, b
+ Settings: enable_parallel = 'off', optimizer = 'off'
+ Optimizer: Postgres query optimizer
+(11 rows)
+
+-- (2) Two-child merge: HashJoin splices left + right scan plans in.
+EXPLAIN (verbose, costs off)
+SELECT pm_t1.a, pm_t2.b FROM pm_t1 JOIN pm_t2 ON pm_t1.a = pm_t2.a;
+                   QUERY PLAN                   
+------------------------------------------------
+ Vec Gather Motion 3:1  (slice1; segments: 3)
+   Output: pm_t1.a, pm_t2.b
+   ->  Vec Hash Join
+         Output: pm_t1.a, pm_t2.b
+         Hash Cond: (pm_t1.a = pm_t2.a)
+         Vec Plan Merge:  2 children
+         ->  Vec Seq Scan on public.pm_t1
+               Output: pm_t1.a
+         ->  Vec Hash
+               Output: pm_t2.b, pm_t2.a
+               ->  Vec Seq Scan on public.pm_t2
+                     Output: pm_t2.b, pm_t2.a
+ Settings: enable_parallel = 'off', optimizer = 'off'
+ Optimizer: Postgres query optimizer
+(14 rows)
+
+-- (3) N-child merge: UNION ALL produces an Append that splices 3 children.
+EXPLAIN (verbose, costs off)
+SELECT a, b FROM pm_t1 WHERE a < 5
+UNION ALL
+SELECT a, b FROM pm_t2 WHERE a < 5
+UNION ALL
+SELECT a, b FROM pm_t3 WHERE a < 105;
+                  QUERY PLAN                  
+----------------------------------------------
+ Vec Gather Motion 3:1  (slice1; segments: 3)
+   Output: pm_t1.a, pm_t1.b
+   ->  Vec Append
+         Vec Plan Merge:  3 children
+         ->  Vec Seq Scan on public.pm_t1
+               Output: pm_t1.a, pm_t1.b
+               Filter: (pm_t1.a < 5)
+         ->  Vec Seq Scan on public.pm_t2
+               Output: pm_t2.a, pm_t2.b
+               Filter: (pm_t2.a < 5)
+         ->  Vec Seq Scan on public.pm_t3
+               Output: pm_t3.a, pm_t3.b
+               Filter: (pm_t3.a < 105)
+ Settings: enable_parallel = 'off', optimizer = 'off'
+ Optimizer: Postgres query optimizer
+(15 rows)
+
+-- (4) Same plan as (1) under non-verbose EXPLAIN: line must be absent.
+EXPLAIN (costs off) SELECT a, b FROM pm_t1 ORDER BY a;
+                  QUERY PLAN                  
+----------------------------------------------
+ Vec Gather Motion 3:1  (slice1; segments: 3)
+   Merge Key: a
+   ->  Vec Sort
+         Sort Key: a
+         ->  Vec Seq Scan on pm_t1
+ Optimizer: Postgres query optimizer
+(6 rows)
+
+-- (5) Row engine baseline: line must be absent at all.
+SET vector.enable_vectorization = OFF;
+EXPLAIN (verbose, costs off) SELECT a, b FROM pm_t1 ORDER BY a;
+                QUERY PLAN                
+------------------------------------------
+ Gather Motion 3:1  (slice1; segments: 3)
+   Output: a, b
+   Merge Key: a
+   ->  Sort
+         Output: a, b
+         Sort Key: pm_t1.a
+         ->  Seq Scan on public.pm_t1
+               Output: a, b
+ Settings: enable_parallel = 'off', optimizer = 'off'
+ Optimizer: Postgres query optimizer
+(10 rows)
+
+SET vector.enable_vectorization = ON;
+-- (6) Correctness sample: vec result must match the row engine.
+SELECT a, b FROM pm_t1 ORDER BY a LIMIT 5;
+ a | b 
+---+---
+ 1 | 1
+ 2 | 2
+ 3 | 3
+ 4 | 4
+ 5 | 5
+(5 rows)
+
+SELECT pm_t1.a, pm_t2.b FROM pm_t1 JOIN pm_t2 ON pm_t1.a = pm_t2.a ORDER BY pm_t1.a LIMIT 5;
+ a | b  
+---+----
+ 1 |  2
+ 2 |  4
+ 3 |  6
+ 4 |  8
+ 5 | 10
+(5 rows)
+
+DROP TABLE pm_t1;
+DROP TABLE pm_t2;
+DROP TABLE pm_t3;

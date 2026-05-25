@@ -59,11 +59,12 @@ SELECT i32, count(*) FROM sn GROUP BY i32;
          Output: i32, count(*)
          Group Key: sn.i32
          Vec HashAgg Method:  Sonic
+         Vec Plan Merge:  1 child
          ->  Vec Seq Scan on vec_sonic.sn
                Output: i32
  Settings: optimizer = 'off'
  Optimizer: Postgres query optimizer
-(10 rows)
+(11 rows)
 
 -- A2) sum(int8) -- two-stage: hash_sum_64 on segments, hash_sum on QD.
 --     Both HashAgg nodes should be sonic-routed.
@@ -77,11 +78,12 @@ SELECT i32, sum(i64) FROM sn GROUP BY i32;
          Output: i32, sum(i64)
          Group Key: sn.i32
          Vec HashAgg Method:  Sonic
+         Vec Plan Merge:  1 child
          ->  Vec Seq Scan on vec_sonic.sn
                Output: i32, i64
  Settings: optimizer = 'off'
  Optimizer: Postgres query optimizer
-(10 rows)
+(11 rows)
 
 -- A3) sum(numeric) -- routes to SumNumeric128Aggregate.
 EXPLAIN (VERBOSE ON, COSTS OFF)
@@ -94,11 +96,12 @@ SELECT i32, sum(n) FROM sn GROUP BY i32;
          Output: i32, sum(n)
          Group Key: sn.i32
          Vec HashAgg Method:  Sonic
+         Vec Plan Merge:  1 child
          ->  Vec Seq Scan on vec_sonic.sn
                Output: i32, n
  Settings: optimizer = 'off'
  Optimizer: Postgres query optimizer
-(10 rows)
+(11 rows)
 
 -- A4) avg(int8) -- hash_avg_trans on segments, hash_avg_final on QD.
 EXPLAIN (VERBOSE ON, COSTS OFF)
@@ -111,11 +114,12 @@ SELECT i32, avg(i64) FROM sn GROUP BY i32;
          Output: i32, avg(i64)
          Group Key: sn.i32
          Vec HashAgg Method:  Sonic
+         Vec Plan Merge:  1 child
          ->  Vec Seq Scan on vec_sonic.sn
                Output: i32, i64
  Settings: optimizer = 'off'
  Optimizer: Postgres query optimizer
-(10 rows)
+(11 rows)
 
 -- A5) GROUP BY text -- sonic_supports_key_type(STRING).
 EXPLAIN (VERBOSE ON, COSTS OFF)
@@ -135,11 +139,12 @@ SELECT t, count(*) FROM sn GROUP BY t;
                      Output: t, PARTIAL count(*)
                      Group Key: sn.t
                      Vec HashAgg Method:  Sonic
+                     Vec Plan Merge:  1 child
                      ->  Vec Seq Scan on vec_sonic.sn
                            Output: t
  Settings: optimizer = 'off'
  Optimizer: Postgres query optimizer
-(17 rows)
+(18 rows)
 
 -- A6) GROUP BY date -- DATE32 in sonic_supports_key_type.
 EXPLAIN (VERBOSE ON, COSTS OFF)
@@ -159,11 +164,12 @@ SELECT d, count(*) FROM sn GROUP BY d;
                      Output: d, PARTIAL count(*)
                      Group Key: sn.d
                      Vec HashAgg Method:  Sonic
+                     Vec Plan Merge:  1 child
                      ->  Vec Seq Scan on vec_sonic.sn
                            Output: d
  Settings: optimizer = 'off'
  Optimizer: Postgres query optimizer
-(17 rows)
+(18 rows)
 
 -- A7) GROUP BY timestamp -- TIMESTAMP in sonic_supports_key_type.
 EXPLAIN (VERBOSE ON, COSTS OFF)
@@ -183,11 +189,12 @@ SELECT ts, count(*) FROM sn GROUP BY ts;
                      Output: ts, PARTIAL count(*)
                      Group Key: sn.ts
                      Vec HashAgg Method:  Sonic
+                     Vec Plan Merge:  1 child
                      ->  Vec Seq Scan on vec_sonic.sn
                            Output: ts
  Settings: optimizer = 'off'
  Optimizer: Postgres query optimizer
-(17 rows)
+(18 rows)
 
 -- A8) min(text) -- only hash_min variant sonic implements.
 EXPLAIN (VERBOSE ON, COSTS OFF)
@@ -200,11 +207,12 @@ SELECT i32, min(t) FROM sn GROUP BY i32;
          Output: i32, min(t)
          Group Key: sn.i32
          Vec HashAgg Method:  Sonic
+         Vec Plan Merge:  1 child
          ->  Vec Seq Scan on vec_sonic.sn
                Output: i32, t
  Settings: optimizer = 'off'
  Optimizer: Postgres query optimizer
-(10 rows)
+(11 rows)
 
 -- ------------------------------------------------------------------
 -- B) Sonic-incompatible -> Normal fallback (expect "Method:  Normal")
@@ -221,11 +229,12 @@ SELECT i32 FROM sn GROUP BY i32;
          Output: i32
          Group Key: sn.i32
          Vec HashAgg Method:  Normal
+         Vec Plan Merge:  1 child
          ->  Vec Seq Scan on vec_sonic.sn
                Output: i32
  Settings: optimizer = 'off'
  Optimizer: Postgres query optimizer
-(10 rows)
+(11 rows)
 
 -- B2) max(int) -- sonic does not implement hash_max (only hash_min).
 EXPLAIN (VERBOSE ON, COSTS OFF)
@@ -238,11 +247,12 @@ SELECT i32, max(i64) FROM sn GROUP BY i32;
          Output: i32, max(i64)
          Group Key: sn.i32
          Vec HashAgg Method:  Normal
+         Vec Plan Merge:  1 child
          ->  Vec Seq Scan on vec_sonic.sn
                Output: i32, i64
  Settings: optimizer = 'off'
  Optimizer: Postgres query optimizer
-(10 rows)
+(11 rows)
 
 -- B3) sum(float8) -- float8 input not in sonic_supports_signed_int_input.
 EXPLAIN (VERBOSE ON, COSTS OFF)
@@ -255,11 +265,12 @@ SELECT i32, sum(f8) FROM sn GROUP BY i32;
          Output: i32, sum(f8)
          Group Key: sn.i32
          Vec HashAgg Method:  Normal
+         Vec Plan Merge:  1 child
          ->  Vec Seq Scan on vec_sonic.sn
                Output: i32, f8
  Settings: optimizer = 'off'
  Optimizer: Postgres query optimizer
-(10 rows)
+(11 rows)
 
 -- B4) GROUP BY bool -- bool not in sonic_supports_key_type.
 EXPLAIN (VERBOSE ON, COSTS OFF)
@@ -279,11 +290,12 @@ SELECT b, count(*) FROM sn GROUP BY b;
                      Output: b, PARTIAL count(*)
                      Group Key: sn.b
                      Vec HashAgg Method:  Normal
+                     Vec Plan Merge:  1 child
                      ->  Vec Seq Scan on vec_sonic.sn
                            Output: b
  Settings: optimizer = 'off'
  Optimizer: Postgres query optimizer
-(17 rows)
+(18 rows)
 
 -- B5) GROUP BY float8 -- float8 not in sonic_supports_key_type.
 EXPLAIN (VERBOSE ON, COSTS OFF)
@@ -303,11 +315,12 @@ SELECT f8, count(*) FROM sn GROUP BY f8;
                      Output: f8, PARTIAL count(*)
                      Group Key: sn.f8
                      Vec HashAgg Method:  Normal
+                     Vec Plan Merge:  1 child
                      ->  Vec Seq Scan on vec_sonic.sn
                            Output: f8
  Settings: optimizer = 'off'
  Optimizer: Postgres query optimizer
-(17 rows)
+(18 rows)
 
 -- B6) min(int) -- sonic only supports hash_min on text/binary.
 EXPLAIN (VERBOSE ON, COSTS OFF)
@@ -320,11 +333,12 @@ SELECT i32, min(i64) FROM sn GROUP BY i32;
          Output: i32, min(i64)
          Group Key: sn.i32
          Vec HashAgg Method:  Normal
+         Vec Plan Merge:  1 child
          ->  Vec Seq Scan on vec_sonic.sn
                Output: i32, i64
  Settings: optimizer = 'off'
  Optimizer: Postgres query optimizer
-(10 rows)
+(11 rows)
 
 -- ------------------------------------------------------------------
 -- C) Correctness: sonic-routed aggregates must match the reference.
@@ -391,15 +405,17 @@ SELECT i32, count(*) FROM sn GROUP BY i32 LIMIT 3;
          Output: i32, (count(*))
          ->  Vec Limit
                Output: i32, (count(*))
+               Vec Plan Merge:  1 child
                ->  Vec HashAggregate
                      Output: i32, count(*)
                      Group Key: sn.i32
                      Vec HashAgg Method:  Limit+HashAgg  Limit: 3
+                     Vec Plan Merge:  1 child
                      ->  Vec Seq Scan on vec_sonic.sn
                            Output: i32
  Settings: optimizer = 'off'
  Optimizer: Postgres query optimizer
-(14 rows)
+(16 rows)
 
 -- ------------------------------------------------------------------
 -- Cleanup.

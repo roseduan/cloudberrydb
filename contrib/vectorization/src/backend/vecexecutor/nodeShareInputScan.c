@@ -447,18 +447,20 @@ ExecInitVecShareInputScan(ShareInputScan *node, EState *estate, int eflags)
 	sisstate->ss.ps.ps_ProjInfo = NULL;
 
 	/*
-	 * When doing EXPLAIN only, we won't actually execute anything, so don't
-	 * bother initializing the state. This isn't merely an optimization:
-	 * closing a cross-slice ShareInputScan waits for the consumers to finish,
-	 * but if we don't execute anything, it will hang forever.
+	 * Upstream's row-engine ShareInputScan returns here when
+	 * EXEC_FLAG_EXPLAIN_ONLY is set, because the producer's
+	 * shareinput_writer_waitdone() in ExecEnd would block forever
+	 * waiting on consumers that never run (EXPLAIN_ONLY skips
+	 * CdbDispatchPlan, see execMain.c:477).
 	 *
-	 * We could also exit here immediately if this is an "alien" node, i.e.
-	 * a node that doesn't execute in this slice, but we can't easily
-	 * detect that here.
+	 * The vectorized path can't return early because PostBuildVecPlan()
+	 * (called near the bottom of this function) needs to attach an
+	 * arrow plan to this node so MergeChildren can splice it into the
+	 * parent.  Instead, the cross-slice "ref" handle that arms the
+	 * close-time wait is suppressed below when EXPLAIN_ONLY is set,
+	 * which makes ExecEnd's wait/notify block a no-op (see the
+	 * if (node->ref) guard in ExecEndVecShareInputScan).
 	 */
-	if ((eflags & EXEC_FLAG_EXPLAIN_ONLY) != 0)
-		return sisstate;
-
 	shareinput_local_state *local_state;
 
 	/* expand the list if necessary */
@@ -486,8 +488,15 @@ ExecInitVecShareInputScan(ShareInputScan *node, EState *estate, int eflags)
 		local_state->childState = childState;
 	sisstate->local_state = local_state;
 
-	/* Get a lease on the shared state for cross-slice coordination */
-	if (node->cross_slice)
+	/*
+	 * Get a lease on the shared state for cross-slice coordination.
+	 * Skip in EXPLAIN_ONLY: the ref arms the close-time wait in
+	 * ExecEnd, but consumers in unrendered QE slices will never call
+	 * notifydone, so a producer running on the QD slice would hang
+	 * forever.  Leaving ref NULL makes ExecEnd skip the entire
+	 * wait/notify block via its (node->ref) guard.
+	 */
+	if (node->cross_slice && !(eflags & EXEC_FLAG_EXPLAIN_ONLY))
 		sisstate->ref = get_shareinput_reference_vec(node->share_id);
 	else
 		sisstate->ref = NULL;

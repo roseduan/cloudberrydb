@@ -1869,7 +1869,6 @@ BuildVecPlan(PlanState *planstate, VecExecuteState *estate)
 		case T_SequenceState:
 		{
 			SequenceState *node = castNode(SequenceState, planstate);
-			support_parallel = false;
 			if (!node->subplans)
 				elog(ERROR, "Sequence node can't be leaf in vector plan");
 			pcontext.inputschema = GetSchemaFromSlot(
@@ -4824,6 +4823,26 @@ SetArrowPlan(PlanState *ps, GArrowExecutePlan *plan)
 		VecLimitState *vlimit = (VecLimitState *)ps;
 		vlimit->estate.plan = plan;
 	}
+	else if (IsA(ps, SequenceState))
+	{
+		VecSequenceState *vseq = (VecSequenceState *)ps;
+		vseq->estate.plan = plan;
+	}
+	else if (IsA(ps, AppendState))
+	{
+		VecAppendState *vappend = (VecAppendState *)ps;
+		vappend->estate.plan = plan;
+	}
+	else if (IsA(ps, MaterialState))
+	{
+		VecMaterialState *vmat = (VecMaterialState *)ps;
+		vmat->estate.plan = plan;
+	}
+	else if (IsA(ps, ShareInputScanState))
+	{
+		VecShareInputScanState *vsis = (VecShareInputScanState *)ps;
+		vsis->estate.plan = plan;
+	}
 	else
 		return;
 }
@@ -4891,7 +4910,31 @@ GetVecExecuteState(PlanState *ps)
 		VecWindowHashAggState *vwindow = (VecWindowHashAggState *)ps;
 		return &vwindow->estate;
 	}
-	// FIXME: Sequence
+	else if (IsA(ps, SequenceState))
+	{
+		VecSequenceState *vseq = (VecSequenceState *)ps;
+		return &vseq->estate;
+	}
+	else if (IsA(ps, AppendState))
+	{
+		VecAppendState *vappend = (VecAppendState *)ps;
+		return &vappend->estate;
+	}
+	else if (IsA(ps, ShareInputScanState))
+	{
+		VecShareInputScanState *vsis = (VecShareInputScanState *)ps;
+		return &vsis->estate;
+	}
+	else if (IsA(ps, NestLoopState))
+	{
+		VecNestLoopState *vnl = (VecNestLoopState *)ps;
+		return &vnl->estate;
+	}
+	else if (IsA(ps, MaterialState))
+	{
+		VecMaterialState *vmat = (VecMaterialState *)ps;
+		return &vmat->estate;
+	}
 	else
 		return NULL;
 }
@@ -5074,7 +5117,7 @@ ExecVecSetTupleBound(int64 tuples_needed, PlanState *child_node, PlanState *limi
 static void
 MergeArrowNodeToPlanStateFromSource(List **arrow_node_to_planstate, VecExecuteState *source_estate, VecExecuteState *estate)
 {
-	if (source_estate)
+	if (source_estate && source_estate->arrow_node_to_planstate != NIL)
 	{
 		estate->arrow_node_num = estate->arrow_node_num + source_estate->arrow_node_num - 2;
 		TraceNodeInfo* last_info = llast(source_estate->arrow_node_to_planstate);
@@ -5089,17 +5132,17 @@ MergeArrowNodeToPlanStateFromSource(List **arrow_node_to_planstate, VecExecuteSt
 void
 PostBuildVecPlan(PlanState *ps, VecExecuteState *estate)
 {
-	GArrowExecutePlan *left_source;
-	GArrowExecutePlan *right_source;
-	VecExecuteState *left_estate;
-	VecExecuteState *right_estate;
-	GError *error = NULL;
+	g_autoptr(GError) error = NULL;
 	GArrowExecutePlan *result;
 	List* arrow_node_to_planstate = NULL;
 	int plan_id;
 	TraceNodeInfo* info;
 	GArrowExecutePlan *target_plan;
 	VecExecuteState *target_state;
+	List *child_estates = NIL;  /* List of VecExecuteState* */
+	ListCell *lc;
+	VecExecuteState *child_estate;
+	int i;
 
 	BuildVecPlan(ps, estate);
 
@@ -5120,46 +5163,182 @@ PostBuildVecPlan(PlanState *ps, VecExecuteState *estate)
 	target_plan = target_state->plan;
 
 	/*
-	 * SubqueryScanState has only one child node in ps->subplan instead of
-	 * ps->lefttree, so we can take the subplan as left_estate.
+	 * Collect child VecExecuteStates into a list based on node type.
+	 * Different node types store their children in different places.
 	 */
 	if (IsA(ps, SubqueryScanState))
 	{
+		/* SubqueryScan: child is in subplan */
 		SubqueryScanState *subqueryState = (SubqueryScanState *) ps;
-		left_estate = GetVecExecuteState(subqueryState->subplan);
+		child_estate = GetVecExecuteState(subqueryState->subplan);
+		if (child_estate)
+			child_estates = lappend(child_estates, child_estate);
+	}
+	else if (IsA(ps, SequenceState))
+	{
+		/* Sequence: children are in subplans[] array */
+		SequenceState *seqState = (SequenceState *) ps;
+		for (i = seqState->numSubplans - 1; i >= 0; i--)
+		{
+			child_estate = GetVecExecuteState(seqState->subplans[i]);
+			if (child_estate)
+				child_estates = lappend(child_estates, child_estate);
+		}
+	}
+	else if (IsA(ps, AppendState))
+	{
+		/* Append: children are in appendplans[] array */
+		AppendState *appendState = (AppendState *) ps;
+		for (i = 0; i < appendState->as_nplans; i++)
+		{
+			child_estate = GetVecExecuteState(appendState->appendplans[i]);
+			if (child_estate)
+				child_estates = lappend(child_estates, child_estate);
+		}
+	}
+	else if (IsA(ps, HashJoinState) || IsA(ps, NestLoopState))
+	{
+		/* Join nodes: left and right children */
+		VecExecuteState *left_estate = GetVecExecuteState(ps->lefttree);
+		VecExecuteState *right_estate;
+
+		/* HashJoin needs to skip the Hash node */
+		if (IsA(ps, HashJoinState))
+			right_estate = GetVecExecuteState(ps->righttree->lefttree);
+		else
+			right_estate = GetVecExecuteState(ps->righttree);
+
+		if (left_estate)
+			child_estates = lappend(child_estates, left_estate);
+		if (right_estate)
+			child_estates = lappend(child_estates, right_estate);
 	}
 	else
 	{
-		left_estate = GetVecExecuteState(ps->lefttree);
+		child_estate = GetVecExecuteState(ps->lefttree);
+		if (child_estate)
+			child_estates = lappend(child_estates, child_estate);
 	}
 
-	left_source = left_estate ? left_estate->plan : NULL;
-	right_estate = IsA(ps, HashJoinState) ?
-						GetVecExecuteState(ps->righttree->lefttree) :
-						GetVecExecuteState(ps->righttree);
-
-	right_source = right_estate ? right_estate->plan : NULL;
-	if (left_source == NULL)
+	if (child_estates == NIL)
 		return;
+
+	/*
+	 * Merge child plans into target_plan.  Both branches below funnel into
+	 * garrow_execute_plan_merge_children().  The join case is kept separate
+	 * only because it needs to peek at left/right by position (and may bail
+	 * out if the left side is missing); the non-join case can simply iterate
+	 * over child_estates in order.
+	 */
+	result = target_plan;
 
 	if (IsA(ps, HashJoinState) || IsA(ps, NestLoopState))
 	{
-		if(right_source == NULL)
+		/* Join nodes: merge left and right via the unified N-ary API. */
+		g_autoptr(GArrowExecutePlan) left_plan = NULL;
+		g_autoptr(GArrowExecutePlan) right_plan = NULL;
+		GList *child_plans = NULL;
+
+		if (list_length(child_estates) >= 1)
+		{
+			VecExecuteState *left_estate = (VecExecuteState *) linitial(child_estates);
+			if (left_estate->plan)
+			{
+				left_plan = garrow_copy_ptr(left_estate->plan);
+				MergeArrowNodeToPlanStateFromSource(&arrow_node_to_planstate, left_estate, estate);
+			}
+		}
+
+		if (list_length(child_estates) >= 2)
+		{
+			VecExecuteState *right_estate = (VecExecuteState *) lsecond(child_estates);
+			if (right_estate->plan)
+			{
+				right_plan = garrow_copy_ptr(right_estate->plan);
+				MergeArrowNodeToPlanStateFromSource(&arrow_node_to_planstate, right_estate, estate);
+			}
+		}
+
+		if (left_plan == NULL || right_plan == NULL)
+		{
+			list_free(child_estates);
 			return;
+		}
+
+		/* garrow_list_append_ptr steals the ref from each autoptr. */
+		child_plans = garrow_list_append_ptr(child_plans, left_plan);
+		child_plans = garrow_list_append_ptr(child_plans, right_plan);
+
+		result = garrow_execute_plan_merge_children(target_plan, child_plans, &error);
+		garrow_list_free_ptr(&child_plans);
+		if (error)
+		{
+			elog(LOG, "Failed to merge plan, cause: %s", error->message);
+			list_free(child_estates);
+			return;
+		}
 	}
-	MergeArrowNodeToPlanStateFromSource(&arrow_node_to_planstate, left_estate, estate);
-	MergeArrowNodeToPlanStateFromSource(&arrow_node_to_planstate, right_estate, estate);
-	result = garrow_execute_plan_merge(target_plan, left_source, right_source, &error);
-	if (error)
+	else
 	{
-		elog(LOG, "Failed to merge plan, cause: %s", error->message);
-		return;
+		/* Other nodes: merge all children at once via merge_children. */
+		GList *child_plans = NULL;
+
+		/* Collect all child plans into a GList */
+		foreach(lc, child_estates)
+		{
+			VecExecuteState *source_estate = (VecExecuteState *) lfirst(lc);
+			g_autoptr(GArrowExecutePlan) source_plan = NULL;
+
+			if (source_estate->plan == NULL)
+			{
+				garrow_list_free_ptr(&child_plans);
+				list_free(child_estates);
+				return;
+			}
+
+			source_plan = garrow_copy_ptr(source_estate->plan);
+			MergeArrowNodeToPlanStateFromSource(&arrow_node_to_planstate, source_estate, estate);
+			child_plans = garrow_list_append_ptr(child_plans, source_plan);
+		}
+
+		/* Merge all child plans at once */
+		result = garrow_execute_plan_merge_children(target_plan, child_plans, &error);
+
+		/*
+		 * garrow_list_append_ptr stole a +1 ref from each source_plan into
+		 * the GList cell, so we must drop those refs (and free the cells)
+		 * after the merge is done.  Skipping this would leak N plan refs
+		 * per PostBuildVecPlan invocation.
+		 */
+		garrow_list_free_ptr(&child_plans);
+
+		if (error)
+		{
+			elog(LOG, "Failed to merge child plans, cause: %s", error->message);
+			list_free(child_estates);
+			return;
+		}
 	}
+
+	/*
+	 * Record that this node consumed N children via MergeChildren.  Surfaced
+	 * by show_vec_merge_info as "Vec Plan Merge:  N children" at EXPLAIN VERBOSE
+	 * time, a regression footprint for the splice path (see explain.c).
+	 */
+	estate->merged_child_count = list_length(child_estates);
+
+	list_free(child_estates);
+
+	/*
+	 * list_concat in PG14 memcpys list2's elements into list1's flat
+	 * element array and leaves list2's cells intact, so the cells of
+	 * estate->arrow_node_to_planstate must be freed separately.  The
+	 * pointed-to TraceNodeInfo objects are shared with arrow_node_to_planstate
+	 * via the memcpy and remain owned there.
+	 */
 	arrow_node_to_planstate = list_concat(arrow_node_to_planstate, estate->arrow_node_to_planstate);
-	if (estate->arrow_node_to_planstate != NIL) 
-	{
+	if (estate->arrow_node_to_planstate != NIL)
 		list_free(estate->arrow_node_to_planstate);
-	}
 	estate->arrow_node_to_planstate = arrow_node_to_planstate;
 	garrow_execute_plan_set_plan_id(result, plan_num++);
 	estate->time_collector = garrow_time_collector_new(estate->arrow_node_num);

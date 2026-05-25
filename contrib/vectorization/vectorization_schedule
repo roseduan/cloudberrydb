@@ -51,6 +51,7 @@ test: sort/sort
 test: sort/arrow_merge_sort
 test: sort/topk
 test: explain/exec_explain
+test: plan_merge/plan_merge
 test: combos/combo_1
 test: misc/motion_hash_time
 ##test: misc/clickhouse_simplifed

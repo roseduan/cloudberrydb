@@ -146,6 +146,7 @@ static void show_sortorder_options(StringInfo buf, Node *sortexpr,
 static void show_tablesample(TableSampleClause *tsc, PlanState *planstate,
 							 List *ancestors, ExplainState *es);
 static void show_sort_info(SortState *sortstate, ExplainState *es);
+static void show_vec_merge_info(PlanState *planstate, ExplainState *es);
 static void show_windowagg_keys(WindowAggState *waggstate, List *ancestors, ExplainState *es);
 static void show_windowhashagg_keys(WindowHashAggState *waggstate, List *ancestors, ExplainState *es);
 static void show_incremental_sort_info(IncrementalSortState *incrsortstate,
@@ -2323,6 +2324,14 @@ VecExplainNode(PlanState *planstate, List *ancestors,
 		default:
 			break;
 	}
+
+	/*
+	 * Vectorization-wide annotation: which nodes had child arrow plans
+	 * spliced into them by PostBuildVecPlan->MergeChildren.  Gated on
+	 * es->verbose so plain EXPLAIN output is unchanged and existing test
+	 * golden files keep matching.
+	 */
+	show_vec_merge_info(planstate, es);
 
     /* Show executor statistics */
 	if (planstate->instrument && planstate->instrument->need_cdb && !es->runtime)
@@ -4623,6 +4632,43 @@ plan_is_vectorized(EState *estate)
 			return true;
 	}
 	return false;
+}
+
+/*
+ * show_vec_merge_info: emit one line per planstate whose VecExecuteState
+ * recorded a non-zero merged_child_count.  The count is written in
+ * PostBuildVecPlan() after garrow_execute_plan_merge_children succeeds and
+ * serves as the regression footprint for the splice path.
+ *
+ * Gated on es->verbose so non-verbose EXPLAIN is unchanged and existing
+ * vec test golden files still match.
+ */
+static void
+show_vec_merge_info(PlanState *planstate, ExplainState *es)
+{
+	VecExecuteState *vestate;
+
+	if (!es->verbose)
+		return;
+	if (!plan_is_vectorized(planstate->state))
+		return;
+
+	vestate = GetVecExecuteState(planstate);
+	if (vestate == NULL || vestate->merged_child_count == 0)
+		return;
+
+	if (es->format == EXPLAIN_FORMAT_TEXT)
+	{
+		appendStringInfoSpaces(es->str, es->indent * 2);
+		appendStringInfo(es->str, "Vec Plan Merge:  %d %s\n",
+						 vestate->merged_child_count,
+						 vestate->merged_child_count == 1 ? "child" : "children");
+	}
+	else
+	{
+		ExplainPropertyInteger("Vec Plan Merge Children", NULL,
+							   vestate->merged_child_count, es);
+	}
 }
 
 static void

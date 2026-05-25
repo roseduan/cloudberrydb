@@ -26,6 +26,7 @@ SELECT count(*) AS n FROM (SELECT ts  FROM vec_motion_time_redist GROUP BY ts)  
    ->  Vec Gather Motion 3:1  (slice1; segments: 3)
          ->  Vec GroupAggregate
                Group Key: vec_motion_time_redist.ts
+               Vec Plan Merge:  1 child
                ->  Vec Sort
                      Output: ts
                      Sort Key: vec_motion_time_redist.ts
@@ -84,6 +85,7 @@ SELECT count(*) AS n FROM (SELECT tm  FROM vec_motion_time_redist GROUP BY tm)  
    ->  Vec Gather Motion 3:1  (slice1; segments: 3)
          ->  Vec GroupAggregate
                Group Key: vec_motion_time_redist.tm
+               Vec Plan Merge:  1 child
                ->  Vec Sort
                      Output: tm
                      Sort Key: vec_motion_time_redist.tm

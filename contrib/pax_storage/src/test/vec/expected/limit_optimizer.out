@@ -116,6 +116,7 @@ SELECT ''::text AS ten, unique1, unique2
 ----------------------------------------------------------
  Vec Limit
    Output: (''::text), unique1, unique2
+   Vec Plan Merge:  1 child
    ->  Vec Result
          Output: ''::text, unique1, unique2
          ->  Vec Gather Motion 3:1  (slice1; segments: 3)
@@ -124,10 +125,11 @@ SELECT ''::text AS ten, unique1, unique2
                ->  Vec Sort
                      Output: unique1, unique2
                      Sort Key: onek.unique1
+                     Vec Plan Merge:  1 child
                      ->  Vec Seq Scan on public.onek
                            Output: unique1, unique2
  Optimizer: Pivotal Optimizer (GPORCA)
-(13 rows)
+(16 rows)
 
 SELECT ''::text AS ten, unique1, unique2
 		FROM onek
