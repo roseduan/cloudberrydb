@@ -88,6 +88,7 @@ void old_GPDB5_check_for_unsupported_distribution_key_data_types(void);
 void old_GPDB6_check_for_unsupported_sha256_password_hashes(void);
 void new_gpdb_invalidate_bitmap_indexes(void);
 void new_invalidate_ao_brin_indexes(void);
+void cleanup_segment_event_trigger_deps(void);
 
 /* check_gp.c */
 

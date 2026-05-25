@@ -350,3 +350,44 @@ new_invalidate_ao_brin_indexes(void)
 
 	check_ok();
 }
+
+/*
+ * cleanup_segment_event_trigger_deps()
+ *
+ * When gpupgrade rsyncs the coordinator's upgraded data directory to segments,
+ * it brings along pg_depend entries that reference pg_event_trigger.  Event
+ * triggers exist only on the coordinator, so these rows are stale on segments
+ * and can cause errors (e.g. "could not find tuple for event trigger").
+ * Remove them.
+ */
+void
+cleanup_segment_event_trigger_deps(void)
+{
+	int			dbnum;
+
+	prep_status("Cleaning up stale event trigger dependencies on segment");
+
+	if (user_opts.check)
+	{
+		check_ok();
+		return;
+	}
+
+	for (dbnum = 0; dbnum < new_cluster.dbarr.ndbs; dbnum++)
+	{
+		DbInfo	   *db = &new_cluster.dbarr.dbs[dbnum];
+		PGconn	   *conn = connectToServer(&new_cluster, db->db_name);
+
+		PQclear(executeQueryOrDie(conn,
+								  "set allow_system_table_mods=true"));
+
+		PQclear(executeQueryOrDie(conn,
+								  "DELETE FROM pg_catalog.pg_depend "
+								  "WHERE classid = "
+								  "'pg_catalog.pg_event_trigger'::regclass"));
+
+		PQfinish(conn);
+	}
+
+	check_ok();
+}

@@ -257,7 +257,10 @@ main(int argc, char **argv)
 	 * Otherwise, vacuuming those tables once data is copied/linked will error out.
 	 */
 	if (!is_greenplum_dispatcher_mode())
+	{
 		update_db_xids();
+		cleanup_segment_event_trigger_deps();
+	}
 
 	/*
 	 * In a segment, the data directory already contains all the objects,
