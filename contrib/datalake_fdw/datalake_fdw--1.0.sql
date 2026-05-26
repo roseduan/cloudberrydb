@@ -178,34 +178,13 @@ AS 'MODULE_PATHNAME', 'pg_iceberg_upsert_location_option_local'
 LANGUAGE C STRICT;
 
 
--- Create iceberg schema to organize all iceberg-related objects
-CREATE SCHEMA iceberg;
-
--- Catalog tables for iceberg metadata.
---
--- These were previously created from C via heap_create_with_catalog(), invoked
--- from `SELECT iceberg.pg_iceberg_create_*_table()` calls inside this script.
--- That pattern only ran on the QD (a SELECT of a plain function is not a
--- utility statement and is not dispatched to QEs), so the tables ended up
--- existing on the coordinator but missing on every segment.  pg_dump's
--- LOCK TABLE iceberg.pg_iceberg_metadata then failed on segments.  See #324.
---
--- Using plain CREATE TABLE makes this go through ProcessUtility ->
--- CdbDispatchUtilityStatement, so QD and all QEs stay in sync.  The C-level
--- access paths (pg_iceberg_add_metadata / get_metadata_info / deletion queue
--- helpers) keep looking up the relation by name, so no OID needs to be fixed.
-CREATE TABLE iceberg.pg_iceberg_metadata (
-    relid                       oid  PRIMARY KEY,
-    metadata_location           text,
-    previous_metadata_location  text,
-    is_internal                 bool,
-    default_spec_id             int4
-) DISTRIBUTED BY (relid);
-
-CREATE TABLE iceberg.pg_iceberg_deletion_queue (
-    path           text     PRIMARY KEY,
-    table_name     regclass,
-    orphaned_at    timestamptz,
-    retry_count    int4,
-    deletion_type  int4
-) DISTRIBUTED BY (path);
+-- The iceberg schema and the two catalog tables
+-- (iceberg.pg_iceberg_metadata, iceberg.pg_iceberg_deletion_queue) are no
+-- longer created here.  They are pinned at initdb time by
+-- contrib/datalake_fdw/iceberg-cdbinit--1.0.sql, with stable OIDs declared
+-- in src/am_iceberg/include/iceberg_oids.h -- the same model PostgreSQL
+-- uses for built-in catalogs like pg_foreign_data_wrapper, and the same
+-- model GPDB uses for gp_distribution_policy.  This eliminates the
+-- CREATE EXTENSION dispatch dependency entirely and lets pg_dump's
+-- LOCK TABLE find the catalogs on every segment without any tricks
+-- (see #324 / #339 thread).

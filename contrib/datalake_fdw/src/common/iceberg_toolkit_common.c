@@ -21,6 +21,7 @@
 #include "access/heapam.h"
 #include "../common/iceberg_constants.h"
 #include "../iceberg_catalog_fdw/iceberg_catalog_option.h"
+#include "../am_iceberg/include/iceberg_oids.h"
 #include "../am_iceberg/include/pg_iceberg_metadata.h"
 
 /*
@@ -742,16 +743,9 @@ static void setup_buildin_catalog_metadata(IcebergCatalogFdwState* fdwState,
         return;
     }
 
-    /* Get sys_iceberg.pg_iceberg_metadata table OID */
-    Oid namespaceid = get_namespace_oid(PG_ICEBERG_SCHEMA_NAME, false);
-    Oid metadata_relid = get_relname_relid(PG_ICEBERG_METADATA_TABLE_NAME, namespaceid);
-    Oid index_oid = get_relname_relid(PG_ICEBERG_METADATA_INDEX_NAME, namespaceid);
-    
-    if (!OidIsValid(metadata_relid)) {
-        fdwState->request.buildInCatalog.tableExists = false;
-        fdwState->request.buildInCatalog.metadataLocation = NULL;
-        return;
-    }
+    /* Iceberg native catalog: OIDs are pinned at initdb (iceberg-cdbinit). */
+    Oid metadata_relid = ICEBERG_METADATA_RELID;
+    Oid index_oid = ICEBERG_METADATA_PKEY_OID;
 
     /* Query pg_iceberg_metadata */
     Relation metadataRel = table_open(metadata_relid, AccessShareLock);

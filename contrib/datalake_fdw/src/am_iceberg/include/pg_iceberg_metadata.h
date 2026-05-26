@@ -16,19 +16,13 @@
 #include "fmgr.h"
 #include "utils/rel.h"
 
-/* Schema name for iceberg-related objects */
-#define PG_ICEBERG_SCHEMA_NAME "iceberg"
-
-/* Metadata table name */
-#define PG_ICEBERG_METADATA_TABLE_NAME "pg_iceberg_metadata"
-
 /*
- * Metadata table primary-key index name.
- *
- * Created implicitly by the PRIMARY KEY constraint on iceberg.pg_iceberg_metadata
- * in datalake_fdw--1.0.sql; PostgreSQL synthesises the name as <table>_pkey.
+ * Catalog OIDs for iceberg.pg_iceberg_metadata are pinned at initdb time
+ * by iceberg-cdbinit--1.0.sql and exposed through iceberg_oids.h
+ * (ICEBERG_METADATA_RELID, ICEBERG_METADATA_PKEY_OID).  C call sites
+ * MUST use those constants, not name lookups -- the legacy
+ * PG_ICEBERG_SCHEMA_NAME / PG_ICEBERG_METADATA_*_NAME macros are gone.
  */
-#define PG_ICEBERG_METADATA_INDEX_NAME "pg_iceberg_metadata_pkey"
 
 /*
  * IcebergMetadataInfo - stores metadata information for an Iceberg table

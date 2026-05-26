@@ -44,6 +44,7 @@
 #include "utils/fmgroids.h"
 #include "utils/syscache.h"
 
+#include "include/iceberg_oids.h"
 #include "include/pg_iceberg_metadata.h"
 #include "include/pg_iceberg_deletion_queue.h"
 #include "include/pg_iceberg_spi_utilities.h"
@@ -52,44 +53,29 @@
 #define OrphanedFileRetentionPeriod 3600
 #define VacuumFileRemoveMaxRetries 5
 #define PER_LOOP_FILE_CLEANUP_LIMIT 1000
-#define DELETION_QUEUE_TABLE PG_ICEBERG_SCHEMA_NAME "." PG_ICEBERG_DELETION_QUEUE_TABLE_NAME
+
+/*
+ * Qualified name used inside SPI SQL strings.  Hard-coded because the
+ * table is pinned by OID (ICEBERG_DELETION_QUEUE_RELID) at initdb time;
+ * renaming would require both the OID pin and this string to change.
+ */
+#define DELETION_QUEUE_TABLE "pg_iceberg.pg_iceberg_deletion_queue"
 
 
 /* ----------------------------------------------------------------
- * Helper: open the deletion queue table and its index
+ * Helper: open the deletion queue table and its index by stable OIDs
+ * pinned by iceberg-cdbinit--1.0.sql.  See iceberg_oids.h.
  * ----------------------------------------------------------------
  */
 static void
 open_deletion_queue_rel(Relation *rel_out, Oid *index_oid_out,
 						LOCKMODE lockmode)
 {
-	Oid		namespaceid;
-	Oid		relid;
-
-	namespaceid = get_namespace_oid(PG_ICEBERG_SCHEMA_NAME, false);
-	relid = get_relname_relid(PG_ICEBERG_DELETION_QUEUE_TABLE_NAME,
-							  namespaceid);
-
-	if (!OidIsValid(relid))
-		ereport(ERROR,
-				(errcode(ERRCODE_UNDEFINED_TABLE),
-				 errmsg("deletion queue table \"%s.%s\" does not exist",
-						PG_ICEBERG_SCHEMA_NAME,
-						PG_ICEBERG_DELETION_QUEUE_TABLE_NAME)));
-
-	*rel_out = table_open(relid, lockmode);
+	*rel_out = table_open(ICEBERG_DELETION_QUEUE_RELID, lockmode);
 
 	if (index_oid_out)
-		*index_oid_out = get_relname_relid(
-			PG_ICEBERG_DELETION_QUEUE_INDEX_NAME, namespaceid);
+		*index_oid_out = ICEBERG_DELETION_QUEUE_PKEY_OID;
 }
-
-/*
- * The iceberg.pg_iceberg_deletion_queue table is now created from
- * datalake_fdw--1.0.sql as a plain CREATE TABLE so the DDL gets dispatched
- * to QEs (see issue #324).  The previous CreateIcebergDeletionQueueTable()
- * helper and its SQL-callable wrapper were removed.
- */
 
 /* ================================================================
  * Insert

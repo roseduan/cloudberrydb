@@ -30,15 +30,19 @@
 #include "utils/syscache.h"
 #include "utils/rel.h"
 #include "utils/lsyscache.h"
+#include "include/iceberg_oids.h"
 #include "include/pg_iceberg_metadata.h"
 
 /*
- * The iceberg.pg_iceberg_metadata table is now created from
- * datalake_fdw--1.0.sql as a plain CREATE TABLE so the DDL gets dispatched
- * to QEs (see issue #324).  The previous CreateIcebergMetadataTable()
- * helper and its SQL-callable wrapper were removed; the data-path
- * functions below continue to look the relation up by name via
- * get_relname_relid().
+ * The iceberg.pg_iceberg_metadata table is created at initdb time by
+ * iceberg-cdbinit--1.0.sql (see #324 follow-up and #339 notes).  Its OID
+ * is pinned to ICEBERG_METADATA_RELID; the unique index is pinned to
+ * ICEBERG_METADATA_PKEY_OID.  All call sites below address the catalog
+ * by these stable OIDs, mirroring how PostgreSQL's built-in BKI
+ * catalogs (e.g. ForeignDataWrapperRelationId for
+ * pg_foreign_data_wrapper) are accessed -- so name lookups and the
+ * "iceberg metadata catalog is not available on this segment" failure
+ * mode are gone.
  */
 
 void
@@ -50,12 +54,10 @@ pg_iceberg_add_metadata(Oid relid, char *metadata_location,
 	Datum		values[5];
 	bool		nulls[5];
 	HeapTuple	tuple;
-	Oid			namespaceid;
 	Oid			metadata_relid;
 
-	/* Get iceberg.pg_iceberg_metadata table OID */
-	namespaceid = get_namespace_oid(PG_ICEBERG_SCHEMA_NAME, false);
-	metadata_relid = get_relname_relid(PG_ICEBERG_METADATA_TABLE_NAME, namespaceid);
+	/* Iceberg native catalog: OIDs are pinned at initdb (iceberg-cdbinit). */
+	metadata_relid = ICEBERG_METADATA_RELID;
 
 	metadata_rel = table_open(metadata_relid, RowExclusiveLock);
 
@@ -114,7 +116,6 @@ pg_iceberg_update_metadata_cas(Oid relid,
 	SysScanDesc scan;
 	HeapTuple	tuple;
 	HeapTuple	newtuple;
-	Oid			namespaceid;
 	Oid			metadata_relid;
 	Oid			index_oid;
 	Datum		values[5];
@@ -123,10 +124,9 @@ pg_iceberg_update_metadata_cas(Oid relid,
 	Datum		old_metadata_datum;
 	bool		old_metadata_isnull;
 
-	/* Get table and index OIDs */
-	namespaceid = get_namespace_oid(PG_ICEBERG_SCHEMA_NAME, false);
-	metadata_relid = get_relname_relid(PG_ICEBERG_METADATA_TABLE_NAME, namespaceid);
-	index_oid = get_relname_relid(PG_ICEBERG_METADATA_INDEX_NAME, namespaceid);
+	/* Iceberg native catalog: OIDs are pinned at initdb (iceberg-cdbinit). */
+	metadata_relid = ICEBERG_METADATA_RELID;
+	index_oid = ICEBERG_METADATA_PKEY_OID;
 
 	metadata_rel = table_open(metadata_relid, RowExclusiveLock);
 
@@ -302,14 +302,12 @@ pg_iceberg_remove_metadata(Oid relid)
 	ScanKeyData skey[1];
 	SysScanDesc scan;
 	HeapTuple	tuple;
-	Oid			namespaceid;
 	Oid			metadata_relid;
 	Oid			index_oid;
 
-	/* Get table and index OIDs */
-	namespaceid = get_namespace_oid(PG_ICEBERG_SCHEMA_NAME, false);
-	metadata_relid = get_relname_relid(PG_ICEBERG_METADATA_TABLE_NAME, namespaceid);
-	index_oid = get_relname_relid(PG_ICEBERG_METADATA_INDEX_NAME, namespaceid);
+	/* Iceberg native catalog: OIDs are pinned at initdb (iceberg-cdbinit). */
+	metadata_relid = ICEBERG_METADATA_RELID;
+	index_oid = ICEBERG_METADATA_PKEY_OID;
 
 	metadata_rel = table_open(metadata_relid, RowExclusiveLock);
 
@@ -341,7 +339,6 @@ pg_iceberg_get_metadata_info(Oid relid)
 	ScanKeyData skey[1];
 	SysScanDesc scan;
 	HeapTuple	tuple;
-	Oid			namespaceid;
 	Oid			metadata_relid;
 	Oid			index_oid;
 	bool		isnull;
@@ -351,17 +348,9 @@ pg_iceberg_get_metadata_info(Oid relid)
 	/* Allocate memory for the result structure */
 	info = (IcebergMetadataInfo *) palloc0(sizeof(IcebergMetadataInfo));
 
-	/* Get table and index OIDs */
-	namespaceid = get_namespace_oid(PG_ICEBERG_SCHEMA_NAME, false);
-	metadata_relid = get_relname_relid(PG_ICEBERG_METADATA_TABLE_NAME, namespaceid);
-	index_oid = get_relname_relid(PG_ICEBERG_METADATA_INDEX_NAME, namespaceid);
-
-	if (!OidIsValid(metadata_relid) || !OidIsValid(index_oid))
-	{
-		ereport(ERROR,
-				(errcode(ERRCODE_UNDEFINED_OBJECT),
-				 errmsg("iceberg metadata catalog is not available on this segment")));
-	}
+	/* Iceberg native catalog: OIDs are pinned at initdb (iceberg-cdbinit). */
+	metadata_relid = ICEBERG_METADATA_RELID;
+	index_oid = ICEBERG_METADATA_PKEY_OID;
 
 	metadata_rel = table_open(metadata_relid, AccessShareLock);
 

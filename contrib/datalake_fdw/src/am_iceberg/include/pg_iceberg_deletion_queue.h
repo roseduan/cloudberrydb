@@ -21,16 +21,13 @@
 #include "fmgr.h"
 #include "utils/timestamp.h"
 
-/* Deletion queue table name (in iceberg schema) */
-#define PG_ICEBERG_DELETION_QUEUE_TABLE_NAME	"pg_iceberg_deletion_queue"
-
 /*
- * Deletion queue primary-key index name.
- *
- * Created implicitly by the PRIMARY KEY on iceberg.pg_iceberg_deletion_queue in
- * datalake_fdw--1.0.sql; PostgreSQL synthesises the name as <table>_pkey.
+ * Catalog OIDs for iceberg.pg_iceberg_deletion_queue are pinned at initdb
+ * time by iceberg-cdbinit--1.0.sql and exposed through iceberg_oids.h
+ * (ICEBERG_DELETION_QUEUE_RELID, ICEBERG_DELETION_QUEUE_PKEY_OID).
+ * C call sites MUST use those constants; the legacy
+ * PG_ICEBERG_DELETION_QUEUE_*_NAME macros are gone.
  */
-#define PG_ICEBERG_DELETION_QUEUE_INDEX_NAME	"pg_iceberg_deletion_queue_pkey"
 
 /*
  * DeletionType - indicates how the path should be processed
