@@ -249,33 +249,17 @@ ParquetReader::readPrimitive(const TypeInfo &typInfo, bool &isNull)
 			((parquet::TypedScanner<parquet::DoubleType> *)scanner.get())->NextValue(&d.doubleValue, &isNull);
 			return Float8GetDatum(d.doubleValue);
 		}
-		case BPCHAROID:
-		{
-			parquet::FixedLenByteArray value;
-			((parquet::TypedScanner<parquet::FLBAType> *)scanner.get())->NextValue(&value, &isNull);
-			if (isNull)
-				PG_RETURN_DATUM(0);
-			int typeLen = typInfo.typeLength_;
-			if (!buffer_)
-			{
-				bytea *result = (bytea *) gpdbPalloc(typeLen + VARHDRSZ);
-				SET_VARSIZE(result, typeLen + VARHDRSZ);
-				memcpy(VARDATA(result), value.ptr, typeLen);
-				return PointerGetDatum(result);
-			}
-			if (typeLen + VARHDRSZ > static_cast<uint32>(buffer_->getDataBuffer(typInfo.columnIndex_)->length))
-			{
-				buffer_->resizeDataBuffer(typInfo.columnIndex_, typeLen + VARHDRSZ);
-			}
-			dataBuff *colBuffer = buffer_->getDataBuffer(typInfo.columnIndex_);
-			SET_VARSIZE(colBuffer->buffer, typeLen + VARHDRSZ);
-			memcpy(VARDATA(colBuffer->buffer), value.ptr, typeLen);
-			return PointerGetDatum(colBuffer->buffer);
-		}
 		case BYTEAOID:
 		case TEXTOID:
 		case VARCHAROID:
+		case BPCHAROID:
 		{
+			/*
+			 * BPCHAR on Iceberg is written as variable-length BYTE_ARRAY +
+			 * UTF8 (Iceberg `string`; see commit 48bf8311b1a / issue #321).
+			 * Trailing-space padding is not preserved on disk, so read it
+			 * back exactly like VARCHAR / TEXT, with no padding to N.
+			 */
 			parquet::ByteArray value;
 			((parquet::TypedScanner<parquet::ByteArrayType> *)scanner.get())->NextValue(&value, &isNull);
 			if (isNull)

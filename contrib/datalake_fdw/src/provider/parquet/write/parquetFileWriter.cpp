@@ -658,14 +658,18 @@ void parquetFileWriter::writeToField(int index, const void* data)
             {
                 /*
                  * Write CHAR(N) as variable-length UTF-8 (Iceberg string
-                 * semantics).  bpcharout already strips trailing spaces, so we
-                 * write only the significant prefix and do NOT pad to N.
+                 * semantics).  bpcharout returns the full padded storage,
+                 * so we explicitly strip trailing spaces before writing —
+                 * matching Snowflake / Spark / Trino / PrestoDB so external
+                 * engines see real string values, not space-padded bytes.
                  */
                 StringVectorBatch* val = reinterpret_cast<StringVectorBatch*>(batchField[i]);
                 if (!isNULL)
                 {
                     char *data = DatumGetCString(DirectFunctionCall1(bpcharout, tts_values));
                     int64_t datalen = static_cast<int64_t> (strlen(data));
+                    while (datalen > 0 && data[datalen - 1] == ' ')
+                        datalen--;
                     resizeDataBuff(index, dataBuffer, datalen, dataBufferOffset);
                     memcpy(dataBuffer.data() + dataBufferOffset, data, datalen);
                     val->buffer[index] = dataBuffer.data() + dataBufferOffset;
