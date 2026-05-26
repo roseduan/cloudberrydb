@@ -141,17 +141,38 @@ vec_motion_direct_send_lookup(Plan *agg_plan);
  *     hashfloat4/8, network types, etc.).
  * ─────────────────────────────────────────────────────────────────────────
  */
+/*
+ * INVARIANT — keep in sync with the Arrow Sonic engine (cannot be a compile
+ * time assert: the Arrow KeyType enum lives across the submodule boundary):
+ *
+ *   Every hash function accepted here must hash a column whose Sonic KeyType
+ *   is one the cdbhash direct-send path implements: INT16 / INT32 / INT64 /
+ *   STRING (see SonicGroupByNode::Make and GlobalAggregator::ComputeCdbHash in
+ *   cpp/src/arrow/compute/sonic/).
+ *
+ * This whitelist is enforced independently of the Sonic *group-key* whitelist
+ * (sonic_supports_key_type in execMain.c), which is deliberately broader — it
+ * also admits bool / "char" / float4 / float8. Direct-send is registered only
+ * when this returns true, so those broader key types never reach the Arrow
+ * cdbhash check today (their hash funcs — hashchar 454, hashfloat4 451,
+ * hashfloat8 452, hashnumeric — are absent below).
+ *
+ * If you add an Oid whose Arrow KeyType is outside {INT16,INT32,INT64,STRING},
+ * the Arrow side returns Status::NotImplemented and the query ABORTS instead
+ * of falling back to normal-mode hash agg. Expand ComputeCdbHash first.
+ * (See also the bpchar over-grouping hazard documented above.)
+ */
 static inline bool
 vec_motion_direct_send_supports_hashfunc(Oid hashfunc_oid)
 {
 	switch (hashfunc_oid)
 	{
-		case 449:		/* hashint2 */
-		case 450:		/* hashint4 — also covers date (date opclass uses hashint4) */
-		case 949:		/* hashint8 */
-		case 400:		/* hashtext — also covers varchar */
-		case 2039:		/* timestamp_hash — timestamp + timestamptz share Oid */
-		case 1688:		/* time_hash */
+		case 449:		/* hashint2            -> Sonic KeyType INT16 */
+		case 450:		/* hashint4 / date     -> Sonic KeyType INT32 */
+		case 949:		/* hashint8            -> Sonic KeyType INT64 */
+		case 400:		/* hashtext / varchar  -> Sonic KeyType STRING */
+		case 2039:		/* timestamp_hash      -> Sonic KeyType INT64 */
+		case 1688:		/* time_hash           -> Sonic KeyType INT64 */
 			return true;
 		default:
 			return false;

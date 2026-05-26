@@ -1752,6 +1752,13 @@ BuildVecPlan(PlanState *planstate, VecExecuteState *estate)
 	pcontext.agginfos = NULL;
 	pcontext.keys = NULL;
 	pcontext.nkey = 0;
+	/*
+	 * Default for non-Agg nodes; the T_AggState case below overwrites it with
+	 * the real strategy. Must be initialized: BuildAggregatation gates sonic
+	 * routing on aggstrategy == AGG_HASHED, so leaving this as stack garbage
+	 * could spuriously run is_sonic_compatible for a window / join / scan node.
+	 */
+	pcontext.aggstrategy = AGG_PLAIN;
 	pcontext.planstate = planstate;
 	pcontext.reader = NULL;
 	pcontext.ishaving = false;
@@ -3878,6 +3885,8 @@ sonic_supports_key_type(GArrowType id)
 {
 	switch (id)
 	{
+		case GARROW_TYPE_BOOLEAN:
+		case GARROW_TYPE_INT8:
 		case GARROW_TYPE_INT16:
 		case GARROW_TYPE_INT32:
 		case GARROW_TYPE_INT64:
@@ -3886,6 +3895,8 @@ sonic_supports_key_type(GArrowType id)
 		case GARROW_TYPE_TIME32:
 		case GARROW_TYPE_TIME64:
 		case GARROW_TYPE_TIMESTAMP:
+		case GARROW_TYPE_FLOAT:
+		case GARROW_TYPE_DOUBLE:
 		case GARROW_TYPE_STRING:
 		case GARROW_TYPE_BINARY:
 		case GARROW_TYPE_NUMERIC128:
@@ -3928,6 +3939,30 @@ sonic_supports_text_input(GArrowType id)
 }
 
 /*
+ * Sonic's hash_min / hash_max over fixed-width comparable values
+ * (MinMaxAggregate<T>): signed integers, date32, float8 (double) and
+ * numeric128.  These are exactly the input types Cloudberry's fmgr.c maps
+ * for F_MIN_* / F_MAX_* (int2/4/8, date, float8, numeric).  Text input is
+ * handled separately (sonic_supports_text_input) and only for MIN.
+ */
+static bool
+sonic_supports_minmax_value_input(GArrowType id)
+{
+	switch (id)
+	{
+		case GARROW_TYPE_INT16:
+		case GARROW_TYPE_INT32:
+		case GARROW_TYPE_INT64:
+		case GARROW_TYPE_DATE32:
+		case GARROW_TYPE_DOUBLE:
+		case GARROW_TYPE_NUMERIC128:
+			return true;
+		default:
+			return false;
+	}
+}
+
+/*
  * Decide whether sonic's SonicGroupByNode can handle this aggregate
  * shape. If anything is outside its current capability we fall back
  * to normal-mode hash agg so the query still runs (correctness over
@@ -3941,12 +3976,14 @@ is_sonic_compatible(List *aggInfos, PlanBuildContext *pcontext)
 	ListCell *l;
 
 	/*
-	 * The "no agg, just GROUP BY" path appends a synthetic
-	 * hash_distinct in BuildAggregatation; sonic doesn't implement
-	 * hash_distinct, so route those queries to normal mode.
+	 * The "no agg, just GROUP BY" path (aggInfos == NIL) is supported:
+	 * SonicGroupByNode handles zero aggregates natively, deduplicating
+	 * the group keys and emitting the unique rows.  BuildAggregatation
+	 * skips synthesizing the hash_distinct placeholder when this returns
+	 * true, so sonic receives an empty aggregate list.  The foreach over
+	 * aggInfos below is simply a no-op in that case, leaving only the
+	 * key-type check to gate routing.
 	 */
-	if (aggInfos == NIL)
-		return false;
 
 	/* Group keys: every key column type must be one sonic supports. */
 	for (int i = 0; i < pcontext->nkey; i++)
@@ -4003,11 +4040,13 @@ is_sonic_compatible(List *aggInfos, PlanBuildContext *pcontext)
 
 		if (strcmp(fn, "hash_sum") == 0)
 		{
-			/* signed int (sonic SumIntAggregate) or numeric128
+			/* signed int (sonic SumIntAggregate), numeric128
 			 * (SumNumeric128Aggregate, used by single-stage SUM(numeric)
-			 * and final stage of two-stage SUM(int8)). */
+			 * and final stage of two-stage SUM(int8)), or float8
+			 * (SumDoubleAggregate, all stages of SUM(float8)). */
 			if (!sonic_supports_signed_int_input(in_id) &&
-				in_id != GARROW_TYPE_NUMERIC128)
+				in_id != GARROW_TYPE_NUMERIC128 &&
+				in_id != GARROW_TYPE_DOUBLE)
 				return false;
 		}
 		else if (strcmp(fn, "hash_sum_64") == 0)
@@ -4024,35 +4063,117 @@ is_sonic_compatible(List *aggInfos, PlanBuildContext *pcontext)
 		}
 		else if (strcmp(fn, "hash_min") == 0)
 		{
-			if (!sonic_supports_text_input(in_id))
+			/* MIN: text/binary (MinTextAggregate) or a fixed-width
+			 * comparable value type (MinMaxAggregate<T>). */
+			if (!sonic_supports_text_input(in_id) &&
+				!sonic_supports_minmax_value_input(in_id))
+				return false;
+		}
+		else if (strcmp(fn, "hash_max") == 0)
+		{
+			/* MAX: only fixed-width comparable value types — Cloudberry
+			 * does not push MAX(text) (no F_MAX_TEXT mapping). */
+			if (!sonic_supports_minmax_value_input(in_id))
 				return false;
 		}
 		else if (strcmp(fn, "hash_mean_numeric") == 0)
 		{
-			if (!sonic_supports_signed_int_input(in_id))
+			/* Single-stage AVG: signed integer (widened to Numeric128 on
+			 * accumulation) or numeric128 (read directly). Covers AVG(int*)
+			 * and AVG(numeric) when GROUP BY is on the distribution key
+			 * (no Motion).  AVG(float8) uses hash_mean, not this. */
+			if (!sonic_supports_signed_int_input(in_id) &&
+				in_id != GARROW_TYPE_NUMERIC128)
 				return false;
 		}
 		else if (strcmp(fn, "hash_avg_trans") == 0)
 		{
 			/*
-			 * Two-phase AVG partial. Sonic supports signed integer
-			 * input (output struct<int64, int64>) and numeric128 input
-			 * (output struct<numeric128, int64>). Float / decimal128
-			 * not yet implemented.
+			 * Two-phase AVG partial. Sonic supports signed integer input
+			 * (output struct<int64, int64>), numeric128 input (output
+			 * struct<numeric128, int64>) and float8 input (output
+			 * struct<double, int64>, the partial of AVG(float8)).
 			 */
 			if (!sonic_supports_signed_int_input(in_id) &&
-				in_id != GARROW_TYPE_NUMERIC128)
+				in_id != GARROW_TYPE_NUMERIC128 &&
+				in_id != GARROW_TYPE_DOUBLE)
 				return false;
 		}
 		else if (strcmp(fn, "hash_avg_final") == 0)
 		{
-			/* PG-level type for the partial state is bigint[]; Arrow
-			 * sees struct<sum, count>. Sonic Consume validates the
-			 * runtime struct layout — the PG type check is a facade. */
+			/*
+			 * Two-phase AVG final over an Arrow struct<sum, count>. Sonic
+			 * now implements the int64-sum (AvgFinalIntAggregate),
+			 * numeric128-sum (AvgFinalNumeric128Aggregate) and double-sum
+			 * (AvgFinalDoubleAggregate, the AVG(float8) final) variants —
+			 * i.e. every AVG kind Cloudberry pushes — so no input-type
+			 * check is needed here. Sonic's MakeAggregateFunctions selects
+			 * the variant from the struct's sum-field type at build time.
+			 */
+		}
+		else if (strcmp(fn, "hash_mean") == 0)
+		{
+			/* Single-stage AVG(float8): double input -> float64
+			 * (MeanDoubleAggregate). Only float8 is pushed. */
+			if (in_id != GARROW_TYPE_DOUBLE)
+				return false;
+		}
+		else if (strcmp(fn, "hash_sum_final") == 0)
+		{
+			/*
+			 * Two-phase SUM(numeric) final over a struct<numeric128,
+			 * count> partial (SumFinalNumeric128Aggregate). The only
+			 * aggregate Cloudberry maps to sum_final is F_SUM_NUMERIC
+			 * (fmgr.c), whose partial sum is always numeric128, so gate on
+			 * the aggfnoid: this keeps the routing precise and future-proof
+			 * (a new sum_final variant with a different aggfnoid falls back
+			 * rather than reaching sonic's numeric128-only implementation).
+			 * The partial column name (_inagg_N) is not in inputschema, so
+			 * we cannot inspect the Arrow struct directly.
+			 */
+			if (agginfo->aggref->aggfnoid != F_SUM_NUMERIC)
+				return false;
+		}
+		else if (strcmp(fn, "hash_stddev_numeric") == 0)
+		{
+			/* Single-stage STDDEV_SAMP(int4) -> numeric128
+			 * (StdDevSampNumericAggregate). Only int4 (INT32) is pushed
+			 * (F_STDDEV_SAMP_INT4). */
+			if (in_id != GARROW_TYPE_INT32)
+				return false;
+		}
+		else if (strcmp(fn, "hash_avg_trans_stddev") == 0)
+		{
+			/* Two-stage STDDEV_SAMP partial: int4 -> struct<sum,count,
+			 * square> (AvgTransStddevAggregate). Only int4 is pushed. */
+			if (in_id != GARROW_TYPE_INT32)
+				return false;
+		}
+		else if (strcmp(fn, "hash_avg_final_stddev") == 0)
+		{
+			/* Two-stage STDDEV_SAMP final over struct<sum,count,square>
+			 * (AvgFinalStddevAggregate). Only STDDEV_SAMP(int4) produces
+			 * this partial, so no input-type check is needed here; sonic's
+			 * MakeAggregateFunctions validates the 3-field struct shape. */
 		}
 		else
 		{
-			/* Any other function name (hash_max, hash_avg_trans_stddev, etc.). */
+			/*
+			 * Any other function name (hash_count_distinct, etc.) is not
+			 * implemented in sonic, so route to the Normal vectorized
+			 * method (Arrow GroupByNode).
+			 *
+			 * Defensive / unreachable-by-design: the upstream
+			 * vectorizability gate (is_aggfn_vectorable, fmgr.c) only
+			 * vectorizes aggregates that sonic also supports, so anything
+			 * sonic cannot do falls back to a row-mode HashAggregate before
+			 * a vec agg node is ever built -- no SQL query currently reaches
+			 * this branch. Kept so that if a future aggregate becomes
+			 * vectorizable before sonic supports it, routing degrades
+			 * gracefully to Normal instead of failing. A vectorizable query
+			 * actually hitting this path signals a sonic coverage gap to
+			 * close, not expected steady-state behavior.
+			 */
 			return false;
 		}
 	}
@@ -4087,19 +4208,13 @@ BuildAggregatation(List *aggInfos, GArrowExecuteNode *input, PlanBuildContext *p
 		}
 	}
 
-	/* no aggref in targetlist, append plain/hash distinct for group by columns.
-	 * Out name will not be used, use dummy.
+	/*
+	 * Decide sonic routing up-front.  It depends only on aggInfos and the
+	 * group-key types, not on the synthetic distinct appended below, so we
+	 * can compute it before the synthesis step.  We need the answer here
+	 * because a sonic-routed bare GROUP BY must skip the placeholder
+	 * entirely (see below).
 	 */
-	if (!IsA(pcontext->planstate, WindowAggState) && !IsA(pcontext->planstate, WindowHashAggState) && ((pcontext->nkey > 0) && (!aggregations)))
-	{
-		agg_func = garrow_aggregation_new(
-			pcontext->aggstrategy == AGG_SORTED ? "plain_distinct" : "hash_distinct",
-			NULL,
-			pcontext->keys[0],
-			"_outagg_dummy");
-		aggregations = garrow_list_append_ptr(aggregations, agg_func);
-	}
-
 	bool sonic_ok = false;
 	if (pcontext->aggstrategy == AGG_HASHED)
 	{
@@ -4107,6 +4222,26 @@ BuildAggregatation(List *aggInfos, GArrowExecuteNode *input, PlanBuildContext *p
 		if (!sonic_ok)
 			elog(DEBUG1, "sonic: query keys/aggs not all supported, "
 						 "falling back to normal-mode hash agg");
+	}
+
+	/* no aggref in targetlist, append plain/hash distinct for group by columns.
+	 * Out name will not be used, use dummy.
+	 *
+	 * Sonic does not need this placeholder: SonicGroupByNode handles zero
+	 * aggregates natively and just emits the unique keys, whereas Arrow's
+	 * hash_distinct kernel would compute a per-group distinct-value list
+	 * only to have its output discarded.  So skip the synthesis when the
+	 * bare GROUP BY is routed to sonic (sonic_ok is true only for the
+	 * AGG_HASHED path, so the AGG_SORTED plain_distinct is unaffected).
+	 */
+	if (!IsA(pcontext->planstate, WindowAggState) && !IsA(pcontext->planstate, WindowHashAggState) && ((pcontext->nkey > 0) && (!aggregations)) && !sonic_ok)
+	{
+		agg_func = garrow_aggregation_new(
+			pcontext->aggstrategy == AGG_SORTED ? "plain_distinct" : "hash_distinct",
+			NULL,
+			pcontext->keys[0],
+			"_outagg_dummy");
+		aggregations = garrow_list_append_ptr(aggregations, agg_func);
 	}
 
 	options = build_aggregatation_options(aggregations, pcontext, sonic_ok);
@@ -5484,25 +5619,21 @@ PostBuildVecPlan(PlanState *ps, VecExecuteState *estate)
 		g_autoptr(GArrowExecutePlan) left_plan = NULL;
 		g_autoptr(GArrowExecutePlan) right_plan = NULL;
 		GList *child_plans = NULL;
+		VecExecuteState *left_estate = NULL;
+		VecExecuteState *right_estate = NULL;
 
 		if (list_length(child_estates) >= 1)
 		{
-			VecExecuteState *left_estate = (VecExecuteState *) linitial(child_estates);
+			left_estate = (VecExecuteState *) linitial(child_estates);
 			if (left_estate->plan)
-			{
 				left_plan = garrow_copy_ptr(left_estate->plan);
-				MergeArrowNodeToPlanStateFromSource(&arrow_node_to_planstate, left_estate, estate);
-			}
 		}
 
 		if (list_length(child_estates) >= 2)
 		{
-			VecExecuteState *right_estate = (VecExecuteState *) lsecond(child_estates);
+			right_estate = (VecExecuteState *) lsecond(child_estates);
 			if (right_estate->plan)
-			{
 				right_plan = garrow_copy_ptr(right_estate->plan);
-				MergeArrowNodeToPlanStateFromSource(&arrow_node_to_planstate, right_estate, estate);
-			}
 		}
 
 		if (left_plan == NULL || right_plan == NULL)
@@ -5517,7 +5648,18 @@ PostBuildVecPlan(PlanState *ps, VecExecuteState *estate)
 		 * produce PG-canonical layout: outer=probe, inner=Hash(build/emit).
 		 * Standard merge order (left_plan=lefttree→inputs[0], right_plan=
 		 * righttree→inputs[1]) already puts build at Arrow right (inputs[1]).
+		 *
+		 * Fold the children's arrow_node_to_planstate / arrow_node_num into
+		 * estate only after the null-check commits us to the merge.  Calling
+		 * MergeArrowNodeToPlanStateFromSource before the check (as an earlier
+		 * refactor did) bumps estate->arrow_node_num and mutates the last
+		 * TraceNodeInfo on the early-return path, leaving the count out of sync
+		 * with both the un-merged plan and the time_collector re-sized below.
+		 * Both left_plan and right_plan are non-NULL here, so both estates
+		 * exist and carry a plan.
 		 */
+		MergeArrowNodeToPlanStateFromSource(&arrow_node_to_planstate, left_estate, estate);
+		MergeArrowNodeToPlanStateFromSource(&arrow_node_to_planstate, right_estate, estate);
 
 		/* garrow_list_append_ptr steals the ref from each autoptr. */
 		child_plans = garrow_list_append_ptr(child_plans, left_plan);
@@ -5537,7 +5679,14 @@ PostBuildVecPlan(PlanState *ps, VecExecuteState *estate)
 		/* Other nodes: merge all children at once via merge_children. */
 		GList *child_plans = NULL;
 
-		/* Collect all child plans into a GList */
+		/*
+		 * First pass: collect every child plan and verify none is NULL.
+		 * Defer MergeArrowNodeToPlanStateFromSource until all plans are
+		 * confirmed present -- it mutates estate->arrow_node_num and the
+		 * last TraceNodeInfo, so calling it here (before a later child is
+		 * found to lack a plan) would leave estate in the same inconsistent
+		 * partial state guarded against in the join branch above.
+		 */
 		foreach(lc, child_estates)
 		{
 			VecExecuteState *source_estate = (VecExecuteState *) lfirst(lc);
@@ -5551,8 +5700,18 @@ PostBuildVecPlan(PlanState *ps, VecExecuteState *estate)
 			}
 
 			source_plan = garrow_copy_ptr(source_estate->plan);
-			MergeArrowNodeToPlanStateFromSource(&arrow_node_to_planstate, source_estate, estate);
 			child_plans = garrow_list_append_ptr(child_plans, source_plan);
+		}
+
+		/*
+		 * Second pass: all child plans are present, so it is now safe to
+		 * fold each child's arrow_node_to_planstate / arrow_node_num into
+		 * estate.
+		 */
+		foreach(lc, child_estates)
+		{
+			VecExecuteState *source_estate = (VecExecuteState *) lfirst(lc);
+			MergeArrowNodeToPlanStateFromSource(&arrow_node_to_planstate, source_estate, estate);
 		}
 
 		/* Merge all child plans at once */
