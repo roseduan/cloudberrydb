@@ -62,10 +62,16 @@ UPDATE pg_namespace SET oid = 8322 WHERE nspname = 'pg_iceberg';
 
 -- pg_iceberg_metadata: one row per Iceberg table, points at the current
 -- manifest list.  Mirror of what datalake_fdw--1.0.sql used to create.
+--
+-- text columns use COLLATE "C": these are system catalogs (oid < 16384) and
+-- get cloned from template0 into every database, so they must not carry a
+-- collation-sensitive ordering -- otherwise a database created with a
+-- non-C collation would inherit a mismatched catalog (opr_sanity enforces
+-- this; see "Check for system catalogs with collation-sensitive ordering").
 CREATE TABLE pg_iceberg.pg_iceberg_metadata (
     relid                       oid   PRIMARY KEY,
-    metadata_location           text,
-    previous_metadata_location  text,
+    metadata_location           text  COLLATE "C",
+    previous_metadata_location  text  COLLATE "C",
     is_internal                 bool,
     default_spec_id             int4
 );
@@ -89,7 +95,7 @@ UPDATE pg_class     SET oid       = 8331 WHERE relname = 'pg_iceberg_metadata_pk
 -- pg_iceberg_deletion_queue: pending orphan-file deletions waiting for the
 -- background sweeper.  Mirror of what datalake_fdw--1.0.sql used to create.
 CREATE TABLE pg_iceberg.pg_iceberg_deletion_queue (
-    path           text         PRIMARY KEY,
+    path           text COLLATE "C" PRIMARY KEY,
     table_name     regclass,
     orphaned_at    timestamptz,
     retry_count    int4,
