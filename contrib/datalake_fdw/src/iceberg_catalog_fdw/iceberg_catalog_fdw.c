@@ -926,38 +926,27 @@ static agentcli_cJSON* createIcebergVolumeConfig(IcebergVolumeOptions *volumeOpt
 }
 
 /*
- * Create SimpleFileIOConfig section
- */
-static void addSimpleFileIOConfig(agentcli_cJSON *config, agentcli_cJSON *parsed, const char *impl_class)
-{
-    agentcli_cJSON *simpleConfig = agentcli_cJSON_CreateObject();
-    agentcli_cJSON_AddStringToObject(simpleConfig, "impl_class", impl_class);
-
-    agentcli_cJSON *properties = agentcli_cJSON_GetObjectItem(parsed, "properties");
-    if (properties) {
-        agentcli_cJSON_AddItemToObject(simpleConfig, "properties", agentcli_cJSON_Duplicate(properties, 1));
-    }
-
-    agentcli_cJSON_AddItemToObject(config, "simpleFileIOConfig", simpleConfig);
-}
-
-/*
- * Create GopherFileIOConfig section
- */
-static void addGopherFileIOConfig(agentcli_cJSON *config, agentcli_cJSON *parsed)
-{
-    agentcli_cJSON *gopherConfig = agentcli_cJSON_GetObjectItem(parsed, "gopherFileIOConfig");
-    if (gopherConfig) {
-        agentcli_cJSON_AddItemToObject(config, "gopherFileIOConfig", agentcli_cJSON_Duplicate(gopherConfig, 1));
-    }
-}
-
-/*
- * Create IcebergFileIOConfig section
+ * Build the FileIOConfig payload sent to dlagent.
  *
- * Determines config type based on impl_class:
- * - If impl_class is GopherFileIO: use gopherFileIOConfig
- * - Otherwise: use simpleFileIOConfig (default)
+ * The current iceberg-openapi schema (post-refactor) is flat:
+ *
+ *   fileIOConfig:
+ *     gopherConfig:
+ *       common: { worker_path, connect_path, connect_plasma_path,
+ *                 cache_strategy, log_level, liboss2_log_severity }
+ *     properties: { <arbitrary extension keys for the non-gopher path> }
+ *
+ * The agent's FileIO implementation is selected by gopher.enabled on the
+ * agent side (application.properties), not by any impl_class field here.
+ * Connection info (endpoint / bucket / credentials / region /
+ * path_style_access / ufs_type) is exclusively carried by
+ * IcebergVolumeConfig and translated to gopher.* keys by the agent.
+ *
+ * We still accept the legacy user-facing fileIOConfig shapes
+ * (impl_class + simpleFileIOConfig / gopherFileIOConfig wrappers) for
+ * backward compatibility with foreign-table DDL written against older
+ * extension versions. Whatever shape the user wrote, we always emit the
+ * flat schema above to the agent.
  */
 static agentcli_cJSON* createIcebergFileIOconfig(IcebergVolumeOptions *volumeOpt)
 {
@@ -969,30 +958,85 @@ static agentcli_cJSON* createIcebergFileIOconfig(IcebergVolumeOptions *volumeOpt
         return NULL;
     }
 
-    agentcli_cJSON *impl_class = agentcli_cJSON_GetObjectItem(parsed, "impl_class");
-    if (!impl_class || !agentcli_cJSON_IsString(impl_class)) {
-        agentcli_cJSON_Delete(parsed);
-        ereport(ERROR,
-                (errcode(ERRCODE_INVALID_TEXT_REPRESENTATION),
-                 errmsg("fileIOConfig missing required field 'impl_class'")));
-        return NULL;
-    }
-
     agentcli_cJSON *config = agentcli_cJSON_CreateObject();
-    agentcli_cJSON_AddStringToObject(config, "impl_class", impl_class->valuestring);
 
-    if (strcmp(impl_class->valuestring, "cn.cbdb.dlagent.plugins.iceberg.GopherFileIO") == 0) {
-        addGopherFileIOConfig(config, parsed);
-    } else {
-        addSimpleFileIOConfig(config, parsed, impl_class->valuestring);
+    /* Pull gopherConfig.common from one of two source shapes (in priority):
+     *  - new flat:    parsed.gopherConfig
+     *  - legacy:      parsed.gopherFileIOConfig.gopherConfig
+     */
+    agentcli_cJSON *gopherCfg = agentcli_cJSON_GetObjectItem(parsed, "gopherConfig");
+    if (!gopherCfg) {
+        agentcli_cJSON *wrapper = agentcli_cJSON_GetObjectItem(parsed, "gopherFileIOConfig");
+        if (wrapper)
+            gopherCfg = agentcli_cJSON_GetObjectItem(wrapper, "gopherConfig");
     }
+    if (gopherCfg)
+        agentcli_cJSON_AddItemToObject(config, "gopherConfig", agentcli_cJSON_Duplicate(gopherCfg, 1));
+
+    /* Pull extension `properties` from one of three source shapes (in priority):
+     *  - new flat:    parsed.properties
+     *  - legacy:      parsed.simpleFileIOConfig.properties
+     *  - legacy:      parsed.gopherFileIOConfig.properties
+     */
+    agentcli_cJSON *props = agentcli_cJSON_GetObjectItem(parsed, "properties");
+    if (!props) {
+        agentcli_cJSON *simpleWrap = agentcli_cJSON_GetObjectItem(parsed, "simpleFileIOConfig");
+        if (simpleWrap)
+            props = agentcli_cJSON_GetObjectItem(simpleWrap, "properties");
+    }
+    if (!props) {
+        agentcli_cJSON *gopherWrap = agentcli_cJSON_GetObjectItem(parsed, "gopherFileIOConfig");
+        if (gopherWrap)
+            props = agentcli_cJSON_GetObjectItem(gopherWrap, "properties");
+    }
+    if (props)
+        agentcli_cJSON_AddItemToObject(config, "properties", agentcli_cJSON_Duplicate(props, 1));
 
     agentcli_cJSON_Delete(parsed);
     return config;
 }
 
 /*
- * Create IcebergAdditionalConfig section
+ * Inject the dlproxy-controlled gopher socket paths into
+ * fileIOConfig.gopherConfig.common. Creates the gopherConfig/common
+ * subobjects as needed. These keys are always required, regardless of
+ * whether the user's fileIOConfig already carried a gopherConfig.
+ */
+static void addGopherRuntimeSocketPaths(agentcli_cJSON *fileIOConfig)
+{
+    agentcli_cJSON *gopherCfg = agentcli_cJSON_GetObjectItem(fileIOConfig, "gopherConfig");
+    if (!gopherCfg) {
+        gopherCfg = agentcli_cJSON_CreateObject();
+        agentcli_cJSON_AddItemToObject(fileIOConfig, "gopherConfig", gopherCfg);
+    }
+    agentcli_cJSON *common = agentcli_cJSON_GetObjectItem(gopherCfg, "common");
+    if (!common) {
+        common = agentcli_cJSON_CreateObject();
+        agentcli_cJSON_AddItemToObject(gopherCfg, "common", common);
+    }
+
+    char path_buf[1024] = {0};
+
+    DatalakeGetGopherSocketPath(path_buf);
+    agentcli_cJSON_AddStringToObject(common, "connect_path", path_buf);
+
+    memset(path_buf, 0, sizeof(path_buf));
+    DatalakeGetGopherPlasmaSocketPath(path_buf);
+    agentcli_cJSON_AddStringToObject(common, "connect_plasma_path", path_buf);
+
+    memset(path_buf, 0, sizeof(path_buf));
+    DatalakeGetGopherMetaPath(path_buf);
+    agentcli_cJSON_AddStringToObject(common, "worker_path", path_buf);
+}
+
+/*
+ * Create IcebergAdditionalConfig section.
+ *
+ * Always emits a fileIOConfig object so that gopher socket paths (which the
+ * dlproxy controls per-cluster) reach the agent under the standard
+ * fileIOConfig.gopherConfig.common nesting. Any user-supplied fileIOConfig
+ * fields are translated into the flat schema first; socket paths are then
+ * merged in last.
  */
 static agentcli_cJSON* createIcebergAdditionalConfig(IcebergCatalogOptions *option, IcebergVolumeOptions *volumeOpt)
 {
@@ -1007,13 +1051,20 @@ static agentcli_cJSON* createIcebergAdditionalConfig(IcebergCatalogOptions *opti
     if (option->foreign_catalog.filter_string && strlen(option->foreign_catalog.filter_string) > 0)
         agentcli_cJSON_AddStringToObject(additionalConfig, DATALAKEFDW_ICEBERG_KEY_FILTERSTRING, option->foreign_catalog.filter_string);
 
+    agentcli_cJSON *fileIOConfig;
     if (volumeOpt != NULL &&
         volumeOpt->foreign_volume.fileIOConfig &&
         strlen(volumeOpt->foreign_volume.fileIOConfig) > 0)
     {
-        agentcli_cJSON* config = createIcebergFileIOconfig(volumeOpt);
-        agentcli_cJSON_AddItemToObject(additionalConfig, DATALAKEFDW_ICEBERG_KEY_FILEIOCONFIG, config);
+        fileIOConfig = createIcebergFileIOconfig(volumeOpt);
     }
+    else
+    {
+        fileIOConfig = agentcli_cJSON_CreateObject();
+    }
+
+    addGopherRuntimeSocketPaths(fileIOConfig);
+    agentcli_cJSON_AddItemToObject(additionalConfig, DATALAKEFDW_ICEBERG_KEY_FILEIOCONFIG, fileIOConfig);
 
     return additionalConfig;
 }
@@ -1037,26 +1088,13 @@ static agentcli_cJSON* createIcebergConfig(IcebergCatalogOptions *option, Iceber
     agentcli_cJSON *additionalConfig = createIcebergAdditionalConfig(option, volumeOpt);
     agentcli_cJSON_AddItemToObject(icebergConfig, DATALAKEFDW_ICEBERG_KEY_ICEBERG_ADDITIONALCONFIG, additionalConfig);
 
-    /* Add gopher system paths so dlagent can connect to gopher without config files.
-     * Note: we only pass paths here; gopher.enabled is controlled by
-     * application.properties or the volume's fileIOConfig. */
-    {
-        agentcli_cJSON *gopherConfig = agentcli_cJSON_CreateObject();
-        char path_buf[1024] = {0};
-
-        DatalakeGetGopherSocketPath(path_buf);
-        agentcli_cJSON_AddStringToObject(gopherConfig, "connect_path", path_buf);
-
-        memset(path_buf, 0, sizeof(path_buf));
-        DatalakeGetGopherPlasmaSocketPath(path_buf);
-        agentcli_cJSON_AddStringToObject(gopherConfig, "connect_plasma_path", path_buf);
-
-        memset(path_buf, 0, sizeof(path_buf));
-        DatalakeGetGopherMetaPath(path_buf);
-        agentcli_cJSON_AddStringToObject(gopherConfig, "worker_path", path_buf);
-
-        agentcli_cJSON_AddItemToObject(icebergConfig, "gopherConfig", gopherConfig);
-    }
+    /*
+     * Gopher socket paths are already attached to
+     * additionalConfig.fileIOConfig.gopherConfig.common by
+     * createIcebergAdditionalConfig -> addGopherRuntimeSocketPaths. The
+     * previous top-level icebergConfig.gopherConfig placement was a
+     * misnesting against the OpenAPI schema and is no longer emitted.
+     */
 
     /* Determine config file name(s) based on volume/catalog type for server_name lookup */
     {

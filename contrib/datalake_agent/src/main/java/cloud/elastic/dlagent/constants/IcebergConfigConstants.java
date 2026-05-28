@@ -31,9 +31,12 @@ public final class IcebergConfigConstants {
 
     public static final String ICEBERG_CONFIG = "IcebergConfig";
 
+    // META domain: how to reach Iceberg table metadata (catalog: hive metastore / polaris / hadoop warehouse).
     public static final class ICEBERG_CATALOG_CONFIG {
         public static final String ICEBERG_CATALOG_CONFIG_STRING = "IcebergCatalogConfig";
         public static final String SERVER_TYPE = "server_type";
+        // Config-file section name; when set, meta config is read from gphive.conf[SERVER_NAME].
+        public static final String SERVER_NAME = "server_name";
         public static final String HIVE_METASTORE_URI = "hive_metastore_uri";
         public static final String USERNAME = "username";
         public static final String AUTH_METHOD = "auth_method";
@@ -65,9 +68,12 @@ public final class IcebergConfigConstants {
     public static final String CATALOG_TYPE_BUILDIN = "builtin";
     public static final String CATALOG_TYPE_POLARIS = "polaris";
 
+    // DATA domain: how to read/write Iceberg data + manifest files (storage/FileIO: s3 / hdfs / abfss).
     public static final class ICEBERG_VOLUME_CONFIG {
         public static final String ICEBERG_VOLUME_CONFIG_STRING = "IcebergVolumeConfig";
         public static final String VOLUME_SERVER_TYPE = "volume_server_type";
+        // Config-file section name; when set, data config is read from s3.conf/gphdfs.conf[SERVER_NAME].
+        public static final String SERVER_NAME = "server_name";
         public static final String VOLUME_ENDPOINT = "volume_endpoint";
         public static final String VOLUME_REGION = "volume_region";
         public static final String BUCKET_NAME = "bucket_name";
@@ -78,14 +84,7 @@ public final class IcebergConfigConstants {
         public static final String ENABLE_CACHING = "enable_caching";
         public static final String ALLOW_WRITES = "allow_writes";
         public static final String USERNAME = "username";
-        // It may be deprecated in the future, or it could be configured as a simplified parameter. It is not currently in use.
-        public static final String CATALOG_FILE_IO_IMPL = "catalog_file_io_impl";
     }
-
-    // FileIO implementation values
-    public static final String GOPHER_FILE_IO = "GopherFileIO";
-    public static final String DEFAULT_IMPL_VALUE = "default";
-    public static final String CUSTOM_IMPL_VALUE = "customFileIO";
 
     // Hadoop configuration keys
     public static final String FS_S3A_IMPL = "fs.s3a.impl";
@@ -99,7 +98,7 @@ public final class IcebergConfigConstants {
     public static final String S3A_FILESYSTEM_IMPL = "org.apache.hadoop.fs.s3a.S3AFileSystem";
     public static final String S3A_CREDENTIALS_PROVIDER = "org.apache.hadoop.fs.s3a.SimpleAWSCredentialsProvider";
 
-    // S3FileIO
+    // S3FileIO (iceberg-aws)
     public static final String S3FILEIO_ACCESS_KEY_ID = "s3.access-key-id";
     public static final String S3FILEIO_SECRET_ACCESS_KEY = "s3.secret-access-key";
     public static final String S3FILEIO_ENDPOINT = "s3.endpoint";
@@ -115,20 +114,17 @@ public final class IcebergConfigConstants {
     public static final String VOLUME_TYPE_HDFS = "hdfs";
     public static final String VOLUME_TYPE_ABFSS = "abfss";
 
-    // Configuration key prefixes
-    public static final String FILE_IO_CONFIG_IMPL_CLASS = "FileIOConfig.impl_class";
+    /**
+     * Prefix for pass-through FileIO extension keys (non-gopher path only).
+     * Carries arbitrary {@code FileIOConfig.properties.<key>} entries from the
+     * request body verbatim to Hadoop Configuration via emitS3Inline.
+     */
     public static final String FILE_IO_CONFIG_PROPERTIES_PREFIX = "FileIOConfig.properties";
-    public static final String FILE_IO_CONFIG_PROPERTIES_IOIMPL = "FileIOConfig.properties.impl_class";
-    public static final String GOPHER_COMMON_CONFIG_PREFIX = "GopherCommonConfig";
 
-    //impl class
-    public static final String HADOOP_FILE_IO_CLASS_NAME = "org.apache.iceberg.hadoop.HadoopFileIO";
-    public static final String S3_FILE_IO_CLASS_NAME = "org.apache.iceberg.aws.s3.S3FileIO";
-    public static final String ICEBERG_S3_FILE_IO_CLASS_NAME = "org.apache.iceberg.io.ResolvingFileIO";
-
-    public static final String ICEBERG_FILE_IO_CLASS_NAME = "org.apache.iceberg.io.ResolvingFileIO";
-    public static final String GOPHER_FILE_IO_CLASS_NAME = "cloud.elastic.dlagent.plugins.iceberg.GopherFileIO";
-    // Common field names
+    // Common field names used by IcebergRequestConfigParser when reading the
+    // request body. The "impl_class" / SimpleFileIOConfig / GopherFileIOConfig
+    // wrapper keys and FileIO implementation class names are intentionally
+    // omitted — FileIO selection is driven by gopher.enabled, not impl_class.
     public static final String COMMON = "common";
     public static final String PROPERTIES = "properties";
 
@@ -141,32 +137,33 @@ public final class IcebergConfigConstants {
         public static final String TABLE_IDENTIFIER = "tableIdentifier";
     }
 
+    /**
+     * Legacy wrapper field name retained <b>only</b> for backward-compat parsing
+     * in {@link cloud.elastic.dlagent.api.model.IcebergRequestConfigParser};
+     * old C clients still emit {@code fileIOConfig.gopherFileIOConfig.gopherConfig.common.*}.
+     * The current OpenAPI schema uses the flattened
+     * {@code fileIOConfig.gopherConfig.common.*} shape directly. Remove once
+     * all C clients have migrated.
+     */
     public static final class FILE_IO_CONFIG {
-        public static final String SIMPLE_FILEIO_CONFIG = "simpleFileIOConfig";
         public static final String GOPHER_FILEIO_CONFIG = "gopherFileIOConfig";
-        public static final String IMPL_CLASS = "impl_class";
     }
 
-    public static final class GOPHER_FILE_IO_CONFIG {
-        public static final String GOPHER_FILE_IO_CONFIG_STRING = "GopherFileIOConfig";
-
-        public static final String PROPERTIES = "properties";
-    }
-
+    /**
+     * Field names of the {@code GopherCommonConfig} schema in iceberg-openapi.yaml.
+     * <b>Only runtime parameters live here</b>: connection info (endpoint /
+     * bucket / credentials / region / path_style_access / ufs_type) is
+     * exclusively carried by {@code IcebergVolumeConfig} and translated to
+     * gopher.* keys by {@code GopherPropertiesResolver}.
+     */
     public static final class GOPHER_CONFIG {
         public static final String GOPHER_HEADER = "gopher";
         public static final String GOPHER_CONFIG_STRING = "gopherConfig";
         public static final String WORKER_PATH = "worker_path";
         public static final String CONNECT_PATH = "connect_path";
         public static final String CONNECT_PLASMA_PATH = "connect_plasma_path";
-        public static final String UFS_TYPE = "ufs_type";
-        public static final String URI_PREFIX = "uri_prefix";
         public static final String CACHE_STRATEGY = "cache_strategy";
-        public static final String GOPHER_MODE = "gopher_mode";
         public static final String LOG_LEVEL = "log_level";
         public static final String LIBOSS2_LOG_SEVERITY = "liboss2_log_severity";
-        public static final String CACHE_PREDICT_NUM = "cache_predict_num";
-        public static final String LOCAL_PATH = "local_path";
-        public static final String LOAD_LIBGOPHER_CLIENT_PATH = "load_libgopherClient_path";
     }
 }

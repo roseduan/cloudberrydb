@@ -1,6 +1,9 @@
 package cloud.elastic.dlagent.service.rest;
 
+import cloud.elastic.dlagent.api.configuration.GopherConfigurationProperties;
 import cloud.elastic.dlagent.api.model.BaseConfigurationFactory;
+import cloud.elastic.dlagent.api.model.IcebergRequestConfigParser;
+import cloud.elastic.dlagent.api.model.iceberg.IcebergRequestConfig;
 import cloud.elastic.dlagent.constants.IcebergConfigConstants;
 import cloud.elastic.dlagent.plugins.iceberg.utilities.IcebergUtilities;
 import cloud.elastic.dlagent.service.iceberg.IcebergService;
@@ -49,20 +52,6 @@ import cloud.elastic.dlagent.service.spring.IcebergRestConfig;
 @Slf4j
 public class IcebergRestController {
 
-    private static final Map<String, String> PropertiesMapping = new HashMap<>();
-
-    static {
-        String volumePrefix = IcebergConfigConstants.ICEBERG_VOLUME_CONFIG.ICEBERG_VOLUME_CONFIG_STRING + ".";
-        PropertiesMapping.put(volumePrefix + IcebergConfigConstants.ICEBERG_VOLUME_CONFIG.VOLUME_SERVER_TYPE, "gopher.ufs_type");
-        PropertiesMapping.put(volumePrefix + IcebergConfigConstants.ICEBERG_VOLUME_CONFIG.VOLUME_ENDPOINT, "gopher.endpoint");
-        PropertiesMapping.put(volumePrefix + IcebergConfigConstants.ICEBERG_VOLUME_CONFIG.VOLUME_REGION, "gopher.region");
-        PropertiesMapping.put(volumePrefix + IcebergConfigConstants.ICEBERG_VOLUME_CONFIG.BUCKET_NAME, "gopher.bucket_name");
-        PropertiesMapping.put(volumePrefix + IcebergConfigConstants.ICEBERG_VOLUME_CONFIG.PATH_STYLE_ACCESS, "gopher.path_style_access");
-        PropertiesMapping.put(volumePrefix + IcebergConfigConstants.ICEBERG_VOLUME_CONFIG.ACCESS_KEY_ID, "gopher.access_key_id");
-        PropertiesMapping.put(volumePrefix + IcebergConfigConstants.ICEBERG_VOLUME_CONFIG.SECRET_ACCESS_KEY, "gopher.secret_access_key");
-    }
-
-
     private final IcebergService icebergService;
     private final IcebergRestConfig icebergRestConfig;
 
@@ -77,6 +66,17 @@ public class IcebergRestController {
 
     @Autowired
     private BaseConfigurationFactory configurationFactory;
+
+    @Autowired
+    private GopherConfigurationProperties gopherConfigurationProperties;
+
+    /**
+     * Sole iceberg-request parser. All endpoint properties extraction is
+     * delegated here; legacy private extractors below are now thin shims that
+     * call into this parser.
+     */
+    @Autowired
+    private IcebergRequestConfigParser requestParser;
 
     private final ObjectMapper objectMapper = new ObjectMapper();
 
@@ -180,9 +180,17 @@ public class IcebergRestController {
         // Add config to response - static S3 configuration (non-sensitive)
         Map<String, String> config = new HashMap<>();
 
-        // Get S3 configuration from FileIO properties
+        // Get S3 configuration from FileIO properties.
+        // GopherFileIO does not implement FileIO.properties() (throws
+        // UnsupportedOperationException); treat as empty in that case — the
+        // S3 config/credential fields below are optional response payload.
         FileIO fileIO = icebergTable.io();
-        Map<String, String> ioProps = fileIO.properties();
+        Map<String, String> ioProps;
+        try {
+            ioProps = fileIO.properties();
+        } catch (UnsupportedOperationException e) {
+            ioProps = java.util.Collections.emptyMap();
+        }
 
         // Extract S3 config from FileIO properties
         if (ioProps.containsKey("s3.endpoint")) {
@@ -1139,230 +1147,47 @@ public class IcebergRestController {
         return ResponseEntity.status(code).body(errorResponse);
     }
     /**
-     * Extract ONLY user-facing Iceberg TBLPROPERTIES from the request body, never
-     * catalog/volume/gopher runtime configuration.
+     * Extract ONLY user-facing Iceberg TBLPROPERTIES from the request body.
      *
-     * <p>Mirrors the open-source Iceberg separation between
-     * {@code Catalog.initialize(catalogProps)} (runtime-only) and
-     * {@code Catalog.createTable(..., tableProps)} (persisted into metadata.json).
-     * Historical note: the C side piggy-backs {@code buildInCatalog.*} plumbing keys
-     * into the same JSON {@code properties} field, so filter those out here.
+     * <p>Thin delegate to {@link IcebergRequestConfigParser#parseUserTableProperties(Map)};
+     * the parser is the sole owner of this filtering logic.
      */
     private Map<String, String> extractUserTableProperties(Map<String, Object> request) {
-        Map<String, String> out = new HashMap<>();
-        Object raw = request.get(IcebergConfigConstants.PROPERTIES);
-        if (raw instanceof Map) {
-            @SuppressWarnings("unchecked")
-            Map<String, Object> userProps = (Map<String, Object>) raw;
-            for (Map.Entry<String, Object> entry : userProps.entrySet()) {
-                if (entry.getValue() == null) {
-                    continue;
-                }
-                if (IcebergUtilities.isInternalConfigKey(entry.getKey())) {
-                    continue;
-                }
-                out.put(entry.getKey(), entry.getValue().toString());
-            }
-        }
-        return out;
+        return requestParser.parseUserTableProperties(request);
     }
 
+    /**
+     * Build the legacy flat properties map consumed by downstream
+     * {@code IcebergService} methods.
+     *
+     * <p>Thin delegate to {@link IcebergRequestConfigParser#parse(Map)}:
+     * the parser is the sole entry point for interpreting an iceberg request
+     * body. The verbatim {@code request.properties} pass-through preserves
+     * legacy semantics where the C side piggy-backs {@code buildInCatalog.*}
+     * plumbing keys into the same JSON {@code properties} field.
+     */
     private Map<String, String> extractProperties(Map<String, Object> request) {
-        Map<String, String> properties = new HashMap<>();
+        IcebergRequestConfig cfg = requestParser.parse(request);
+        Map<String, String> properties = cfg.toFlatPropertiesMap();
 
-        if (request.containsKey(IcebergConfigConstants.ICEBERG_CONFIG)) {
-            Map<String, Object> icebergConfig = (Map<String, Object>) request.get(IcebergConfigConstants.ICEBERG_CONFIG);
-            extractCatalogConfig(icebergConfig, properties);
-            extractVolumeConfig(icebergConfig, properties);
-            extractAdditionalConfig(icebergConfig, properties);
-
-            // Extract config_files (e.g. "s3.conf", "gphdfs.conf") for server_name lookup
-            if (icebergConfig.containsKey("config_files")) {
-                properties.put("config_files", icebergConfig.get("config_files").toString());
-            }
-
-            // Extract gopherConfig (gopher system paths passed from C side)
-            if (icebergConfig.containsKey("gopherConfig")) {
-                Map<String, Object> gopherConfig = (Map<String, Object>) icebergConfig.get("gopherConfig");
-                for (Map.Entry<String, Object> entry : gopherConfig.entrySet()) {
-                    if (entry.getValue() != null) {
-                        String key = entry.getKey();
-                        String propKey = key.startsWith("gopher.") ? key : "gopher." + key;
-                        properties.put(propKey, entry.getValue().toString());
-                    }
+        // Preserve legacy: pass-through the raw request.properties unfiltered
+        // so downstream code that reads buildInCatalog.* / other internal keys
+        // continues to work.
+        Object rawProps = request.get(IcebergConfigConstants.PROPERTIES);
+        if (rawProps instanceof Map) {
+            @SuppressWarnings("unchecked")
+            Map<String, Object> userProps = (Map<String, Object>) rawProps;
+            for (Map.Entry<String, Object> entry : userProps.entrySet()) {
+                if (entry.getValue() != null) {
+                    properties.put(entry.getKey(), entry.getValue().toString());
                 }
             }
-        }
-
-        if (request.containsKey(IcebergConfigConstants.PROPERTIES)) {
-            Map<String, String> requestProps = (Map<String, String>) request.get(IcebergConfigConstants.PROPERTIES);
-            properties.putAll(requestProps);
         }
 
         if (log.isDebugEnabled()) {
             log.debug("Extracted properties: {}", properties);
         }
-
         return properties;
-    }
-
-    /**
-     * Extract catalog configuration
-     */
-    private void extractCatalogConfig(Map<String, Object> icebergConfig, Map<String, String> properties) {
-        if (!icebergConfig.containsKey(IcebergConfigConstants.ICEBERG_CATALOG_CONFIG.ICEBERG_CATALOG_CONFIG_STRING)) {
-            return;
-        }
-
-        Map<String, Object> catalogConfig = (Map<String, Object>) icebergConfig.get(
-            IcebergConfigConstants.ICEBERG_CATALOG_CONFIG.ICEBERG_CATALOG_CONFIG_STRING);
-
-        for (Map.Entry<String, Object> entry : catalogConfig.entrySet()) {
-            if (entry.getValue() != null) {
-                String configKey = IcebergConfigConstants.ICEBERG_CATALOG_CONFIG.ICEBERG_CATALOG_CONFIG_STRING
-                    + "." + entry.getKey();
-                properties.put(configKey, entry.getValue().toString());
-            }
-        }
-    }
-
-    /**
-     * Extract volume configuration
-     */
-    private void extractVolumeConfig(Map<String, Object> icebergConfig, Map<String, String> properties) {
-        if (!icebergConfig.containsKey(IcebergConfigConstants.ICEBERG_VOLUME_CONFIG.ICEBERG_VOLUME_CONFIG_STRING)) {
-            return;
-        }
-
-        Map<String, Object> volumeConfig = (Map<String, Object>) icebergConfig.get(
-            IcebergConfigConstants.ICEBERG_VOLUME_CONFIG.ICEBERG_VOLUME_CONFIG_STRING);
-
-        for (Map.Entry<String, Object> entry : volumeConfig.entrySet()) {
-            if (entry.getValue() != null) {
-                String configKey = IcebergConfigConstants.ICEBERG_VOLUME_CONFIG.ICEBERG_VOLUME_CONFIG_STRING
-                    + "." + entry.getKey();
-                properties.put(configKey, entry.getValue().toString());
-            }
-        }
-    }
-
-    /**
-     * Extract additional configuration including FileIO config
-     */
-    private void extractAdditionalConfig(Map<String, Object> icebergConfig, Map<String, String> properties) {
-        if (!icebergConfig.containsKey(IcebergConfigConstants.ICEBERG_ADDITIONAL_CONFIG.ICEBERG_ADDITIONAL_CONFIG_STRING)) {
-            return;
-        }
-
-        Map<String, Object> additionalConfig = (Map<String, Object>) icebergConfig.get(
-            IcebergConfigConstants.ICEBERG_ADDITIONAL_CONFIG.ICEBERG_ADDITIONAL_CONFIG_STRING);
-
-        // Extract non-FileIO properties
-        for (Map.Entry<String, Object> entry : additionalConfig.entrySet()) {
-            if (entry.getValue() != null && !IcebergConfigConstants.ICEBERG_ADDITIONAL_CONFIG.FILE_IO_CONFIG.equals(entry.getKey())) {
-                String configKey = IcebergConfigConstants.ICEBERG_ADDITIONAL_CONFIG.ICEBERG_ADDITIONAL_CONFIG_STRING
-                    + "." + entry.getKey();
-                properties.put(configKey, entry.getValue().toString());
-            }
-        }
-
-        // Extract FileIO config
-        if (additionalConfig.containsKey(IcebergConfigConstants.ICEBERG_ADDITIONAL_CONFIG.FILE_IO_CONFIG)) {
-            Map<String, Object> fileIOConfig = (Map<String, Object>) additionalConfig.get(
-                IcebergConfigConstants.ICEBERG_ADDITIONAL_CONFIG.FILE_IO_CONFIG);
-            extractFileIOConfig(fileIOConfig, properties);
-        }
-    }
-
-    /**
-     * Extract FileIO configuration based on impl_class
-     */
-    private void extractFileIOConfig(Map<String, Object> fileIOConfig, Map<String, String> properties) {
-        String implClass = (String) fileIOConfig.get(IcebergConfigConstants.FILE_IO_CONFIG.IMPL_CLASS);
-
-        if (implClass == null) {
-            return;
-        }
-
-        if (IcebergConfigConstants.GOPHER_FILE_IO_CLASS_NAME.equals(implClass)) {
-            extractGopherFileIOConfig(fileIOConfig, properties);
-        } else {
-            extractSimpleFileIOConfig(fileIOConfig, properties, implClass);
-        }
-    }
-
-    /**
-     * Extract SimpleFileIO configuration
-     */
-    private void extractSimpleFileIOConfig(Map<String, Object> fileIOConfig, Map<String, String> properties, String implClass) {
-        String simpleFileIOConfigName = IcebergConfigConstants.FILE_IO_CONFIG.SIMPLE_FILEIO_CONFIG;
-        properties.put(IcebergConfigConstants.FILE_IO_CONFIG_IMPL_CLASS, implClass);
-
-        if (!fileIOConfig.containsKey(simpleFileIOConfigName)) {
-            return;
-        }
-
-        Map<String, Object> simpleConfig = (Map<String, Object>) fileIOConfig.get(simpleFileIOConfigName);
-
-        // Extract additional properties
-        if (simpleConfig.containsKey(IcebergConfigConstants.PROPERTIES)) {
-            Map<String, Object> simpleProps = (Map<String, Object>) simpleConfig.get(IcebergConfigConstants.PROPERTIES);
-            for (Map.Entry<String, Object> entry : simpleProps.entrySet()) {
-                if (entry.getValue() != null) {
-                    String configKey = IcebergConfigConstants.FILE_IO_CONFIG_PROPERTIES_PREFIX + "." + entry.getKey();
-                    properties.put(configKey, entry.getValue().toString());
-                }
-            }
-        }
-    }
-
-    /**
-     * Extract GopherFileIO configuration
-     */
-    private void extractGopherFileIOConfig(Map<String, Object> fileIOConfig, Map<String, String> properties) {
-        String gopherFileIOConfigName = IcebergConfigConstants.FILE_IO_CONFIG.GOPHER_FILEIO_CONFIG;
-        if (!fileIOConfig.containsKey(gopherFileIOConfigName)) {
-            return;
-        }
-
-        properties.put(IcebergConfigConstants.FILE_IO_CONFIG_IMPL_CLASS, IcebergConfigConstants.GOPHER_FILE_IO);
-
-        Map<String, Object> gopherFileIOConfig = (Map<String, Object>) fileIOConfig.get(gopherFileIOConfigName);
-
-        // Extract gopherConfig
-        if (gopherFileIOConfig.containsKey(IcebergConfigConstants.GOPHER_CONFIG.GOPHER_CONFIG_STRING)) {
-            Map<String, Object> gopherConfig = (Map<String, Object>) gopherFileIOConfig.get(
-                IcebergConfigConstants.GOPHER_CONFIG.GOPHER_CONFIG_STRING);
-            extractGopherCommonConfig(gopherConfig, properties);
-        }
-
-        // Extract additional properties
-        if (gopherFileIOConfig.containsKey(IcebergConfigConstants.PROPERTIES)) {
-            Map<String, Object> gopherProps = (Map<String, Object>) gopherFileIOConfig.get(IcebergConfigConstants.PROPERTIES);
-            for (Map.Entry<String, Object> entry : gopherProps.entrySet()) {
-                if (entry.getValue() != null) {
-                    String configKey = IcebergConfigConstants.FILE_IO_CONFIG_PROPERTIES_PREFIX + "." + entry.getKey();
-                    properties.put(configKey, entry.getValue().toString());
-                }
-            }
-        }
-    }
-
-    /**
-     * Extract Gopher common configuration
-     */
-    private void extractGopherCommonConfig(Map<String, Object> gopherConfig, Map<String, String> properties) {
-        if (!gopherConfig.containsKey(IcebergConfigConstants.COMMON)) {
-            return;
-        }
-
-        Map<String, Object> common = (Map<String, Object>) gopherConfig.get(IcebergConfigConstants.COMMON);
-        for (Map.Entry<String, Object> entry : common.entrySet()) {
-            if (entry.getValue() != null) {
-                String configKey = IcebergConfigConstants.GOPHER_COMMON_CONFIG_PREFIX + "." + entry.getKey();
-                properties.put(configKey, entry.getValue().toString());
-            }
-        }
     }
 
     /**
@@ -1567,21 +1392,21 @@ public class IcebergRestController {
         return schemaConverter.fromJson(schemaMap);
     }
 
+    /**
+     * Extract the gopher.* subset from the flat properties map.
+     *
+     * <p>The map is already populated with normalized {@code gopher.*} keys by
+     * {@link IcebergRequestConfigParser} (which delegates the
+     * Volume-to-gopher translation and normalization — s3 -> s3a, useHttps,
+     * useVirtualHost, endpoint scheme stripping — to
+     * {@code GopherPropertiesResolver}). This method is now a thin filter.
+     */
     private Map<String, String> getGopherProps(Map<String, String> properties) {
-        // set gopher common propertis
         Map<String, String> gopherProps = new HashMap<>();
+        String prefix = IcebergConfigConstants.GOPHER_CONFIG.GOPHER_HEADER + ".";
         for (Map.Entry<String, String> entry : properties.entrySet()) {
-            if (entry.getKey().startsWith(IcebergConfigConstants.GOPHER_CONFIG.GOPHER_HEADER + ".")) {
+            if (entry.getKey().startsWith(prefix)) {
                 gopherProps.put(entry.getKey(), entry.getValue());
-            }
-        }
-        // set gopher connect propertis
-        for (Map.Entry<String, String> entry : properties.entrySet()) {
-            String key = entry.getKey();
-            String value = entry.getValue();
-            String mappingKey = PropertiesMapping.get(key);
-            if (mappingKey != null) {
-                gopherProps.put(mappingKey, value);
             }
         }
         return gopherProps;
@@ -1597,134 +1422,123 @@ public class IcebergRestController {
         return buildInCatalogProps;
     }
 
-    private void processVolumeS3FileIO(Configuration configuration, Map<String, String> properties) {
-        String implClass = properties.getOrDefault(IcebergConfigConstants.FILE_IO_CONFIG_IMPL_CLASS, IcebergConfigConstants.HADOOP_FILE_IO_CLASS_NAME);
-        configuration.set(IcebergConfigConstants.FILE_IO_CONFIG_IMPL_CLASS, implClass);
+    private static String volKey(String key) {
+        return IcebergConfigConstants.ICEBERG_VOLUME_CONFIG.ICEBERG_VOLUME_CONFIG_STRING + "." + key;
+    }
 
-        // Get S3 credentials from volume config
-        String accessKeyConfigKey = IcebergConfigConstants.ICEBERG_VOLUME_CONFIG.ICEBERG_VOLUME_CONFIG_STRING + "." + IcebergConfigConstants.ICEBERG_VOLUME_CONFIG.ACCESS_KEY_ID;
-        String secretKeyConfigKey = IcebergConfigConstants.ICEBERG_VOLUME_CONFIG.ICEBERG_VOLUME_CONFIG_STRING + "." + IcebergConfigConstants.ICEBERG_VOLUME_CONFIG.SECRET_ACCESS_KEY;
-        String endpointConfigKey = IcebergConfigConstants.ICEBERG_VOLUME_CONFIG.ICEBERG_VOLUME_CONFIG_STRING + "." + IcebergConfigConstants.ICEBERG_VOLUME_CONFIG.VOLUME_ENDPOINT;
-        String pathStyleConfigKey = IcebergConfigConstants.ICEBERG_VOLUME_CONFIG.ICEBERG_VOLUME_CONFIG_STRING + "." + IcebergConfigConstants.ICEBERG_VOLUME_CONFIG.PATH_STYLE_ACCESS;
+    private static String catKey(String key) {
+        return IcebergConfigConstants.ICEBERG_CATALOG_CONFIG.ICEBERG_CATALOG_CONFIG_STRING + "." + key;
+    }
 
-        String accessKey = properties.get(accessKeyConfigKey);
-        String secretKey = properties.get(secretKeyConfigKey);
-        String endpoint = properties.get(endpointConfigKey);
-        Boolean pathStyleAccess = Boolean.parseBoolean(properties.getOrDefault(pathStyleConfigKey, "true"));
-
-        // Determine FileIO type by impl_class
-        if (IcebergConfigConstants.S3_FILE_IO_CLASS_NAME.equals(implClass) ||
-            IcebergConfigConstants.ICEBERG_S3_FILE_IO_CLASS_NAME.equals(implClass)) {
-            // Configure for S3FileIO
-            String regionConfigKey = IcebergConfigConstants.ICEBERG_VOLUME_CONFIG.ICEBERG_VOLUME_CONFIG_STRING + "." + IcebergConfigConstants.ICEBERG_VOLUME_CONFIG.VOLUME_REGION;
-            String region = properties.getOrDefault(regionConfigKey, IcebergConfigConstants.DEFAULT_S3_REGION_VALUE);
-
-            if (accessKey != null) configuration.set(IcebergConfigConstants.S3FILEIO_ACCESS_KEY_ID, accessKey);
-            if (secretKey != null) configuration.set(IcebergConfigConstants.S3FILEIO_SECRET_ACCESS_KEY, secretKey);
-            if (endpoint != null) configuration.set(IcebergConfigConstants.S3FILEIO_ENDPOINT, endpoint);
-            if (region != null) configuration.set(IcebergConfigConstants.S3FILEIO_REGION, region);
-            configuration.set(IcebergConfigConstants.S3FILEIO_PATH_STYLE_ACCESS, pathStyleAccess.toString());
-        } else {
-            // Configure for HadoopFileIO with S3A (default)
-            configuration.set(IcebergConfigConstants.FS_S3A_IMPL, IcebergConfigConstants.S3A_FILESYSTEM_IMPL);
-            configuration.set(IcebergConfigConstants.FS_S3A_AWS_CREDENTIALS_PROVIDER, IcebergConfigConstants.S3A_CREDENTIALS_PROVIDER);
-
-            if (accessKey != null) configuration.set(IcebergConfigConstants.FS_S3A_ACCESS_KEY, accessKey);
-            if (secretKey != null) configuration.set(IcebergConfigConstants.FS_S3A_SECRET_KEY, secretKey);
-            if (endpoint != null) configuration.set(IcebergConfigConstants.FS_S3A_ENDPOINT, endpoint);
-            configuration.set(IcebergConfigConstants.FS_S3A_PATH_STYLE_ACCESS, pathStyleAccess.toString());
+    /**
+     * Mask secret-bearing entries so gopher param logs are diagnostic without
+     * leaking credentials. Matches any key containing secret / access_key /
+     * password / token / keytab (case-insensitive).
+     */
+    private static Map<String, String> redactSecrets(Map<String, String> props) {
+        java.util.LinkedHashMap<String, String> safe = new java.util.LinkedHashMap<>();
+        for (Map.Entry<String, String> e : props.entrySet()) {
+            String k = e.getKey().toLowerCase();
+            if (k.contains("secret") || k.contains("access_key") || k.contains("access-key")
+                    || k.contains("password") || k.contains("token") || k.contains("keytab")) {
+                safe.put(e.getKey(), "***");
+            } else {
+                safe.put(e.getKey(), e.getValue());
+            }
         }
+        return safe;
+    }
 
-        // Set warehouse location from volume config
-        String bucketConfigKey = IcebergConfigConstants.ICEBERG_VOLUME_CONFIG.ICEBERG_VOLUME_CONFIG_STRING + "." + IcebergConfigConstants.ICEBERG_VOLUME_CONFIG.BUCKET_NAME;
-        String basePathConfigKey = IcebergConfigConstants.ICEBERG_VOLUME_CONFIG.ICEBERG_VOLUME_CONFIG_STRING + "." + IcebergConfigConstants.ICEBERG_VOLUME_CONFIG.BASE_PATH;
-        String bucketName = properties.get(bucketConfigKey);
-        String basePath = properties.getOrDefault(basePathConfigKey, "/hive");
+    /**
+     * Emit S3 storage credentials for the DATA domain from inline
+     * IcebergVolumeConfig options.
+     *
+     * <p>Writes BOTH credential key families — iceberg-aws ({@code s3.*}) and
+     * hadoop-aws ({@code fs.s3a.*}). The actual FileIO is chosen later by
+     * {@code IcebergUtilities.composeCatalogProperties} (GopherFileIO when
+     * gopher.enabled, otherwise the mixed ResolvingFileIO which dispatches s3://
+     * to S3FileIO and other schemes to HadoopFileIO), so there is deliberately
+     * no explicit FileIO-impl selection here.
+     */
+    private void emitS3Inline(Configuration configuration, Map<String, String> properties) {
+        String accessKey = properties.get(volKey(IcebergConfigConstants.ICEBERG_VOLUME_CONFIG.ACCESS_KEY_ID));
+        String secretKey = properties.get(volKey(IcebergConfigConstants.ICEBERG_VOLUME_CONFIG.SECRET_ACCESS_KEY));
+        String endpoint = properties.get(volKey(IcebergConfigConstants.ICEBERG_VOLUME_CONFIG.VOLUME_ENDPOINT));
+        String region = properties.getOrDefault(volKey(IcebergConfigConstants.ICEBERG_VOLUME_CONFIG.VOLUME_REGION),
+                IcebergConfigConstants.DEFAULT_S3_REGION_VALUE);
+        Boolean pathStyleAccess = Boolean.parseBoolean(
+                properties.getOrDefault(volKey(IcebergConfigConstants.ICEBERG_VOLUME_CONFIG.PATH_STYLE_ACCESS), "true"));
+
+        // hadoop-aws (HadoopFileIO via S3AFileSystem)
+        configuration.set(IcebergConfigConstants.FS_S3A_IMPL, IcebergConfigConstants.S3A_FILESYSTEM_IMPL);
+        configuration.set(IcebergConfigConstants.FS_S3A_AWS_CREDENTIALS_PROVIDER, IcebergConfigConstants.S3A_CREDENTIALS_PROVIDER);
+        if (accessKey != null) configuration.set(IcebergConfigConstants.FS_S3A_ACCESS_KEY, accessKey);
+        if (secretKey != null) configuration.set(IcebergConfigConstants.FS_S3A_SECRET_KEY, secretKey);
+        if (endpoint != null) configuration.set(IcebergConfigConstants.FS_S3A_ENDPOINT, endpoint);
+        configuration.set(IcebergConfigConstants.FS_S3A_PATH_STYLE_ACCESS, pathStyleAccess.toString());
+
+        // iceberg-aws (S3FileIO / ResolvingFileIO)
+        if (accessKey != null) configuration.set(IcebergConfigConstants.S3FILEIO_ACCESS_KEY_ID, accessKey);
+        if (secretKey != null) configuration.set(IcebergConfigConstants.S3FILEIO_SECRET_ACCESS_KEY, secretKey);
+        if (endpoint != null) configuration.set(IcebergConfigConstants.S3FILEIO_ENDPOINT, endpoint);
+        if (region != null) configuration.set(IcebergConfigConstants.S3FILEIO_REGION, region);
+        configuration.set(IcebergConfigConstants.S3FILEIO_PATH_STYLE_ACCESS, pathStyleAccess.toString());
+
+        // Warehouse location for Hive-metastore-backed catalogs.
+        String bucketName = properties.get(volKey(IcebergConfigConstants.ICEBERG_VOLUME_CONFIG.BUCKET_NAME));
+        String basePath = properties.getOrDefault(volKey(IcebergConfigConstants.ICEBERG_VOLUME_CONFIG.BASE_PATH), "/hive");
         if (bucketName != null) {
-            String warehouseLocation = String.format("s3a://%s%s", bucketName, basePath);
-            configuration.set("hive.metastore.warehouse.dir", warehouseLocation);
+            configuration.set("hive.metastore.warehouse.dir", String.format("s3a://%s%s", bucketName, basePath));
         }
 
-        // Pass through all FileIOConfig.properties to configuration
+        // gopher path: IcebergUtilities.convertProtocolConfiguration only harvests
+        // fs.gopher.* keys (the shape s3.conf produces). Mirror credentials there so
+        // GopherFileIO/GopherFileSystem get endpoint + keys in the inline case too;
+        // without this the gopher S3 path reaches gophermeta with empty OSS config.
+        // These keys are inert when gopher is off (ResolvingFileIO reads s3.*).
+        if (bucketName != null) configuration.set("fs.gopher.bucket", bucketName);
+        if (accessKey != null) configuration.set("fs.gopher.access_key", accessKey);
+        if (secretKey != null) configuration.set("fs.gopher.secret_key", secretKey);
+        if (endpoint != null) {
+            boolean useHttps = endpoint.startsWith("https://");
+            String hostPort = endpoint.replaceFirst("^https?://", "");
+            configuration.set("fs.gopher.endpoint", hostPort);
+            configuration.set("fs.gopher.use_https", Boolean.toString(useHttps));
+        }
+        // Deliberately NOT setting fs.gopher.region: when present, gopher's native
+        // OSS client builds an AWS-style host (s3.<region>.amazonaws.com) instead of
+        // using fs.gopher.endpoint, which produces CURLE_COULDNT_RESOLVE_HOST against
+        // self-hosted endpoints like minio. The working s3.conf shape omits region.
+        configuration.set("fs.gopher.use_virtual_host", Boolean.toString(!pathStyleAccess));
+        // gopher only supports the "s3a" UFS type for object storage; normalize "s3".
+        String volType = properties.getOrDefault(
+                volKey(IcebergConfigConstants.ICEBERG_VOLUME_CONFIG.VOLUME_SERVER_TYPE), "");
+        String ufsType = (volType.equals(IcebergConfigConstants.VOLUME_TYPE_S3)
+                || volType.equals(IcebergConfigConstants.VOLUME_TYPE_S3A)) ? "s3a" : volType;
+        if (!ufsType.isEmpty()) configuration.set("fs.gopher.ufs_type", ufsType);
+
+        // Pass through all FileIOConfig.properties to configuration.
         String prefix = IcebergConfigConstants.FILE_IO_CONFIG_PROPERTIES_PREFIX + ".";
         for (Map.Entry<String, String> entry : properties.entrySet()) {
             if (entry.getKey().startsWith(prefix)) {
-                String configKey = entry.getKey().substring(prefix.length());
-                configuration.set(configKey, entry.getValue());
+                configuration.set(entry.getKey().substring(prefix.length()), entry.getValue());
             }
         }
-    }
 
-    private void processVolumeS3Resource(Configuration configuration, Map<String, String> properties) {
-        String file_io_config = properties.getOrDefault(IcebergConfigConstants.FILE_IO_CONFIG_IMPL_CLASS, "");
-        if (file_io_config.equals(IcebergConfigConstants.GOPHER_FILE_IO)) {
-            //TODO: support GopherFileIO to read catalog io
-        } else {
-            processVolumeS3FileIO(configuration, properties);
-        }
-    }
-
-    private void processHiveVolumeS3Resource(Configuration configuration, Map<String, String> properties) {
-        String catalogConfigKey = IcebergConfigConstants.ICEBERG_VOLUME_CONFIG.ICEBERG_VOLUME_CONFIG_STRING + "." + IcebergConfigConstants.ICEBERG_VOLUME_CONFIG.CATALOG_FILE_IO_IMPL;
-        String catalog_file_io_impl = properties.getOrDefault(catalogConfigKey, "");
-        if (catalog_file_io_impl.equals(IcebergConfigConstants.GOPHER_FILE_IO)) {
-            //TODO(liuxiaoyu): support GopherFileIO to read catalog io
-        } else {
-            // Configure S3A filesystem for Hive
-            configuration.set(IcebergConfigConstants.FS_S3A_IMPL, IcebergConfigConstants.S3A_FILESYSTEM_IMPL);
-            configuration.set(IcebergConfigConstants.FS_S3A_AWS_CREDENTIALS_PROVIDER, IcebergConfigConstants.S3A_CREDENTIALS_PROVIDER);
-
-            // Set S3 credentials from volume config
-            String accessKeyConfigKey = IcebergConfigConstants.ICEBERG_VOLUME_CONFIG.ICEBERG_VOLUME_CONFIG_STRING + "." + IcebergConfigConstants.ICEBERG_VOLUME_CONFIG.ACCESS_KEY_ID;
-            String secretKeyConfigKey = IcebergConfigConstants.ICEBERG_VOLUME_CONFIG.ICEBERG_VOLUME_CONFIG_STRING + "." + IcebergConfigConstants.ICEBERG_VOLUME_CONFIG.SECRET_ACCESS_KEY;
-            String endpointConfigKey = IcebergConfigConstants.ICEBERG_VOLUME_CONFIG.ICEBERG_VOLUME_CONFIG_STRING + "." + IcebergConfigConstants.ICEBERG_VOLUME_CONFIG.VOLUME_ENDPOINT;
-            String regionConfigKey = IcebergConfigConstants.ICEBERG_VOLUME_CONFIG.ICEBERG_VOLUME_CONFIG_STRING + "." + IcebergConfigConstants.ICEBERG_VOLUME_CONFIG.VOLUME_REGION;
-
-            String accessKey = properties.get(accessKeyConfigKey);
-            String secretKey = properties.get(secretKeyConfigKey);
-            String endpoint = properties.get(endpointConfigKey);
-            String region = properties.getOrDefault(regionConfigKey, "us-east-1");
-
-            // Configure for both S3A (HadoopFileIO) and S3 (S3FileIO)
-            if (accessKey != null) {
-                configuration.set(IcebergConfigConstants.FS_S3A_ACCESS_KEY, accessKey);
-                configuration.set("iceberg.s3.access-key-id", accessKey);
+        if (LOG.isDebugEnabled()) {
+            LOG.debug("data: emitS3Inline wrote fs.s3a.*/s3.* (endpoint={}, region={}, pathStyle={}, warehouse={})",
+                    endpoint, region, pathStyleAccess,
+                    bucketName == null ? "<none>" : "s3a://" + bucketName + basePath);
+            // Also dump the fs.gopher.* keys we just set so future "gopher param wrong"
+            // debugging (e.g. endpoint with scheme, ufs_type=s3, virtual-host flips)
+            // can be checked at this layer without bumping native LIBOSS2 trace.
+            Map<String, String> fsGopher = new java.util.LinkedHashMap<>();
+            for (Map.Entry<String, String> e : configuration) {
+                if (e.getKey().startsWith("fs.gopher.")) {
+                    fsGopher.put(e.getKey(), e.getValue());
+                }
             }
-            if (secretKey != null) {
-                configuration.set(IcebergConfigConstants.FS_S3A_SECRET_KEY, secretKey);
-                configuration.set("iceberg.s3.secret-access-key", secretKey);
-            }
-            if (endpoint != null) {
-                configuration.set(IcebergConfigConstants.FS_S3A_ENDPOINT, endpoint);
-                configuration.set("iceberg.s3.endpoint", endpoint);
-            }
-            if (region != null) {
-                configuration.set("fs.s3a.endpoint.region", region);
-                configuration.set("iceberg.s3.region", region);
-            }
-
-            String pathStyleConfigKey = IcebergConfigConstants.ICEBERG_VOLUME_CONFIG.ICEBERG_VOLUME_CONFIG_STRING + "." + IcebergConfigConstants.ICEBERG_VOLUME_CONFIG.PATH_STYLE_ACCESS;
-            Boolean pathStyleAccess = Boolean.parseBoolean(properties.getOrDefault(pathStyleConfigKey, "false"));
-            configuration.set(IcebergConfigConstants.FS_S3A_PATH_STYLE_ACCESS, pathStyleAccess.toString());
-            configuration.set("iceberg.s3.path-style-access", pathStyleAccess.toString());
-
-            // Set warehouse location from volume config
-            //TODO(liuxiaoyu): need set warehouse dir
-            String bucketConfigKey = IcebergConfigConstants.ICEBERG_VOLUME_CONFIG.ICEBERG_VOLUME_CONFIG_STRING + "." + IcebergConfigConstants.ICEBERG_VOLUME_CONFIG.BUCKET_NAME;
-            String basePathConfigKey = IcebergConfigConstants.ICEBERG_VOLUME_CONFIG.ICEBERG_VOLUME_CONFIG_STRING + "." + IcebergConfigConstants.ICEBERG_VOLUME_CONFIG.BASE_PATH;
-            String bucketName = properties.get(bucketConfigKey);
-            String basePath = properties.getOrDefault(basePathConfigKey, "/hive");
-            if (bucketName != null) {
-                String warehouseLocation = String.format("s3a://%s%s", bucketName, basePath);
-                configuration.set("hive.metastore.warehouse.dir", warehouseLocation);
-            }
-
-            // Set FileIO implementation based on catalog_file_io_impl
-            String catalogFileIoKey = IcebergConfigConstants.ICEBERG_CATALOG_CONFIG.ICEBERG_CATALOG_CONFIG_STRING + ".catalog_file_io_impl";
-            String fileIoImpl = properties.getOrDefault(catalogFileIoKey, "");
-            if ("GopherFileIO".equals(fileIoImpl)) {
-                configuration.set("iceberg.catalog.file-io-impl", "cloud.elastic.dlagent.plugins.iceberg.GopherFileIO");
-            }
+            LOG.debug("data: emitS3Inline fs.gopher.* set: {}", redactSecrets(fsGopher));
         }
     }
 
@@ -1734,27 +1548,53 @@ public class IcebergRestController {
         return basePath;
     }
 
-    private void processHiveVolumeServerResource(Configuration configuration, Map<String, String> properties) {
-        String volumeServerTypeKey = IcebergConfigConstants.ICEBERG_VOLUME_CONFIG.ICEBERG_VOLUME_CONFIG_STRING + "." + IcebergConfigConstants.ICEBERG_VOLUME_CONFIG.VOLUME_SERVER_TYPE;
-        String volume_server_type = properties.getOrDefault(volumeServerTypeKey, "");
-        if (volume_server_type.isEmpty()) {
-            String key = IcebergConfigConstants.ICEBERG_VOLUME_CONFIG.ICEBERG_VOLUME_CONFIG_STRING + "." + IcebergConfigConstants.ICEBERG_VOLUME_CONFIG.VOLUME_SERVER_TYPE;
-            throw new IllegalArgumentException(key + " is empty, must specify it");
+    /**
+     * DATA domain: configure storage / FileIO access for reading and writing
+     * Iceberg data + manifest files.
+     *
+     * <p>Per-domain source switch: if the volume specifies a config-file section
+     * ({@code server_name}), the whole domain is read from that section of
+     * s3.conf / gphdfs.conf and the inline IcebergVolumeConfig options are
+     * ignored; otherwise the inline options are used.
+     */
+    private void buildDataConfig(Configuration configuration, Map<String, String> properties) {
+        String volumeType = properties.getOrDefault(
+                volKey(IcebergConfigConstants.ICEBERG_VOLUME_CONFIG.VOLUME_SERVER_TYPE), "");
+        if (volumeType.isEmpty()) {
+            // No volume (e.g. some polaris setups). Storage credentials, if any,
+            // reach the catalog through gopherProps; nothing to do here.
+            LOG.debug("data: no volume_server_type; skipping data config (credentials, if any, via gopherProps)");
+            return;
         }
+        String serverName = properties.get(volKey(IcebergConfigConstants.ICEBERG_VOLUME_CONFIG.SERVER_NAME));
+        boolean useConfFile = serverName != null && !serverName.isEmpty();
 
-        if (volume_server_type.equals(IcebergConfigConstants.VOLUME_TYPE_S3A) ||
-            volume_server_type.equals(IcebergConfigConstants.VOLUME_TYPE_S3) ||
-            volume_server_type.equals(IcebergConfigConstants.VOLUME_TYPE_ABFSS)) {
-            processVolumeS3Resource(configuration, properties);
-        } else if (volume_server_type.equals(IcebergConfigConstants.VOLUME_TYPE_HDFS)) {
-            processVolumeHdfsResource(configuration, properties);
+        if (volumeType.equals(IcebergConfigConstants.VOLUME_TYPE_S3A) ||
+            volumeType.equals(IcebergConfigConstants.VOLUME_TYPE_S3) ||
+            volumeType.equals(IcebergConfigConstants.VOLUME_TYPE_ABFSS)) {
+            if (useConfFile) {
+                String s3Location = deriveS3Location(configuration, properties);
+                LOG.debug("data: type={}, source=conf-file s3.conf[{}] location={} (inline access_key/secret ignored)",
+                        volumeType, serverName, s3Location);
+                loadConfFile("s3.conf", serverName, "data", s3Location, configuration);
+            } else {
+                LOG.debug("data: type={}, source=inline", volumeType);
+                emitS3Inline(configuration, properties);
+            }
+        } else if (volumeType.equals(IcebergConfigConstants.VOLUME_TYPE_HDFS)) {
+            if (useConfFile) {
+                LOG.debug("data: type=hdfs, source=conf-file gphdfs.conf[{}] (inline options ignored)", serverName);
+                loadConfFile("gphdfs.conf", serverName, "data", "", configuration);
+            } else {
+                LOG.debug("data: type=hdfs, source=inline");
+                emitHdfsInline(configuration, properties);
+            }
         } else {
-            String key = IcebergConfigConstants.ICEBERG_VOLUME_CONFIG.ICEBERG_VOLUME_CONFIG_STRING + "." + IcebergConfigConstants.ICEBERG_VOLUME_CONFIG.VOLUME_SERVER_TYPE;
-            throw new UnsupportedOperationException(key + " '" + volume_server_type + "' is not supported yet. " +
-                    "Supported types are: [" + IcebergConfigConstants.VOLUME_TYPE_S3A + ", " +
-                    IcebergConfigConstants.VOLUME_TYPE_S3 + ", " +
-                    IcebergConfigConstants.VOLUME_TYPE_HDFS + ", " +
-                    IcebergConfigConstants.VOLUME_TYPE_ABFSS + "]");
+            throw new UnsupportedOperationException(
+                    volKey(IcebergConfigConstants.ICEBERG_VOLUME_CONFIG.VOLUME_SERVER_TYPE) + " '" + volumeType
+                    + "' is not supported yet. Supported types are: ["
+                    + IcebergConfigConstants.VOLUME_TYPE_S3A + ", " + IcebergConfigConstants.VOLUME_TYPE_S3 + ", "
+                    + IcebergConfigConstants.VOLUME_TYPE_HDFS + ", " + IcebergConfigConstants.VOLUME_TYPE_ABFSS + "]");
         }
     }
 
@@ -1771,7 +1611,7 @@ public class IcebergRestController {
      * pick them up.  Simple auth is the default to match the C side's
      * iceberg_volume_fdw.parseVolumeOption fallback.
      */
-    private void processVolumeHdfsResource(Configuration configuration, Map<String, String> properties) {
+    private void emitHdfsInline(Configuration configuration, Map<String, String> properties) {
         String endpointKey = IcebergConfigConstants.ICEBERG_VOLUME_CONFIG.ICEBERG_VOLUME_CONFIG_STRING + "."
             + IcebergConfigConstants.ICEBERG_VOLUME_CONFIG.VOLUME_ENDPOINT;
         String endpoint = properties.getOrDefault(endpointKey, "");
@@ -1779,7 +1619,7 @@ public class IcebergRestController {
         if (!endpoint.isEmpty()) {
             // Accept "hdfs://host:port" or just "host:port".
             String defaultFS = endpoint.startsWith("hdfs://") ? endpoint : "hdfs://" + endpoint;
-            // fs.defaultFS already set by processS3OrHadoopServerResource for hadoop
+            // fs.defaultFS already set by setCatalogWarehouseInline for hadoop
             // catalog; only set when not already configured (e.g. builtin/hive
             // catalog with hdfs volume).
             if (configuration.get("fs.defaultFS") == null
@@ -1795,29 +1635,23 @@ public class IcebergRestController {
         }
     }
 
-    private void processHiveServerResource(Configuration configuration, Map<String, String> properties) {
-        String hiveMetastoreUriKey = IcebergConfigConstants.ICEBERG_CATALOG_CONFIG.ICEBERG_CATALOG_CONFIG_STRING + "." + IcebergConfigConstants.ICEBERG_CATALOG_CONFIG.HIVE_METASTORE_URI;
-        String hive_metastore_uris = properties.getOrDefault(hiveMetastoreUriKey, "");
-        if (!hive_metastore_uris.isEmpty()) {
-            configuration.set("hive.metastore.uris", hive_metastore_uris);
-        } else {
-            String key = IcebergConfigConstants.ICEBERG_CATALOG_CONFIG.ICEBERG_CATALOG_CONFIG_STRING + "." + IcebergConfigConstants.ICEBERG_CATALOG_CONFIG.HIVE_METASTORE_URI;
-            throw new IllegalArgumentException(key + " is empty, must specify it");
+    private void setHiveMetaInline(Configuration configuration, Map<String, String> properties) {
+        String hive_metastore_uris = properties.getOrDefault(
+                catKey(IcebergConfigConstants.ICEBERG_CATALOG_CONFIG.HIVE_METASTORE_URI), "");
+        if (hive_metastore_uris.isEmpty()) {
+            throw new IllegalArgumentException(
+                    catKey(IcebergConfigConstants.ICEBERG_CATALOG_CONFIG.HIVE_METASTORE_URI) + " is empty, must specify it");
         }
+        configuration.set("hive.metastore.uris", hive_metastore_uris);
 
-        String authMethodKey = IcebergConfigConstants.ICEBERG_CATALOG_CONFIG.ICEBERG_CATALOG_CONFIG_STRING + "." + IcebergConfigConstants.ICEBERG_CATALOG_CONFIG.AUTH_METHOD;
-        String auth_method = properties.getOrDefault(authMethodKey, "");
+        String auth_method = properties.getOrDefault(
+                catKey(IcebergConfigConstants.ICEBERG_CATALOG_CONFIG.AUTH_METHOD), "");
         if (!auth_method.isEmpty()) {
             configuration.set("hadoop.security.authentication", auth_method);
         }
-        processHiveVolumeServerResource(configuration, properties);
     }
 
-    private void processBuildInResource(Configuration configuration, Map<String, String> properties) {
-        processHiveVolumeServerResource(configuration, properties);
-    }
-
-    private void processPolarisServerResource(Configuration configuration, Map<String, String> properties) {
+    private void setPolarisInline(Configuration configuration, Map<String, String> properties) {
         String polarisServerUrlKey = IcebergConfigConstants.ICEBERG_CATALOG_CONFIG.ICEBERG_CATALOG_CONFIG_STRING + "." + IcebergConfigConstants.ICEBERG_CATALOG_CONFIG.POLARIS_SERVER_URL;
         String polaris_server_url = properties.getOrDefault(polarisServerUrlKey, "");
         if (!polaris_server_url.isEmpty()) {
@@ -1842,8 +1676,9 @@ public class IcebergRestController {
             configuration.set(IcebergConfigConstants.ICEBERG_CATALOG_CONFIG.SCOPE, scope);
         }
         // Volume credentials reach IcebergPolarisCatalog through
-        // gopherProperties (translated from SQL options by PropertiesMapping);
-        // Polaris always uses GopherFileIO, so no S3A / S3FileIO config here.
+        // gopherProperties (translated from SQL options by
+        // GopherPropertiesResolver via IcebergRequestConfigParser); Polaris
+        // always uses GopherFileIO, so no S3A / S3FileIO config here.
     }
 
     /**
@@ -1866,7 +1701,7 @@ public class IcebergRestController {
      * was a no-op, so warehouse_location_prefix never reached the catalog
      * and IcebergS3Catalog computed warehouse as the literal "null/".
      */
-    private void processS3OrHadoopServerResource(Configuration configuration,
+    private void setCatalogWarehouseInline(Configuration configuration,
                                                   Map<String, String> properties,
                                                   boolean isHadoopCatalog) {
         String warehouse = getCatalogWarehouseLocationPrefix(properties);
@@ -1904,28 +1739,46 @@ public class IcebergRestController {
             configuration.set("fs.prefix", prefix);
         }
 
-        // Both s3 and hadoop catalogs delegate to processHiveVolumeServerResource
-        // for the volume-side credentials (s3a access keys, HDFS auth, etc.).
-        processHiveVolumeServerResource(configuration, properties);
     }
 
-    private void processServerResource(Configuration configuration, Map<String, String> properties) {
-        String catalogServerTypeKey = IcebergConfigConstants.ICEBERG_CATALOG_CONFIG.ICEBERG_CATALOG_CONFIG_STRING + "." + IcebergConfigConstants.ICEBERG_CATALOG_CONFIG.SERVER_TYPE;
-        String catalog_server_type = properties.getOrDefault(catalogServerTypeKey, "");
+    /**
+     * META domain: configure how to reach Iceberg table metadata (catalog).
+     *
+     * <p>Per-domain source switch: a {@code hive} catalog that specifies a
+     * config-file section ({@code server_name}) reads its metastore connection
+     * from gphive.conf[server_name]; otherwise the inline IcebergCatalogConfig
+     * options are used. polaris / hadoop / s3 catalogs have no gphive.conf form
+     * and always use inline options. The DATA domain (volume credentials) is
+     * configured separately by {@link #buildDataConfig}.
+     */
+    private void buildMetaConfig(Configuration configuration, Map<String, String> properties) {
+        String catalogType = properties.getOrDefault(
+                catKey(IcebergConfigConstants.ICEBERG_CATALOG_CONFIG.SERVER_TYPE), "");
+        String serverName = properties.get(catKey(IcebergConfigConstants.ICEBERG_CATALOG_CONFIG.SERVER_NAME));
+        boolean useConfFile = serverName != null && !serverName.isEmpty();
 
-        if (catalog_server_type.equals(IcebergConfigConstants.CATALOG_TYPE_S3A) ||
-            catalog_server_type.equals(IcebergConfigConstants.CATALOG_TYPE_S3)) {
-            processS3OrHadoopServerResource(configuration, properties, false);
-        } else if (catalog_server_type.equals(IcebergConfigConstants.CATALOG_TYPE_HADOOP)) {
-            processS3OrHadoopServerResource(configuration, properties, true);
-        } else if (catalog_server_type.equals(IcebergConfigConstants.CATALOG_TYPE_HIVE)) {
-            processHiveServerResource(configuration, properties);
-        } else if (catalog_server_type.equals(IcebergConfigConstants.CATALOG_TYPE_BUILDIN)) {
-            processBuildInResource(configuration, properties);
-        } else if (catalog_server_type.equals(IcebergConfigConstants.CATALOG_TYPE_POLARIS)) {
-            processPolarisServerResource(configuration, properties);
+        if (catalogType.equals(IcebergConfigConstants.CATALOG_TYPE_HIVE)) {
+            if (useConfFile) {
+                LOG.debug("meta: type=hive, source=conf-file gphive.conf[{}]", serverName);
+                loadConfFile("gphive.conf", serverName, "meta", "", configuration);
+            } else {
+                LOG.debug("meta: type=hive, source=inline");
+                setHiveMetaInline(configuration, properties);
+            }
+        } else if (catalogType.equals(IcebergConfigConstants.CATALOG_TYPE_POLARIS)) {
+            LOG.debug("meta: type=polaris, source=inline");
+            setPolarisInline(configuration, properties);
+        } else if (catalogType.equals(IcebergConfigConstants.CATALOG_TYPE_S3A) ||
+                   catalogType.equals(IcebergConfigConstants.CATALOG_TYPE_S3)) {
+            LOG.debug("meta: type={}, source=inline (warehouse)", catalogType);
+            setCatalogWarehouseInline(configuration, properties, false);
+        } else if (catalogType.equals(IcebergConfigConstants.CATALOG_TYPE_HADOOP)) {
+            LOG.debug("meta: type=hadoop, source=inline (warehouse)");
+            setCatalogWarehouseInline(configuration, properties, true);
+        } else if (catalogType.equals(IcebergConfigConstants.CATALOG_TYPE_BUILDIN)) {
+            LOG.debug("meta: type=builtin, no catalog-side config");
         } else {
-            throw new UnsupportedOperationException("This server type '" + catalog_server_type + "' is not supported yet. " +
+            throw new UnsupportedOperationException("This server type '" + catalogType + "' is not supported yet. " +
                     "Supported types are: [" + IcebergConfigConstants.CATALOG_TYPE_S3A + ", " +
                     IcebergConfigConstants.CATALOG_TYPE_S3 + ", " +
                     IcebergConfigConstants.CATALOG_TYPE_HADOOP + ", " +
@@ -1934,52 +1787,133 @@ public class IcebergRestController {
         }
     }
 
+    /**
+     * Load one $PGDATA config file section into the Configuration for a domain
+     * (meta = gphive.conf, data = s3.conf / gphdfs.conf). The section is keyed
+     * by that domain's own {@code server_name}. {@code location} is required
+     * for s3.conf (BaseConfigurationFactory.transformS3Config parses bucket and
+     * prefix from it); pass an empty string for non-s3 conf files. A missing
+     * section fails fast with a clear message that names the file, section and
+     * domain.
+     */
+    private void loadConfFile(String configFile, String serverName, String domain,
+                              String location, Configuration configuration) {
+        try {
+            configurationFactory.processServerResource("", configFile, serverName, configuration, location);
+        } catch (RuntimeException e) {
+            throw new RuntimeException(String.format(
+                    "%s config: failed to load section '%s' from '%s': %s",
+                    domain, serverName, configFile, e.getMessage()), e);
+        }
+        LOG.debug("{}: loaded conf-file {}[{}] (location={})", domain, configFile, serverName, location);
+    }
+
+    /**
+     * Derive the s3a:// URL that transformS3Config needs to extract bucket and
+     * prefix when loading s3.conf for the DATA domain.
+     *
+     * <p>Preference order:
+     * <ol>
+     *   <li>{@code fs.defaultFS}+{@code fs.prefix} already set by the META phase
+     *       (s3/hadoop catalog populates these from warehouse_location_prefix);</li>
+     *   <li>{@code IcebergVolumeConfig.bucket_name}+{@code base_path} when the
+     *       volume options are inline (e.g. hive catalog + s3 volume);</li>
+     *   <li>empty string as a last resort (transformS3Config will reject it).</li>
+     * </ol>
+     */
+    private String deriveS3Location(Configuration configuration, Map<String, String> properties) {
+        String defaultFS = configuration.get("fs.defaultFS");
+        if (defaultFS != null && (defaultFS.startsWith("s3a://") || defaultFS.startsWith("s3://"))) {
+            String prefix = configuration.get("fs.prefix");
+            if (prefix != null && !prefix.isEmpty()) {
+                return defaultFS + "/" + prefix;
+            }
+            return defaultFS;
+        }
+        String bucket = properties.get(volKey(IcebergConfigConstants.ICEBERG_VOLUME_CONFIG.BUCKET_NAME));
+        if (bucket != null && !bucket.isEmpty()) {
+            String basePath = properties.getOrDefault(
+                    volKey(IcebergConfigConstants.ICEBERG_VOLUME_CONFIG.BASE_PATH), "/");
+            if (!basePath.startsWith("/")) {
+                basePath = "/" + basePath;
+            }
+            return String.format("s3a://%s%s", bucket, basePath);
+        }
+        return "";
+    }
+
     private Configuration getConfiguration(Map<String, String> properties) {
         LOG.debug("Initializing configuration for server");
         Configuration configuration = new Configuration(false);
 
-        // Inject gopher system paths from the request so that
-        // setupGopherConfiguration() can find gopher even without config files.
-        // Note: gopher.enabled is NOT injected here — it is controlled by
-        // application.properties or the volume's fileIOConfig.
+        // gopher.enabled is a process-wide toggle from application.properties; it is
+        // intentionally NOT taken from the per-request SQL options so a single call
+        // cannot silently flip the FileIO stack.
+        if (gopherConfigurationProperties != null
+                && gopherConfigurationProperties.getEnabled() != null) {
+            configuration.set("gopher.enabled",
+                    String.valueOf(gopherConfigurationProperties.getEnabled()));
+        }
+
+        // Inject gopher.* system paths (connect_path / connect_plasma_path /
+        // worker_path) the C side sends per request, so setupGopherConfiguration()
+        // can reach gopher even without config files. These are gopher runtime
+        // plumbing — not meta/data config — so they go in before both domains.
+        // The request uses underscore keys (gopher.worker_path); Spring's
+        // application.properties uses hyphen keys (gopher.worker-path) — different
+        // namespaces, and the request's underscore keys are the ones consumed.
         for (Map.Entry<String, String> entry : properties.entrySet()) {
             String key = entry.getKey();
             if (key.startsWith("gopher.") && !key.equals("gopher.enabled")) {
                 configuration.set(key, entry.getValue());
             }
         }
-
-        processServerResource(configuration, properties);
-
-        // If server_name is specified, load config from $PGDATA config files
-        // (s3.conf, gphdfs.conf, gphive.conf). Config file values override
-        // the inline SQL parameters already in the Configuration.
-        String configFiles = properties.get("config_files");
-        String volumeServerName = properties.get(
-            IcebergConfigConstants.ICEBERG_VOLUME_CONFIG.ICEBERG_VOLUME_CONFIG_STRING + ".server_name");
-        String catalogServerName = properties.get(
-            IcebergConfigConstants.ICEBERG_CATALOG_CONFIG.ICEBERG_CATALOG_CONFIG_STRING + ".server_name");
-        if (configFiles != null) {
-            String serverName = volumeServerName != null ? volumeServerName : catalogServerName;
-            if (serverName != null) {
-                String catalogType = properties.getOrDefault(
-                    IcebergConfigConstants.ICEBERG_CATALOG_CONFIG.ICEBERG_CATALOG_CONFIG_STRING + "."
-                    + IcebergConfigConstants.ICEBERG_CATALOG_CONFIG.SERVER_TYPE, "");
-                String[] files = configFiles.split("0");
-                for (String file : files) {
-                    try {
-                        configurationFactory.processServerResource(catalogType, file.trim(),
-                            serverName, configuration, "");
-                        LOG.debug("Loaded config from file '{}' for server '{}'", file, serverName);
-                    } catch (Exception e) {
-                        LOG.warn("Failed to load config from '{}' for server '{}': {}",
-                            file, serverName, e.getMessage());
-                    }
-                }
-            }
+        if (LOG.isDebugEnabled()) {
+            LOG.debug("gopher: enabled={}, system paths worker_path={}, connect_path={}, connect_plasma_path={}",
+                    configuration.get("gopher.enabled"),
+                    configuration.get("gopher.worker_path"),
+                    configuration.get("gopher.connect_path"),
+                    configuration.get("gopher.connect_plasma_path"));
         }
 
+        // Two independent domains: META (catalog) then DATA (storage/FileIO).
+        buildMetaConfig(configuration, properties);
+        buildDataConfig(configuration, properties);
+
+        logResolvedConfig(configuration, properties);
         return configuration;
+    }
+
+    /**
+     * One-line INFO summary of how config was resolved this request, so a
+     * misconfiguration that silently takes a different branch is visible in
+     * the log without needing a stack trace. Contains no sensitive values.
+     */
+    private void logResolvedConfig(Configuration configuration, Map<String, String> properties) {
+        if (!LOG.isInfoEnabled()) {
+            return;
+        }
+        String metaType = properties.getOrDefault(catKey(IcebergConfigConstants.ICEBERG_CATALOG_CONFIG.SERVER_TYPE), "");
+        String metaServer = properties.get(catKey(IcebergConfigConstants.ICEBERG_CATALOG_CONFIG.SERVER_NAME));
+        String dataType = properties.getOrDefault(volKey(IcebergConfigConstants.ICEBERG_VOLUME_CONFIG.VOLUME_SERVER_TYPE), "");
+        String dataServer = properties.get(volKey(IcebergConfigConstants.ICEBERG_VOLUME_CONFIG.SERVER_NAME));
+        boolean gopherOn = "true".equalsIgnoreCase(configuration.get("gopher.enabled"));
+
+        String metaSource = (IcebergConfigConstants.CATALOG_TYPE_HIVE.equals(metaType)
+                && metaServer != null && !metaServer.isEmpty())
+                ? "conf-file gphive.conf[" + metaServer + "]" : "inline";
+        String dataSource;
+        if (dataType.isEmpty()) {
+            dataSource = "none";
+        } else if (dataServer != null && !dataServer.isEmpty()) {
+            dataSource = "conf-file[" + dataServer + "]";
+        } else {
+            dataSource = "inline";
+        }
+        LOG.info("iceberg config resolved: meta[type={}, source={}], data[type={}, source={}], gopher.enabled={}, fileIO={}",
+                metaType.isEmpty() ? "<none>" : metaType, metaSource,
+                dataType.isEmpty() ? "<none>" : dataType, dataSource,
+                gopherOn, gopherOn ? "GopherFileIO" : "ResolvingFileIO");
     }
 
     /**
@@ -2056,6 +1990,13 @@ public class IcebergRestController {
         // Set Gopher properties
         Map<String, String> gopherProps = getGopherProps(properties);
         context.setGopherProperties(gopherProps);
+        // Diagnostic INFO line: gopher params plumbed to catalog (secrets redacted).
+        // Helps spot misrouted params like endpoint with scheme leftover, ufs_type=s3
+        // (gopher rejects), missing useVirtualHost, etc. that previously caused
+        // CURLE_COULDNT_RESOLVE_HOST / "unsupported UFS type: s3".
+        if (LOG.isInfoEnabled() && !gopherProps.isEmpty()) {
+            LOG.info("gopher props -> catalog: {}", redactSecrets(gopherProps));
+        }
 
         // Set context configuration
         Configuration configuration = getConfiguration(properties);
@@ -2067,7 +2008,7 @@ public class IcebergRestController {
         // path is consumed by IcebergHadoopCatalog as `catalogLocation` in the
         // formula `WAREHOUSE_LOCATION = fs.defaultFS + catalogLocation`, so we
         // store only the path component here (with leading '/').  fs.defaultFS
-        // for hadoop catalog is set in processS3OrHadoopServerResource.
+        // for hadoop catalog is set in setCatalogWarehouseInline.
         String warehouseLocation = getCatalogWarehouseLocationPrefix(properties);
         if (server_type.equals(IcebergConfigConstants.CATALOG_TYPE_HADOOP)
                 && warehouseLocation != null && !warehouseLocation.isEmpty()) {

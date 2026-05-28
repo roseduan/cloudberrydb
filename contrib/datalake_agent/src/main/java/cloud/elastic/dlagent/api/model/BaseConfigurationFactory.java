@@ -19,27 +19,25 @@
 
 package cloud.elastic.dlagent.api.model;
 
+import cloud.elastic.dlagent.api.configuration.DlServerProperties;
+import cloud.elastic.dlagent.api.configuration.GopherPropertiesResolver;
 import cloud.elastic.dlagent.api.security.SecureLogin;
 import cloud.elastic.dlagent.api.utilities.Utilities;
+import com.fasterxml.jackson.core.type.TypeReference;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import com.google.common.collect.ImmutableMap;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.CommonConfigurationKeys;
-import cloud.elastic.dlagent.api.configuration.DlServerProperties;
-import cloud.elastic.dlagent.api.configuration.GopherConfigurationProperties;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Component;
 import cloud.elastic.dlagent.plugins.hudi.utilities.FilePathUtils;
 
-import java.io.File;
 import java.io.FileInputStream;
-import java.io.IOException;
 import java.io.InputStream;
 import java.util.HashMap;
-import java.util.Iterator;
 import java.util.Map;
-import java.util.Properties;
 
 import org.yaml.snakeyaml.Yaml;
 
@@ -63,14 +61,20 @@ public class BaseConfigurationFactory implements ConfigurationFactory {
             "hadoop_rpc_protection","hadoop.rpc.protection",
             "data_transfer_protocol", "dfs.encrypt.data.transfer");
 
-    /** Gopher configuration from Spring application.properties */
-    private final GopherConfigurationProperties gopherConfiguration;
+    /** Resolver that owns gopher baseline + per-request normalization (single source of truth). */
+    private final GopherPropertiesResolver gopherResolver;
+
+    private final IcebergRequestConfigParser icebergRequestParser;
+
+    private static final ObjectMapper OBJECT_MAPPER = new ObjectMapper();
 
     @Autowired
     public BaseConfigurationFactory(DlServerProperties dlagentServerProperties,
-                                   GopherConfigurationProperties gopherConfiguration) {
-        this.gopherConfiguration = gopherConfiguration;
-        LOG.info("BaseConfigurationFactory initialized with Gopher configuration");
+                                    GopherPropertiesResolver gopherResolver,
+                                    IcebergRequestConfigParser icebergRequestParser) {
+        this.gopherResolver = gopherResolver;
+        this.icebergRequestParser = icebergRequestParser;
+        LOG.info("BaseConfigurationFactory initialized; gopher baseline + iceberg parsing delegated to dedicated components");
     }
 
     /**
@@ -115,11 +119,12 @@ public class BaseConfigurationFactory implements ConfigurationFactory {
         // add the server name itself as a configuration property
         configuration.set(DLAGENT_SERVER_NAME_PROPERTY, serverName);
 
-        // Inject Gopher configuration from Spring application.properties
-        Map<String, String> gopherProps = gopherConfiguration.toGopherPropertiesMap();
+        // Inject Gopher baseline from application.properties via the shared resolver.
+        // GopherPropertiesResolver is the single source of truth for gopher.* keys.
+        Map<String, String> gopherProps = gopherResolver.baseline();
         if (!gopherProps.isEmpty()) {
-            LOG.debug("Injecting {} Gopher properties from Spring configuration", gopherProps.size());
-            gopherProps.forEach(configuration::set);
+            LOG.debug("Injecting {} Gopher baseline properties from application.properties", gopherProps.size());
+            gopherResolver.applyTo(configuration, gopherProps);
         }
 
         // add additional properties, if provided
@@ -149,9 +154,27 @@ public class BaseConfigurationFactory implements ConfigurationFactory {
         return configuration;
     }
 
+    /**
+     * Initialize iceberg-related fields on {@link RequestContext} from the
+     * iceberg config JSON string carried by dlproxy legacy clients.
+     *
+     * <p>Supports two on-wire shapes:
+     * <ul>
+     *   <li><b>New (REST shape)</b>: nested {@code IcebergConfig.IcebergAdditionalConfig.fileIOConfig.gopherConfig.common.*}.
+     *       Delegated to {@link IcebergRequestConfigParser} — the sole entry
+     *       point used by REST endpoints in {@code IcebergRestController}.</li>
+     *   <li><b>Legacy (dlproxy shape)</b>: top-level {@code "gopher": { ... }} object
+     *       carrying pre-translated {@code gopher.*} keys. Emitted by
+     *       {@code contrib/datalake_fdw/src/dlproxy/icebergConfig.c::convertIcebergConfigToJson}.
+     *       Parsed in-place here; merged directly into
+     *       {@code RequestContext.gopherProperties}.</li>
+     * </ul>
+     *
+     * <p>The legacy branch will be retired once the dlproxy emitter migrates
+     * to the REST shape.
+     */
     @Override
     public void initIcebergConfigFormJson(RequestContext context) {
-
         String jsonString = context.getIcebergConfigJsonString();
         if (jsonString == null || jsonString.isEmpty()) {
             LOG.warn("Invalid input parameters for initIcebergConfigFormJson");
@@ -159,49 +182,71 @@ public class BaseConfigurationFactory implements ConfigurationFactory {
         }
 
         try {
-            org.json.JSONObject jsonObject = new org.json.JSONObject(jsonString);
-            // parser common conifg
-            if (jsonObject.has("iceberg_config_version")) {
-                context.setIcebergConfigVersion(jsonObject.getString("iceberg_config_version"));
+            Map<String, Object> jsonMap = OBJECT_MAPPER.readValue(jsonString,
+                    new TypeReference<Map<String, Object>>() {});
+
+            // Legacy dlproxy shape: top-level "iceberg_config_version" / "set_catalog_default_impl".
+            Object versionRaw = jsonMap.get("iceberg_config_version");
+            if (versionRaw != null) {
+                context.setIcebergConfigVersion(versionRaw.toString());
             }
-            if (jsonObject.has("set_catalog_default_impl")) {
-                context.setIcebergConfigUseDefaultCatalogImpl(jsonObject.getString("set_catalog_default_impl"));
+            Object catalogImplRaw = jsonMap.get("set_catalog_default_impl");
+            if (catalogImplRaw != null) {
+                context.setIcebergConfigUseDefaultCatalogImpl(catalogImplRaw.toString());
             }
 
-            // parser gopher
-            if (jsonObject.has("gopher")) {
-                org.json.JSONObject gopher = jsonObject.getJSONObject("gopher");
-                parseGopherJsonToProperties(gopher, context.getGopherProperties());
+            // Legacy dlproxy shape: top-level "gopher" object whose entries are
+            // already pre-prefixed (or are bare runtime keys that we coerce to
+            // the gopher.* namespace below).
+            Object legacyGopher = jsonMap.get("gopher");
+            if (legacyGopher instanceof Map) {
+                @SuppressWarnings("unchecked")
+                Map<String, Object> gopherMap = (Map<String, Object>) legacyGopher;
+                for (Map.Entry<String, Object> entry : gopherMap.entrySet()) {
+                    if (entry.getValue() == null) {
+                        continue;
+                    }
+                    String key = entry.getKey();
+                    String propKey = key.startsWith("gopher.") ? key : "gopher." + key;
+                    context.getGopherProperties().put(propKey, entry.getValue().toString());
+                }
             }
 
-            // The "iceberg" config section is reserved for future handling;
-            // nothing reads it yet, so don't parse it into a discarded local.
+            // New REST shape: hand the request body to the single iceberg parser.
+            cloud.elastic.dlagent.api.model.iceberg.IcebergRequestConfig cfg =
+                    icebergRequestParser.parse(jsonMap);
+
+            if (cfg.getIcebergConfigVersion() != null) {
+                context.setIcebergConfigVersion(cfg.getIcebergConfigVersion());
+            }
+            if (cfg.getSetCatalogDefaultImpl() != null) {
+                context.setIcebergConfigUseDefaultCatalogImpl(cfg.getSetCatalogDefaultImpl());
+            }
+
+            // The parser has already resolved gopher.* keys (translated from the
+            // request body or, when gopher.enabled=false, emitted s3.* keys
+            // instead). Merge into RequestContext.gopherProperties so legacy
+            // consumers see the same shape as before.
+            Map<String, String> fileIOProps = cfg.getFileIOProps();
+            if (fileIOProps != null && !fileIOProps.isEmpty()) {
+                context.getGopherProperties().putAll(fileIOProps);
+            }
         } catch (Exception e) {
             LOG.error("Failed to init iceberg config from json string", e);
         }
     }
 
     /**
-     * Parse Gopher JSON object and map to configuration properties
+     * Legacy site-config loader retained for the hive/hudi/dlproxy plugin paths
+     * which feed Hadoop {@link Configuration} directly.
      *
-     * @param gopherJson Gopher JSON object
-     * @param properties Configuration properties map
+     * <p>The iceberg REST path does <b>not</b> call this method anymore — it
+     * goes through {@code IcebergRequestConfigParser} (and
+     * {@code SiteConfigLoader} for typed YAML loading). This shim continues to
+     * exist solely so that hive/hudi {@code BaseServiceImpl} requests, which
+     * invoke {@code initConfiguration} with a non-empty {@code configFiles},
+     * keep working unchanged.
      */
-    private void parseGopherJsonToProperties(org.json.JSONObject gopherJson, Map<String, String> properties) {
-        Iterator<String> keys = gopherJson.keys();
-        while (keys.hasNext()) {
-            String key = keys.next();
-            Object value = gopherJson.get(key);
-            if (value != null) {
-                // Add "gopher." prefix so keys match what isGopherEnabled() and
-                // setupGopherConfiguration() expect (e.g. "gopher.enabled",
-                // "gopher.worker_path").
-                String propKey = key.startsWith("gopher.") ? key : "gopher." + key;
-                properties.put(propKey, value.toString());
-            }
-        }
-    }
-
     public void processServerResource(String catalogType,
                                       String configFile,
                                       String serverName,

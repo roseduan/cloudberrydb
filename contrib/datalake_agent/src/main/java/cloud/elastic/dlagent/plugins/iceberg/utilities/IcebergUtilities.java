@@ -19,6 +19,7 @@
 
 package cloud.elastic.dlagent.plugins.iceberg.utilities;
 
+import cloud.elastic.dlagent.api.configuration.GopherPropertiesResolver;
 import cloud.elastic.dlagent.api.error.DlRuntimeException;
 import cloud.elastic.dlagent.api.error.UnsupportedTypeException;
 import cloud.elastic.dlagent.api.io.DataType;
@@ -33,7 +34,6 @@ import cloud.elastic.dlagent.service.rest.FileListRequest;
 import cloud.elastic.dlagent.constants.IcebergConfigConstants;
 
 import org.apache.hadoop.conf.Configuration;
-import org.apache.iceberg.hadoop.HadoopFileIO;
 import org.apache.iceberg.Schema;
 import org.apache.iceberg.CatalogProperties;
 import org.apache.iceberg.DataFile;
@@ -46,6 +46,7 @@ import org.apache.iceberg.catalog.TableIdentifier;
 import org.apache.iceberg.types.Type;
 import org.apache.iceberg.types.Types;
 import org.apache.iceberg.types.Types.NestedField;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Component;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -68,6 +69,14 @@ import java.util.stream.Collectors;
 public class IcebergUtilities {
 
     private static final Logger LOG = LoggerFactory.getLogger(IcebergUtilities.class);
+
+    /**
+     * Resolver that owns the {@code gopher.enabled} master switch lookup.
+     * Spring autowires it; callers continue to invoke {@link #isGopherEnabled(Configuration)}
+     * unchanged so the 6 catalog implementations need no edits.
+     */
+    @Autowired
+    private GopherPropertiesResolver gopherResolver;
 
     /**
      * Prefixes of runtime-configuration keys that must never appear in Iceberg
@@ -259,53 +268,6 @@ public class IcebergUtilities {
         return TableIdentifier.parse(tableName);
     }
 
-    private void processFileIOImple(Configuration configuration, Map<String, String> props) {
-        String implClass = configuration.get(IcebergConfigConstants.FILE_IO_CONFIG_IMPL_CLASS);
-        if (implClass == null || implClass.isEmpty()) {
-            return;
-        }
-
-        if (IcebergConfigConstants.S3_FILE_IO_CLASS_NAME.equals(implClass) || 
-            IcebergConfigConstants.ICEBERG_S3_FILE_IO_CLASS_NAME.equals(implClass)) {
-            configureS3FileIO(configuration, props);
-        } else {
-            configureHadoopFileIO(configuration, props);
-        }
-
-        passFileIOProperties(configuration, props);
-    }
-
-    private void configureS3FileIO(Configuration configuration, Map<String, String> props) {
-        List<String> configKeys = Arrays.asList(
-            IcebergConfigConstants.S3FILEIO_ACCESS_KEY_ID,
-            IcebergConfigConstants.S3FILEIO_SECRET_ACCESS_KEY,
-            IcebergConfigConstants.S3FILEIO_ENDPOINT,
-            IcebergConfigConstants.S3FILEIO_REGION,
-            IcebergConfigConstants.S3FILEIO_PATH_STYLE_ACCESS);
-
-        for (String key : configKeys) {
-            String val = configuration.get(key);
-            if (val != null) {
-                props.put(key, val);
-            }
-        }
-        props.put(CatalogProperties.FILE_IO_IMPL, IcebergConfigConstants.ICEBERG_FILE_IO_CLASS_NAME);
-    }
-
-    private void configureHadoopFileIO(Configuration configuration, Map<String, String> props) {
-        props.put(CatalogProperties.FILE_IO_IMPL, HadoopFileIO.class.getName());
-    }
-
-    private void passFileIOProperties(Configuration configuration, Map<String, String> props) {
-        String prefix = IcebergConfigConstants.FILE_IO_CONFIG_PROPERTIES_PREFIX + ".";
-        for (Map.Entry<String, String> entry : configuration) {
-            if (entry.getKey().startsWith(prefix)) {
-                String configKey = entry.getKey().substring(prefix.length());
-                props.put(configKey, entry.getValue());
-            }
-        }
-    }
-
     /**
      * Compose Iceberg catalog properties from Hadoop Configuration.
      *
@@ -375,10 +337,35 @@ public class IcebergUtilities {
             }
         }
 
-        // Use HadoopFileIO for original S3 logic
+        // Gopher off: use the mixed ResolvingFileIO, which dispatches s3:// to
+        // iceberg-aws S3FileIO (reads the s3.* keys) and other schemes (hdfs://)
+        // to HadoopFileIO — no explicit per-scheme FileIO selection needed.
         if (!props.containsKey(CatalogProperties.FILE_IO_IMPL)) {
-            props.put(CatalogProperties.FILE_IO_IMPL, org.apache.iceberg.hadoop.HadoopFileIO.class.getName());
-            LOG.info("Gopher not enabled, using HadoopFileIO");
+            props.put(CatalogProperties.FILE_IO_IMPL, org.apache.iceberg.io.ResolvingFileIO.class.getName());
+            LOG.info("Gopher not enabled, using ResolvingFileIO (s3->S3FileIO, others->HadoopFileIO)");
+        }
+
+        // S3FileIO (reached via ResolvingFileIO for s3:// paths) reads its
+        // credentials/region/endpoint from the catalog properties, not the Hadoop
+        // Configuration. Propagate the s3.* keys that emitS3Inline / s3.conf set so
+        // S3FileIO can authenticate (otherwise it fails with "Unable to load region").
+        for (String key : new String[] {
+                IcebergConfigConstants.S3FILEIO_ACCESS_KEY_ID,
+                IcebergConfigConstants.S3FILEIO_SECRET_ACCESS_KEY,
+                IcebergConfigConstants.S3FILEIO_ENDPOINT,
+                IcebergConfigConstants.S3FILEIO_REGION,
+                IcebergConfigConstants.S3FILEIO_PATH_STYLE_ACCESS}) {
+            String val = configuration.get(key);
+            if (val != null) {
+                props.put(key, val);
+            }
+        }
+        // Iceberg's S3FileIO reads the AWS client region from "client.region"
+        // (AwsClientProperties), not "s3.region". Map it across so the AWS SDK
+        // doesn't fall back to its region provider chain and fail.
+        String s3Region = configuration.get(IcebergConfigConstants.S3FILEIO_REGION);
+        if (s3Region != null && !s3Region.isEmpty()) {
+            props.put("client.region", s3Region);
         }
 
         return props;
@@ -387,14 +374,16 @@ public class IcebergUtilities {
     /**
      * Checks if Gopher should be enabled based on configuration.
      *
-     * <p>Gopher is considered enabled if gopher.enabled is set to "true"
+     * <p>Delegates to {@link GopherPropertiesResolver#isEnabled(Configuration)}
+     * so the master-switch lookup lives in a single place.
      *
      * @param configuration Hadoop Configuration
      * @return true if Gopher should be used, false otherwise
      */
     public boolean isGopherEnabled(Configuration configuration) {
-        String enabledFlag = configuration.get("gopher.enabled");
-        return "true".equalsIgnoreCase(enabledFlag);
+        return gopherResolver != null
+                ? gopherResolver.isEnabled(configuration)
+                : "true".equalsIgnoreCase(configuration.get("gopher.enabled"));
     }
 
     /**

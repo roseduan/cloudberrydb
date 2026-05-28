@@ -1,3 +1,23 @@
+/*
+ * dlproxy iceberg config JSON emitter (legacy protocol).
+ *
+ * Emits the historical top-level shape
+ *   { "gopher": { ...pre-translated gopher.* fields... },
+ *     "iceberg_config_version": "v1",
+ *     "set_catalog_default_impl": <bool> }
+ * which the dlagent accepts in BaseConfigurationFactory.initIcebergConfigFormJson
+ * via a legacy-shape branch.
+ *
+ * The newer iceberg REST endpoints (see iceberg_catalog_fdw.c) emit the
+ * nested IcebergConfig schema and connection info travels through
+ * IcebergVolumeConfig, translated to gopher.* keys server-side by
+ * GopherPropertiesResolver. This file pre-translates client-side because
+ * the dlproxy protocol predates that resolver and the wire shape cannot be
+ * changed without coordinating with deployed gphadoop servers.
+ *
+ * When deprecating dlproxy, the agent-side legacy branch in
+ * initIcebergConfigFormJson and this whole file can be removed together.
+ */
 #include "icebergConfig.h"
 #include "utils/builtins.h"
 #include "utils/json.h"

@@ -953,18 +953,22 @@ components:
 
     GopherConfig:
       type: object
-      description: gopher config
+      description: Gopher process-level runtime configuration. Connection
+        information (endpoint, bucket, credentials, region, path_style_access,
+        ufs_type) is carried exclusively by IcebergVolumeConfig and translated
+        to gopher.* keys server-side; do not place connection info here.
       properties:
         common:
           $ref: '#/components/schemas/GopherCommonConfig'
 
     GopherCommonConfig:
       type: object
-      description: Gopher common config
+      description: Runtime-only gopher parameters (socket paths, cache
+        strategy, log levels). Connection info belongs on IcebergVolumeConfig.
       properties:
         worker_path:
           type: string
-          description: gopher work path
+          description: gopher worker socket path
           example: "/tmp/gopher/worker"
         connect_path:
           type: string
@@ -974,47 +978,21 @@ components:
           type: string
           description: Plasma connect socket path
           example: "/tmp/gopher/plasma"
-        ufs_type:
-          type: string
-          description: gopher ufs type support visit oss and hdfs
-          enum: [QINGSTOR, HUAWEI, S3A, S3AV2, QCLOUD, OSS, KSYUN, QINIU, UCLOUD, HDFS, SWIFT, FTP, UFS_LOCAL]
-          example: "hdfs"
-        uri_prefix:
-          type: string
-          description: URI prefix
-          example: "/prefix"
         cache_strategy:
           type: string
           enum: [GOPHER_CACHE, GOPHER_NOT_CACHE]
-          description: whether cache file for gopher
+          description: whether to cache files for gopher
           example: "GOPHER_CACHE"
-        gopher_mode:
-          type: string
-          enum: [GOPHER_NORMAL, GOPHER_DELEGATE]
-          description: Gopher mode, default set GOPHER_NORMAL
-          example: "GOPHER_NORMAL"
         log_level:
           type: string
           description: gopher log level
           enum: [GOPHER_FATAL, GOPHER_ERROR, GOPHER_WARNING, GOPHER_INFO, GOPHER_DEBUG1, GOPHER_DEBUG2, GOPHER_DEBUG3]
-          example: "GOPHER_FATAL"
+          example: "GOPHER_INFO"
         liboss2_log_severity:
           type: string
-          description: liboss2 log level
+          description: liboss2 log severity
           enum: [GOPHER_LIBOSS2_FATAL, GOPHER_LIBOSS2_ERROR, GOPHER_LIBOSS2_WARNING, GOPHER_LIBOSS2_INFO, GOPHER_LIBOSS2_DEBUG1, GOPHER_LIBOSS2_DEBUG2, GOPHER_LIBOSS2_DEBUG3]
-          example: "GOPHER_LIBOSS2_FATAL"
-        cache_predict_num:
-          type: integer
-          description: cache predict num, default set 3 num
-          example: 3
-        local_path:
-          type: string
-          description: local path
-          example: "/tmp/gopher/local"
-        load_libgopherClient_path:
-          type: string
-          description: load libgopherClient.so path
-          example: "/workspace/dist/thirdparty/lib"
+          example: "GOPHER_LIBOSS2_INFO"
 
     IcebergConfig:
       type: object
@@ -1204,41 +1182,21 @@ components:
 
     FileIOConfig:
       type: object
-      description: FileIO implementation configuration
-      properties:
-        impl_class:
-          type: string
-          description: io-impl name
-        simpleFileIOConfig:
-          $ref: '#/components/schemas/SimpleFileIOConfig'
-        gopherFileIOConfig:
-          $ref: '#/components/schemas/GopherFileIOConfig'
-
-    SimpleFileIOConfig:
-      type: object
-      description: Hadoop FileIO/S3 FileIO configuration
-      required:
-        - impl_class
-      properties:
-        impl_class:
-          type: string
-        properties:
-          type: object
-          description: "additionalProperties is used for dynamically extending parameters. In the code, no validation or modification will be performed on these parameters—they will be directly set into the code. This design is intended to enable better dynamic extensibility."
-          additionalProperties:
-            type: string
-
-    GopherFileIOConfig:
-      type: object
-      description: Gopher FileIO configuration
-      required:
-        - gopherConfig
+      description: |
+        FileIO configuration. The FileIO implementation is selected entirely by
+        the agent's gopher.enabled master switch (application.properties), not
+        by any field in this schema. When gopher is enabled the agent uses
+        GopherFileIO and reads gopherConfig.common runtime parameters; when
+        disabled the agent uses iceberg-aws ResolvingFileIO and reads the
+        `properties` map as extension keys.
       properties:
         gopherConfig:
           $ref: '#/components/schemas/GopherConfig'
         properties:
           type: object
-          description: "additionalProperties is used for dynamically extending parameters. In the code, no validation or modification will be performed on these parameters—they will be directly set into the code. This design is intended to enable better dynamic extensibility."
+          description: |
+            Extension key/value pairs forwarded verbatim to the non-gopher
+            FileIO (S3FileIO / HadoopFileIO). Ignored when gopher is enabled.
           additionalProperties:
             type: string
 

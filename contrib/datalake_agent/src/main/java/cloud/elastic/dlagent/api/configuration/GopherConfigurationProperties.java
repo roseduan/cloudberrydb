@@ -74,31 +74,6 @@ public class GopherConfigurationProperties {
     private String cacheStrategy = "GOPHER_CACHE";
 
     /**
-     * Gopher mode: GOPHER_NORMAL or GOPHER_DELEGATE.
-     */
-    private String gopherMode = "GOPHER_NORMAL";
-
-    /**
-     * Local path for temporary files.
-     */
-    private String localPath;
-
-    /**
-     * Staging directory for data operations.
-     */
-    private String stagingDirectory;
-
-    /**
-     * Maximum number of read connections.
-     */
-    private Integer maxReadConnection;
-
-    /**
-     * Maximum number of HTTP retries.
-     */
-    private Integer maxHttpRetry;
-
-    /**
      * Gopher log level: fatal, error, warn, info, debug1, debug2, debug3.
      */
     private String logLevel = "info";
@@ -107,16 +82,6 @@ public class GopherConfigurationProperties {
      * liboss2 log severity: fatal, error, warn, info, debug1, debug2, debug3.
      */
     private String liboss2LogLevel = "info";
-
-    /**
-     * Minimum delay time for OSS operations in milliseconds.
-     */
-    private Integer ossMinDelayTime;
-
-    /**
-     * Cache prediction number.
-     */
-    private Integer cachePredictNum;
 
     /**
      * Block size for file operations in bytes.
@@ -154,32 +119,11 @@ public class GopherConfigurationProperties {
         if (cacheStrategy != null) {
             props.put("gopher.cache_strategy", cacheStrategy);
         }
-        if (gopherMode != null) {
-            props.put("gopher.mode", gopherMode);
-        }
-        if (localPath != null) {
-            props.put("gopher.local_path", localPath);
-        }
-        if (stagingDirectory != null) {
-            props.put("gopher.staging_dir", stagingDirectory);
-        }
-        if (maxReadConnection != null) {
-            props.put("gopher.max_read_connection", String.valueOf(maxReadConnection));
-        }
-        if (maxHttpRetry != null) {
-            props.put("gopher.max_http_retry", String.valueOf(maxHttpRetry));
-        }
         if (logLevel != null) {
             props.put("gopher.log_level", logLevel);
         }
         if (liboss2LogLevel != null) {
             props.put("gopher.liboss2_log_level", liboss2LogLevel);
-        }
-        if (ossMinDelayTime != null) {
-            props.put("gopher.oss_min_delay_time", String.valueOf(ossMinDelayTime));
-        }
-        if (cachePredictNum != null) {
-            props.put("gopher.cache_predict_num", String.valueOf(cachePredictNum));
         }
         if (blockSize != null) {
             props.put("gopher.block_size", String.valueOf(blockSize));
