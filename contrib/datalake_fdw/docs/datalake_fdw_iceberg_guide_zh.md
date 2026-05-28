@@ -526,30 +526,28 @@ GROUP BY region;
 
 ### 4.7 Schema 演化
 
-```sql
--- 添加列（已有行该列为 NULL）
-ALTER TABLE orders ADD COLUMN note TEXT;
+当前版本**所有 `ALTER TABLE` 子命令在 Iceberg 表上均不支持**，执行会报错：
 
--- 新数据可填充新列
-INSERT INTO orders VALUES (100, 'New', 50.00, '2024-06-01', 'rush order');
-
--- 单次 SELECT 同时读取旧文件（note=NULL）和新文件（note 有值）
-SELECT * FROM orders;
+```
+ERROR:  ALTER TABLE is not supported on Iceberg tables
+HINT:   Use Spark/Trino/Flink to perform Iceberg schema evolution, or recreate the table.
 ```
 
-混合 Schema 文件读取依赖 Iceberg 的 **field-id 映射**。新增列后旧数据文件中该列自动填 NULL，无需重写。
+需要做 Schema 演化，请在 Spark/Trino/Flink 端通过 Iceberg DDL 完成，或在 Cloudberry 端 `DROP TABLE` 后重建。
 
-**当前实际支持的 ALTER 范围**：
+Iceberg 通过 **field-id 映射**支持不同 schema 版本的文件并存读取。若通过外部引擎添加了新列，datalake_fdw 可正确读取旧文件（该列显示为 NULL）。
+
+**当前 ALTER 支持状态**：
 
 | 子命令 | 状态 | 说明 |
 |--------|------|------|
-| `ADD COLUMN` | ✅ 支持 | 新列对老数据文件读出 NULL；新写入文件含新列；CI 覆盖 |
-| `DROP COLUMN` | ❌ 不支持，会报错 | 历史上半生效（PG 端打 dropped，Iceberg metadata 未变），跨引擎读 schema 不一致；现已显式拒绝 |
-| `RENAME COLUMN` | ❌ 不支持，会报错 | 同上；Iceberg 端列名不变会造成跨引擎列名不一致；现已显式拒绝 |
-| `ALTER COLUMN TYPE` | ❌ 不支持，会报错 | 有数据时会触发 PG rewrite 路径并踩到 Iceberg AM 的空 stub（曾导致 SIGSEGV，详见 issue #334）；现已显式拒绝 |
-| `SET / DROP NOT NULL` / `SET / DROP DEFAULT` / `ADD CONSTRAINT` / `OWNER TO` / `SET STORAGE` 等 | ❌ 不支持，会报错 | 均不传播到 Iceberg metadata，已统一在 `datalake_ProcessUtility` 层拒绝 |
+| `ADD COLUMN` | ❌ 不支持，会报错 | 请通过 Spark/Trino/Flink 的 Iceberg DDL 添加列 |
+| `DROP COLUMN` | ❌ 不支持，会报错 | 同上 |
+| `RENAME COLUMN` | ❌ 不支持，会报错 | 通过 `RenameStmt` 路径同样被拦截 |
+| `ALTER COLUMN TYPE` | ❌ 不支持，会报错 | 曾导致 PG rewrite 路径踩到 Iceberg AM 空 stub（SIGSEGV，issue #334） |
+| `SET / DROP NOT NULL` / `SET / DROP DEFAULT` / `ADD CONSTRAINT` / `OWNER TO` / `SET STORAGE` 等 | ❌ 不支持，会报错 | 均不传播到 Iceberg metadata |
 
-> 实现层面：除 `ADD COLUMN`（含 `AT_AddColumnRecurse`）外，所有 `AlterTableStmt` 子命令以及 `RenameStmt(OBJECT_COLUMN)` 都在 `datalake_fdw.c` 的 `datalake_ProcessUtility` 里被显式拦截，报 `ERRCODE_FEATURE_NOT_SUPPORTED`。需要做 `DROP / RENAME / 改类型` 等 schema 演化，请在 Spark/Trino/Flink 端通过 Iceberg DDL 完成，或在 Cloudberry 端 `DROP TABLE` 后重建。
+> 实现层面：所有 `AlterTableStmt` 子命令以及 `RenameStmt(OBJECT_COLUMN)` 都在 `datalake_fdw.c` 的 `datalake_ProcessUtility` 里被显式拦截，报 `ERRCODE_FEATURE_NOT_SUPPORTED`。
 
 ### 4.8 VACUUM（压缩）
 
@@ -638,13 +636,14 @@ SELECT * FROM iceberg_toolkit.get_fragments('orders'::regclass);
 | `TRUNCATE <iceberg_table>` | `iceberg_relation_nontransactional_truncate` 实现为空；表内容不会被清空。需要清空请用 `DELETE FROM` 或 `DROP TABLE` 重建 |
 | `CREATE INDEX ... ON <iceberg_table>` | `iceberg_index_build_range_scan` 直接返回 0；索引对象创建后无任何条目 |
 | `ANALYZE <iceberg_table>` | 抛 NOTICE：`ANALYZE is a no-op for Iceberg tables; planner stats come from Iceberg catalog metadata`。统计来自 manifest |
-| `DROP COLUMN` / `RENAME COLUMN` / `ALTER COLUMN TYPE` | 只更新 PG `pg_attribute`，Iceberg metadata 不变（详见 4.7） |
 | `PRIMARY KEY` / `UNIQUE` / `FOREIGN KEY` / `CHECK` 约束 | DDL 接受但无 Iceberg 端唯一索引承载，运行时不强制 |
 
 #### 4.11.3 显式拒绝
 
 | 操作 | 错误 |
 |------|------|
+| 所有 `ALTER TABLE` 子命令（`ADD / DROP / RENAME COLUMN`、`ALTER COLUMN TYPE`、`SET/DROP NOT NULL`、`ADD CONSTRAINT` 等） | `ERRCODE_FEATURE_NOT_SUPPORTED`: `ALTER TABLE is not supported on Iceberg tables`（datalake_fdw.c） |
+| `RENAME COLUMN`（通过 `ALTER TABLE … RENAME COLUMN`） | `ERRCODE_FEATURE_NOT_SUPPORTED`: `RENAME COLUMN is not supported on Iceberg tables`（datalake_fdw.c） |
 | TID range scan（如 `WHERE ctid <@ '...'` 之类的范围 TID 谓词） | `ERRCODE_FEATURE_NOT_SUPPORTED`: `not supported`（pg_iceberg_am_handler.c:496） |
 | ANALYZE 内部的 `analyze_next_block` / `analyze_next_tuple` API | `ERRCODE_INTERNAL_ERROR`: `API not supported for iceberg relations`（pg_iceberg_am_handler.c:668） |
 
