@@ -114,7 +114,7 @@ github:
         required_approving_review_count: 2
 
       # Enforce linear commit history
-      required_linear_history: true
+      # required_linear_history: true
 
       # Don't require commits to be signed
       required_signatures: false
