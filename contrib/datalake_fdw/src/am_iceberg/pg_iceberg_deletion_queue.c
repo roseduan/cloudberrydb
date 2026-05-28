@@ -59,7 +59,7 @@
  * table is pinned by OID (ICEBERG_DELETION_QUEUE_RELID) at initdb time;
  * renaming would require both the OID pin and this string to change.
  */
-#define DELETION_QUEUE_TABLE "pg_iceberg.pg_iceberg_deletion_queue"
+#define DELETION_QUEUE_TABLE "pg_ext_aux.pg_iceberg_deletion_queue"
 
 
 /* ----------------------------------------------------------------

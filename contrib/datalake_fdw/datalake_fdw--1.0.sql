@@ -178,9 +178,9 @@ AS 'MODULE_PATHNAME', 'pg_iceberg_upsert_location_option_local'
 LANGUAGE C STRICT;
 
 
--- The iceberg schema and the two catalog tables
--- (iceberg.pg_iceberg_metadata, iceberg.pg_iceberg_deletion_queue) are no
--- longer created here.  They are pinned at initdb time by
+-- The two iceberg catalog tables (pg_ext_aux.pg_iceberg_metadata,
+-- pg_ext_aux.pg_iceberg_deletion_queue) are no longer created here.
+-- They are pinned at initdb time by
 -- contrib/datalake_fdw/iceberg-cdbinit--1.0.sql, with stable OIDs declared
 -- in src/am_iceberg/include/iceberg_oids.h -- the same model PostgreSQL
 -- uses for built-in catalogs like pg_foreign_data_wrapper, and the same

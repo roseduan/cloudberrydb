@@ -40,25 +40,28 @@ COMMENT ON FUNCTION pg_iceberg_tableam_handler(internal) IS 'iceberg table acces
 --     dispatch trick.
 --
 -- OID layout (must stay in sync with iceberg_oids.h):
---     8322  pg_iceberg namespace
 --     8330  pg_iceberg_metadata             table
 --     8331  pg_iceberg_metadata_pkey        unique index (PRIMARY KEY)
 --     8334  pg_iceberg_deletion_queue       table
 --     8335  pg_iceberg_deletion_queue_pkey  unique index (PRIMARY KEY)
 --
--- The schema is intentionally named with a "pg_" prefix.  pg_dump's
--- selectDumpableNamespace (pg_dump.c) treats every schema whose name
--- starts with "pg_" as a reserved system schema and skips it -- which
--- is exactly what we want here, otherwise pg_dump would emit
--- CREATE SCHEMA / CREATE TABLE statements for catalogs that the target
--- cluster's initdb has already created, and the restore would fail
--- with "relation already exists".  The same convention is used by
--- pg_ext_aux (for pax) and by every PostgreSQL built-in catalog.
+-- The tables live in pg_ext_aux, the PostgreSQL/Cloudberry built-in schema
+-- (postgres.bki entry, oid 7094) reserved for extension auxiliary catalogs.
+-- This is the same schema pax uses for pg_pax_fastsequence.  Reusing it --
+-- rather than creating a "pg_iceberg" schema with the "pg_" prefix trick --
+-- buys three things a self-rolled schema cannot:
+--   * pg_dump's selectDumpableNamespace already skips pg_ext_aux exactly
+--     like any built-in catalog, so restore never tries to recreate these
+--     tables.
+--   * heap.c:1680 skips array type creation for pg_ext_aux relations and
+--     namespace.c:3084 forbids ALTER SCHEMA RENAME -- giving the schema
+--     true system-namespace semantics rather than user-namespace lookalike.
+--   * Downstream tools that filter by namespace whitelist (e.g.
+--     postgresql-anonymizer's pg_identifiers view, which casts relname to
+--     REGCLASS without a schema qualifier) automatically ignore objects
+--     here.  A "pg_iceberg" schema with the same oid range is still seen
+--     as user namespace by these tools and breaks them.
 -- ============================================================================
-
--- pg_iceberg namespace
-CREATE SCHEMA pg_iceberg;
-UPDATE pg_namespace SET oid = 8322 WHERE nspname = 'pg_iceberg';
 
 -- pg_iceberg_metadata: one row per Iceberg table, points at the current
 -- manifest list.  Mirror of what datalake_fdw--1.0.sql used to create.
@@ -68,7 +71,7 @@ UPDATE pg_namespace SET oid = 8322 WHERE nspname = 'pg_iceberg';
 -- collation-sensitive ordering -- otherwise a database created with a
 -- non-C collation would inherit a mismatched catalog (opr_sanity enforces
 -- this; see "Check for system catalogs with collation-sensitive ordering").
-CREATE TABLE pg_iceberg.pg_iceberg_metadata (
+CREATE TABLE pg_ext_aux.pg_iceberg_metadata (
     relid                       oid   PRIMARY KEY,
     metadata_location           text  COLLATE "C",
     previous_metadata_location  text  COLLATE "C",
@@ -94,7 +97,7 @@ UPDATE pg_class     SET oid       = 8331 WHERE relname = 'pg_iceberg_metadata_pk
 
 -- pg_iceberg_deletion_queue: pending orphan-file deletions waiting for the
 -- background sweeper.  Mirror of what datalake_fdw--1.0.sql used to create.
-CREATE TABLE pg_iceberg.pg_iceberg_deletion_queue (
+CREATE TABLE pg_ext_aux.pg_iceberg_deletion_queue (
     path           text COLLATE "C" PRIMARY KEY,
     table_name     regclass,
     orphaned_at    timestamptz,

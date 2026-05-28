@@ -28,8 +28,12 @@
 /* 8320  pg_am.oid for 'iceberg'                              (ICEBERG_AM_OID)  */
 /* 8321  pg_proc.oid for pg_iceberg_tableam_handler                             */
 
-/* iceberg namespace */
-#define ICEBERG_NAMESPACE_OID                   8322
+/*
+ * Tables live in pg_ext_aux (the PostgreSQL/Cloudberry built-in schema for
+ * extension-auxiliary catalogs, oid 7094 in postgres.bki, shared with
+ * pax_storage's pg_pax_fastsequence).  No dedicated iceberg namespace oid
+ * is reserved.  See iceberg-cdbinit--1.0.sql header for rationale.
+ */
 
 /* pg_iceberg_metadata */
 #define ICEBERG_METADATA_RELID                  8330
