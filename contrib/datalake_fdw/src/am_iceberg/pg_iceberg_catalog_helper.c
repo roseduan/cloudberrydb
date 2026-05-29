@@ -51,8 +51,6 @@ pg_iceberg_resolve_namespace(const char *options_namespace,
 							 const char *catalog_name,
 							 Relation rel)
 {
-	Assert(rel != NULL);
-
 	/* Tier 1: explicit table OPTIONS namespace. */
 	if (options_namespace != NULL && options_namespace[0] != '\0')
 		return pstrdup(options_namespace);
@@ -68,7 +66,22 @@ pg_iceberg_resolve_namespace(const char *options_namespace,
 			return pstrdup(cat->foreign_catalog.default_namespace);
 	}
 
-	/* Tier 3: PG schema name of the relation. */
+	/*
+	 * Tier 3: PG schema name of the relation. Some callsites (e.g.
+	 * pg_iceberg_commit_data_with_catalog on the external-table path) pass
+	 * rel == NULL because they always expect tier 1 to win there. Raise an
+	 * ereport in that case rather than asserting / dereferencing NULL, so
+	 * the failure is diagnosable: it means tiers 1 + 2 both came up empty
+	 * AND there's no relation to fall back on -- typically a programming
+	 * error in the caller.
+	 */
+	if (rel == NULL)
+		ereport(ERROR,
+				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+				 errmsg("iceberg namespace cannot be resolved: "
+						"no OPTIONS namespace, no catalog default_namespace, "
+						"and no relation for PG schema fallback")));
+
 	return get_namespace_name(rel->rd_rel->relnamespace);
 }
 

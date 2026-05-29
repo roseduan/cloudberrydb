@@ -62,8 +62,16 @@ typedef struct IcebergLoadTableResult
  *
  * All three sources are user-visible PG state, no external lookup.
  * Returns a palloc'd string in the current memory context; never returns
- * NULL.  `catalog_server_name` / `catalog_name` may be NULL when no
- * foreign catalog is associated; in that case tier (2) is skipped.
+ * NULL.
+ *
+ * Parameter nullability:
+ *   catalog_server_name / catalog_name  may be NULL when no foreign
+ *      catalog is associated; tier (2) is skipped in that case.
+ *   rel                                  may be NULL on callsites that
+ *      always expect tier (1) to win (e.g. external-table commit paths
+ *      that never need PG schema fallback). If rel is NULL AND tiers (1)
+ *      + (2) both come up empty, ereport(ERROR) is raised so the failure
+ *      is diagnosable rather than a NULL dereference.
  */
 extern const char *pg_iceberg_resolve_namespace(const char *options_namespace,
 												const char *catalog_server_name,
