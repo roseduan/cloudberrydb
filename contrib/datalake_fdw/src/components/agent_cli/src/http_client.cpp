@@ -135,6 +135,25 @@ HttpResponse HttpClient::perform_request_with_retry(const HttpRequest& request) 
         max_attempts = config_.max_retries;
     }
 
+    /*
+     * The dlagent JVM is fork+exec'd lazily by the datalake_proxy bgworker as
+     * a child of each PG backend; Spring Boot needs ~7-10s to bind the
+     * Tomcat port (3888). Under workloads that churn backends quickly
+     * (pg_regress in particular, where short-lived connections rapid-fire
+     * SQL and each backend death takes its child agent with it), a single
+     * iceberg op can land in a window where the previous agent has just
+     * died and the new one isn't bound yet. The default
+     * max_retries=3 * retry_delay_ms=1000 = 3s budget is way too short, so
+     * the call surfaces a CURLE_COULDNT_CONNECT (libcurl code 7) to the
+     * SQL caller as a hard failure.
+     *
+     * Detect that condition specifically and stretch the budget to ~60s, so
+     * back-to-back agent reboots have time to settle. Other errors (4xx/5xx
+     * body responses, network mid-flight failures) keep the original
+     * max_attempts since they're not "service starting up" conditions.
+     */
+    constexpr int CONN_REFUSED_EXTRA_ATTEMPTS = 60;
+
     while (attempts < max_attempts) {
         response = perform_single_request(request);
 
@@ -142,12 +161,17 @@ HttpResponse HttpClient::perform_request_with_retry(const HttpRequest& request) 
             break;
         }
 
+        if (response.curl_code == CURLE_COULDNT_CONNECT &&
+            max_attempts < CONN_REFUSED_EXTRA_ATTEMPTS) {
+            max_attempts = CONN_REFUSED_EXTRA_ATTEMPTS;
+        }
+
         attempts++;
         if (attempts < max_attempts) {
-            LOG_WARN("Request failed (attempt " + std::to_string(attempts) + "/" + 
-                     std::to_string(max_attempts) + "), retrying in " + 
-                     std::to_string(config_.retry_delay_ms) + "ms. Status: " + 
-                     std::to_string(response.status_code) + ", curl_code: " + 
+            LOG_WARN("Request failed (attempt " + std::to_string(attempts) + "/" +
+                     std::to_string(max_attempts) + "), retrying in " +
+                     std::to_string(config_.retry_delay_ms) + "ms. Status: " +
+                     std::to_string(response.status_code) + ", curl_code: " +
                      std::to_string(response.curl_code));
             std::this_thread::sleep_for(std::chrono::milliseconds(config_.retry_delay_ms));
         } else {
