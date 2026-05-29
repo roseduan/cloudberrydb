@@ -1463,6 +1463,13 @@ public class IcebergRestController {
     private void emitS3Inline(Configuration configuration, Map<String, String> properties) {
         String accessKey = properties.get(volKey(IcebergConfigConstants.ICEBERG_VOLUME_CONFIG.ACCESS_KEY_ID));
         String secretKey = properties.get(volKey(IcebergConfigConstants.ICEBERG_VOLUME_CONFIG.SECRET_ACCESS_KEY));
+
+        /* Diagnostic trace: see iceberg_volume_option.c step2 for context. */
+        LOG.debug("[trace_ak] step5 emitS3Inline: read key=[{}] access_key len={}, secret len={}",
+            volKey(IcebergConfigConstants.ICEBERG_VOLUME_CONFIG.ACCESS_KEY_ID),
+            accessKey == null ? -1 : accessKey.length(),
+            secretKey == null ? -1 : secretKey.length());
+
         String endpoint = properties.get(volKey(IcebergConfigConstants.ICEBERG_VOLUME_CONFIG.VOLUME_ENDPOINT));
         String region = properties.getOrDefault(volKey(IcebergConfigConstants.ICEBERG_VOLUME_CONFIG.VOLUME_REGION),
                 IcebergConfigConstants.DEFAULT_S3_REGION_VALUE);
@@ -1993,6 +2000,14 @@ public class IcebergRestController {
         // CURLE_COULDNT_RESOLVE_HOST / "unsupported UFS type: s3".
         if (LOG.isInfoEnabled() && !gopherProps.isEmpty()) {
             LOG.info("gopher props -> catalog: {}", redactSecrets(gopherProps));
+            /* Diagnostic trace: see iceberg_volume_option.c step2 for context. */
+            if (LOG.isDebugEnabled()) {
+                String ak = gopherProps.get("gopher.access_key");
+                String sk = gopherProps.get("gopher.secret_key");
+                LOG.debug("[trace_ak] step6 gopherProps->catalog: gopher.access_key len={}, gopher.secret_key len={}",
+                    ak == null ? -1 : ak.length(),
+                    sk == null ? -1 : sk.length());
+            }
         }
 
         // Set context configuration

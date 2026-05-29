@@ -108,6 +108,22 @@ static void parseIcebergVolumeUserMappingOptions(IcebergVolumeUserMappingOptions
     options->username = getStringOption(user_options, DATALAKE_ICEBERG_VOLUME_USERNAME);
     options->aws_access_key_id = getStringOption(user_options, DATALAKE_ICEBERG_VOLUME_AWS_ACCESS_KEY_ID);
     options->aws_secret_access_key = getStringOption(user_options, DATALAKE_ICEBERG_VOLUME_AWS_SECRET_ACCESS_KEY);
+
+    /*
+     * Diagnostic trace for the OSS credential / connection chain:
+     *   C OPTIONS parse  -> JSON volumeConfig  -> Java VolumeInfo
+     *   -> resolver gopher.*  -> emitS3Inline  -> GopherFileIO ctor
+     *   -> GopherClientFactories SWIG  -> gophermeta OssWorker.
+     *
+     * Stays at DEBUG: silent in production, recoverable by bumping
+     * client_min_messages / log_min_messages to DEBUG1 + dlagent logger to
+     * DEBUG. Kept after the bug hunt because the same drop signature
+     * (gophermeta cache poisoning, dropped resolver props) is easy to hit
+     * again and walking every layer otherwise costs a full rebuild cycle.
+     */
+    elog(DEBUG1, "[trace_ak] step2 parseVolUserMap: access_key_id len=%d, secret_access_key len=%d",
+         options->aws_access_key_id ? (int) strlen(options->aws_access_key_id) : -1,
+         options->aws_secret_access_key ? (int) strlen(options->aws_secret_access_key) : -1);
 }
 
 static void parseIcebergForeignVolumeOptions(IcebergForeignVolumeOptions *options, List *foreign_options)

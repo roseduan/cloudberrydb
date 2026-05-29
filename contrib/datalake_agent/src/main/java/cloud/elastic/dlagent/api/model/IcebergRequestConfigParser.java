@@ -211,6 +211,13 @@ public class IcebergRequestConfigParser {
         info.setPathStyleAccess(booleanOrNull(body.get(IcebergConfigConstants.ICEBERG_VOLUME_CONFIG.PATH_STYLE_ACCESS)));
         info.setAccessKeyId(stringOrNull(body.get(IcebergConfigConstants.ICEBERG_VOLUME_CONFIG.ACCESS_KEY_ID)));
         info.setSecretAccessKey(stringOrNull(body.get(IcebergConfigConstants.ICEBERG_VOLUME_CONFIG.SECRET_ACCESS_KEY)));
+
+        /* Diagnostic trace: see iceberg_volume_option.c step2 for context. */
+        log.debug("[trace_ak] step4 parseVolBody: access_key_id len={}, secret_access_key len={}, body_keys={}",
+            info.getAccessKeyId() == null ? -1 : info.getAccessKeyId().length(),
+            info.getSecretAccessKey() == null ? -1 : info.getSecretAccessKey().length(),
+            body.keySet());
+
         info.setBasePath(stringOrNull(body.get(IcebergConfigConstants.ICEBERG_VOLUME_CONFIG.BASE_PATH)));
         info.setEnableCaching(booleanOrNull(body.get(IcebergConfigConstants.ICEBERG_VOLUME_CONFIG.ENABLE_CACHING)));
         info.setAllowWrites(booleanOrNull(body.get(IcebergConfigConstants.ICEBERG_VOLUME_CONFIG.ALLOW_WRITES)));

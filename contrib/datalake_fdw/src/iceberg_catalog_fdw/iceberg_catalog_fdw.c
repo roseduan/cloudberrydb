@@ -918,6 +918,13 @@ static agentcli_cJSON* createIcebergVolumeConfig(IcebergVolumeOptions *volumeOpt
 
     agentcli_cJSON_AddBoolToObject(volumeConfig, DATALAKEFDW_ICEBERG_KEY_PATH_STYLE_ACCESS, volumeOpt->volume_server.path_style_access);
 
+    /* Diagnostic trace: see iceberg_volume_option.c step2 for context. */
+    elog(DEBUG1, "[trace_ak] step3 createVolCfg: access_key_id len=%d, secret_access_key len=%d, will_add=%d/%d",
+         volumeOpt->volume_user.aws_access_key_id ? (int) strlen(volumeOpt->volume_user.aws_access_key_id) : -1,
+         volumeOpt->volume_user.aws_secret_access_key ? (int) strlen(volumeOpt->volume_user.aws_secret_access_key) : -1,
+         (volumeOpt->volume_user.aws_access_key_id && strlen(volumeOpt->volume_user.aws_access_key_id) > 0) ? 1 : 0,
+         (volumeOpt->volume_user.aws_secret_access_key && strlen(volumeOpt->volume_user.aws_secret_access_key) > 0) ? 1 : 0);
+
     if (volumeOpt->volume_user.aws_access_key_id && strlen(volumeOpt->volume_user.aws_access_key_id) > 0)
         agentcli_cJSON_AddStringToObject(volumeConfig, DATALAKEFDW_ICEBERG_KEY_ACCESS_KEY_ID, volumeOpt->volume_user.aws_access_key_id);
 
