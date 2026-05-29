@@ -150,6 +150,14 @@ datalake_proxy_start_worker(void)
 	MemSet(&worker, 0, sizeof(BackgroundWorker));
 	worker.bgw_flags = BGWORKER_SHMEM_ACCESS;
 	worker.bgw_start_time = BgWorkerStart_RecoveryFinished;
+	/*
+	 * Restart with a 30s delay after a crash.  bgw_restart_time = 0 (the
+	 * MemSet default) means "respawn immediately", which during transient
+	 * failures (e.g. ENOSPC on relcache init file write) creates a tight
+	 * 6-second cascade loop that floods the log and never lets the child
+	 * dlagent JVM finish Spring startup.
+	 */
+	worker.bgw_restart_time = 30;
 
 	strcpy(worker.bgw_library_name, "datalake_proxy");
 	strcpy(worker.bgw_function_name, "datalake_proxy_main");
