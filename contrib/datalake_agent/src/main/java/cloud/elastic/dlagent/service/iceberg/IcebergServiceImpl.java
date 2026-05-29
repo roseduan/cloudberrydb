@@ -136,6 +136,32 @@ public class IcebergServiceImpl implements IcebergService {
         } catch (org.apache.iceberg.exceptions.AlreadyExistsException e) {
             log.info("Table {} already exists, loading existing table", tableId);
             return catalog.loadTable(tableId, context.getPath(), properties);
+        } catch (org.apache.iceberg.exceptions.ValidationException e) {
+            /*
+             * Hive Metastore raises InvalidObjectException(message:database <ns>)
+             * when the catalog has no database matching the iceberg namespace.
+             * The iceberg-hive client wraps it as a ValidationException; for
+             * users this manifests as an opaque "Invalid Hive object" error
+             * that does not point at the namespace mismatch. Re-throw with a
+             * message that lists the three places namespace can come from so
+             * the operator knows which knob to turn.
+             */
+            if (isHmsMissingDatabaseError(e)) {
+                String catalogType = context.getCatalogType();
+                String msg = String.format(
+                    "Iceberg catalog (%s) has no database matching namespace \"%s\". "
+                    + "Resolution precedence is: (1) CREATE ICEBERG TABLE ... OPTIONS (namespace '<ns>') "
+                    + "[per-table override], (2) CREATE FOREIGN CATALOG ... OPTIONS (default_namespace '<ns>') "
+                    + "[per-catalog default], (3) PostgreSQL schema name [fallback]. "
+                    + "Either CREATE the namespace in the underlying catalog (e.g. via spark-sql / beeline), "
+                    + "or set OPTIONS namespace on the table, "
+                    + "or set OPTIONS default_namespace on the foreign catalog, "
+                    + "or move the table into a PostgreSQL schema whose name matches an existing namespace.",
+                    catalogType, namespace);
+                log.error("HMS missing database for namespace {}: {}", namespace, e.getMessage());
+                throw new org.apache.iceberg.exceptions.NoSuchNamespaceException(msg);
+            }
+            throw e;
         } catch (NoSuchNamespaceException e) {
             String catalogType = context.getCatalogType();
 
@@ -189,6 +215,32 @@ public class IcebergServiceImpl implements IcebergService {
         }
 
         return new String[]{catalogName, namespace.toString()};
+    }
+
+    /*
+     * Detect "HMS database missing for iceberg namespace" inside a
+     * ValidationException raised by iceberg-hive's HiveTableOperations.
+     * The thrift cause is InvalidObjectException whose message is literally
+     *   "database <catalog>.<namespace>"
+     * which is distinct from a generic schema-validation failure.
+     */
+    private static boolean isHmsMissingDatabaseError(Throwable e) {
+        for (Throwable t = e; t != null; t = t.getCause()) {
+            String cls = t.getClass().getName();
+            String msg = t.getMessage();
+            if (msg == null) continue;
+            if (cls.endsWith(".InvalidObjectException") && msg.toLowerCase().contains("database ")) {
+                return true;
+            }
+            /*
+             * Belt-and-suspenders: some iceberg versions stringify the cause
+             * into the outer message ("Invalid Hive object ...").
+             */
+            if (cls.endsWith(".ValidationException") && msg.toLowerCase().contains("invalid hive object")) {
+                return true;
+            }
+        }
+        return false;
     }
 
     @Override

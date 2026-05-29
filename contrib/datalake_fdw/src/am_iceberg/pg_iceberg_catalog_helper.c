@@ -34,6 +34,44 @@
 #include "include/pg_iceberg_metadata.h"
 #include "include/pg_iceberg_rewrite_plan.h"
 
+/*
+ * Three-tier iceberg namespace resolver.  See header for contract.
+ *
+ * The previous code path picked one source per callsite (PG schema for
+ * internal tables, opts->namespace for external) and never consulted the
+ * catalog's default_namespace.  That made the foreign catalog option
+ * dead code, and prevented internal tables from overriding the namespace
+ * at all.  Funneling every callsite through this helper keeps the three
+ * sources at known precedence and ensures the resolved value is the only
+ * thing that reaches the FDW request payload / agent.
+ */
+const char *
+pg_iceberg_resolve_namespace(const char *options_namespace,
+							 const char *catalog_server_name,
+							 const char *catalog_name,
+							 Relation rel)
+{
+	Assert(rel != NULL);
+
+	/* Tier 1: explicit table OPTIONS namespace. */
+	if (options_namespace != NULL && options_namespace[0] != '\0')
+		return pstrdup(options_namespace);
+
+	/* Tier 2: foreign catalog default_namespace. */
+	if (catalog_server_name != NULL && catalog_name != NULL)
+	{
+		IcebergCatalogOptions *cat = getIcebergCatalogOptions(catalog_server_name,
+															  catalog_name);
+		if (cat != NULL &&
+			cat->foreign_catalog.default_namespace != NULL &&
+			cat->foreign_catalog.default_namespace[0] != '\0')
+			return pstrdup(cat->foreign_catalog.default_namespace);
+	}
+
+	/* Tier 3: PG schema name of the relation. */
+	return get_namespace_name(rel->rd_rel->relnamespace);
+}
+
 static FdwRoutine *
 get_catalog_fdw_routine(void)
 {
@@ -696,15 +734,19 @@ pg_iceberg_commit_rewrite(Relation rel, List *all_private_results)
 	metadata_location = pg_iceberg_get_latest_metadata_location(
 		RelationGetRelid(rel), table_info);
 
+	nameSpace = pg_iceberg_resolve_namespace(
+		table_info->opts ? table_info->opts->namespace : NULL,
+		table_info->catalog_server_name,
+		table_info->catalog_name,
+		rel);
+
 	if (table_info->opts == NULL || table_info->opts->table == NULL)
 	{
-		nameSpace = get_namespace_name(rel->rd_rel->relnamespace);
 		tableName = pstrdup(RelationGetRelationName(rel));
 		catalogName = NULL;
 	}
 	else
 	{
-		nameSpace = table_info->opts->namespace;
 		tableName = table_info->opts->table;
 		catalogName = table_info->opts->catalog;
 	}

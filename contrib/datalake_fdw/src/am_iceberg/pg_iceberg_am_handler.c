@@ -46,6 +46,7 @@
 #include "include/pg_iceberg_am.h"
 #include "include/pg_iceberg_am_handler.h"
 #include "include/pg_iceberg_catalog.h"
+#include "include/pg_iceberg_catalog_helper.h"
 #include "include/pg_iceberg_metadata.h"
 #include "include/pg_iceberg_metadata_tracker.h"
 
@@ -191,7 +192,11 @@ iceberg_modify_init(Relation rel, IcebergDMLState *state, CmdType operation,
 
 	fdwState->iceTable.volumn_server_name = table_info->volume_server_name;
 	fdwState->iceTable.volumn_name = table_info->volume_name;
-	fdwState->iceTable.icebergNamespace = get_namespace_name(rel->rd_rel->relnamespace);
+	fdwState->iceTable.icebergNamespace = (char *) pg_iceberg_resolve_namespace(
+		table_info->opts ? table_info->opts->namespace : NULL,
+		table_info->catalog_server_name,
+		table_info->catalog_name,
+		rel);
 	fdwState->iceTable.tableName = pstrdup(RelationGetRelationName(rel));
 
 	{

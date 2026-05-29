@@ -53,6 +53,23 @@ typedef struct IcebergLoadTableResult
 	char *location;
 } IcebergLoadTableResult;
 
+/*
+ * Resolve the iceberg namespace for a CREATE / DML / metadata-lookup
+ * operation.  Precedence (highest first):
+ *   1. table OPTIONS namespace   -- per-table override (opts->namespace)
+ *   2. catalog default_namespace -- per-catalog default
+ *   3. PG schema name of rel     -- final fallback
+ *
+ * All three sources are user-visible PG state, no external lookup.
+ * Returns a palloc'd string in the current memory context; never returns
+ * NULL.  `catalog_server_name` / `catalog_name` may be NULL when no
+ * foreign catalog is associated; in that case tier (2) is skipped.
+ */
+extern const char *pg_iceberg_resolve_namespace(const char *options_namespace,
+												const char *catalog_server_name,
+												const char *catalog_name,
+												Relation rel);
+
 extern char *pg_iceberg_create_table(Relation relation,
 									 const char *catalogName,
 									 const char *nameSpace,

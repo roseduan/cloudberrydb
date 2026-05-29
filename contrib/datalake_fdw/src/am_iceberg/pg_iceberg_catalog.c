@@ -264,6 +264,7 @@ pg_iceberg_get_latest_metadata_location(Oid relid, IcebergTableInfo *table_info)
 {
 	IcebergMetadataInfo *meta_info;
 	IcebergLoadTableResult *load_result;
+	Relation	rel;
 	const char *nameSpace;
 	const char *tableName;
 	const char *catalogName;
@@ -281,7 +282,19 @@ pg_iceberg_get_latest_metadata_location(Oid relid, IcebergTableInfo *table_info)
 		return latest_metadata_location;
 	}
 
-	nameSpace = table_info->opts->namespace;
+	/*
+	 * External path: resolve namespace via the 3-tier precedence so a missing
+	 * OPTIONS namespace can still fall back to catalog default / PG schema.
+	 * Open the relation briefly to get relnamespace for the final fallback;
+	 * AccessShareLock is the standard read lock for catalog-only access.
+	 */
+	rel = relation_open(relid, AccessShareLock);
+	nameSpace = pg_iceberg_resolve_namespace(table_info->opts->namespace,
+											 table_info->catalog_server_name,
+											 table_info->catalog_name,
+											 rel);
+	relation_close(rel, AccessShareLock);
+
 	tableName = table_info->opts->table;
 	catalogName = table_info->opts->catalog;
 
@@ -337,10 +350,15 @@ pg_iceberg_create_table_with_catalog(Relation rel, bool *is_internal)
 	/* Get table information */
 	table_info = pg_iceberg_get_table_info(RelationGetRelid(rel));
 
+	nameSpace = pg_iceberg_resolve_namespace(
+		table_info->opts ? table_info->opts->namespace : NULL,
+		table_info->catalog_server_name,
+		table_info->catalog_name,
+		rel);
+
 	if (table_info->opts == NULL || table_info->opts->table == NULL)
 	{
-		/* Internal table: Use local names */
-		nameSpace = get_namespace_name(rel->rd_rel->relnamespace);
+		/* Internal table: name comes from PG; namespace already resolved above. */
 		tableName = pstrdup(RelationGetRelationName(rel));
 		catalogName = NULL;
 
@@ -413,8 +431,7 @@ pg_iceberg_create_table_with_catalog(Relation rel, bool *is_internal)
 	{
 		IcebergLoadTableResult *load_result;
 
-		/* External table: Use parsed identifier names */
-		nameSpace = table_info->opts->namespace;
+		/* External table: identifier names from OPTIONS; namespace already resolved above. */
 		tableName = table_info->opts->table;
 		catalogName = table_info->opts->catalog;
 
@@ -512,15 +529,19 @@ pg_iceberg_get_fragments_with_catalog(Relation rel,
 	const char *tableName;
 	const char *catalogName;
 
+	nameSpace = pg_iceberg_resolve_namespace(
+		table_info->opts ? table_info->opts->namespace : NULL,
+		table_info->catalog_server_name,
+		table_info->catalog_name,
+		rel);
+
 	if (table_info->opts == NULL || table_info->opts->table == NULL)
 	{
-		nameSpace = get_namespace_name(rel->rd_rel->relnamespace);
 		tableName = pstrdup(RelationGetRelationName(rel));
 		catalogName = NULL;
 	}
 	else
 	{
-		nameSpace = table_info->opts->namespace;
 		tableName = table_info->opts->table;
 		catalogName = table_info->opts->catalog;
 	}
@@ -548,15 +569,19 @@ pg_iceberg_get_statistics_with_catalog(Relation rel,
 	const char *tableName;
 	const char *catalogName;
 
+	nameSpace = pg_iceberg_resolve_namespace(
+		table_info->opts ? table_info->opts->namespace : NULL,
+		table_info->catalog_server_name,
+		table_info->catalog_name,
+		rel);
+
 	if (table_info->opts == NULL || table_info->opts->table == NULL)
 	{
-		nameSpace = get_namespace_name(rel->rd_rel->relnamespace);
 		tableName = pstrdup(RelationGetRelationName(rel));
 		catalogName = NULL;
 	}
 	else
 	{
-		nameSpace = table_info->opts->namespace;
 		tableName = table_info->opts->table;
 		catalogName = table_info->opts->catalog;
 	}
@@ -586,15 +611,19 @@ pg_iceberg_get_rewrite_plan_with_catalog(Relation rel,
 	const char *tableName;
 	const char *catalogName;
 
+	nameSpace = pg_iceberg_resolve_namespace(
+		table_info->opts ? table_info->opts->namespace : NULL,
+		table_info->catalog_server_name,
+		table_info->catalog_name,
+		rel);
+
 	if (table_info->opts == NULL || table_info->opts->table == NULL)
 	{
-		nameSpace = get_namespace_name(rel->rd_rel->relnamespace);
 		tableName = pstrdup(RelationGetRelationName(rel));
 		catalogName = NULL;
 	}
 	else
 	{
-		nameSpace = table_info->opts->namespace;
 		tableName = table_info->opts->table;
 		catalogName = table_info->opts->catalog;
 	}
@@ -643,15 +672,19 @@ pg_iceberg_modify_data_with_catalog(Relation rel,
 			return NULL;
 	}
 
+	nameSpace = pg_iceberg_resolve_namespace(
+		table_info->opts ? table_info->opts->namespace : NULL,
+		table_info->catalog_server_name,
+		table_info->catalog_name,
+		rel);
+
 	if (table_info->opts == NULL || table_info->opts->table == NULL)
 	{
-		nameSpace = get_namespace_name(rel->rd_rel->relnamespace);
 		tableName = pstrdup(RelationGetRelationName(rel));
 		catalogName = NULL;
 	}
 	else
 	{
-		nameSpace = table_info->opts->namespace;
 		tableName = table_info->opts->table;
 		catalogName = table_info->opts->catalog;
 	}
@@ -712,13 +745,21 @@ pg_iceberg_commit_data_with_catalog(Relation rel,
 			ereport(ERROR,
 					(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
 					 errmsg("pg_iceberg_commit_data_with_catalog requires either an external iceberg table or a relation")));
-		nameSpace = get_namespace_name(rel->rd_rel->relnamespace);
+		nameSpace = pg_iceberg_resolve_namespace(
+			table_info->opts ? table_info->opts->namespace : NULL,
+			table_info->catalog_server_name,
+			table_info->catalog_name,
+			rel);
 		tableName = pstrdup(RelationGetRelationName(rel));
 		catalogName = NULL;
 	}
 	else
 	{
-		nameSpace = table_info->opts->namespace;
+		nameSpace = pg_iceberg_resolve_namespace(
+			table_info->opts->namespace,
+			table_info->catalog_server_name,
+			table_info->catalog_name,
+			rel);
 		tableName = table_info->opts->table;
 		catalogName = table_info->opts->catalog;
 	}
