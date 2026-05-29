@@ -48,7 +48,16 @@ public class IcebergHiveCatalog implements IcebergCatalog {
     private DlIcebergHiveCatalog hiveCatalog;
     private IcebergUtilities icebergUtilities;
     private Configuration configuration;
-    private boolean isUseGopherClient = false;
+    /*
+     * Default true to match IcebergHadoopCatalog and the rest of the gopher-enabled
+     * stack. Previously this was false, which routed every Hive request through
+     * createDefaultHiveCatalog -- a path that silently dropped the gopherProperties
+     * passed in by the caller. Symptom: gopher.region (and any other key that only
+     * the resolver added to gopherProperties, never to fs.gopher.*) never reached
+     * GopherProperties on the FileIO side, producing empty-region AWS SigV4
+     * Credential headers like "admin/<date>//s3/aws4_request" -> MinIO 403.
+     */
+    private boolean isUseGopherClient = true;
     private String catalogLocation;
 
     public IcebergHiveCatalog(String catalogLocation,
