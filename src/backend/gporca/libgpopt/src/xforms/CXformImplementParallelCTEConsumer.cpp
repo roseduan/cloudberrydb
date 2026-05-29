@@ -97,6 +97,17 @@ CXformImplementParallelCTEConsumer::Exfp(CExpressionHandle &exprhdl) const
 		return CXform::ExfpNone;
 	}
 
+	/*
+	 * Skip the parallel CTE consumer when the producer's subtree
+	 * contains a replicated table.  Such a producer must run serially
+	 * (see CXformImplementParallelCTEProducer), so generating a parallel
+	 * consumer for it would be inconsistent.
+	 */
+	if (CXformUtils::FContainsReplicatedTable(ptabdescset))
+	{
+		return CXform::ExfpNone;
+	}
+
 	return CXform::ExfpHigh;
 }
 

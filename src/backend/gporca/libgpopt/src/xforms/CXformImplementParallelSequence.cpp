@@ -87,13 +87,19 @@ CXformImplementParallelSequence::Exfp(CExpressionHandle &exprhdl) const
 		return CXform::ExfpNone;
 	}
 
-	/* Skip parallel sequence when any child contains a Foreign Scan. */
+	/*
+	 * Skip parallel sequence when any child contains a Foreign Scan or a
+	 * replicated table.  Both force the corresponding CTE producer to run
+	 * serially, so a parallel Sequence would survive with a non-parallel
+	 * child and be rejected in FValidContext.
+	 */
 	const ULONG arity = exprhdl.Arity();
 	for (ULONG ul = 0; ul < arity; ul++)
 	{
 		CTableDescriptorHashSet *ptabdescset =
 			exprhdl.DeriveTableDescriptor(ul);
-		if (CXformUtils::FContainsForeignTable(ptabdescset))
+		if (CXformUtils::FContainsForeignTable(ptabdescset) ||
+			CXformUtils::FContainsReplicatedTable(ptabdescset))
 		{
 			return CXform::ExfpNone;
 		}

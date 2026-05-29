@@ -96,6 +96,18 @@ CXformImplementParallelCTEProducer::Exfp(CExpressionHandle &exprhdl) const
 		return CXform::ExfpNone;
 	}
 
+	/*
+	 * Skip parallel CTE when the child subtree contains a replicated
+	 * table.  A replicated table already has a full copy on every
+	 * segment, so a parallel shared scan over it would have each worker
+	 * redundantly populate the SharedTuplestore, producing duplicate
+	 * rows in the CTE.
+	 */
+	if (CXformUtils::FContainsReplicatedTable(ptabdescset))
+	{
+		return CXform::ExfpNone;
+	}
+
 	return CXform::ExfpHigh;
 }
 
