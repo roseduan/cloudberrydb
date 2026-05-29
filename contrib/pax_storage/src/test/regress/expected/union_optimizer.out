@@ -179,14 +179,14 @@ UNION ALL
 SELECT f1 FROM INT4_TBL;
           ten          
 -----------------------
+                123456
+               -123456
                      0
                 -34.84
                -1004.3
  -1.2345678901234e+200
  -1.2345678901234e-200
                      0
-                123456
-               -123456
             2147483647
            -2147483647
 (10 rows)
@@ -233,14 +233,14 @@ UNION ALL
 SELECT f1 FROM CHAR_TBL;
  eight 
 -------
- a
+ ab
+ abcd
+ abcd
  ab
  abcd
  abcd
  a
- ab
- abcd
- abcd
+ a
 (8 rows)
 
 SELECT f1 AS five FROM TEXT_TBL
@@ -362,7 +362,7 @@ select count(*) from
                            ->  Redistribute Motion 3:3  (slice2; segments: 3)
                                  Hash Key: tenk1_1.fivethous
                                  ->  Seq Scan on tenk1 tenk1_1
- Optimizer: Pivotal Optimizer (GPORCA)
+ Optimizer: GPORCA
 (11 rows)
 
 select count(*) from
@@ -391,7 +391,7 @@ select count(*) from
                                  ->  Redistribute Motion 3:3  (slice2; segments: 3)
                                        Hash Key: tenk1_1.fivethous
                                        ->  Seq Scan on tenk1 tenk1_1
- Optimizer: Pivotal Optimizer (GPORCA)
+ Optimizer: GPORCA
 (15 rows)
 
 select count(*) from
@@ -416,7 +416,7 @@ select unique1 from tenk1 except select unique2 from tenk1 where unique2 != 10;
                            Hash Key: tenk1_1.unique2
                            ->  Seq Scan on tenk1 tenk1_1
                                  Filter: (unique2 <> 10)
- Optimizer: Pivotal Optimizer (GPORCA)
+ Optimizer: GPORCA
 (12 rows)
 
 select unique1 from tenk1 except select unique2 from tenk1 where unique2 != 10;
@@ -441,7 +441,7 @@ select count(*) from
                            ->  Redistribute Motion 3:3  (slice2; segments: 3)
                                  Hash Key: tenk1_1.fivethous
                                  ->  Seq Scan on tenk1 tenk1_1
- Optimizer: Pivotal Optimizer (GPORCA)
+ Optimizer: GPORCA
 (11 rows)
 
 select count(*) from
@@ -470,7 +470,7 @@ select count(*) from
                                  ->  Redistribute Motion 3:3  (slice2; segments: 3)
                                        Hash Key: tenk1_1.fivethous
                                        ->  Seq Scan on tenk1 tenk1_1
- Optimizer: Pivotal Optimizer (GPORCA)
+ Optimizer: GPORCA
 (15 rows)
 
 select count(*) from
@@ -495,7 +495,7 @@ select unique1 from tenk1 except select unique2 from tenk1 where unique2 != 10;
                            Hash Key: tenk1_1.unique2
                            ->  Seq Scan on tenk1 tenk1_1
                                  Filter: (unique2 <> 10)
- Optimizer: Pivotal Optimizer (GPORCA)
+ Optimizer: GPORCA
 (12 rows)
 
 select unique1 from tenk1 except select unique2 from tenk1 where unique2 != 10;
@@ -518,7 +518,7 @@ select x from (values (100::money), (200::money)) _(x) union select x from (valu
          ->  Append
                ->  Values Scan on "Values"
                ->  Values Scan on "Values_1"
- Optimizer: Pivotal Optimizer (GPORCA)
+ Optimizer: GPORCA
 (8 rows)
 
 set enable_hashagg to off;
@@ -533,7 +533,7 @@ select x from (values (100::money), (200::money)) _(x) union select x from (valu
          ->  Append
                ->  Values Scan on "Values"
                ->  Values Scan on "Values_1"
- Optimizer: Pivotal Optimizer (GPORCA)
+ Optimizer: GPORCA
 (8 rows)
 
 reset enable_hashagg;
@@ -550,7 +550,7 @@ select x from (values (array[1, 2]), (array[1, 3])) _(x) union select x from (va
          ->  Append
                ->  Values Scan on "Values"
                ->  Values Scan on "Values_1"
- Optimizer: Pivotal Optimizer (GPORCA)
+ Optimizer: GPORCA
 (8 rows)
 
 select x from (values (array[1, 2]), (array[1, 3])) _(x) union select x from (values (array[1, 2]), (array[1, 4])) _(x);
@@ -621,7 +621,7 @@ select x from (values (array[100::money]), (array[200::money])) _(x) union selec
          ->  Append
                ->  Values Scan on "Values"
                ->  Values Scan on "Values_1"
- Optimizer: Pivotal Optimizer (GPORCA)
+ Optimizer: GPORCA
 (8 rows)
 
 select x from (values (array[100::money]), (array[200::money])) _(x) union select x from (values (array[100::money]), (array[300::money])) _(x);
@@ -644,7 +644,7 @@ select x from (values (array[1, 2]), (array[1, 3])) _(x) union select x from (va
          ->  Append
                ->  Values Scan on "Values"
                ->  Values Scan on "Values_1"
- Optimizer: Pivotal Optimizer (GPORCA)
+ Optimizer: GPORCA
 (8 rows)
 
 select x from (values (array[1, 2]), (array[1, 3])) _(x) union select x from (values (array[1, 2]), (array[1, 4])) _(x);
@@ -809,7 +809,7 @@ select x from (values (row(100::money)::ct1), (row(200::money)::ct1)) _(x) union
          ->  Append
                ->  Values Scan on "Values"
                ->  Values Scan on "Values_1"
- Optimizer: Pivotal Optimizer (GPORCA)
+ Optimizer: GPORCA
 (8 rows)
 
 select x from (values (row(100::money)::ct1), (row(200::money)::ct1)) _(x) union select x from (values (row(100::money)::ct1), (row(300::money)::ct1)) _(x);
@@ -949,13 +949,13 @@ SELECT q1 FROM int8_tbl UNION ALL SELECT q2 FROM int8_tbl EXCEPT SELECT q1 FROM 
 SELECT q1 FROM int8_tbl UNION ALL (((SELECT q2 FROM int8_tbl EXCEPT SELECT q1 FROM int8_tbl ORDER BY 1))); --order none
         q1         
 -------------------
-               123
-               123
   4567890123456789
   4567890123456789
   4567890123456789
  -4567890123456789
                456
+               123
+               123
 (7 rows)
 
 (((SELECT q1 FROM int8_tbl UNION ALL SELECT q2 FROM int8_tbl))) EXCEPT SELECT q1 FROM int8_tbl ORDER BY 1;
@@ -997,11 +997,11 @@ SELECT q1 FROM int8_tbl EXCEPT (((SELECT q2 FROM int8_tbl ORDER BY q2 LIMIT 1)))
 (((((select * from int8_tbl)))));
         q1        |        q2         
 ------------------+-------------------
-              123 |               456
-              123 |  4567890123456789
  4567890123456789 |               123
  4567890123456789 |  4567890123456789
  4567890123456789 | -4567890123456789
+              123 |               456
+              123 |  4567890123456789
 (5 rows)
 
 --
@@ -1032,7 +1032,7 @@ select from generate_series(1,5) union select from generate_series(1,3);
                ->  Function Scan on generate_series
          ->  Aggregate
                ->  Function Scan on generate_series generate_series_1
- Optimizer: Pivotal Optimizer (GPORCA)
+ Optimizer: GPORCA
 (7 rows)
 
 explain (costs off)
@@ -1045,7 +1045,7 @@ select from generate_series(1,5) intersect select from generate_series(1,3);
          ->  Function Scan on generate_series generate_series_1
    ->  Aggregate
          ->  Function Scan on generate_series
- Optimizer: Pivotal Optimizer (GPORCA)
+ Optimizer: GPORCA
 (7 rows)
 
 select from generate_series(1,5) union select from generate_series(1,3);
@@ -1085,7 +1085,7 @@ select from generate_series(1,5) union select from generate_series(1,3);
                ->  Function Scan on generate_series
          ->  Aggregate
                ->  Function Scan on generate_series generate_series_1
- Optimizer: Pivotal Optimizer (GPORCA)
+ Optimizer: GPORCA
 (7 rows)
 
 explain (costs off)
@@ -1098,7 +1098,7 @@ select from generate_series(1,5) intersect select from generate_series(1,3);
          ->  Function Scan on generate_series generate_series_1
    ->  Aggregate
          ->  Function Scan on generate_series
- Optimizer: Pivotal Optimizer (GPORCA)
+ Optimizer: GPORCA
 (7 rows)
 
 select from generate_series(1,5) union select from generate_series(1,3);
@@ -1154,6 +1154,8 @@ LINE 1: SELECT '3.4'::numeric UNION SELECT 'foo';
 -- UNION or UNION ALL
 --
 CREATE TEMP TABLE t1 (a text, b text);
+NOTICE:  Table doesn't have 'DISTRIBUTED BY' clause -- Using column named 'a' as the Apache Cloudberry data distribution key for this table.
+HINT:  The 'DISTRIBUTED BY' clause determines the distribution of data. Make sure column(s) chosen are the optimal data distribution key to minimize skew.
 CREATE INDEX t1_ab_idx on t1 ((a || b));
 CREATE TEMP TABLE t2 (ab text primary key);
 INSERT INTO t1 VALUES ('a', 'b'), ('x', 'y');
@@ -1210,6 +1212,8 @@ explain (costs off)
 -- children.
 --
 CREATE TEMP TABLE t1c (b text, a text);
+NOTICE:  Table doesn't have 'DISTRIBUTED BY' clause -- Using column named 'b' as the Apache Cloudberry data distribution key for this table.
+HINT:  The 'DISTRIBUTED BY' clause determines the distribution of data. Make sure column(s) chosen are the optimal data distribution key to minimize skew.
 ALTER TABLE t1c INHERIT t1;
 CREATE TEMP TABLE t2c (primary key (ab)) INHERITS (t2);
 INSERT INTO t1c VALUES ('v', 'w'), ('c', 'd'), ('m', 'n'), ('e', 'f');
@@ -1225,20 +1229,21 @@ explain (costs off)
    UNION ALL
    SELECT ab FROM t2) t
   ORDER BY 1 LIMIT 8;
-                           QUERY PLAN                            
------------------------------------------------------------------
+                     QUERY PLAN                     
+----------------------------------------------------
  Limit
    ->  Gather Motion 3:1  (slice1; segments: 3)
          Merge Key: ((t1.a || t1.b))
          ->  Limit
-               ->  Merge Append
+               ->  Sort
                      Sort Key: ((t1.a || t1.b))
-                     ->  Index Scan using t1_ab_idx on t1
-                     ->  Index Scan using t1c_ab_idx on t1c t1_1
-                     ->  Index Scan using t2_pkey on t2
-                     ->  Index Scan using t2c_pkey on t2c t2_1
+                     ->  Append
+                           ->  Seq Scan on t1
+                           ->  Seq Scan on t1c t1_1
+                           ->  Seq Scan on t2
+                           ->  Seq Scan on t2c t2_1
  Optimizer: Postgres query optimizer
-(11 rows)
+(12 rows)
 
   SELECT * FROM
   (SELECT a || b AS ab FROM t1
@@ -1267,6 +1272,7 @@ set enable_seqscan=off;
 create table events (event_id int primary key);
 create table other_events (event_id int primary key);
 create table events_child () inherits (events);
+NOTICE:  table has parent, setting distribution columns to match parent table
 explain (costs off)
 select event_id
  from (select event_id from events
@@ -1277,15 +1283,16 @@ select event_id
 ----------------------------------------------------------------
  Gather Motion 3:1  (slice1; segments: 3)
    Merge Key: events.event_id
-   ->  Merge Append
+   ->  Sort
          Sort Key: events.event_id
-         ->  Index Scan using events_pkey on events
-         ->  Sort
-               Sort Key: events_1.event_id
+         ->  Append
+               ->  Bitmap Heap Scan on events
+                     ->  Bitmap Index Scan on events_pkey
                ->  Seq Scan on events_child events_1
-         ->  Index Scan using other_events_pkey on other_events
+               ->  Bitmap Heap Scan on other_events
+                     ->  Bitmap Index Scan on other_events_pkey
  Optimizer: Postgres query optimizer
-(10 rows)
+(11 rows)
 
 reset enable_seqscan;
 drop table events_child, events, other_events;
@@ -1312,8 +1319,8 @@ SELECT * FROM
    SELECT 2 AS t, 4 AS x) ss
 WHERE x < 4
 ORDER BY x;
-              QUERY PLAN               
----------------------------------------
+              QUERY PLAN              
+--------------------------------------
  Sort
    Sort Key: (2)
    ->  Append
@@ -1322,7 +1329,7 @@ ORDER BY x;
                ->  Result
          ->  Result
                One-Time Filter: false
- Optimizer: Pivotal Optimizer (GPORCA)
+ Optimizer: GPORCA
 (9 rows)
 
 SELECT * FROM
@@ -1495,6 +1502,7 @@ create function expensivefunc(int) returns int
 language plpgsql immutable strict cost 10000
 as $$begin return $1; end$$;
 create temp table t3 as select generate_series(-1000,1000) as x;
+NOTICE:  Table doesn't have 'DISTRIBUTED BY' clause. Creating a NULL policy entry.
 create index t3i on t3 (expensivefunc(x));
 analyze t3;
 explain (costs off)

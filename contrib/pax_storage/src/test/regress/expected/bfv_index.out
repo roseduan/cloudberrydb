@@ -23,32 +23,31 @@ create index bfv_tab1_idx1 on bfv_tab1 using btree(unique1);
 -- GPDB_12_MERGE_FIXME: Non default collation
 explain select * from bfv_tab1, (values(147, 'RFAAAA'), (931, 'VJAAAA')) as v (i, j)
     WHERE bfv_tab1.unique1 = v.i and bfv_tab1.stringu1 = v.j;
-                                                QUERY PLAN                                                 
------------------------------------------------------------------------------------------------------------
- Gather Motion 3:1  (slice1; segments: 3)  (cost=0.06..278.70 rows=14 width=280)
-   ->  Hash Join  (cost=0.06..278.70 rows=5 width=280)
-         Hash Cond: bfv_tab1.unique1 = "*VALUES*".column1 AND bfv_tab1.stringu1::text = "*VALUES*".column2
-         ->  Seq Scan on bfv_tab1  (cost=0.00..219.00 rows=3967 width=244)
-         ->  Hash  (cost=0.03..0.03 rows=1 width=36)
-               ->  Values Scan on "*VALUES*"  (cost=0.00..0.03 rows=1 width=36)
- Optimizer status: Postgres query optimizer
+                                                    QUERY PLAN                                                     
+-------------------------------------------------------------------------------------------------------------------
+ Gather Motion 3:1  (slice1; segments: 3)  (cost=0.06..93.80 rows=14 width=280)
+   ->  Hash Join  (cost=0.06..93.62 rows=5 width=280)
+         Hash Cond: ((bfv_tab1.unique1 = "*VALUES*".column1) AND (bfv_tab1.stringu1 = ("*VALUES*".column2)::text))
+         ->  Seq Scan on bfv_tab1  (cost=0.00..73.67 rows=3967 width=244)
+         ->  Hash  (cost=0.03..0.03 rows=2 width=36)
+               ->  Values Scan on "*VALUES*"  (cost=0.00..0.03 rows=2 width=36)
+ Optimizer: Postgres query optimizer
 (7 rows)
 
 set gp_enable_relsize_collection=on;
 -- GPDB_12_MERGE_FIXME: Non default collation
 explain select * from bfv_tab1, (values(147, 'RFAAAA'), (931, 'VJAAAA')) as v (i, j)
     WHERE bfv_tab1.unique1 = v.i and bfv_tab1.stringu1 = v.j;
-                                                QUERY PLAN                                                 
------------------------------------------------------------------------------------------------------------
- Gather Motion 3:1  (slice1; segments: 3)  (cost=0.01..0.09 rows=4 width=280)
-   ->  Hash Join  (cost=0.01..0.09 rows=2 width=280)
-         Hash Cond: "*VALUES*".column1 = bfv_tab1.unique1 AND "*VALUES*".column2 = bfv_tab1.stringu1::text
-         ->  Values Scan on "*VALUES*"  (cost=0.00..0.03 rows=1 width=36)
-         ->  Hash  (cost=0.00..0.00 rows=1 width=244)
-               ->  Seq Scan on bfv_tab1  (cost=0.00..0.00 rows=1 width=244)
- Settings:  gp_enable_relsize_collection=on
- Optimizer status: Postgres query optimizer
-(8 rows)
+                                                    QUERY PLAN                                                     
+-------------------------------------------------------------------------------------------------------------------
+ Gather Motion 3:1  (slice1; segments: 3)  (cost=0.03..0.12 rows=3 width=280)
+   ->  Hash Join  (cost=0.03..0.08 rows=1 width=280)
+         Hash Cond: (("*VALUES*".column1 = bfv_tab1.unique1) AND (("*VALUES*".column2)::text = bfv_tab1.stringu1))
+         ->  Values Scan on "*VALUES*"  (cost=0.00..0.03 rows=2 width=36)
+         ->  Hash  (cost=0.01..0.01 rows=1 width=244)
+               ->  Seq Scan on bfv_tab1  (cost=0.00..0.01 rows=1 width=244)
+ Optimizer: Postgres query optimizer
+(7 rows)
 
 -- Test that we do not choose to perform an index scan if indisvalid=false.
 create table bfv_tab1_with_invalid_index (like bfv_tab1 including indexes);
@@ -59,7 +58,7 @@ reset allow_system_table_mods;
 explain select * from bfv_tab1_with_invalid_index where unique1>42;
                                     QUERY PLAN                                     
 -----------------------------------------------------------------------------------
- Gather Motion 3:1  (slice1; segments: 3)  (cost=0.00..0.05 rows=3 width=244)
+ Gather Motion 3:1  (slice1; segments: 3)  (cost=0.00..0.03 rows=1 width=244)
    ->  Seq Scan on bfv_tab1_with_invalid_index  (cost=0.00..0.01 rows=1 width=244)
          Filter: (unique1 > 42)
  Optimizer: Postgres query optimizer
@@ -214,7 +213,7 @@ AND ft.id = dt1.id;
 
 -- start_ignore
 create language plpython3u;
-ERROR:  language "plpython3u" already exists
+ERROR:  extension "plpython3u" already exists
 -- end_ignore
 create or replace function count_index_scans(explain_query text) returns int as
 $$
@@ -476,12 +475,12 @@ select disable_xform('CXformGet2TableScan');
 
 -- end_ignore
 explain select * from tbl_ab where b::oid=1;
-                                   QUERY PLAN                                   
---------------------------------------------------------------------------------
- Gather Motion 3:1  (slice1; segments: 3)  (cost=0.00..1176.25 rows=87 width=8)
-   ->  Seq Scan on tbl_ab  (cost=0.00..1176.25 rows=29 width=8)
-         Filter: b::oid = 1::oid
- Optimizer status: Postgres query optimizer
+                                  QUERY PLAN                                   
+-------------------------------------------------------------------------------
+ Gather Motion 3:1  (slice1; segments: 3)  (cost=0.00..393.90 rows=86 width=8)
+   ->  Seq Scan on tbl_ab  (cost=0.00..392.75 rows=29 width=8)
+         Filter: ((b)::oid = '1'::oid)
+ Optimizer: Postgres query optimizer
 (4 rows)
 
 drop table tbl_ab;
@@ -519,58 +518,61 @@ set seq_page_cost=10000000;
 set enable_indexscan=on;
 set enable_nestloop=on;
 explain select * from nestloop_x as x, nestloop_y as y where x.i + x.j < y.j;
-                                            QUERY PLAN                                             
----------------------------------------------------------------------------------------------------
- Gather Motion 3:1  (slice2; segments: 3)  (cost=0.00..30030626.55 rows=47 width=16)
-   ->  Nested Loop  (cost=0.00..30030626.55 rows=16 width=16)
-         ->  Broadcast Motion 3:3  (slice1; segments: 3)  (cost=0.00..30000001.00 rows=20 width=8)
-               ->  Seq Scan on nestloop_x x  (cost=0.00..30000000.20 rows=7 width=8)
-         ->  Index Scan using nestloop_y_idx on nestloop_y y  (cost=0.00..510.39 rows=1 width=8)
-               Index Cond: (x.i + x.j) < y.j
- Settings:  enable_indexscan=on; enable_nestloop=on; optimizer=off; seq_page_cost=1e+07
- Optimizer status: Postgres query optimizer
-(8 rows)
+                                              QUERY PLAN                                               
+-------------------------------------------------------------------------------------------------------
+ Gather Motion 3:1  (slice1; segments: 3)  (cost=217.82..412639669.50 rows=2471070000 width=16)
+   ->  Nested Loop  (cost=217.82..379692069.50 rows=823690000 width=16)
+         ->  Broadcast Motion 3:3  (slice2; segments: 3)  (cost=0.00..340001435.00 rows=86100 width=8)
+               ->  Seq Scan on nestloop_x x  (cost=0.00..340000287.00 rows=28700 width=8)
+         ->  Bitmap Heap Scan on nestloop_y y  (cost=217.82..365.32 rows=9567 width=8)
+               Recheck Cond: ((x.i + x.j) < j)
+               ->  Bitmap Index Scan on nestloop_y_idx  (cost=0.00..215.42 rows=9567 width=0)
+                     Index Cond: (j > (x.i + x.j))
+ Optimizer: Postgres query optimizer
+(9 rows)
 
 select * from nestloop_x as x, nestloop_y as y where x.i + x.j < y.j;
  i | j | i | j 
 ---+---+---+---
  1 | 1 | 3 | 3
  1 | 1 | 4 | 4
- 1 | 1 | 5 | 5
- 1 | 1 | 6 | 6
  1 | 1 | 7 | 7
- 2 | 2 | 5 | 5
- 2 | 2 | 6 | 6
  2 | 2 | 7 | 7
  3 | 3 | 7 | 7
+ 2 | 2 | 5 | 5
+ 2 | 2 | 6 | 6
+ 1 | 1 | 5 | 5
+ 1 | 1 | 6 | 6
 (9 rows)
 
 explain select * from nestloop_x as x, nestloop_y as y where y.j > x.i + x.j + 2;
-                                            QUERY PLAN                                             
----------------------------------------------------------------------------------------------------
- Gather Motion 3:1  (slice2; segments: 3)  (cost=0.00..30030627.05 rows=47 width=16)
-   ->  Nested Loop  (cost=0.00..30030627.05 rows=16 width=16)
-         ->  Broadcast Motion 3:3  (slice1; segments: 3)  (cost=0.00..30000001.00 rows=20 width=8)
-               ->  Seq Scan on nestloop_x x  (cost=0.00..30000000.20 rows=7 width=8)
-         ->  Index Scan using nestloop_y_idx on nestloop_y y  (cost=0.00..510.39 rows=1 width=8)
-               Index Cond: y.j > (x.i + x.j + 2)
- Settings:  enable_indexscan=on; enable_nestloop=on; optimizer=off; seq_page_cost=1e+07
- Optimizer status: Postgres query optimizer
-(8 rows)
+                                              QUERY PLAN                                               
+-------------------------------------------------------------------------------------------------------
+ Gather Motion 3:1  (slice1; segments: 3)  (cost=217.82..414699109.75 rows=2471070000 width=16)
+   ->  Nested Loop  (cost=217.82..381751509.75 rows=823690000 width=16)
+         ->  Broadcast Motion 3:3  (slice2; segments: 3)  (cost=0.00..340001435.00 rows=86100 width=8)
+               ->  Seq Scan on nestloop_x x  (cost=0.00..340000287.00 rows=28700 width=8)
+         ->  Bitmap Heap Scan on nestloop_y y  (cost=217.82..389.24 rows=9567 width=8)
+               Recheck Cond: (j > ((x.i + x.j) + 2))
+               ->  Bitmap Index Scan on nestloop_y_idx  (cost=0.00..215.43 rows=9567 width=0)
+                     Index Cond: (j > ((x.i + x.j) + 2))
+ Optimizer: Postgres query optimizer
+(9 rows)
 
 select * from nestloop_x as x, nestloop_y as y where y.j > x.i + x.j + 2;
  i | j | i | j 
 ---+---+---+---
+ 2 | 2 | 7 | 7
+ 1 | 1 | 7 | 7
  1 | 1 | 5 | 5
  1 | 1 | 6 | 6
- 1 | 1 | 7 | 7
- 2 | 2 | 7 | 7
 (4 rows)
 
 drop table nestloop_x, nestloop_y;
 SET enable_seqscan = OFF;
 SET enable_indexscan = ON;
 DROP TABLE IF EXISTS bpchar_ops;
+NOTICE:  table "bpchar_ops" does not exist, skipping
 CREATE TABLE bpchar_ops(id INT8, v char(10)) DISTRIBUTED BY(id);
 CREATE INDEX bpchar_ops_btree_idx ON bpchar_ops USING btree(v bpchar_pattern_ops);
 INSERT INTO bpchar_ops VALUES (0, 'row');
@@ -619,33 +621,33 @@ set enable_bitmapscan=on;
 explain select * from shape_heap where c && '<(5,5), 1>'::circle;
                                        QUERY PLAN                                       
 ----------------------------------------------------------------------------------------
- Gather Motion 3:1  (slice1; segments: 3)  (cost=101.26..201.27 rows=1 width=24)
-   ->  Bitmap Heap Scan on shape_heap  (cost=101.26..201.27 rows=1 width=24)
-         Recheck Cond: c && '<(5,5),1>'::circle
-         ->  Bitmap Index Scan on shape_heap_bb_idx  (cost=0.00..101.26 rows=1 width=0)
-               Index Cond: c && '<(5,5),1>'::circle
+ Gather Motion 3:1  (slice1; segments: 3)  (cost=6.58..340000011.88 rows=303 width=24)
+   ->  Bitmap Heap Scan on shape_heap  (cost=6.58..340000007.84 rows=101 width=24)
+         Recheck Cond: (c && '<(5,5),1>'::circle)
+         ->  Bitmap Index Scan on shape_heap_bb_idx  (cost=0.00..6.55 rows=101 width=0)
+               Index Cond: (c && '<(5,5),1>'::circle)
  Optimizer: Postgres query optimizer
 (6 rows)
 
 explain select * from shape_ao   where c && '<(5,5), 1>'::circle;
-                                      QUERY PLAN                                      
---------------------------------------------------------------------------------------
- Gather Motion 3:1  (slice1; segments: 3)  (cost=101.26..201.27 rows=1 width=24)
-   ->  Bitmap Heap Scan on shape_ao  (cost=101.26..201.27 rows=1 width=24)
-         Recheck Cond: c && '<(5,5),1>'::circle
-         ->  Bitmap Index Scan on shape_ao_bb_idx  (cost=0.00..101.26 rows=1 width=0)
-               Index Cond: c && '<(5,5),1>'::circle
+                                      QUERY PLAN                                       
+---------------------------------------------------------------------------------------
+ Gather Motion 3:1  (slice1; segments: 3)  (cost=6.58..340000011.88 rows=303 width=24)
+   ->  Bitmap Heap Scan on shape_ao  (cost=6.58..340000007.84 rows=101 width=24)
+         Recheck Cond: (c && '<(5,5),1>'::circle)
+         ->  Bitmap Index Scan on shape_ao_bb_idx  (cost=0.00..6.55 rows=101 width=0)
+               Index Cond: (c && '<(5,5),1>'::circle)
  Optimizer: Postgres query optimizer
 (6 rows)
 
 explain select * from shape_aocs where c && '<(5,5), 1>'::circle;
                                        QUERY PLAN                                       
 ----------------------------------------------------------------------------------------
- Gather Motion 3:1  (slice1; segments: 3)  (cost=101.26..201.27 rows=1 width=24)
-   ->  Bitmap Heap Scan on shape_aocs  (cost=101.26..201.27 rows=1 width=24)
-         Recheck Cond: c && '<(5,5),1>'::circle
-         ->  Bitmap Index Scan on shape_aocs_bb_idx  (cost=0.00..101.26 rows=1 width=0)
-               Index Cond: c && '<(5,5),1>'::circle
+ Gather Motion 3:1  (slice1; segments: 3)  (cost=6.58..340000011.88 rows=303 width=24)
+   ->  Bitmap Heap Scan on shape_aocs  (cost=6.58..340000007.84 rows=101 width=24)
+         Recheck Cond: (c && '<(5,5),1>'::circle)
+         ->  Bitmap Index Scan on shape_aocs_bb_idx  (cost=0.00..6.55 rows=101 width=0)
+               Index Cond: (c && '<(5,5),1>'::circle)
  Optimizer: Postgres query optimizer
 (6 rows)
 
@@ -718,11 +720,11 @@ SET optimizer_enable_tablescan=off;
 SET optimizer_enable_indexscan=off;
 SET optimizer_enable_indexonlyscan=on;
 EXPLAIN SELECT c, a FROM table_with_reversed_index WHERE a > 5;
-                                                                    QUERY PLAN                                                              
---------------------------------------------------------------------------------------------------------------------------------------------------
- Gather Motion 3:1  (slice1; segments: 3)  (cost=10000000000.12..10000000008.16 rows=1 width=7)
-   ->  Index Only Scan using table_with_reversed_index_c_a_idx on table_with_reversed_index  (cost=10000000000.12..10000000008.14 rows=1 width=7)
-         Index Cond: (a > 5)
+                                              QUERY PLAN                                               
+-------------------------------------------------------------------------------------------------------
+ Gather Motion 3:1  (slice1; segments: 3)  (cost=10000000000.00..10340000420.22 rows=16267 width=36)
+   ->  Seq Scan on table_with_reversed_index  (cost=10000000000.00..10340000203.33 rows=5422 width=36)
+         Filter: (a > 5)
  Optimizer: Postgres query optimizer
 (4 rows)
 

@@ -79,9 +79,7 @@ WHERE t1.unique1 < 1000;', false);
    ->  Gather Motion 3:1  (slice1; segments: 3) (actual rows=3 loops=N)
          ->  Partial Aggregate (actual rows=1 loops=N)
                ->  Merge Join (actual rows=400 loops=N)
-                     Merge Cond: (t2.unique1 = t1.twenty)
-                     ->  Index Only Scan using tenk1_unique1 on tenk1 t2 (actual rows=9 loops=N)
-                           Heap Fetches: N
+                     Merge Cond: (t1.twenty = t2.unique1)
                      ->  Sort (actual rows=400 loops=N)
                            Sort Key: t1.twenty
                            Sort Method:  quicksort  Memory: NkB
@@ -90,8 +88,12 @@ WHERE t1.unique1 < 1000;', false);
                                  ->  Seq Scan on tenk1 t1 (actual rows=340 loops=N)
                                        Filter: (unique1 < 1000)
                                        Rows Removed by Filter: 2906
+                     ->  Sort (actual rows=401 loops=N)
+                           Sort Key: t2.unique1
+                           Sort Method:  quicksort  Memory: NkB
+                           ->  Seq Scan on tenk1 t2 (actual rows=3386 loops=N)
  Optimizer: Postgres query optimizer
-(16 rows)
+(18 rows)
 
 -- And check we get the expected results.
 SELECT COUNT(*),AVG(t2.unique1) FROM tenk1 t1,
@@ -220,8 +222,8 @@ WHERE unique1 < 3
 	SELECT 1 FROM tenk1 t1
 	INNER JOIN tenk1 t2 ON t1.unique1 = t2.hundred
 	WHERE t0.ten = t1.twenty AND t0.two <> t2.four OFFSET 0);
-                                           QUERY PLAN                                           
-------------------------------------------------------------------------------------------------
+                                          QUERY PLAN                                          
+----------------------------------------------------------------------------------------------
  Vec Gather Motion 3:1  (slice1; segments: 3)
    ->  Vec GroupAggregate
          Group Key: t0.unique1, t0.ctid, t0.gp_segment_id
@@ -274,8 +276,8 @@ EXPLAIN (COSTS OFF)
 SELECT COUNT(*),AVG(t2.unique1) FROM tenk1 t1,
 LATERAL (SELECT t2.unique1 FROM tenk1 t2 WHERE t1.twenty = t2.unique1) t2
 WHERE t1.unique1 < 1000;
-                                  QUERY PLAN                                  
-------------------------------------------------------------------------------
+                                    QUERY PLAN                                    
+----------------------------------------------------------------------------------
  Vec Finalize Vec Aggregate
    ->  Vec Gather Motion 3:1  (slice1; segments: 3)
          ->  Vec Partial Vec Aggregate

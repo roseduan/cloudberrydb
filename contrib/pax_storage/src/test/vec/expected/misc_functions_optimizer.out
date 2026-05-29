@@ -279,10 +279,12 @@ WHERE my_int_eq(a.unique2, 42);
    ->  Nested Loop
          ->  Seq Scan on tenk1 a
                Filter: my_int_eq(unique2, 42)
-         ->  Index Scan using tenk1_unique1 on tenk1 b
-               Index Cond: (unique1 = a.unique1)
+         ->  Bitmap Heap Scan on tenk1 b
+               Recheck Cond: (unique1 = a.unique1)
+               ->  Bitmap Index Scan on tenk1_unique1
+                     Index Cond: (unique1 = a.unique1)
  Optimizer: Postgres query optimizer
-(7 rows)
+(9 rows)
 
 -- Also test non-default rowcount estimate
 CREATE FUNCTION my_gen_series(int, int) RETURNS SETOF integer

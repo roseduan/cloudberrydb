@@ -251,41 +251,49 @@ set local enable_indexscan = on;
 set local enable_bitmapscan = on;
 set local max_parallel_workers_per_gather=1;
 explain(costs off) select y from ao1 where y > 1000000;
+                 QUERY PLAN                 
+--------------------------------------------
+ Gather Motion 3:1  (slice1; segments: 3)
+   ->  Bitmap Heap Scan on ao1
+         Recheck Cond: (y > 1000000)
+         ->  Bitmap Index Scan on ao1_y_idx
+               Index Cond: (y > 1000000)
+ Optimizer: Postgres query optimizer
+(6 rows)
+
+explain(costs off) select y from aocs1 where y > 1000000;
                   QUERY PLAN                  
 ----------------------------------------------
  Gather Motion 3:1  (slice1; segments: 3)
-   ->  Index Only Scan using ao1_y_idx on ao1
-         Index Cond: (y > 1000000)
+   ->  Bitmap Heap Scan on aocs1
+         Recheck Cond: (y > 1000000)
+         ->  Bitmap Index Scan on aocs1_y_idx
+               Index Cond: (y > 1000000)
  Optimizer: Postgres query optimizer
-(4 rows)
-
-explain(costs off) select y from aocs1 where y > 1000000;
-                    QUERY PLAN                    
---------------------------------------------------
- Gather Motion 3:1  (slice1; segments: 3)
-   ->  Index Only Scan using aocs1_y_idx on aocs1
-         Index Cond: (y > 1000000)
- Optimizer: Postgres query optimizer
-(4 rows)
+(6 rows)
 
 set local max_parallel_workers_per_gather=0;
 explain(costs off) select y from ao1 where y > 1000000;
+                 QUERY PLAN                 
+--------------------------------------------
+ Gather Motion 3:1  (slice1; segments: 3)
+   ->  Bitmap Heap Scan on ao1
+         Recheck Cond: (y > 1000000)
+         ->  Bitmap Index Scan on ao1_y_idx
+               Index Cond: (y > 1000000)
+ Optimizer: Postgres query optimizer
+(6 rows)
+
+explain(costs off) select y from aocs1 where y > 1000000;
                   QUERY PLAN                  
 ----------------------------------------------
  Gather Motion 3:1  (slice1; segments: 3)
-   ->  Index Only Scan using ao1_y_idx on ao1
-         Index Cond: (y > 1000000)
+   ->  Bitmap Heap Scan on aocs1
+         Recheck Cond: (y > 1000000)
+         ->  Bitmap Index Scan on aocs1_y_idx
+               Index Cond: (y > 1000000)
  Optimizer: Postgres query optimizer
-(4 rows)
-
-explain(costs off) select y from aocs1 where y > 1000000;
-                    QUERY PLAN                    
---------------------------------------------------
- Gather Motion 3:1  (slice1; segments: 3)
-   ->  Index Only Scan using aocs1_y_idx on aocs1
-         Index Cond: (y > 1000000)
- Optimizer: Postgres query optimizer
-(4 rows)
+(6 rows)
 
 commit;
 drop table ao1;
@@ -336,18 +344,20 @@ select count(c2) from t1;
 
 set local enable_parallel = off;
 explain(locus, costs off) select count(c2) from t1;
-                       QUERY PLAN                        
----------------------------------------------------------
+                       QUERY PLAN                       
+--------------------------------------------------------
  Finalize Aggregate
    Locus: Entry
    ->  Gather Motion 3:1  (slice1; segments: 3)
          Locus: Entry
          ->  Partial Aggregate
                Locus: Hashed
-               ->  Index Only Scan using t1_c2_idx on t1
+               ->  Bitmap Heap Scan on t1
                      Locus: Hashed
+                     ->  Bitmap Index Scan on t1_c2_idx
+                           Locus: Hashed
  Optimizer: Postgres query optimizer
-(9 rows)
+(11 rows)
 
 select count(c2) from t1;
   count  
@@ -998,7 +1008,7 @@ explain(locus, costs off) select * from t_replica_workers_2 join t_random_worker
                      Locus: Strewn
                      Parallel Workers: 2
  Optimizer: Postgres query optimizer
-(16 rows)
+(15 rows)
 
 select * from t_replica_workers_2 join t_random_workers_2 using(a);
  a | b | b 
@@ -1794,8 +1804,8 @@ explain (locus, costs off)
 select * from
   (select count(id) from t1 where id > 10) ss
   right join (values (1),(2),(3)) v(x) on true;
-                             QUERY PLAN                              
----------------------------------------------------------------------
+                             QUERY PLAN                             
+--------------------------------------------------------------------
  Nested Loop Left Join
    Locus: Entry
    ->  Values Scan on "*VALUES*"
@@ -1808,11 +1818,14 @@ select * from
                      Locus: Entry
                      ->  Partial Aggregate
                            Locus: Hashed
-                           ->  Index Only Scan using t1_id_idx on t1
+                           ->  Bitmap Heap Scan on t1
                                  Locus: Hashed
-                                 Index Cond: (id > 10)
+                                 Recheck Cond: (id > 10)
+                                 ->  Bitmap Index Scan on t1_id_idx
+                                       Locus: Hashed
+                                       Index Cond: (id > 10)
  Optimizer: Postgres query optimizer
-(16 rows)
+(19 rows)
 
 abort;
 begin;
@@ -2166,8 +2179,8 @@ explain (locus, costs off)
 select * from
   (select count(id) from t1 where id > 10) ss
   right join (values (1),(2),(3)) v(x) on true;
-                             QUERY PLAN                              
----------------------------------------------------------------------
+                             QUERY PLAN                             
+--------------------------------------------------------------------
  Nested Loop Left Join
    Locus: Entry
    ->  Values Scan on "*VALUES*"
@@ -2180,11 +2193,14 @@ select * from
                      Locus: Entry
                      ->  Partial Aggregate
                            Locus: Hashed
-                           ->  Index Only Scan using t1_id_idx on t1
+                           ->  Bitmap Heap Scan on t1
                                  Locus: Hashed
-                                 Index Cond: (id > 10)
+                                 Recheck Cond: (id > 10)
+                                 ->  Bitmap Index Scan on t1_id_idx
+                                       Locus: Hashed
+                                       Index Cond: (id > 10)
  Optimizer: Postgres query optimizer
-(16 rows)
+(19 rows)
 
 abort;
 -- Subplan locus, One-time flter locus is null

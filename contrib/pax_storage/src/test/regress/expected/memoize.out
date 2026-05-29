@@ -48,8 +48,10 @@ WHERE t2.unique1 < 1000;', false);
          ->  Partial Aggregate (actual rows=1 loops=N)
                ->  Merge Join (actual rows=400 loops=N)
                      Merge Cond: (t1.unique1 = t2.twenty)
-                     ->  Index Only Scan using tenk1_unique1 on tenk1 t1 (actual rows=9 loops=N)
-                           Heap Fetches: N
+                     ->  Sort (actual rows=9 loops=N)
+                           Sort Key: t1.unique1
+                           Sort Method:  quicksort  Memory: NkB
+                           ->  Seq Scan on tenk1 t1 (actual rows=3386 loops=N)
                      ->  Sort (actual rows=400 loops=N)
                            Sort Key: t2.twenty
                            Sort Method:  quicksort  Memory: NkB
@@ -59,7 +61,7 @@ WHERE t2.unique1 < 1000;', false);
                                        Filter: (unique1 < 1000)
                                        Rows Removed by Filter: 2906
  Optimizer: Postgres query optimizer
-(16 rows)
+(18 rows)
 
 -- And check we get the expected results.
 SELECT COUNT(*),AVG(t1.unique1) FROM tenk1 t1
@@ -81,9 +83,7 @@ WHERE t1.unique1 < 1000;', false);
    ->  Gather Motion 3:1  (slice1; segments: 3) (actual rows=3 loops=N)
          ->  Partial Aggregate (actual rows=1 loops=N)
                ->  Merge Join (actual rows=400 loops=N)
-                     Merge Cond: (t2.unique1 = t1.twenty)
-                     ->  Index Only Scan using tenk1_unique1 on tenk1 t2 (actual rows=9 loops=N)
-                           Heap Fetches: N
+                     Merge Cond: (t1.twenty = t2.unique1)
                      ->  Sort (actual rows=400 loops=N)
                            Sort Key: t1.twenty
                            Sort Method:  quicksort  Memory: NkB
@@ -92,8 +92,12 @@ WHERE t1.unique1 < 1000;', false);
                                  ->  Seq Scan on tenk1 t1 (actual rows=340 loops=N)
                                        Filter: (unique1 < 1000)
                                        Rows Removed by Filter: 2906
+                     ->  Sort (actual rows=401 loops=N)
+                           Sort Key: t2.unique1
+                           Sort Method:  quicksort  Memory: NkB
+                           ->  Seq Scan on tenk1 t2 (actual rows=3386 loops=N)
  Optimizer: Postgres query optimizer
-(16 rows)
+(18 rows)
 
 -- And check we get the expected results.
 SELECT COUNT(*),AVG(t2.unique1) FROM tenk1 t1,
@@ -121,8 +125,10 @@ WHERE t2.unique1 < 1200;', true);
          ->  Partial Aggregate (actual rows=1 loops=N)
                ->  Merge Join (actual rows=407 loops=N)
                      Merge Cond: (t1.unique1 = t2.thousand)
-                     ->  Index Only Scan using tenk1_unique1 on tenk1 t1 (actual rows=341 loops=N)
-                           Heap Fetches: N
+                     ->  Sort (actual rows=341 loops=N)
+                           Sort Key: t1.unique1
+                           Sort Method:  quicksort  Memory: NkB
+                           ->  Seq Scan on tenk1 t1 (actual rows=3386 loops=N)
                      ->  Sort (actual rows=407 loops=N)
                            Sort Key: t2.thousand
                            Sort Method:  quicksort  Memory: NkB
@@ -132,9 +138,11 @@ WHERE t2.unique1 < 1200;', true);
                                        Filter: (unique1 < 1200)
                                        Rows Removed by Filter: 2961
  Optimizer: Postgres query optimizer
-(16 rows)
+(18 rows)
 
 CREATE TABLE flt (f float);
+NOTICE:  Table doesn't have 'DISTRIBUTED BY' clause -- Using column named 'f' as the Apache Cloudberry data distribution key for this table.
+HINT:  The 'DISTRIBUTED BY' clause determines the distribution of data. Make sure column(s) chosen are the optimal data distribution key to minimize skew.
 CREATE INDEX flt_f_idx ON flt (f);
 INSERT INTO flt VALUES('-0.0'::float),('+0.0'::float);
 ANALYZE flt;
@@ -142,38 +150,43 @@ SET enable_seqscan TO off;
 -- Ensure memoize operates in logical mode
 SELECT explain_memoize('
 SELECT * FROM flt f1 INNER JOIN flt f2 ON f1.f = f2.f;', false);
-                                explain_memoize                                
--------------------------------------------------------------------------------
+                         explain_memoize                          
+------------------------------------------------------------------
  Gather Motion 3:1  (slice1; segments: 3) (actual rows=4 loops=N)
-   ->  Nested Loop (actual rows=4 loops=N)
-         ->  Index Only Scan using flt_f_idx on flt f1 (actual rows=2 loops=N)
-               Heap Fetches: N
-         ->  Index Only Scan using flt_f_idx on flt f2 (actual rows=2 loops=N)
-               Index Cond: (f = f1.f)
-               Heap Fetches: N
+   ->  Merge Join (actual rows=4 loops=N)
+         Merge Cond: (f1.f = f2.f)
+         ->  Sort (actual rows=2 loops=N)
+               Sort Key: f1.f
+               Sort Method:  quicksort  Memory: NkB
+               ->  Seq Scan on flt f1 (actual rows=2 loops=N)
+         ->  Sort (actual rows=3 loops=N)
+               Sort Key: f2.f
+               Sort Method:  quicksort  Memory: NkB
+               ->  Seq Scan on flt f2 (actual rows=2 loops=N)
  Optimizer: Postgres query optimizer
-(8 rows)
+(12 rows)
 
 -- Ensure memoize operates in binary mode
 SELECT explain_memoize('
 SELECT * FROM flt f1 INNER JOIN flt f2 ON f1.f >= f2.f;', false);
-                                   explain_memoize                                   
--------------------------------------------------------------------------------------
+                                    explain_memoize                                    
+---------------------------------------------------------------------------------------
  Gather Motion 3:1  (slice1; segments: 3) (actual rows=4 loops=N)
    ->  Nested Loop (actual rows=4 loops=N)
-         ->  Broadcast Motion 3:3  (slice2; segments: 3) (actual rows=2 loops=N)
-               ->  Index Only Scan using flt_f_idx on flt f1 (actual rows=2 loops=N)
-                     Heap Fetches: N
-         ->  Index Only Scan using flt_f_idx on flt f2 (actual rows=2 loops=N)
-               Index Cond: (f <= f1.f)
-               Heap Fetches: N
+         Join Filter: (f1.f >= f2.f)
+         ->  Seq Scan on flt f1 (actual rows=2 loops=N)
+         ->  Materialize (actual rows=2 loops=N)
+               ->  Broadcast Motion 3:3  (slice2; segments: 3) (actual rows=2 loops=N)
+                     ->  Seq Scan on flt f2 (actual rows=2 loops=N)
  Optimizer: Postgres query optimizer
-(9 rows)
+(8 rows)
 
 DROP TABLE flt;
 -- Exercise Memoize in binary mode with a large fixed width type and a
 -- varlena type.
 CREATE TABLE strtest (n name, t text);
+NOTICE:  Table doesn't have 'DISTRIBUTED BY' clause -- Using column named 'n' as the Apache Cloudberry data distribution key for this table.
+HINT:  The 'DISTRIBUTED BY' clause determines the distribution of data. Make sure column(s) chosen are the optimal data distribution key to minimize skew.
 CREATE INDEX strtest_n_idx ON strtest (n);
 CREATE INDEX strtest_t_idx ON strtest (t);
 INSERT INTO strtest VALUES('one','one'),('two','two'),('three',repeat(md5('three'),100));
@@ -183,30 +196,34 @@ ANALYZE strtest;
 -- Ensure we get 3 hits and 3 misses
 SELECT explain_memoize('
 SELECT * FROM strtest s1 INNER JOIN strtest s2 ON s1.n >= s2.n;', false);
-                                 explain_memoize                                  
-----------------------------------------------------------------------------------
+                                    explain_memoize                                    
+---------------------------------------------------------------------------------------
  Gather Motion 3:1  (slice1; segments: 3) (actual rows=24 loops=N)
-   ->  Nested Loop (actual rows=12 loops=N)
-         ->  Broadcast Motion 3:3  (slice2; segments: 3) (actual rows=6 loops=N)
-               ->  Seq Scan on strtest s1 (actual rows=4 loops=N)
-         ->  Index Scan using strtest_n_idx on strtest s2 (actual rows=2 loops=N)
-               Index Cond: (n <= s1.n)
+   ->  Nested Loop (actual rows=20 loops=N)
+         Join Filter: (s1.n >= s2.n)
+         Rows Removed by Join Filter: 4
+         ->  Seq Scan on strtest s1 (actual rows=4 loops=N)
+         ->  Materialize (actual rows=6 loops=N)
+               ->  Broadcast Motion 3:3  (slice2; segments: 3) (actual rows=6 loops=N)
+                     ->  Seq Scan on strtest s2 (actual rows=4 loops=N)
  Optimizer: Postgres query optimizer
-(7 rows)
+(9 rows)
 
 -- Ensure we get 3 hits and 3 misses
 SELECT explain_memoize('
 SELECT * FROM strtest s1 INNER JOIN strtest s2 ON s1.t >= s2.t;', false);
-                                 explain_memoize                                  
-----------------------------------------------------------------------------------
+                                    explain_memoize                                    
+---------------------------------------------------------------------------------------
  Gather Motion 3:1  (slice1; segments: 3) (actual rows=24 loops=N)
    ->  Nested Loop (actual rows=16 loops=N)
-         ->  Broadcast Motion 3:3  (slice2; segments: 3) (actual rows=6 loops=N)
-               ->  Seq Scan on strtest s1 (actual rows=4 loops=N)
-         ->  Index Scan using strtest_t_idx on strtest s2 (actual rows=3 loops=N)
-               Index Cond: (t <= s1.t)
+         Join Filter: (s1.t >= s2.t)
+         Rows Removed by Join Filter: 8
+         ->  Seq Scan on strtest s1 (actual rows=4 loops=N)
+         ->  Materialize (actual rows=6 loops=N)
+               ->  Broadcast Motion 3:3  (slice2; segments: 3) (actual rows=6 loops=N)
+                     ->  Seq Scan on strtest s2 (actual rows=4 loops=N)
  Optimizer: Postgres query optimizer
-(7 rows)
+(9 rows)
 
 DROP TABLE strtest;
 -- Exercise Memoize code that flushes the cache when a parameter changes which
@@ -219,12 +236,14 @@ WHERE unique1 < 3
 	SELECT 1 FROM tenk1 t1
 	INNER JOIN tenk1 t2 ON t1.unique1 = t2.hundred
 	WHERE t0.ten = t1.twenty AND t0.two <> t2.four OFFSET 0);
-                                          QUERY PLAN                                          
-----------------------------------------------------------------------------------------------
+                                       QUERY PLAN                                        
+-----------------------------------------------------------------------------------------
  Gather Motion 3:1  (slice1; segments: 3)
-   ->  Index Scan using tenk1_unique1 on tenk1 t0
-         Index Cond: (unique1 < 3)
+   ->  Bitmap Heap Scan on tenk1 t0
+         Recheck Cond: (unique1 < 3)
          Filter: (SubPlan 1)
+         ->  Bitmap Index Scan on tenk1_unique1
+               Index Cond: (unique1 < 3)
          SubPlan 1
            ->  Merge Join
                  Merge Cond: (t2.hundred = t1.unique1)
@@ -234,7 +253,7 @@ WHERE unique1 < 3
                              Filter: (t0.two <> t2.four)
                              ->  Materialize
                                    ->  Broadcast Motion 3:3  (slice2; segments: 3)
-                                         ->  Index Scan using tenk1_hundred on tenk1 t2
+                                         ->  Seq Scan on tenk1 t2
                  ->  Materialize
                        ->  Sort
                              Sort Key: t1.unique1
@@ -242,9 +261,9 @@ WHERE unique1 < 3
                                    Filter: (t0.ten = t1.twenty)
                                    ->  Materialize
                                          ->  Broadcast Motion 3:3  (slice3; segments: 3)
-                                               ->  Index Scan using tenk1_unique1 on tenk1 t1
+                                               ->  Seq Scan on tenk1 t1
  Optimizer: Postgres query optimizer
-(23 rows)
+(25 rows)
 
 -- Ensure the above query returns the correct result
 SELECT unique1 FROM tenk1 t0
