@@ -195,9 +195,14 @@ normalizePathComponents(const char* protocol, const char* bucket, const char* pa
 
     /*
      * Map volume server type to Hadoop-compatible URI scheme.
-     * Hadoop only has s3a:// filesystem, not s3://.
+     * Hadoop only ships fs.s3a:// (not s3://), so user-facing s3 / s3v2
+     * are translated to the s3a:// URI here. This is the Hadoop URI
+     * scheme convention only — the gopher UFS type sent to iceberg-gopher
+     * remains the plain user-facing value.
      */
-    if (protocol && pg_strcasecmp(protocol, "s3") == 0)
+    if (protocol &&
+        (pg_strcasecmp(protocol, "s3") == 0 ||
+         pg_strcasecmp(protocol, "s3v2") == 0))
         scheme = "s3a";
     else
         scheme = protocol;
@@ -1105,7 +1110,7 @@ static agentcli_cJSON* createIcebergConfig(IcebergCatalogOptions *option, Iceber
         if (volumeOpt != NULL && volumeOpt->volume_server.server_name)
         {
             const char *vtype = volumeOpt->volume_server.server_type;
-            if (vtype && (pg_strcasecmp(vtype, "s3") == 0 || pg_strcasecmp(vtype, "s3a") == 0))
+            if (vtype && (pg_strcasecmp(vtype, "s3") == 0 || pg_strcasecmp(vtype, "s3v2") == 0))
             {
                 appendStringInfoString(&config_files, "s3.conf");
                 has_config = true;
@@ -1608,7 +1613,7 @@ build_storage_config_info(IcebergVolumeOptions *volumeOpt)
 		const char *storageType = NULL;
 		
 		if (pg_strcasecmp(volumeOpt->volume_server.server_type, "s3") == 0 ||
-			pg_strcasecmp(volumeOpt->volume_server.server_type, "s3a") == 0)
+			pg_strcasecmp(volumeOpt->volume_server.server_type, "s3v2") == 0)
 			storageType = "S3";
 		else if (pg_strcasecmp(volumeOpt->volume_server.server_type, "gcs") == 0 ||
 				 pg_strcasecmp(volumeOpt->volume_server.server_type, "gs") == 0)
@@ -1638,7 +1643,7 @@ build_storage_config_info(IcebergVolumeOptions *volumeOpt)
 		if (volumeOpt->volume_server.server_type)
 		{
 			if (pg_strcasecmp(volumeOpt->volume_server.server_type, "s3") == 0 ||
-				pg_strcasecmp(volumeOpt->volume_server.server_type, "s3a") == 0)
+				pg_strcasecmp(volumeOpt->volume_server.server_type, "s3v2") == 0)
 				protocol = "s3";
 		}
 
@@ -1704,14 +1709,16 @@ build_create_catalog_json(IcebergCatalogOptions *options, IcebergVolumeOptions *
 		const char *protocol;
 
 		/*
-		 * Map volume server type to Hadoop-compatible URI scheme.
-		 * Hadoop only has s3a:// filesystem, not s3://.
+		 * Build Polaris default-base-location URI. Align with the
+		 * allowedLocations protocol above (s3 for object storage,
+		 * hdfs for HDFS). iceberg-aws S3FileIO understands both
+		 * s3:// and s3a://, and Polaris itself stores plain s3://.
 		 */
 		if (volumeOpt->volume_server.server_type &&
 			(strcasecmp(volumeOpt->volume_server.server_type, "hdfs") == 0))
 			protocol = "hdfs";
 		else
-			protocol = "s3a";
+			protocol = "s3";
 
 		snprintf(baseLocation, sizeof(baseLocation), "%s://%s/",
 					 protocol, volumeOpt->volume_server.bucket_name);

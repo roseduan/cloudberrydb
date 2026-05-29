@@ -17,6 +17,7 @@
 /* S3 volume server options */
 #define DATALAKE_ICEBERG_VOLUME_SERVER_TYPE "type"
 #define DATALAKE_ICEBERG_VOLUME_SERVER_TYPE_S3 "s3"
+#define DATALAKE_ICEBERG_VOLUME_SERVER_TYPE_S3V2 "s3v2"
 #define DATALAKE_ICEBERG_VOLUME_SERVER_TYPE_ABFSS "abfss"
 #define DATALAKE_ICEBERG_VOLUME_ENDPOINT "endpoint"
 #define DATALAKE_ICEBERG_VOLUME_REGION "region"
@@ -62,6 +63,25 @@ static void parseIcebergVolumeServerOptions(IcebergVolumeServerOptions *options,
     options->region = getStringOption(server_options, DATALAKE_ICEBERG_VOLUME_REGION);
     options->bucket_name = getStringOption(server_options, DATALAKE_ICEBERG_VOLUME_BUCKET_NAME);
     options->path_style_access = getBoolOption(server_options, DATALAKE_ICEBERG_VOLUME_PATH_STYLE_ACCESS, false);
+
+    /*
+     * Reject the deprecated s3a / s3av2 aliases at OPTION parse time. These
+     * names were a leak of Hadoop's fs.s3a URI scheme into the volume_server
+     * type vocabulary; the gopher native client now accepts plain s3 / s3v2
+     * directly, and everywhere downstream (Java parser, JSON wire shape)
+     * assumes s3 / s3v2 only.
+     */
+    if (options->server_type != NULL &&
+        (pg_strcasecmp(options->server_type, "s3a") == 0 ||
+         pg_strcasecmp(options->server_type, "s3av2") == 0)) {
+        ereport(ERROR,
+                (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+                 errmsg("volume server type '%s' is no longer supported",
+                        options->server_type),
+                 errhint("Use 'type=%s' instead.",
+                         pg_strcasecmp(options->server_type, "s3a") == 0
+                             ? "s3" : "s3v2")));
+    }
 
     if (options->server_type != NULL && pg_strcasecmp(options->server_type, DATALAKE_ICEBERG_VOLUME_SERVER_TYPE_S3) == 0) {
         /* AWS specific options */
@@ -171,12 +191,18 @@ buildVolumeBasePath(IcebergVolumeOptions *volumeOption)
     {
         /*
          * Object storage: <scheme>://bucket/base_path/
-         * Map user-facing type to Hadoop URI scheme:
-         *   s3, s3a → s3a (Hadoop S3A connector)
-         *   others  → pass through as-is
+         *
+         * Map the user-facing volume type to a Hadoop URI scheme:
+         *   s3 / s3v2 → s3a (Hadoop only ships the fs.s3a:// connector)
+         *   others    → pass through as-is
+         *
+         * This rewrite is purely the Hadoop URI scheme convention; the
+         * gopher UFS type (sent to iceberg-gopher) is set elsewhere to
+         * the plain user-facing value (s3, s3v2, ...).
          */
         const char *scheme = server_type;
-        if (pg_strcasecmp(server_type, "s3") == 0)
+        if (pg_strcasecmp(server_type, "s3") == 0 ||
+            pg_strcasecmp(server_type, "s3v2") == 0)
             scheme = "s3a";
 
         if (bucket == NULL || *bucket == '\0')

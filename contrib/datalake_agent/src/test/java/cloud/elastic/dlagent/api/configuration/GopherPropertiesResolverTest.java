@@ -101,7 +101,7 @@ public class GopherPropertiesResolverTest {
     }
 
     @Test
-    public void build_s3VolumeMapsToS3aAndStripsEndpointScheme() {
+    public void build_s3VolumeUfsTypePassThroughAndStripsEndpointScheme() {
         VolumeInfo volume = new VolumeInfo();
         volume.setVolumeServerType("s3");
         volume.setVolumeEndpoint("http://minio:9000");
@@ -113,8 +113,8 @@ public class GopherPropertiesResolverTest {
 
         Map<String, String> out = resolver.build(volume, null);
 
-        // ufs_type legacy hack mapping
-        assertEquals("s3a", out.get("gopher.ufs_type"));
+        // ufs_type pass-through (iceberg-gopher accepts s3 natively now)
+        assertEquals("s3", out.get("gopher.ufs_type"));
         // endpoint scheme stripped, useHttps derived
         assertEquals("minio:9000", out.get("gopher.endpoint"));
         assertEquals("false", out.get("gopher.useHttps"));
@@ -129,11 +129,11 @@ public class GopherPropertiesResolverTest {
     }
 
     @Test
-    public void build_s3v2VolumeMapsToS3av2() {
+    public void build_s3v2VolumeUfsTypePassThrough() {
         VolumeInfo volume = new VolumeInfo();
         volume.setVolumeServerType("s3v2");
         Map<String, String> out = resolver.build(volume, null);
-        assertEquals("s3av2", out.get("gopher.ufs_type"));
+        assertEquals("s3v2", out.get("gopher.ufs_type"));
     }
 
     @Test
@@ -217,7 +217,7 @@ public class GopherPropertiesResolverTest {
 
         assertEquals("minio:9000", conf.get("gopher.endpoint"));
         assertEquals("foo", conf.get("gopher.bucket"));
-        assertEquals("s3a", conf.get("gopher.ufs_type"));
+        assertEquals("s3", conf.get("gopher.ufs_type"));
     }
 
     @Test

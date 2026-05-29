@@ -62,7 +62,6 @@ public final class IcebergConfigConstants {
     }
 
     public static final String CATALOG_TYPE_HIVE = "hive";
-    public static final String CATALOG_TYPE_S3A = "s3a";
     public static final String CATALOG_TYPE_S3 = "s3";
     public static final String CATALOG_TYPE_HADOOP = "hadoop";
     public static final String CATALOG_TYPE_BUILDIN = "builtin";
@@ -108,9 +107,11 @@ public final class IcebergConfigConstants {
     // S3 Default value
     public static final String DEFAULT_S3_REGION_VALUE = "us-east-1";
 
-    // Volume server types — must match FDW's iceberg_volume_option.c definitions
-    public static final String VOLUME_TYPE_S3A = "s3a";
+    // Volume server types — must match FDW's iceberg_volume_option.c definitions.
+    // Note: the legacy s3a / s3av2 aliases are intentionally NOT defined here;
+    // FDW rejects them at OPTION parse time with a hint to use s3 / s3v2.
     public static final String VOLUME_TYPE_S3 = "s3";
+    public static final String VOLUME_TYPE_S3V2 = "s3v2";
     public static final String VOLUME_TYPE_HDFS = "hdfs";
     public static final String VOLUME_TYPE_ABFSS = "abfss";
 

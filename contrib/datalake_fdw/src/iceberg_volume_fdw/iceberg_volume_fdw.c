@@ -572,7 +572,12 @@ parseCatalogPropertiesOption(dataLakeOptions *opt, const char *catalog_propertie
 
 	PG_TRY();
 	{
-		opt->gopher->gopherType = pstrdup("s3a");
+		/*
+		 * S3 is the only object-storage backend reachable via Iceberg REST
+		 * catalog responses today. Pass "s3" — iceberg-gopher accepts it as
+		 * a first-class UFS type (alongside legacy "s3a").
+		 */
+		opt->gopher->gopherType = pstrdup("s3");
 
 		/* Parse "config" object */
 		config = json_object_get(root, "config");

@@ -1510,12 +1510,11 @@ public class IcebergRestController {
         // using fs.gopher.endpoint, which produces CURLE_COULDNT_RESOLVE_HOST against
         // self-hosted endpoints like minio. The working s3.conf shape omits region.
         configuration.set("fs.gopher.use_virtual_host", Boolean.toString(!pathStyleAccess));
-        // gopher only supports the "s3a" UFS type for object storage; normalize "s3".
+        // Pass volume_server_type through verbatim — iceberg-gopher accepts
+        // s3 / s3v2 natively. Hadoop fs.s3a URI/key naming is unaffected.
         String volType = properties.getOrDefault(
                 volKey(IcebergConfigConstants.ICEBERG_VOLUME_CONFIG.VOLUME_SERVER_TYPE), "");
-        String ufsType = (volType.equals(IcebergConfigConstants.VOLUME_TYPE_S3)
-                || volType.equals(IcebergConfigConstants.VOLUME_TYPE_S3A)) ? "s3a" : volType;
-        if (!ufsType.isEmpty()) configuration.set("fs.gopher.ufs_type", ufsType);
+        if (!volType.isEmpty()) configuration.set("fs.gopher.ufs_type", volType);
 
         // Pass through all FileIOConfig.properties to configuration.
         String prefix = IcebergConfigConstants.FILE_IO_CONFIG_PROPERTIES_PREFIX + ".";
@@ -1569,8 +1568,8 @@ public class IcebergRestController {
         String serverName = properties.get(volKey(IcebergConfigConstants.ICEBERG_VOLUME_CONFIG.SERVER_NAME));
         boolean useConfFile = serverName != null && !serverName.isEmpty();
 
-        if (volumeType.equals(IcebergConfigConstants.VOLUME_TYPE_S3A) ||
-            volumeType.equals(IcebergConfigConstants.VOLUME_TYPE_S3) ||
+        if (volumeType.equals(IcebergConfigConstants.VOLUME_TYPE_S3) ||
+            volumeType.equals(IcebergConfigConstants.VOLUME_TYPE_S3V2) ||
             volumeType.equals(IcebergConfigConstants.VOLUME_TYPE_ABFSS)) {
             if (useConfFile) {
                 String s3Location = deriveS3Location(configuration, properties);
@@ -1593,7 +1592,7 @@ public class IcebergRestController {
             throw new UnsupportedOperationException(
                     volKey(IcebergConfigConstants.ICEBERG_VOLUME_CONFIG.VOLUME_SERVER_TYPE) + " '" + volumeType
                     + "' is not supported yet. Supported types are: ["
-                    + IcebergConfigConstants.VOLUME_TYPE_S3A + ", " + IcebergConfigConstants.VOLUME_TYPE_S3 + ", "
+                    + IcebergConfigConstants.VOLUME_TYPE_S3 + ", " + IcebergConfigConstants.VOLUME_TYPE_S3V2 + ", "
                     + IcebergConfigConstants.VOLUME_TYPE_HDFS + ", " + IcebergConfigConstants.VOLUME_TYPE_ABFSS + "]");
         }
     }
@@ -1768,8 +1767,7 @@ public class IcebergRestController {
         } else if (catalogType.equals(IcebergConfigConstants.CATALOG_TYPE_POLARIS)) {
             LOG.debug("meta: type=polaris, source=inline");
             setPolarisInline(configuration, properties);
-        } else if (catalogType.equals(IcebergConfigConstants.CATALOG_TYPE_S3A) ||
-                   catalogType.equals(IcebergConfigConstants.CATALOG_TYPE_S3)) {
+        } else if (catalogType.equals(IcebergConfigConstants.CATALOG_TYPE_S3)) {
             LOG.debug("meta: type={}, source=inline (warehouse)", catalogType);
             setCatalogWarehouseInline(configuration, properties, false);
         } else if (catalogType.equals(IcebergConfigConstants.CATALOG_TYPE_HADOOP)) {
@@ -1779,7 +1777,7 @@ public class IcebergRestController {
             LOG.debug("meta: type=builtin, no catalog-side config");
         } else {
             throw new UnsupportedOperationException("This server type '" + catalogType + "' is not supported yet. " +
-                    "Supported types are: [" + IcebergConfigConstants.CATALOG_TYPE_S3A + ", " +
+                    "Supported types are: [" +
                     IcebergConfigConstants.CATALOG_TYPE_S3 + ", " +
                     IcebergConfigConstants.CATALOG_TYPE_HADOOP + ", " +
                     IcebergConfigConstants.CATALOG_TYPE_HIVE + ", " + IcebergConfigConstants.CATALOG_TYPE_BUILDIN + ", " +
@@ -1956,7 +1954,6 @@ public class IcebergRestController {
         String catalogServerType = properties.getOrDefault(catalogServerTypeKey, "");
 
         if (catalogServerType.equals(IcebergConfigConstants.CATALOG_TYPE_HIVE)
-                || catalogServerType.equals(IcebergConfigConstants.CATALOG_TYPE_S3A)
                 || catalogServerType.equals(IcebergConfigConstants.CATALOG_TYPE_S3)
                 || catalogServerType.equals(IcebergConfigConstants.CATALOG_TYPE_HADOOP)) {
             // For path-based and Hive catalogs the agent identifies tables by

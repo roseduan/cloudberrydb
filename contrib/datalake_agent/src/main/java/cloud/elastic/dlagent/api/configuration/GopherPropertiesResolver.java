@@ -50,8 +50,11 @@ import java.util.Map;
  *
  * <p>This class is the only place that performs gopher-side normalization
  * (endpoint scheme stripping, {@code useHttps} / {@code useVirtualHost}
- * derivation, and the {@code ufs_type} legacy naming hack {@code s3 -> s3a} /
- * {@code s3v2 -> s3av2}). All other modules must consume the output verbatim.
+ * derivation). The {@code volume_server_type} value is passed through to
+ * {@code gopher.ufs_type} verbatim; the iceberg-gopher native client now
+ * accepts {@code s3} / {@code s3v2} natively (since the s3a-only era), so
+ * no on-the-fly rewriting is needed here. All other modules must consume
+ * the output verbatim.
  */
 @Component
 @Slf4j
@@ -96,8 +99,6 @@ public class GopherPropertiesResolver {
     static final String KEY_HADOOP_RPC_PROTECTION    = GOPHER_PREFIX + "hadoop_rpc_protection";
     static final String KEY_DATA_TRANSFER_PROTOCOL   = GOPHER_PREFIX + "data_transfer_protocol";
 
-    // ufs_type legacy naming hack: gopher client treats "s3a" / "s3av2" as the
-    // S3 protocol family (NOT the hadoop-aws fs.s3a meaning). Do not remove.
     private static final String UFS_TYPE_HDFS = "hdfs";
 
     private final GopherConfigurationProperties baseline;
@@ -204,7 +205,9 @@ public class GopherPropertiesResolver {
     }
 
     private void applyObjectStorageConnection(Map<String, String> props, VolumeInfo volume) {
-        putIfNotBlank(props, KEY_UFS_TYPE, normalizeUfsType(volume.getVolumeServerType()));
+        // Pass volume_server_type through verbatim. The iceberg-gopher native
+        // client accepts s3 / s3v2 (and the legacy s3a / s3av2) directly.
+        putIfNotBlank(props, KEY_UFS_TYPE, volume.getVolumeServerType());
         putIfNotBlank(props, KEY_BUCKET,        volume.getBucketName());
         putIfNotBlank(props, KEY_REGION,        volume.getVolumeRegion());
         putIfNotBlank(props, KEY_ACCESS_KEY,    volume.getAccessKeyId());
@@ -250,28 +253,6 @@ public class GopherPropertiesResolver {
         Boolean useHostname = volume.getDfsClientUseDatanodeHostname();
         if (useHostname != null) {
             props.put(KEY_DFS_USE_DATANODE_HOSTNAME, Boolean.toString(useHostname));
-        }
-    }
-
-    /**
-     * Translate {@code volume_server_type} to gopher {@code ufs_type}.
-     *
-     * <p>This is the gopher legacy naming hack: gopher client expects {@code s3a}
-     * to denote the S3 protocol family (not the hadoop-aws fs.s3a meaning), and
-     * {@code s3av2} for v2 signatures. Other types pass through verbatim.
-     * Do not remove this mapping without coordinating with the gopher client.
-     */
-    private static String normalizeUfsType(String volumeServerType) {
-        if (volumeServerType == null) {
-            return null;
-        }
-        switch (volumeServerType.toLowerCase()) {
-            case "s3":
-                return "s3a";
-            case "s3v2":
-                return "s3av2";
-            default:
-                return volumeServerType;
         }
     }
 
