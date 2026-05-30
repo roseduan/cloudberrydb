@@ -149,6 +149,15 @@ SKIPPED_TESTS=0
 declare -a FAILED_TEST_LIST
 declare -a SKIPPED_TEST_LIST
 
+# Categories that are temporarily disabled.  These need fixture data
+# populated by spark-sql against the lakehouse all-in-one container
+# (hdfs://lakehouse:8020) which is not the topology used here -- the dev
+# stack splits hadoop / minio / hiveserver2 / polaris into separate
+# containers, so the spark client falls over with UnknownHostException
+# before any iceberg ops run.  Re-enable once spark conf points at the
+# split-container hosts.
+SMOKE_SKIP="${SMOKE_SKIP:-hudi iceberg_am_tpcds iceberg_am_tpch iceberg_am_hadoop_hdfs}"
+
 # ===================================================================
 # Run tests
 # ===================================================================
@@ -157,6 +166,24 @@ for category in ${CATEGORIES_TO_RUN}; do
 
     if [ ! -d "${test_dir}" ]; then
         log_warn "Directory not found, skipping: ${category}"
+        continue
+    fi
+
+    # Honor SMOKE_SKIP (whitespace-separated category names).  We compare on
+    # the leaf name (after the last "/"), so an entry "iceberg_am_tpcds"
+    # matches both "iceberg_am_tpcds" and a hypothetical "foo/iceberg_am_tpcds".
+    skip_leaf="${category##*/}"
+    skip_match=""
+    for s in ${SMOKE_SKIP}; do
+        if [ "${s}" = "${category}" ] || [ "${s}" = "${skip_leaf}" ]; then
+            skip_match="${s}"
+            break
+        fi
+    done
+    if [ -n "${skip_match}" ]; then
+        log_warn "Skipping ${category} (in SMOKE_SKIP)"
+        SKIPPED_TESTS=$((SKIPPED_TESTS + 1))
+        SKIPPED_TEST_LIST+=("${category}")
         continue
     fi
 

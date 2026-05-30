@@ -6,6 +6,7 @@
 -- the same-tx UPDATE shape silently produced two rows; this test pins
 -- the corrected single-row outcome.
 CREATE EXTENSION IF NOT EXISTS datalake_fdw;
+NOTICE:  extension "datalake_fdw" already exists, skipping
 SET DateStyle = 'ISO, YMD';
 DROP SERVER IF EXISTS hd_s3_acid_cat_srv CASCADE;
 NOTICE:  server "hd_s3_acid_cat_srv" does not exist, skipping

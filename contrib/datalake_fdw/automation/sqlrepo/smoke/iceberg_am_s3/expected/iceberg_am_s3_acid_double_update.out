@@ -22,6 +22,7 @@
 -- admin/admin12345, bucket "warehouse") + the matching pre-cleanup that
 -- iceberg_am_s3/run.sh already performs.
 CREATE EXTENSION IF NOT EXISTS datalake_fdw;
+NOTICE:  extension "datalake_fdw" already exists, skipping
 SET DateStyle = 'ISO, YMD';
 -- ===== S3 catalog + S3 volume (same shape as iceberg_am_s3_basic) =====
 DROP SERVER IF EXISTS s3_acid_cat_srv CASCADE;

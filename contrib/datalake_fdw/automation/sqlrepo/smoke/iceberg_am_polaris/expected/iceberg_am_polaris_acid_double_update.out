@@ -11,6 +11,7 @@
 -- "metadata_location" property, the agent falls back to the catalog's
 -- current pointer, and same-tx UPDATE 2 reads pre-UPDATE-1 state.
 CREATE EXTENSION IF NOT EXISTS datalake_fdw;
+NOTICE:  extension "datalake_fdw" already exists, skipping
 SET DateStyle = 'ISO, YMD';
 -- ===== Polaris REST catalog + S3 volume =====
 -- (Volume server must exist before FOREIGN CATALOG -- Polaris derives its
