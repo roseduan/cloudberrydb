@@ -25,6 +25,13 @@ AUTOMATION_DIR="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 export PATH="${AUTOMATION_DIR}/tools/bin:${PATH}"
 # hdfs CLI also needs HADOOP_CONF_DIR to point at our cluster config.
 export HADOOP_CONF_DIR="${AUTOMATION_DIR}/tools/conf/hadoop"
+# The dev container ships with an HTTP/HTTPS_PROXY (10.13.11.1:1080) for
+# fetching jars/etc; that proxy routes external traffic only and returns 502
+# for in-cluster service hosts (minio, hadoop, hive-metastore, polaris,
+# hiveserver2).  Make sure cleanup-step requests stay on the direct path so
+# `mc alias set`, `hdfs dfs`, etc. don't silently fail with "Bad Gateway".
+export NO_PROXY="${NO_PROXY:+${NO_PROXY},}minio,hadoop,hive-metastore,hiveserver2,polaris,localhost,127.0.0.1"
+export no_proxy="$NO_PROXY"
 
 # Source configuration and common functions
 source "${AUTOMATION_DIR}/config/test_config.env"
