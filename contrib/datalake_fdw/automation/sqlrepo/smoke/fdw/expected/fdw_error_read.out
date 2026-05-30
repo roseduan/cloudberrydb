@@ -139,7 +139,7 @@ NOTICE:  pq int-as-text: Type Mismatch: columnIndex 0. MPP type text. Parquet ty
  float4,float8       |  float,   double
  interval            |  byteArray
  time                |  byteArray
- timestamp           |  int96, int64, int32
+ timestamp,timestamptz|  int96, int64, int32
  numeric             |  int96
  char(n),varchar(n)  |  byteArray,  fixlenbyteArray
  bytea,text          |  byteArray,  fixlenbyteArray (parquetRead.cpp:77)
@@ -166,7 +166,7 @@ NOTICE:  pq text-as-int: Type Mismatch: columnIndex 1. MPP type integer<int, int
  float4,float8       |  float,   double
  interval            |  byteArray
  time                |  byteArray
- timestamp           |  int96, int64, int32
+ timestamp,timestamptz|  int96, int64, int32
  numeric             |  int96
  char(n),varchar(n)  |  byteArray,  fixlenbyteArray
  bytea,text          |  byteArray,  fixlenbyteArray (parquetRead.cpp:77)
