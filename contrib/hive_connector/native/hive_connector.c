@@ -281,7 +281,17 @@ validateTable(HmsHandle *hms,
 	}
 
 	tableType = HmsTableGetTableType(hms);
-	if (pg_strcasecmp(tableType, "MANAGED_TABLE") != 0)
+	/*
+	 * Hive 4.0 changed the default for `CREATE TABLE` from MANAGED_TABLE to
+	 * EXTERNAL_TABLE, so a populator that worked on Hive 3.x now leaves
+	 * EXTERNAL_TABLE entries behind.  Both shapes read the same way through
+	 * the metastore (storage descriptor, partition columns, location) -- the
+	 * difference only matters for DROP semantics, which sync_hive_table
+	 * doesn't perform.  Accept both kinds so users do not have to chase the
+	 * Hive 3 legacy flag.
+	 */
+	if (pg_strcasecmp(tableType, "MANAGED_TABLE") != 0 &&
+		pg_strcasecmp(tableType, "EXTERNAL_TABLE") != 0)
 	{
 		elog(suppressError ? WARNING : ERROR, "failed to sync table \"%s.%s\": \"%s\" table is not supported",
 				hiveDbName, hiveTableName, tableType);
