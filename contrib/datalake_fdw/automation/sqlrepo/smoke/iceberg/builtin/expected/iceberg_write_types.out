@@ -135,21 +135,11 @@ CREATE ICEBERG TABLE wt_temporal_tstz (
     col_tstz timestamptz
 );
 SELECT __test_exec('INSERT INTO wt_temporal_tstz VALUES (''2024-06-15'', ''2024-06-15 10:30:00+08'')');
-ERROR:  Type Mismatch: data in col_tstz is as define OSS protocol not supported data type. in datalake foreign table, but in parquet not define 
-           Type Mapping Supported
- External Data Type  |  Parquet Data Type 
- --------------------------------------------------------------------
- bool                |  boolean
- int,int2,int4,int8  |  int32, int64
- date                |  int32
- float4,float8       |  float,   double
- interval            |  byteArray
- time                |  byteArray
- timestamp           |  int96, int64, int32
- numeric             |  int96
- char(n),varchar(n)  |  byteArray,  fixlenbyteArray
- bytea,text          |  byteArray,  fixlenbyteArray (parquetFileWriter.cpp:745)  (segN) (pl_exec.c:3859)
-CONTEXT:  PL/pgSQL function __test_exec(text) line 5 at RAISE
+ __test_exec 
+-------------
+ 
+(1 row)
+
 DROP TABLE wt_temporal_tstz;
 -- ============================================================
 -- Test 4: Boolean and smallint branches
@@ -229,26 +219,26 @@ SELECT * FROM wt_truncate;
  id |      val       
 ----+----------------
   1 | after_truncate
+  2 | val_2
+  5 | val_5
+ 10 | val_10
+ 16 | val_16
+  3 | val_3
+  4 | val_4
   6 | val_6
   9 | val_9
  11 | val_11
- 12 | val_12
- 14 | val_14
-  5 | val_5
- 13 | val_13
- 15 | val_15
- 16 | val_16
- 17 | val_17
  18 | val_18
- 19 | val_19
- 20 | val_20
   1 | val_1
-  2 | val_2
-  3 | val_3
-  4 | val_4
   7 | val_7
   8 | val_8
- 10 | val_10
+ 12 | val_12
+ 13 | val_13
+ 14 | val_14
+ 15 | val_15
+ 17 | val_17
+ 19 | val_19
+ 20 | val_20
 (21 rows)
 
 DROP TABLE wt_truncate;

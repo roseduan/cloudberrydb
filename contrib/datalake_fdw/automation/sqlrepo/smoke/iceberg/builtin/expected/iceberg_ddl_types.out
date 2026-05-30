@@ -134,21 +134,11 @@ DROP TABLE types_all_columns;
 -- ============================================================
 CREATE ICEBERG TABLE types_tstz_only (col_tstz timestamptz);
 SELECT __test_exec('INSERT INTO types_tstz_only VALUES (''2024-06-15 10:30:00+08'')');
-ERROR:  Type Mismatch: data in col_tstz is as define OSS protocol not supported data type. in datalake foreign table, but in parquet not define 
-           Type Mapping Supported
- External Data Type  |  Parquet Data Type 
- --------------------------------------------------------------------
- bool                |  boolean
- int,int2,int4,int8  |  int32, int64
- date                |  int32
- float4,float8       |  float,   double
- interval            |  byteArray
- time                |  byteArray
- timestamp           |  int96, int64, int32
- numeric             |  int96
- char(n),varchar(n)  |  byteArray,  fixlenbyteArray
- bytea,text          |  byteArray,  fixlenbyteArray (parquetFileWriter.cpp:745)  (segN) (pl_exec.c:3859)
-CONTEXT:  PL/pgSQL function __test_exec(text) line 5 at RAISE
+ __test_exec 
+-------------
+ 
+(1 row)
+
 DROP TABLE types_tstz_only;
 -- ============================================================
 -- Test 2: Wide table (20+ columns)
@@ -268,7 +258,7 @@ HINT:  Use Spark/Trino/Flink to perform Iceberg schema evolution, or recreate th
 -- Table still has all three columns; INSERT must succeed against the original schema.
 INSERT INTO types_drop_col VALUES (3, 'c', 40);
 SELECT * FROM types_drop_col ORDER BY id;
- id | name | age
+ id | name | age 
 ----+------+-----
   1 | a    |  20
   2 | b    |  30

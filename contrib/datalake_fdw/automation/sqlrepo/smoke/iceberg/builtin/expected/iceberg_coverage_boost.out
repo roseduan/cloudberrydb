@@ -125,21 +125,11 @@ DROP TABLE cb_all_types;
 -- ============================================================
 CREATE ICEBERG TABLE cb_tstz_test (col_tstz timestamptz);
 SELECT __test_exec('INSERT INTO cb_tstz_test VALUES (''2024-06-15 10:30:00+08'')');
-ERROR:  Type Mismatch: data in col_tstz is as define OSS protocol not supported data type. in datalake foreign table, but in parquet not define 
-           Type Mapping Supported
- External Data Type  |  Parquet Data Type 
- --------------------------------------------------------------------
- bool                |  boolean
- int,int2,int4,int8  |  int32, int64
- date                |  int32
- float4,float8       |  float,   double
- interval            |  byteArray
- time                |  byteArray
- timestamp           |  int96, int64, int32
- numeric             |  int96
- char(n),varchar(n)  |  byteArray,  fixlenbyteArray
- bytea,text          |  byteArray,  fixlenbyteArray (parquetFileWriter.cpp:745)  (segN) (pl_exec.c:3859)
-CONTEXT:  PL/pgSQL function __test_exec(text) line 5 at RAISE
+ __test_exec 
+-------------
+ 
+(1 row)
+
 DROP TABLE cb_tstz_test;
 -- ============================================================
 -- Test 2: Multiple small tables (exercises catalog_fdw list paths,
