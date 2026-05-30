@@ -65,13 +65,19 @@ public class IcebergHadoopCatalog implements IcebergCatalog {
 
         Map<String, String> props = icebergUtilities.composeCatalogProperties(this.configuration);
 
-        // Use gopher:// URI when Gopher is enabled, otherwise use standard hdfs:// URI for HadoopFileIO
-        String warehouseLocation;
-        if (icebergUtilities.isGopherEnabled(this.configuration)) {
-            warehouseLocation = convertToGopherURI(configuration.get("fs.defaultFS"), catalogLocation);
-        } else {
-            warehouseLocation = buildStandardURI(configuration.get("fs.defaultFS"), catalogLocation);
-        }
+        // Always pass the original URL (hdfs://namenode:port/..., s3a://bucket/...,
+        // oss://bucket/...) into iceberg's HadoopCatalog.  The previous code rewrote
+        // it to gopher://hdfs/... or gopher://<bucket>/... in the gopher-enabled
+        // branch on the theory that hadoop would route gopher:// to GopherFileSystem
+        // -- but the rewrite is unnecessary (IcebergUtilities.setupGopherConfiguration
+        // already registers fs.hdfs.impl / fs.s3a.impl / fs.oss.impl as
+        // GopherFileSystem, so hadoop dispatches the native scheme to it) AND
+        // destructive (it loses the original scheme, host and port).  Iceberg writes
+        // data file URLs into metadata.json relative to WAREHOUSE_LOCATION; keeping
+        // the original scheme means readers/writers see a faithful URL all the way
+        // through and GopherURI / native gopher can parse host+bucket+key from it
+        // directly.
+        String warehouseLocation = buildStandardURI(configuration.get("fs.defaultFS"), catalogLocation);
         props.put(CatalogProperties.WAREHOUSE_LOCATION, warehouseLocation);
 
         LOG.info("warehouse location of iceberg hadoop-table {}", warehouseLocation);
@@ -81,7 +87,11 @@ public class IcebergHadoopCatalog implements IcebergCatalog {
     }
 
     /**
-     * Builds a standard hdfs:// URI for use with HadoopFileIO (non-Gopher mode).
+     * Builds a standard URI by joining fs.defaultFS with the relative catalog
+     * location, preserving the native scheme (hdfs://, s3a://, oss://...).
+     * GopherFileSystem is wired in via fs.<scheme>.impl by
+     * IcebergUtilities.setupGopherConfiguration, so we do not need to (and
+     * should not) rewrite to a synthetic gopher:// scheme here.
      */
     private String buildStandardURI(String defaultFS, String catalogLocation) {
         if (defaultFS != null && !defaultFS.isEmpty()) {
@@ -91,50 +101,6 @@ public class IcebergHadoopCatalog implements IcebergCatalog {
             return defaultFS + "/" + catalogLocation;
         }
         return catalogLocation;
-    }
-
-    /**
-     * Converts legacy URI to gopher:// format.
-     *
-     * <p>Examples:
-     * <ul>
-     * <li>hdfs://namenode:9000/warehouse → gopher://warehouse</li>
-     * <li>s3a://bucket/path → gopher://bucket/path</li>
-     * <li>oss://bucket/path → gopher://bucket/path</li>
-     * </ul>
-     */
-    private String convertToGopherURI(String defaultFS, String catalogLocation) {
-        if (defaultFS == null || defaultFS.isEmpty()) {
-            // If no defaultFS, assume gopher format directly
-            return "gopher://" + catalogLocation;
-        }
-
-        // Parse the defaultFS to extract scheme and authority
-        // For HDFS: hdfs://namenode:port -> use gopher with namenode config
-        // For S3/OSS: s3a://bucket or oss://bucket -> use gopher://bucket
-        if (defaultFS.startsWith("hdfs://")) {
-            // HDFS: use gopher://hdfs<path> to avoid URI normalization issues
-            // GopherFileSystem is registered as fs.gopher.impl
-            return "gopher://hdfs" + (catalogLocation.startsWith("/") ? catalogLocation : "/" + catalogLocation);
-        } else if (defaultFS.startsWith("s3a://") || defaultFS.startsWith("s3://") ||
-                   defaultFS.startsWith("oss://")) {
-            // Object storage: extract bucket from defaultFS
-            int schemeEnd = defaultFS.indexOf("://");
-            String afterScheme = defaultFS.substring(schemeEnd + 3);
-            int slashPos = afterScheme.indexOf('/');
-            String bucket = (slashPos > 0) ? afterScheme.substring(0, slashPos) : afterScheme;
-
-            // Construct gopher URI
-            if (catalogLocation.startsWith("/")) {
-                return "gopher://" + bucket + catalogLocation;
-            } else {
-                return "gopher://" + bucket + "/" + catalogLocation;
-            }
-        } else {
-            // Unknown scheme, default to gopher
-            LOG.warn("Unknown defaultFS scheme: {}, using gopher://", defaultFS);
-            return "gopher://" + catalogLocation;
-        }
     }
 
     public void createGopherHadoopCatalog(String catalogLocation,
@@ -153,13 +119,9 @@ public class IcebergHadoopCatalog implements IcebergCatalog {
 
         Map<String, String> props = icebergUtilities.composeCatalogProperties(this.configuration);
 
-        // Use gopher:// URI when Gopher is enabled, otherwise use standard hdfs:// URI for HadoopFileIO
-        String warehouseLocation;
-        if (icebergUtilities.isGopherEnabled(this.configuration)) {
-            warehouseLocation = convertToGopherURI(configuration.get("fs.defaultFS"), catalogLocation);
-        } else {
-            warehouseLocation = buildStandardURI(configuration.get("fs.defaultFS"), catalogLocation);
-        }
+        // See createDefaultHadoopCatalog: keep the original native scheme; do not
+        // rewrite to gopher://<...>.
+        String warehouseLocation = buildStandardURI(configuration.get("fs.defaultFS"), catalogLocation);
         props.put(CatalogProperties.WAREHOUSE_LOCATION, warehouseLocation);
 
 
