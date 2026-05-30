@@ -84,7 +84,7 @@ BEGIN
         OPTIONS (
             username ''gpadmin'',
             auth_method ''kerberos'',
-            krb_service_principal ''hive/hive-metastore@EXAMPLE.COM'',
+            krb_service_principal ''hive/lakehouse@EXAMPLE.COM'',
             krb_client_principal ''gpadmin/master@EXAMPLE.COM'',
             krb_client_keytab ''/tmp/gpadmin.keytab''
         )';

@@ -63,27 +63,37 @@ INSERT INTO iceberg_hive_basic VALUES (4, NULL);
 INSERT INTO iceberg_hive_basic SELECT 5, 'David';
 -- SELECT: full scan ordered
 SELECT * FROM iceberg_hive_basic ORDER BY id;
- id | name 
-----+------
-(0 rows)
+ id |  name   
+----+---------
+  1 | Alice
+  2 | Bob
+  3 | Charlie
+  4 | 
+  5 | David
+(5 rows)
 
 -- SELECT: NULL filter
 SELECT * FROM iceberg_hive_basic WHERE name IS NULL;
  id | name 
 ----+------
-(0 rows)
+  4 | 
+(1 row)
 
 -- SELECT: NOT NULL filter
 SELECT * FROM iceberg_hive_basic WHERE name IS NOT NULL ORDER BY id;
- id | name 
-----+------
-(0 rows)
+ id |  name   
+----+---------
+  1 | Alice
+  2 | Bob
+  3 | Charlie
+  5 | David
+(4 rows)
 
 -- SELECT: count
 SELECT COUNT(*) FROM iceberg_hive_basic;
  count 
 -------
-     0
+     5
 (1 row)
 
 -- UPDATE: single row by id
@@ -93,18 +103,27 @@ UPDATE iceberg_hive_basic SET name = NULL WHERE id = 2;
 -- UPDATE: by NULL condition
 UPDATE iceberg_hive_basic SET name = 'Updated' WHERE name IS NULL;
 SELECT * FROM iceberg_hive_basic ORDER BY id;
- id | name 
-----+------
-(0 rows)
+ id |     name      
+----+---------------
+  1 | Alice Updated
+  2 | Updated
+  3 | Charlie
+  4 | Updated
+  5 | David
+(5 rows)
 
 -- DELETE: by id
 DELETE FROM iceberg_hive_basic WHERE id = 3;
 -- DELETE: by NULL condition (should match no rows after above updates)
 DELETE FROM iceberg_hive_basic WHERE name IS NULL;
 SELECT * FROM iceberg_hive_basic ORDER BY id;
- id | name 
-----+------
-(0 rows)
+ id |     name      
+----+---------------
+  1 | Alice Updated
+  2 | Updated
+  4 | Updated
+  5 | David
+(4 rows)
 
 DROP TABLE iceberg_hive_basic;
 -- ============================================================
@@ -125,41 +144,53 @@ INSERT INTO iceberg_hive_types VALUES
     (3, 0, 0.0, 0.0, 0.00, '', true, '2024-12-31'),
     (4, NULL, NULL, NULL, NULL, NULL, NULL, NULL);
 SELECT * FROM iceberg_hive_types ORDER BY id;
- id | int_col | float_col | double_col | decimal_col | text_col | bool_col | date_col 
-----+---------+-----------+------------+-------------+----------+----------+----------
-(0 rows)
+ id | int_col | float_col | double_col | decimal_col | text_col | bool_col |  date_col  
+----+---------+-----------+------------+-------------+----------+----------+------------
+  1 |     100 |       1.5 |        2.5 |       99.99 | hello    | t        | 2024-01-15
+  2 |    -100 |      -1.5 |       -2.5 |      -99.99 | world    | f        | 2024-06-30
+  3 |       0 |         0 |          0 |        0.00 |          | t        | 2024-12-31
+  4 |         |           |            |             |          |          | 
+(4 rows)
 
 -- Type-specific filters
 SELECT id, int_col FROM iceberg_hive_types WHERE int_col > 0 ORDER BY id;
  id | int_col 
 ----+---------
-(0 rows)
+  1 |     100
+(1 row)
 
 SELECT id, bool_col FROM iceberg_hive_types WHERE bool_col = true ORDER BY id;
  id | bool_col 
 ----+----------
-(0 rows)
+  1 | t
+  3 | t
+(2 rows)
 
 SELECT id, date_col FROM iceberg_hive_types WHERE date_col >= '2024-06-01' ORDER BY id;
- id | date_col 
-----+----------
-(0 rows)
+ id |  date_col  
+----+------------
+  2 | 2024-06-30
+  3 | 2024-12-31
+(2 rows)
 
 SELECT id, decimal_col FROM iceberg_hive_types WHERE decimal_col < 0 ORDER BY id;
  id | decimal_col 
 ----+-------------
-(0 rows)
+  2 |      -99.99
+(1 row)
 
 SELECT id, text_col FROM iceberg_hive_types WHERE text_col = '' ORDER BY id;
  id | text_col 
 ----+----------
-(0 rows)
+  3 | 
+(1 row)
 
 -- NULL checks across types
 SELECT id FROM iceberg_hive_types WHERE int_col IS NULL AND float_col IS NULL AND text_col IS NULL ORDER BY id;
  id 
 ----
-(0 rows)
+  4
+(1 row)
 
 DROP TABLE iceberg_hive_types;
 -- ============================================================
@@ -179,40 +210,55 @@ INSERT INTO iceberg_hive_agg VALUES
 SELECT COUNT(*) FROM iceberg_hive_agg;
  count 
 -------
-     0
+     5
 (1 row)
 
 SELECT category, COUNT(*) AS cnt, SUM(amount) AS total,
        MIN(amount) AS min_amt, MAX(amount) AS max_amt
 FROM iceberg_hive_agg GROUP BY category ORDER BY category;
- category | cnt | total | min_amt | max_amt 
-----------+-----+-------+---------+---------
-(0 rows)
+ category | cnt | total  | min_amt | max_amt 
+----------+-----+--------+---------+---------
+ A        |   2 | 300.00 |  100.00 |  200.00
+ B        |   2 | 400.00 |  150.00 |  250.00
+ C        |   1 | 300.00 |  300.00 |  300.00
+(3 rows)
 
 -- Filter + aggregate
 SELECT category, SUM(amount) AS total
 FROM iceberg_hive_agg WHERE amount > 150 GROUP BY category ORDER BY category;
- category | total 
-----------+-------
-(0 rows)
+ category | total  
+----------+--------
+ A        | 200.00
+ B        | 250.00
+ C        | 300.00
+(3 rows)
 
 -- IN filter
 SELECT * FROM iceberg_hive_agg WHERE category IN ('A', 'C') ORDER BY id;
  id | category | amount 
 ----+----------+--------
-(0 rows)
+  1 | A        | 100.00
+  2 | A        | 200.00
+  5 | C        | 300.00
+(3 rows)
 
 -- BETWEEN filter
 SELECT * FROM iceberg_hive_agg WHERE amount BETWEEN 150.00 AND 250.00 ORDER BY id;
  id | category | amount 
 ----+----------+--------
-(0 rows)
+  2 | A        | 200.00
+  3 | B        | 150.00
+  4 | B        | 250.00
+(3 rows)
 
 -- ORDER BY + LIMIT
 SELECT * FROM iceberg_hive_agg ORDER BY amount DESC LIMIT 3;
  id | category | amount 
 ----+----------+--------
-(0 rows)
+  5 | C        | 300.00
+  4 | B        | 250.00
+  2 | A        | 200.00
+(3 rows)
 
 DROP TABLE iceberg_hive_agg;
 -- ============================================================
@@ -240,18 +286,23 @@ SELECT o.order_id, o.customer, o.total, c.city
 FROM iceberg_hive_orders o
 JOIN local_customers c ON o.customer = c.name
 ORDER BY o.order_id;
- order_id | customer | total | city 
-----------+----------+-------+------
-(0 rows)
+ order_id | customer | total  |   city   
+----------+----------+--------+----------
+        1 | Alice    | 100.00 | Beijing
+        2 | Bob      | 200.00 | Shanghai
+(2 rows)
 
 -- LEFT JOIN
 SELECT o.order_id, o.customer, c.city
 FROM iceberg_hive_orders o
 LEFT JOIN local_customers c ON o.customer = c.name
 ORDER BY o.order_id;
- order_id | customer | city 
-----------+----------+------
-(0 rows)
+ order_id | customer |   city   
+----------+----------+----------
+        1 | Alice    | Beijing
+        2 | Bob      | Shanghai
+        3 | Charlie  | 
+(3 rows)
 
 -- RIGHT JOIN
 SELECT o.order_id, c.name, c.city
@@ -260,8 +311,8 @@ RIGHT JOIN local_customers c ON o.customer = c.name
 ORDER BY c.name;
  order_id | name  |   city   
 ----------+-------+----------
-          | Alice | Beijing
-          | Bob   | Shanghai
+        1 | Alice | Beijing
+        2 | Bob   | Shanghai
           | Dave  | Shenzhen
 (3 rows)
 
@@ -271,9 +322,10 @@ FROM iceberg_hive_orders o
 JOIN local_customers c ON o.customer = c.name
 WHERE o.total > 100
 ORDER BY o.order_id;
- order_id | customer | total 
-----------+----------+-------
-(0 rows)
+ order_id | customer | total  
+----------+----------+--------
+        2 | Bob      | 200.00
+(1 row)
 
 DROP TABLE iceberg_hive_orders;
 DROP TABLE local_customers;
@@ -302,9 +354,13 @@ SELECT p.product_name, p.price, s.quantity, (p.price * s.quantity) AS line_total
 FROM iceberg_hive_products p
 JOIN iceberg_hive_sales s ON p.product_id = s.product_id
 ORDER BY s.sale_id;
- product_name | price | quantity | line_total 
---------------+-------+----------+------------
-(0 rows)
+ product_name |  price  | quantity | line_total 
+--------------+---------+----------+------------
+ Laptop       | 1299.99 |        5 |    6499.95
+ Mouse        |   29.99 |       20 |     599.80
+ Laptop       | 1299.99 |        3 |    3899.97
+ Keyboard     |   79.99 |       10 |     799.90
+(4 rows)
 
 -- Aggregate across Iceberg tables
 SELECT p.product_name, SUM(s.quantity) AS total_qty
@@ -314,7 +370,10 @@ GROUP BY p.product_name
 ORDER BY p.product_name;
  product_name | total_qty 
 --------------+-----------
-(0 rows)
+ Keyboard     |        10
+ Laptop       |         8
+ Mouse        |        20
+(3 rows)
 
 DROP TABLE iceberg_hive_sales;
 DROP TABLE iceberg_hive_products;

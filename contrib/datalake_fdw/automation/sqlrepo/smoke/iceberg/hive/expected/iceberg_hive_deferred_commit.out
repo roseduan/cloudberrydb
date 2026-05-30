@@ -39,7 +39,7 @@ INSERT INTO deferred_commit_test VALUES (3, 'gamma');
 SELECT COUNT(*) FROM deferred_commit_test;
  count 
 -------
-     0
+     3
 (1 row)
 
 -- Test commitAppend via toolkit function
