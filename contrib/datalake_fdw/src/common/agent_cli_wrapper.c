@@ -4,6 +4,9 @@
 #include "lib/stringinfo.h"
 #include "../components/agent_cli/c_interface/agent_cjson_builder.hpp"
 
+#include <curl/curl.h>
+#include <string.h>
+
 /* Global resource tracking */
 bool agent_cli_wrapper_resowner_callback_registered = false;
 AgentCliResource *agent_cli_wrapper_open_resources = NULL;
@@ -229,6 +232,170 @@ agent_cli_wrapper_get_statistics(AgentCliHandle* handle, const char* table_name,
 
     if (handle->lastStatus != AGENT_CLI_SUCCESS)
         handle->lastErrorMessage = pstrdup(agent_cli_get_error_string(handle->lastStatus));
+}
+
+/* ----------------------------------------------------------------
+ * agent_cli_wrapper_cleanup_metadata
+ *
+ * libcurl-based POST to /v1/files/cleanup-from-metadata. See header for
+ * rationale of bypassing agent_cli_* C++ method routing.
+ * ----------------------------------------------------------------
+ */
+static size_t
+cleanup_metadata_write_cb(char *ptr, size_t size, size_t nmemb, void *userdata)
+{
+    StringInfo body = (StringInfo) userdata;
+    size_t total = size * nmemb;
+
+    appendBinaryStringInfo(body, ptr, (int) total);
+    return total;
+}
+
+void
+agent_cli_wrapper_cleanup_metadata(AgentCliHandle* handle,
+                                   const char* metadata_path,
+                                   const char* fileio_config_json)
+{
+    CURL              *curl;
+    CURLcode           res;
+    long               http_code = 0;
+    struct curl_slist *headers = NULL;
+    StringInfoData     url;
+    StringInfoData     body;
+    StringInfoData     response;
+    const char        *base_url;
+
+    if (!handle || !handle->isValid)
+        elog(ERROR, "Invalid agent CLI handle");
+
+    if (handle->agentConfig == NULL ||
+        handle->agentConfig->server_url == NULL ||
+        handle->agentConfig->server_url[0] == '\0')
+    {
+        handle->lastStatus       = AGENT_CLI_ERROR_INVALID_PARAM;
+        handle->lastErrorMessage = pstrdup("agent server_url is empty");
+        handle->responseValid    = false;
+        return;
+    }
+    base_url = handle->agentConfig->server_url;
+
+    if (metadata_path == NULL || metadata_path[0] == '\0')
+    {
+        handle->lastStatus       = AGENT_CLI_ERROR_INVALID_PARAM;
+        handle->lastErrorMessage = pstrdup("metadata_path is empty");
+        handle->responseValid    = false;
+        return;
+    }
+
+    /* Build URL: <base>/v1/files/cleanup-from-metadata
+     *
+     * Trim a trailing slash if any so we don't end up with "..//v1/...".
+     */
+    initStringInfo(&url);
+    {
+        size_t base_len = strlen(base_url);
+        if (base_len > 0 && base_url[base_len - 1] == '/')
+            appendBinaryStringInfo(&url, base_url, (int)(base_len - 1));
+        else
+            appendStringInfoString(&url, base_url);
+        appendStringInfoString(&url, "/api/v1/files/cleanup-from-metadata");
+    }
+
+    /* Build JSON body.
+     *
+     * metadata_path is hand-escaped here (only backslashes and quotes are
+     * possible in object-storage URIs).  fileio_config_json is assumed to be
+     * a syntactically valid JSON object and is inlined verbatim.
+     */
+    initStringInfo(&body);
+    appendStringInfoString(&body, "{\"metadataPath\":\"");
+    for (const char *p = metadata_path; *p; p++)
+    {
+        if (*p == '\\' || *p == '"')
+            appendStringInfoChar(&body, '\\');
+        appendStringInfoChar(&body, *p);
+    }
+    appendStringInfoString(&body, "\",\"fileIOConfig\":");
+    if (fileio_config_json && fileio_config_json[0] != '\0')
+        appendStringInfoString(&body, fileio_config_json);
+    else
+        appendStringInfoString(&body, "{}");
+    appendStringInfoChar(&body, '}');
+
+    initStringInfo(&response);
+
+    curl = curl_easy_init();
+    if (!curl)
+    {
+        handle->lastStatus       = AGENT_CLI_ERROR_CURL;
+        handle->lastErrorMessage = pstrdup("curl_easy_init() failed");
+        handle->responseValid    = false;
+
+        pfree(url.data);
+        pfree(body.data);
+        pfree(response.data);
+        return;
+    }
+
+    headers = curl_slist_append(headers, "Content-Type: application/json");
+    headers = curl_slist_append(headers, "Accept: application/json");
+
+    curl_easy_setopt(curl, CURLOPT_URL,          url.data);
+    curl_easy_setopt(curl, CURLOPT_POST,         1L);
+    curl_easy_setopt(curl, CURLOPT_POSTFIELDS,   body.data);
+    curl_easy_setopt(curl, CURLOPT_POSTFIELDSIZE, (long) body.len);
+    curl_easy_setopt(curl, CURLOPT_HTTPHEADER,   headers);
+    curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, cleanup_metadata_write_cb);
+    curl_easy_setopt(curl, CURLOPT_WRITEDATA,    (void *) &response);
+    curl_easy_setopt(curl, CURLOPT_NOSIGNAL,     1L);   /* avoid SIGPIPE in PG backends */
+
+    if (handle->agentConfig->request_timeout_seconds > 0)
+        curl_easy_setopt(curl, CURLOPT_TIMEOUT,
+                         (long) handle->agentConfig->request_timeout_seconds);
+    if (handle->agentConfig->connect_timeout_seconds > 0)
+        curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT,
+                         (long) handle->agentConfig->connect_timeout_seconds);
+
+    res = curl_easy_perform(curl);
+    curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &http_code);
+
+    /* Populate handle->currentResponse so callers can read the body. */
+    if (handle->currentResponse->response_body)
+    {
+        pfree(handle->currentResponse->response_body);
+        handle->currentResponse->response_body = NULL;
+    }
+    handle->currentResponse->response_body = pstrdup(response.data);
+    handle->currentResponse->response_size = response.len;
+    handle->currentResponse->http_status   = (int) http_code;
+    handle->currentResponse->curl_code     = (long) res;
+    handle->responseValid                  = true;
+
+    if (res != CURLE_OK)
+    {
+        handle->lastStatus       = AGENT_CLI_ERROR_NETWORK;
+        handle->lastErrorMessage = psprintf("curl_easy_perform failed: %s",
+                                            curl_easy_strerror(res));
+    }
+    else if (http_code < 200 || http_code >= 300)
+    {
+        handle->lastStatus       = AGENT_CLI_ERROR_HTTP;
+        handle->lastErrorMessage = psprintf("dlagent returned HTTP %ld: %s",
+                                            http_code,
+                                            response.len > 0 ? response.data : "(empty)");
+    }
+    else
+    {
+        handle->lastStatus       = AGENT_CLI_SUCCESS;
+        handle->lastErrorMessage = NULL;
+    }
+
+    curl_slist_free_all(headers);
+    curl_easy_cleanup(curl);
+
+    pfree(url.data);
+    pfree(body.data);
+    pfree(response.data);
 }
 
 /*

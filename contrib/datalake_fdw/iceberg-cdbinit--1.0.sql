@@ -40,10 +40,12 @@ COMMENT ON FUNCTION pg_iceberg_tableam_handler(internal) IS 'iceberg table acces
 --     dispatch trick.
 --
 -- OID layout (must stay in sync with iceberg_oids.h):
---     8330  pg_iceberg_metadata             table
---     8331  pg_iceberg_metadata_pkey        unique index (PRIMARY KEY)
---     8334  pg_iceberg_deletion_queue       table
---     8335  pg_iceberg_deletion_queue_pkey  unique index (PRIMARY KEY)
+--     8330  pg_iceberg_metadata              table
+--     8331  pg_iceberg_metadata_pkey         unique index (PRIMARY KEY)
+--     8334  pg_iceberg_deletion_queue        table
+--     8335  pg_iceberg_deletion_queue_pkey   unique index (PRIMARY KEY)
+--     8336  pg_iceberg_deletion_failed       table (dead-letter queue)
+--     8337  pg_iceberg_deletion_failed_pkey  unique index (PRIMARY KEY)
 --
 -- The tables live in pg_ext_aux, the PostgreSQL/Cloudberry built-in schema
 -- (postgres.bki entry, oid 7094) reserved for extension auxiliary catalogs.
@@ -96,13 +98,29 @@ UPDATE pg_class     SET oid       = 8330 WHERE relname = 'pg_iceberg_metadata';
 UPDATE pg_class     SET oid       = 8331 WHERE relname = 'pg_iceberg_metadata_pkey';
 
 -- pg_iceberg_deletion_queue: pending orphan-file deletions waiting for the
--- background sweeper.  Mirror of what datalake_fdw--1.0.sql used to create.
+-- autovacuum-driven consumer (see pg_iceberg_av_consumer.c).
+--
+-- Columns beyond (path, table_name, orphaned_at, retry_count, deletion_type)
+-- carry the credential context that the consumer needs to call dlagent's
+-- /v1/files/cleanup-from-metadata endpoint after DROP TABLE has already
+-- removed the foreign volume / foreign server lookup path through pg_lake_table:
+--
+--   volume_name     -- pg_foreign_volume.fvname  → reconstruct fileIOConfig
+--   server_name     -- pg_foreign_server.srvname → reconstruct fileIOConfig
+--   owner_username  -- rolname of the DROP executor → pg_user_mapping lookup key
+--   table_qname     -- "nspname.relname" snapshot for audit/log (oid is dead post-DROP)
+--   last_error      -- textual reason of the most recent retry failure
 CREATE TABLE pg_ext_aux.pg_iceberg_deletion_queue (
     path           text COLLATE "C" PRIMARY KEY,
     table_name     regclass,
     orphaned_at    timestamptz,
     retry_count    int4,
-    deletion_type  int4
+    deletion_type  int4,
+    volume_name    text COLLATE "C",
+    server_name    text COLLATE "C",
+    owner_username text COLLATE "C",
+    table_qname    text COLLATE "C",
+    last_error     text COLLATE "C"
 );
 
 -- Pin OIDs to 8334 (table) and 8335 (pkey index).
@@ -119,3 +137,38 @@ UPDATE pg_constraint SET conrelid = 8334 WHERE conrelid = (SELECT oid FROM pg_cl
 UPDATE pg_constraint SET conindid = 8335 WHERE conindid = (SELECT oid FROM pg_class WHERE relname = 'pg_iceberg_deletion_queue_pkey');
 UPDATE pg_class     SET oid       = 8334 WHERE relname = 'pg_iceberg_deletion_queue';
 UPDATE pg_class     SET oid       = 8335 WHERE relname = 'pg_iceberg_deletion_queue_pkey';
+
+-- pg_iceberg_deletion_failed: dead-letter queue (DLQ) for entries that
+-- exceeded datalake_fdw.deletion_queue_max_retry attempts.  Schema mirrors
+-- pg_iceberg_deletion_queue plus a failed_at timestamp recording when the
+-- row was pushed to the DLQ.  Operators triage by inspecting last_error
+-- (often clustered) and replay rows with
+--   SELECT pg_ext_aux.pg_iceberg_retry_failed_deletion(path).
+CREATE TABLE pg_ext_aux.pg_iceberg_deletion_failed (
+    path           text COLLATE "C" PRIMARY KEY,
+    table_name     regclass,
+    orphaned_at    timestamptz,
+    retry_count    int4,
+    deletion_type  int4,
+    volume_name    text COLLATE "C",
+    server_name    text COLLATE "C",
+    owner_username text COLLATE "C",
+    table_qname    text COLLATE "C",
+    last_error     text COLLATE "C",
+    failed_at      timestamptz
+);
+
+-- Pin OIDs to 8336 (table) and 8337 (pkey index).
+UPDATE pg_type      SET typrelid  = 8336 WHERE typname = 'pg_iceberg_deletion_failed';
+UPDATE pg_depend    SET refobjid  = 8336 WHERE refobjid = (SELECT oid FROM pg_class WHERE relname = 'pg_iceberg_deletion_failed');
+UPDATE pg_depend    SET objid     = 8336 WHERE objid    = (SELECT oid FROM pg_class WHERE relname = 'pg_iceberg_deletion_failed');
+UPDATE pg_depend    SET objid     = 8337 WHERE objid    = (SELECT oid FROM pg_class WHERE relname = 'pg_iceberg_deletion_failed_pkey');
+UPDATE pg_attribute SET attrelid  = 8336 WHERE attrelid = (SELECT oid FROM pg_class WHERE relname = 'pg_iceberg_deletion_failed');
+UPDATE pg_attribute SET attrelid  = 8337 WHERE attrelid = (SELECT oid FROM pg_class WHERE relname = 'pg_iceberg_deletion_failed_pkey');
+UPDATE pg_index     SET indexrelid = 8337, indrelid = 8336
+    WHERE indexrelid = (SELECT oid FROM pg_class WHERE relname = 'pg_iceberg_deletion_failed_pkey')
+      AND indrelid   = (SELECT oid FROM pg_class WHERE relname = 'pg_iceberg_deletion_failed');
+UPDATE pg_constraint SET conrelid = 8336 WHERE conrelid = (SELECT oid FROM pg_class WHERE relname = 'pg_iceberg_deletion_failed');
+UPDATE pg_constraint SET conindid = 8337 WHERE conindid = (SELECT oid FROM pg_class WHERE relname = 'pg_iceberg_deletion_failed_pkey');
+UPDATE pg_class     SET oid       = 8336 WHERE relname = 'pg_iceberg_deletion_failed';
+UPDATE pg_class     SET oid       = 8337 WHERE relname = 'pg_iceberg_deletion_failed_pkey';

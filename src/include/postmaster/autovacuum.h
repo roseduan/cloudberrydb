@@ -66,6 +66,16 @@ extern void AutoVacWorkerFailed(void);
 /* autovacuum cost-delay balancer */
 extern void AutoVacuumUpdateDelay(void);
 
+/*
+ * Hook invoked at the end of each per-database autovacuum worker, after
+ * do_autovacuum() returns and before proc_exit(0).  Extensions may use this
+ * to piggy-back periodic per-DB maintenance (e.g. datalake_fdw consumes
+ * pg_ext_aux.pg_iceberg_deletion_queue here).  Errors raised inside the hook
+ * are caught and reported but do not prevent worker shutdown.
+ */
+typedef void (*AutoVacWorkerPostHook_type) (Oid datid);
+extern PGDLLIMPORT AutoVacWorkerPostHook_type AutoVacWorkerPostHook;
+
 #ifdef EXEC_BACKEND
 extern void AutoVacLauncherMain(int argc, char *argv[]) pg_attribute_noreturn();
 extern void AutoVacWorkerMain(int argc, char *argv[]) pg_attribute_noreturn();

@@ -43,4 +43,8 @@
 #define ICEBERG_DELETION_QUEUE_RELID            8334
 #define ICEBERG_DELETION_QUEUE_PKEY_OID         8335
 
+/* pg_iceberg_deletion_failed (dead-letter queue) */
+#define ICEBERG_DELETION_FAILED_RELID           8336
+#define ICEBERG_DELETION_FAILED_PKEY_OID        8337
+
 #endif /* ICEBERG_OIDS_H */

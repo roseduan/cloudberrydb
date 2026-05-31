@@ -47,6 +47,34 @@ void agent_cli_wrapper_drop_table(AgentCliHandle* handle, const char* table_name
 
 void agent_cli_wrapper_get_statistics(AgentCliHandle* handle, const char* table_name, const char* json);
 
+/*
+ * File-level cleanup invoked by the deletion-queue consumer.
+ *
+ * POSTs to ${handle->agentConfig->server_url}/api/v1/files/cleanup-from-metadata
+ * with body  { "metadataPath": <metadata_path>,
+ *              "fileIOConfig": <fileio_config_json> }.
+ *
+ * dlagent reads the metadata.json with the supplied fileIOConfig, walks the
+ * full snapshot tree (manifest lists -> manifests -> data/delete files), and
+ * deletes every referenced object.  This is called after DROP TABLE has
+ * already torn down the catalog identity of the table, so the path is the
+ * only handle the queue still has on the dataset.
+ *
+ * Unlike the other wrappers this one issues an HTTP POST directly via
+ * libcurl rather than going through agent_cli_* C++ method routing, because
+ * the cleanup endpoint is not part of the prefix-based method registry.
+ *
+ * On HTTP failure the function populates handle->lastStatus / lastErrorMessage
+ * and returns; callers MUST check via agent_cli_wrapper_check_exec_error_json.
+ *
+ * fileio_config_json must already be a JSON object literal (e.g. produced by
+ * agentcli_cJSON_PrintUnformatted).  It is inlined verbatim into the request
+ * body; the caller owns its lifetime.
+ */
+void agent_cli_wrapper_cleanup_metadata(AgentCliHandle* handle,
+                                        const char* metadata_path,
+                                        const char* fileio_config_json);
+
 /* Catalog management operations */
 void agent_cli_wrapper_create_catalog(AgentCliHandle* handle, const char* json);
 void agent_cli_wrapper_list_catalogs(AgentCliHandle* handle, const char* json);

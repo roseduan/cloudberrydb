@@ -23,8 +23,18 @@ import org.apache.iceberg.Snapshot;
 import org.apache.iceberg.SnapshotRef;
 import org.apache.iceberg.types.Types;
 import org.apache.iceberg.TableMetadata;
+import org.apache.iceberg.TableMetadataParser;
 import org.apache.iceberg.BaseTable;
+import org.apache.iceberg.ManifestFile;
+import org.apache.iceberg.ManifestFiles;
+import org.apache.iceberg.DataFile;
+import org.apache.iceberg.DeleteFile;
 import org.apache.iceberg.io.FileIO;
+import org.apache.iceberg.io.InputFile;
+import org.apache.iceberg.io.CloseableIterable;
+import org.apache.iceberg.hadoop.HadoopFileIO;
+import cloud.elastic.dlagent.api.model.CleanupFromMetadataRequest;
+import cloud.elastic.dlagent.api.model.CleanupFromMetadataResponse;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
@@ -1132,6 +1142,200 @@ public class IcebergRestController {
         response.put("namespaces", namespaces);
 
         return ResponseEntity.ok(response);
+    }
+
+    /**
+     * Clean up an orphaned metadata.json tree.
+     *
+     * Called by the datalake_fdw autovacuum-driven consumer after a DROP
+     * ICEBERG TABLE has already torn down the catalog identity of the
+     * table.  The caller no longer has a TableIdentifier or catalog context
+     * -- only the absolute path to the root metadata.json plus the
+     * fileIOConfig needed to talk to the underlying storage.
+     *
+     * We rebuild a HadoopFileIO from the supplied fileIOConfig, parse the
+     * metadata.json, walk every reachable snapshot (manifest list ->
+     * manifests -> data files / delete files), and delete each referenced
+     * object via FileIO.deleteFile.  The root metadata.json itself is
+     * deleted last so a mid-flight crash leaves a valid -- if incomplete
+     * -- snapshot tree that can be retried.
+     *
+     * Partial failure is reported in the response.failed[] array with HTTP
+     * 200; the caller treats any non-empty failed array as ERROR so the
+     * queue entry is retried or moved to the DLQ.
+     */
+    @PostMapping({"/files/cleanup-from-metadata"})
+    public ResponseEntity<?> cleanupFromMetadata(
+            @RequestBody CleanupFromMetadataRequest request) {
+
+        String metadataPath = request.getMetadataPath();
+        Map<String, String> fileIOConfig = request.getFileIOConfig();
+
+        if (metadataPath == null || metadataPath.isEmpty()) {
+            return createErrorResponse("metadataPath is required",
+                                       "BadRequestException", 400);
+        }
+        if (fileIOConfig == null || fileIOConfig.isEmpty()) {
+            return createErrorResponse("fileIOConfig is required",
+                                       "BadRequestException", 400);
+        }
+
+        log.info("Cleaning up metadata tree rooted at {}", metadataPath);
+
+        // 1. Build a HadoopFileIO from the supplied config.  s3/hdfs/abfss
+        //    all funnel through Hadoop FS impls (s3a://, hdfs://, abfss://).
+        FileIO fileIO;
+        try {
+            fileIO = buildFileIOForCleanup(fileIOConfig);
+        } catch (Exception e) {
+            return createErrorResponse(
+                "Failed to build FileIO from fileIOConfig: " + e.getMessage(),
+                "BadRequestException", 400);
+        }
+
+        // 2. Parse the metadata.json so we can walk the snapshot tree.
+        TableMetadata metadata;
+        try {
+            InputFile input = fileIO.newInputFile(metadataPath);
+            metadata = TableMetadataParser.read(fileIO, input);
+        } catch (Exception e) {
+            log.warn("Failed to parse metadata at {}: {}", metadataPath,
+                     e.getMessage());
+            return createErrorResponse(
+                "Failed to parse metadata: " + e.getMessage(),
+                "MetadataReadError", 400);
+        }
+
+        // 3. Collect every reachable file path.  Snapshot/manifest walking
+        //    can itself fail (e.g. a manifest already removed by an earlier
+        //    half-completed cleanup); treat those as per-file failures and
+        //    keep going.
+        List<Map<String, String>> failed = new ArrayList<>();
+        int deletedCount = 0;
+        List<String> toDelete = new ArrayList<>();
+
+        for (Snapshot snap : metadata.snapshots()) {
+            if (snap.manifestListLocation() != null) {
+                toDelete.add(snap.manifestListLocation());
+            }
+            try {
+                for (ManifestFile mf : snap.allManifests(fileIO)) {
+                    toDelete.add(mf.path());
+                    try (CloseableIterable<DataFile> data =
+                             ManifestFiles.read(mf, fileIO)) {
+                        for (DataFile df : data) {
+                            toDelete.add(df.path().toString());
+                        }
+                    } catch (Exception e) {
+                        Map<String, String> err = new HashMap<>();
+                        err.put("path", mf.path());
+                        err.put("error", "read manifest data files: " + e.getMessage());
+                        failed.add(err);
+                    }
+                    try (CloseableIterable<DeleteFile> del =
+                             ManifestFiles.readDeleteManifest(mf, fileIO, null)) {
+                        for (DeleteFile df : del) {
+                            toDelete.add(df.path().toString());
+                        }
+                    } catch (Exception e) {
+                        // Not all manifests carry delete files; ignore the
+                        // common "not a delete manifest" case quietly.
+                        if (!isNotDeleteManifest(e)) {
+                            Map<String, String> err = new HashMap<>();
+                            err.put("path", mf.path());
+                            err.put("error", "read manifest delete files: " + e.getMessage());
+                            failed.add(err);
+                        }
+                    }
+                }
+            } catch (Exception e) {
+                Map<String, String> err = new HashMap<>();
+                err.put("path", "snapshot:" + snap.snapshotId());
+                err.put("error", "walk manifests: " + e.getMessage());
+                failed.add(err);
+            }
+        }
+
+        // metadata.json itself is the very last delete so retries can find
+        // their way back to the tree.
+        toDelete.add(metadataPath);
+
+        // 4. Delete each, recording per-file failures.
+        for (String p : toDelete) {
+            try {
+                fileIO.deleteFile(p);
+                deletedCount++;
+            } catch (Exception e) {
+                Map<String, String> err = new HashMap<>();
+                err.put("path", p);
+                err.put("error", e.getClass().getSimpleName() + ": " + e.getMessage());
+                failed.add(err);
+            }
+        }
+
+        CleanupFromMetadataResponse resp = new CleanupFromMetadataResponse();
+        resp.setDeletedCount(deletedCount);
+        resp.setFailed(failed);
+
+        log.info("Cleanup of {} finished: deleted={}, failed={}",
+                 metadataPath, deletedCount, failed.size());
+
+        return ResponseEntity.ok(resp);
+    }
+
+    /**
+     * Build a HadoopFileIO from the flat key/value config posted by the
+     * datalake_fdw consumer.  Recognized "type" values: "s3", "hdfs", "abfss".
+     */
+    private FileIO buildFileIOForCleanup(Map<String, String> cfg) {
+        Configuration conf = new Configuration();
+        String type = cfg.getOrDefault("type", "s3");
+
+        if ("s3".equals(type)) {
+            // Hadoop S3A keys.  endpoint / region / path_style_access are
+            // optional; access_key_id / secret_access_key are required for
+            // private buckets.
+            putIfPresent(conf, cfg, "endpoint",          "fs.s3a.endpoint");
+            putIfPresent(conf, cfg, "region",            "fs.s3a.endpoint.region");
+            putIfPresent(conf, cfg, "path_style_access", "fs.s3a.path.style.access");
+            putIfPresent(conf, cfg, "access_key_id",     "fs.s3a.access.key");
+            putIfPresent(conf, cfg, "secret_access_key", "fs.s3a.secret.key");
+        } else if ("hdfs".equals(type)) {
+            putIfPresent(conf, cfg, "namenodes",          "dfs.namenode.rpc-address");
+            putIfPresent(conf, cfg, "auth_method",        "hadoop.security.authentication");
+            putIfPresent(conf, cfg, "rpc_protection",     "hadoop.rpc.protection");
+            putIfPresent(conf, cfg, "nameservices",       "dfs.nameservices");
+            putIfPresent(conf, cfg, "ha_namenodes",       "dfs.ha.namenodes");
+            putIfPresent(conf, cfg, "namenode_rpc_address",
+                         "dfs.namenode.rpc-address");
+            putIfPresent(conf, cfg, "failover_proxy_provider",
+                         "dfs.client.failover.proxy.provider");
+        } else if ("abfss".equals(type)) {
+            // Minimal abfss support; expand if/when production paths hit it.
+            putIfPresent(conf, cfg, "tenant_id", "fs.azure.account.oauth2.client.endpoint");
+        } else {
+            throw new IllegalArgumentException(
+                "Unsupported fileIOConfig.type: " + type);
+        }
+
+        return new HadoopFileIO(conf);
+    }
+
+    private static void putIfPresent(Configuration conf,
+                                     Map<String, String> cfg,
+                                     String cfgKey,
+                                     String confKey) {
+        String v = cfg.get(cfgKey);
+        if (v != null && !v.isEmpty()) {
+            conf.set(confKey, v);
+        }
+    }
+
+    private static boolean isNotDeleteManifest(Exception e) {
+        // Iceberg throws IllegalArgumentException for "not a delete
+        // manifest" on plain data manifests; treat that as a non-error.
+        String msg = e.getMessage();
+        return msg != null && msg.toLowerCase().contains("delete manifest");
     }
 
     /**

@@ -181,6 +181,14 @@ int			autovacuum_vac_cost_limit;
 
 int			Log_autovacuum_min_duration = 0;
 
+/*
+ * Extension hook fired at the end of every per-database autovacuum worker
+ * lifecycle, after do_autovacuum() returns and before proc_exit(0).
+ * Errors raised inside the hook are caught by AutoVacWorkerMain so they
+ * cannot prevent worker shutdown.
+ */
+AutoVacWorkerPostHook_type AutoVacWorkerPostHook = NULL;
+
 /* how long to keep pgstat data in the launcher, in milliseconds */
 #define STATS_READ_DELAY 1000
 
@@ -1802,6 +1810,26 @@ AutoVacWorkerMain(int argc, char *argv[])
 		recentMulti = ReadNextMultiXactId();
 
 		do_autovacuum();
+
+		/*
+		 * Extension hook for per-database post-vacuum work (e.g. datalake_fdw
+		 * consumes pg_ext_aux.pg_iceberg_deletion_queue here).  Errors are
+		 * swallowed so the hook cannot block proper worker shutdown.
+		 */
+		if (AutoVacWorkerPostHook != NULL)
+		{
+			PG_TRY();
+			{
+				AutoVacWorkerPostHook(MyDatabaseId);
+			}
+			PG_CATCH();
+			{
+				EmitErrorReport();
+				FlushErrorState();
+				AbortOutOfAnyTransaction();
+			}
+			PG_END_TRY();
+		}
 	}
 
 	/*

@@ -125,6 +125,7 @@ OBJS = 	src/datalake_fdw.o \
 		src/am_iceberg/pg_iceberg_extensible.o \
 		src/am_iceberg/pg_iceberg_custom_scan.o \
 		src/am_iceberg/pg_iceberg_pending_delete.o \
+		src/am_iceberg/pg_iceberg_av_consumer.o \
 		src/common/fileMetadata.o \
 		src/components/agent_cli/src/agent_c_api.o \
 		src/components/agent_cli/src/agent_client.o \

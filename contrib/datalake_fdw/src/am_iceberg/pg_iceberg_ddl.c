@@ -5,8 +5,11 @@
 #include "catalog/objectaccess.h"
 #include "catalog/pg_lake_table.h"
 #include "commands/laketablecmds.h"
+#include "miscadmin.h"
 #include "nodes/parsenodes.h"
 #include "tcop/utility.h"
+#include "utils/builtins.h"
+#include "utils/lsyscache.h"
 #include "utils/rel.h"
 #include "cdb/cdbvars.h"
 #include "utils/timestamp.h"
@@ -74,41 +77,86 @@ iceberg_object_access_hook(ObjectAccessType access, Oid classId, Oid objectId,
 			(subId == 0) && is_iceberg_rel(rel))
 		{
 			/*
-			 * pg_lake_table is a per-node catalog: clean on both QD and QE.
-			 * Replaces the former hardcoded RemoveLakeTableEntry() call in
-			 * heap_drop_with_catalog().
+			 * On QD we have to (a) gather the credential context that the
+			 * async consumer will need (volume/server/owner_username/qname)
+			 * BEFORE pg_lake_table is cleared, because pg_iceberg_get_table_info
+			 * resolves the volume/server through pg_lake_table; and (b)
+			 * enqueue + remove the metadata.  RemoveLakeTableEntry is the
+			 * per-node tail step, so it runs after the QD-only block.
 			 */
-			RemoveLakeTableEntry(objectId);
-
 			if (Gp_role == GP_ROLE_DISPATCH)
 			{
+				IcebergMetadataInfo *meta_info =
+					pg_iceberg_get_metadata_info_missing_ok(objectId);
+
 				/*
-				 * Before removing the metadata entry, enqueue the metadata
-				 * location into the deletion queue so the background cleanup
-				 * module can later parse it and delete all referenced files.
-				 *
 				 * Tolerate a missing metadata entry (e.g. a table created
 				 * with a bare CREATE TABLE ... USING iceberg before that
 				 * path was blocked): the table must remain droppable.
 				 */
-				IcebergMetadataInfo *info =
-					pg_iceberg_get_metadata_info_missing_ok(objectId);
-
-				if (info != NULL)
+				if (meta_info != NULL)
 				{
-					pg_iceberg_deletion_queue_insert(info->metadata_location,
-													 objectId,
-													 GetCurrentTimestamp(),
-													 DELETION_TYPE_METADATA);
-					pg_iceberg_free_metadata_info(info);
+					IcebergTableInfo   *table_info;
+					char               *owner_username;
+					char               *table_qname;
+					char               *nspname;
+					const char         *relname;
+
+					/*
+					 * Resolve the storage context while pg_lake_table is still
+					 * intact.  pg_iceberg_get_table_info goes pg_lake_table ->
+					 * pg_foreign_volume -> pg_foreign_server to fill in the
+					 * volume_name / volume_server_name we need to reconstruct
+					 * fileIOConfig on the consumer side.
+					 */
+					table_info = pg_iceberg_get_table_info(objectId);
+
+					owner_username = GetUserNameFromId(GetUserId(), false);
+
+					nspname = get_namespace_name(rel->rd_rel->relnamespace);
+					relname = NameStr(rel->rd_rel->relname);
+					table_qname = nspname ?
+						psprintf("%s.%s", nspname, relname) :
+						psprintf("%s", relname);
+
+					/*
+					 * Enqueue the metadata path with full credential context.
+					 * The autovacuum-driven consumer (pg_iceberg_av_consumer.c)
+					 * will pick it up, reconstruct fileIOConfig, and call
+					 * dlagent's /v1/files/cleanup-from-metadata endpoint.
+					 */
+					pg_iceberg_deletion_queue_insert(
+						meta_info->metadata_location,
+						objectId,
+						table_info->volume_name,
+						table_info->volume_server_name,
+						owner_username,
+						table_qname,
+						GetCurrentTimestamp(),
+						DELETION_TYPE_METADATA);
+
+					pg_iceberg_free_table_info(table_info);
+					pg_iceberg_free_metadata_info(meta_info);
+
+					if (nspname)
+						pfree(nspname);
+					pfree(table_qname);
 
 					pg_iceberg_remove_metadata(objectId);
 				}
 				else
 					ereport(WARNING,
-							(errmsg("iceberg metadata entry not found for table \"%s\", skipping iceberg metadata cleanup",
-									RelationGetRelationName(rel))));
+						(errmsg("iceberg metadata entry not found for table \"%s\", skipping iceberg metadata cleanup",
+							RelationGetRelationName(rel))));
 			}
+
+			/*
+			 * pg_lake_table is a per-node catalog: clean on both QD and QE.
+			 * Replaces the former hardcoded RemoveLakeTableEntry() call in
+			 * heap_drop_with_catalog().  Must run after the QD-only block
+			 * above because pg_iceberg_get_table_info reads pg_lake_table.
+			 */
+			RemoveLakeTableEntry(objectId);
 		}
 
 		relation_close(rel, AccessShareLock);

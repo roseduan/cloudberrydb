@@ -80,6 +80,7 @@
 #include "am_iceberg/include/pg_iceberg_extensible.h"
 #include "am_iceberg/include/pg_iceberg_custom_scan.h"
 #include "am_iceberg/include/pg_iceberg_am.h"
+#include "am_iceberg/include/pg_iceberg_av_consumer.h"
 
 
 PG_MODULE_MAGIC;
@@ -438,6 +439,9 @@ _PG_init(void)
 	pg_iceberg_setup_ddl_hooks();
 	ProcessDispatchResult_hook = FDW_RecvMeta;
 	FDWRecvProtocol = RecvMetaMethod;
+
+	/* Register the autovacuum-driven deletion queue consumer. */
+	pg_iceberg_av_consumer_init();
 }
 
 /*
