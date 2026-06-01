@@ -46,7 +46,8 @@ CXformImplementIntraSegmentParallelUnionAll::
 
 CXform::EXformPromise
 CXformImplementIntraSegmentParallelUnionAll::Exfp(
-	CExpressionHandle &exprhdl) const
+	CExpressionHandle &  // exprhdl
+) const
 {
 	// Check 1: Is parallel mode enabled and OK?
 	if (!gpdb::IsParallelModeOK())
@@ -55,12 +56,6 @@ CXformImplementIntraSegmentParallelUnionAll::Exfp(
 	}
 
 	if (GPOS_FTRACE(EopttraceEnableParallelAppend))
-	{
-		return CXform::ExfpNone;
-	}
-
-	// Check 2: Are there parallel-incompatible operations (including set operations)?
-	if (CXformUtils::FHasParallelIncompatibleOps(exprhdl))
 	{
 		return CXform::ExfpNone;
 	}

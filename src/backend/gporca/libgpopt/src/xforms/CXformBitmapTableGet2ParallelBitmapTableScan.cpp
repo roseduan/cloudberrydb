@@ -80,11 +80,6 @@ CXformBitmapTableGet2ParallelBitmapTableScan::Exfp(CExpressionHandle &exprhdl) c
 		return CXform::ExfpNone;
 	}
 
-	if (CXformUtils::FHasParallelIncompatibleOps(exprhdl))
-	{
-		return CXform::ExfpNone;
-	}
-
 	CLogicalBitmapTableGet *popGet = CLogicalBitmapTableGet::PopConvert(exprhdl.Pop());
 	CTableDescriptor *ptabdesc = popGet->Ptabdesc();
 

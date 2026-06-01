@@ -74,12 +74,6 @@ CXformIndexGet2ParallelIndexScan::Exfp(CExpressionHandle &exprhdl) const
 		return CXform::ExfpNone;
 	}
 
-	// Check for parallel-incompatible operations that would conflict with parallel index scans
-	if (CXformUtils::FHasParallelIncompatibleOps(exprhdl))
-	{
-		return CXform::ExfpNone;
-	}
-
 	CLogicalIndexGet *popGet = CLogicalIndexGet::PopConvert(exprhdl.Pop());
 
 	CTableDescriptor *ptabdesc = popGet->Ptabdesc();

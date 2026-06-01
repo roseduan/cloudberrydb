@@ -77,12 +77,11 @@ CXformImplementParallelSequence::Exfp(CExpressionHandle &exprhdl) const
 		return CXform::ExfpNone;
 	}
 
-	/* Apply the same parallel-incompat gate as the parallel scan
-	 * xforms: in DML with CTEs, no parallel scan will be generated,
-	 * so a parallel Sequence would survive with a non-parallel CTE
-	 * producer as child 0 and be rejected in FValidContext. Avoid
-	 * that by not producing the parallel Sequence at all. */
-	if (CXformUtils::FHasParallelIncompatibleOps(exprhdl))
+	/* In a DML query no parallel scan will be generated, so a parallel
+	 * Sequence would survive with a non-parallel CTE producer as child 0
+	 * and be rejected in FValidContext. Avoid that by not producing the
+	 * parallel Sequence at all. */
+	if (COptCtxt::PoctxtFromTLS()->FDMLQuery())
 	{
 		return CXform::ExfpNone;
 	}

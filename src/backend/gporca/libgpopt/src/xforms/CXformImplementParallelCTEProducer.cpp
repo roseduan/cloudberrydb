@@ -76,8 +76,9 @@ CXformImplementParallelCTEProducer::Exfp(CExpressionHandle &exprhdl) const
 		return CXform::ExfpNone;
 	}
 
-	// Check for parallel-incompatible operations that would conflict with parallel scans
-	if (CXformUtils::FHasParallelIncompatibleOps(exprhdl))
+	/* In a DML query no parallel scan will be generated, so the CTE
+	 * producer would stay non-parallel; skip the parallel CTE producer. */
+	if (COptCtxt::PoctxtFromTLS()->FDMLQuery())
 	{
 		return CXform::ExfpNone;
 	}

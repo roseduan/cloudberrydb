@@ -75,12 +75,6 @@ CXformDynamicGet2ParallelAppendTableScan::Exfp(CExpressionHandle &exprhdl) const
 	if (!GPOS_FTRACE(EopttraceEnableParallelAppendScan))
 		return CXform::ExfpNone;
 
-	// Check for parallel-incompatible operations that would conflict with parallel scans
-	if (CXformUtils::FHasParallelIncompatibleOps(exprhdl))
-	{
-		return CXform::ExfpNone;
-	}
-
 	CLogicalDynamicGet *popGet = CLogicalDynamicGet::PopConvert(exprhdl.Pop());
 	CTableDescriptor *ptabdesc = popGet->Ptabdesc();
 

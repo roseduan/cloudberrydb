@@ -74,12 +74,10 @@ CXformImplementParallelCTEConsumer::Exfp(CExpressionHandle &exprhdl) const
 		return CXform::ExfpNone;
 	}
 
-	/* Gate symmetric with ParallelCTEProducer: if the memo has
-	 * parallel-incompatible ops (e.g. CTE Producer/Sequence under DML),
-	 * parallel scan xforms will be blocked and the producer stays
-	 * non-parallel, so the matching parallel consumer must also be
-	 * skipped. */
-	if (CXformUtils::FHasParallelIncompatibleOps(exprhdl))
+	/* Gate symmetric with ParallelCTEProducer: in a DML query the
+	 * producer stays non-parallel, so the matching parallel consumer
+	 * must also be skipped. */
+	if (COptCtxt::PoctxtFromTLS()->FDMLQuery())
 	{
 		return CXform::ExfpNone;
 	}

@@ -87,11 +87,6 @@ CXformIndexOnlyGet2ParallelIndexOnlyScan::Exfp(
 		return CXform::ExfpNone;
 	}
 
-	if (CXformUtils::FHasParallelIncompatibleOps(exprhdl))
-	{
-		return CXform::ExfpNone;
-	}
-
 	CLogicalIndexOnlyGet *popGet =
 		CLogicalIndexOnlyGet::PopConvert(exprhdl.Pop());
 	CTableDescriptor *ptabdesc = popGet->Ptabdesc();
