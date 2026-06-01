@@ -167,11 +167,20 @@ create_toast_table(Relation rel, Oid toastOid, Oid toastIndexOid,
 	/*
 	 * Toast tables for regular relations go in pg_toast; those for temp
 	 * relations go into the per-backend temp-toast-table namespace.
+	 *
+	 * The check has two arms because a TEMP relation can in principle
+	 * live outside a temp namespace.  In particular: PAX aux tables
+	 * (pg_pax_blocks_<oid>) always live in pg_ext_aux, but they
+	 * inherit their parent PAX table's persistence — including TEMP.
+	 * Without the explicit relpersistence check, the aux's TOAST would
+	 * incorrectly land in pg_toast (permanent), orphaning data after
+	 * the session ends.  By honouring the persistence flag, the
+	 * aux's TOAST goes to pg_toast_temp_<N> just like the parent's
+	 * own TOAST would (matching heap/AO behaviour).
 	 */
-	if (isTempOrTempToastNamespace(rel->rd_rel->relnamespace))
+	if (isTempOrTempToastNamespace(rel->rd_rel->relnamespace) ||
+		rel->rd_rel->relpersistence == RELPERSISTENCE_TEMP)
 		namespaceid = GetTempToastNamespace();
-	else if (IsExtAuxNamespace(rel->rd_rel->relnamespace))
-		namespaceid = PG_EXTAUX_NAMESPACE;
 	else
 		namespaceid = PG_TOAST_NAMESPACE;
 

@@ -89,6 +89,12 @@ void CPaxCreateMicroPartitionTable(Relation rel) {
   pax_relid = RelationGetRelid(rel);
 
   // 1. create blocks table.
+  //
+  // The aux relation lives in pg_ext_aux regardless of whether the
+  // parent is PERMANENT, UNLOGGED, or TEMP.  Persistence is
+  // propagated from the parent so the TOAST helper can route the
+  // TOAST companion + index correctly (pg_toast for permanent /
+  // unlogged, pg_toast_temp_<N> for temp).
   snprintf(aux_relname, sizeof(aux_relname), "pg_pax_blocks_%u", pax_relid);
   aux_namespace_id = PG_EXTAUX_NAMESPACE;
   aux_relid = GetNewOidForRelation(pg_class_desc, ClassOidIndexId,
@@ -121,14 +127,17 @@ void CPaxCreateMicroPartitionTable(Relation rel) {
     attr->attnotnull = true;
   }
 
-  // FIXME: temporary table in aux namespace  is not supported yet.
+  /*
+   * Aux inherits the parent's persistence (PERMANENT / UNLOGGED / TEMP).
+   * The aux relation itself always lives in pg_ext_aux; only its TOAST
+   * helper looks at persistence to decide whether to route into
+   * pg_toast (permanent / unlogged) or pg_toast_temp_<N> (temp).
+   */
   relid = heap_create_with_catalog(
       aux_relname, aux_namespace_id, InvalidOid, aux_relid, InvalidOid,
       InvalidOid, rel->rd_rel->relowner, HEAP_TABLE_AM_OID, tupdesc, NIL,
       RELKIND_RELATION,
-      rel->rd_rel->relpersistence == RELPERSISTENCE_UNLOGGED
-          ? RELPERSISTENCE_UNLOGGED
-          : RELPERSISTENCE_PERMANENT,
+      rel->rd_rel->relpersistence,
       rel->rd_rel->relisshared, RelationIsMapped(rel), ONCOMMIT_NOOP,
       NULL,                         /* GP Policy */
       (Datum)0, false,              /* use _user_acl */
