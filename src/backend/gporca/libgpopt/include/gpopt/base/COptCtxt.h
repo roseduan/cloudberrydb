@@ -104,6 +104,13 @@ private:
 	// does the query have parallel operators (parallel table scans)
 	BOOL m_has_parallel_operators;
 
+	// does the query contain any subquery-level LIMIT (query_level > 0).
+	// Set once by CLogicalLimit ctor when it sees query_level > 0; used by
+	// parallel xforms (and other consumers) to cheaply gate decisions that
+	// must consider the presence of a segment-local LIMIT without walking
+	// the whole memo.
+	BOOL m_has_subquery_limit{false};
+
 	// does this plan have a direct dispatchable filter
 	CExpressionArray *m_direct_dispatchable_filters;
 
@@ -190,6 +197,12 @@ public:
 	}
 
 	void
+	SetHasSubqueryLimit()
+	{
+		m_has_subquery_limit = true;
+	}
+
+	void
 	AddDirectDispatchableFilterCandidate(CExpression *filter_expression)
 	{
 		filter_expression->AddRef();
@@ -218,6 +231,12 @@ public:
 	HasParallelOperators() const
 	{
 		return m_has_parallel_operators;
+	}
+
+	BOOL
+	FHasSubqueryLimit() const
+	{
+		return m_has_subquery_limit;
 	}
 
 	CExpressionArray *

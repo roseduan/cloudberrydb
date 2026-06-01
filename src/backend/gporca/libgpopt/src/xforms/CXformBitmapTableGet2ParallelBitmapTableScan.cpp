@@ -80,6 +80,13 @@ CXformBitmapTableGet2ParallelBitmapTableScan::Exfp(CExpressionHandle &exprhdl) c
 		return CXform::ExfpNone;
 	}
 
+	// Subquery-level LIMIT lowers into a segment-local Limit, which is
+	// incompatible with worker-level parallel distribution.
+	if (COptCtxt::PoctxtFromTLS()->FHasSubqueryLimit())
+	{
+		return CXform::ExfpNone;
+	}
+
 	CLogicalBitmapTableGet *popGet = CLogicalBitmapTableGet::PopConvert(exprhdl.Pop());
 	CTableDescriptor *ptabdesc = popGet->Ptabdesc();
 

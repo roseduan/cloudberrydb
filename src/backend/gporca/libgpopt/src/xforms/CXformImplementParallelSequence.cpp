@@ -86,6 +86,13 @@ CXformImplementParallelSequence::Exfp(CExpressionHandle &exprhdl) const
 		return CXform::ExfpNone;
 	}
 
+	/* Subquery-level LIMIT lowers into a segment-local Limit, which is
+	 * incompatible with worker-level parallel distribution. */
+	if (COptCtxt::PoctxtFromTLS()->FHasSubqueryLimit())
+	{
+		return CXform::ExfpNone;
+	}
+
 	/*
 	 * Skip parallel sequence when any child contains a Foreign Scan or a
 	 * replicated table.  Both force the corresponding CTE producer to run

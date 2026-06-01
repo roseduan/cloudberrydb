@@ -14,6 +14,7 @@
 #include "gpos/base.h"
 
 #include "gpopt/base/CColRefSet.h"
+#include "gpopt/base/COptCtxt.h"
 #include "gpopt/base/CUtils.h"
 #include "gpopt/metadata/CName.h"
 #include "gpopt/metadata/CTableDescriptor.h"
@@ -66,6 +67,14 @@ CLogicalLimit::CLogicalLimit(CMemoryPool *mp, COrderSpec *pos, BOOL fGlobal,
 	CColRefSet *pcrsSort = m_pos->PcrsUsed(mp);
 	m_pcrsLocalUsed->Include(pcrsSort);
 	pcrsSort->Release();
+
+	// Subquery-level LIMIT may lower into a segment-local LIMIT, which is
+	// incompatible with worker-level parallel distribution. Record the fact
+	// once here so consumers can gate in O(1) instead of walking the memo.
+	if (m_query_level > 0)
+	{
+		COptCtxt::PoctxtFromTLS()->SetHasSubqueryLimit();
+	}
 }
 
 

@@ -74,6 +74,13 @@ CXformIndexGet2ParallelIndexScan::Exfp(CExpressionHandle &exprhdl) const
 		return CXform::ExfpNone;
 	}
 
+	// Subquery-level LIMIT lowers into a segment-local Limit, which is
+	// incompatible with worker-level parallel distribution.
+	if (COptCtxt::PoctxtFromTLS()->FHasSubqueryLimit())
+	{
+		return CXform::ExfpNone;
+	}
+
 	CLogicalIndexGet *popGet = CLogicalIndexGet::PopConvert(exprhdl.Pop());
 
 	CTableDescriptor *ptabdesc = popGet->Ptabdesc();

@@ -75,6 +75,13 @@ CXformDynamicGet2ParallelAppendTableScan::Exfp(CExpressionHandle &exprhdl) const
 	if (!GPOS_FTRACE(EopttraceEnableParallelAppendScan))
 		return CXform::ExfpNone;
 
+	// Subquery-level LIMIT lowers into a segment-local Limit, which is
+	// incompatible with worker-level parallel distribution.
+	if (COptCtxt::PoctxtFromTLS()->FHasSubqueryLimit())
+	{
+		return CXform::ExfpNone;
+	}
+
 	CLogicalDynamicGet *popGet = CLogicalDynamicGet::PopConvert(exprhdl.Pop());
 	CTableDescriptor *ptabdesc = popGet->Ptabdesc();
 

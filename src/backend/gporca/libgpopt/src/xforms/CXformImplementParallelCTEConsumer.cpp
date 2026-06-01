@@ -82,6 +82,13 @@ CXformImplementParallelCTEConsumer::Exfp(CExpressionHandle &exprhdl) const
 		return CXform::ExfpNone;
 	}
 
+	/* Subquery-level LIMIT lowers into a segment-local Limit, which is
+	 * incompatible with worker-level parallel distribution. */
+	if (COptCtxt::PoctxtFromTLS()->FHasSubqueryLimit())
+	{
+		return CXform::ExfpNone;
+	}
+
 	CTableDescriptorHashSet *ptabdescset = exprhdl.DeriveTableDescriptor();
 
 	/*
