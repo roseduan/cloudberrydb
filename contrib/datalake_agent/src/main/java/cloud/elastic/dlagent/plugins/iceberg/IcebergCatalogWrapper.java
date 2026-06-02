@@ -57,10 +57,20 @@ public class IcebergCatalogWrapper {
     public IcebergCatalogWrapper () {
         LOG.info("Creating iceberg catalogCache ...");
         catalogCache = CacheBuilder.newBuilder()
-                .removalListener((RemovalListener<String, IcebergHiveCatalog>) notification ->
-                        LOG.debug("Removed iceberg catalogCache entry for key {} with cause {}",
-                                notification.getKey(),
-                                notification.getCause().toString()))
+                .removalListener((RemovalListener<String, IcebergHiveCatalog>) notification -> {
+                    LOG.info("Removed iceberg catalogCache entry key={} cause={}",
+                            notification.getKey(),
+                            notification.getCause());
+                    IcebergHiveCatalog evicted = notification.getValue();
+                    if (evicted != null) {
+                        try {
+                            evicted.close();
+                        } catch (Exception e) {
+                            LOG.warn("Error closing evicted IcebergHiveCatalog for key={}",
+                                    notification.getKey(), e);
+                        }
+                    }
+                })
                 .build();
     }
 
@@ -97,7 +107,12 @@ public class IcebergCatalogWrapper {
                 return new IcebergHadoopCatalog(FilePathUtils.unescapeString(context.getPath()),
                         icebergUtilities, context.getConfiguration(), context.getGopherProperties());
             case "hive":
-                return getHiveCatalog(context);
+                // Wrap the cached IcebergHiveCatalog in a proxy that invalidates this
+                // cache (and the layer-2 DlCachedClientPool) on connection-class
+                // failures, so subsequent requests rebuild the catalog instead of
+                // reusing a broken one.  Service-layer and fetcher-layer callers
+                // need no changes -- the proxy intercepts every catalog method.
+                return new InvalidatingHiveCatalog(getHiveCatalog(context), this, context);
             case "polaris":
                 return new IcebergPolarisCatalog(
                     context.getDataSource(),
@@ -158,5 +173,57 @@ public class IcebergCatalogWrapper {
                 throw (IOException) exception;
             throw new IOException(exception);
         }
+    }
+
+    /**
+     * Drop the cached hive catalog for the given context.  Triggered by
+     * {@link InvalidatingHiveCatalog} when a catalog call surfaces a
+     * connection-class failure.  Idempotent: invalidating a missing key is a
+     * no-op.  The Guava removal listener will synchronously call
+     * {@link IcebergHiveCatalog#close()} on the evicted value, which in turn
+     * evicts the layer-2 {@code DlCachedClientPool} entry tied to the same
+     * metastore URI.
+     */
+    public void invalidateHiveCatalog(RequestContext context) {
+        String key = formCatalogCacheKey(context);
+        LOG.info("Invalidating iceberg catalog cache for key={}", key);
+        catalogCache.invalidate(key);
+    }
+
+    /**
+     * True iff {@code t}'s cause chain contains an exception that indicates a
+     * connection-class failure between dlagent and the Hive metastore.  We
+     * deliberately keep this narrow so that schema / table / namespace errors
+     * (NoSuchTable, AlreadyExists, ValidationException, ...) do not cause
+     * cache thrash.  Match types:
+     *
+     * <ul>
+     *   <li>{@code TTransportException}, {@code ConnectException},
+     *       {@code UnknownHostException}, {@code SocketTimeoutException}
+     *       -- thrift/socket transport gave up</li>
+     *   <li>{@code ServiceUnavailableException} -- iceberg's own connect
+     *       wrapper</li>
+     *   <li>{@code RuntimeMetaException} only when its message explicitly says
+     *       "Failed to connect" / "Failed to reconnect" -- {@code DlHiveClientPool#newClient}
+     *       wraps real connection errors that way; other RuntimeMetaException
+     *       paths cover non-connection HMS errors</li>
+     * </ul>
+     */
+    public static boolean isConnectionFailure(Throwable t) {
+        for (Throwable c = t; c != null; c = c.getCause()) {
+            if (c instanceof org.apache.thrift.transport.TTransportException) return true;
+            if (c instanceof java.net.ConnectException) return true;
+            if (c instanceof java.net.UnknownHostException) return true;
+            if (c instanceof java.net.SocketTimeoutException) return true;
+            if (c instanceof org.apache.iceberg.exceptions.ServiceUnavailableException) return true;
+            if (c instanceof org.apache.iceberg.hive.RuntimeMetaException) {
+                String msg = c.getMessage();
+                if (msg != null
+                        && (msg.contains("Failed to connect") || msg.contains("Failed to reconnect"))) {
+                    return true;
+                }
+            }
+        }
+        return false;
     }
 }

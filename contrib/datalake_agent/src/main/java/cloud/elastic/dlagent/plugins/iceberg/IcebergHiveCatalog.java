@@ -20,6 +20,7 @@
 package cloud.elastic.dlagent.plugins.iceberg;
 
 import cloud.elastic.dlagent.api.security.SecureLogin;
+import cloud.elastic.dlagent.plugins.hive.utilities.DlCachedClientPool;
 import cloud.elastic.dlagent.plugins.iceberg.utilities.IcebergUtilities;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.hive.conf.HiveConf;
@@ -41,7 +42,7 @@ import java.util.List;
 /**
  * Implementation of IcebergCatalog for tables stored in HiveCatalog.
  */
-public class IcebergHiveCatalog implements IcebergCatalog {
+public class IcebergHiveCatalog implements IcebergCatalog, AutoCloseable {
 
     private static final Logger LOG = LoggerFactory.getLogger(IcebergHiveCatalog.class);
 
@@ -59,6 +60,18 @@ public class IcebergHiveCatalog implements IcebergCatalog {
      */
     private boolean isUseGopherClient = true;
     private String catalogLocation;
+    /*
+     * Captured at construction so {@link #close()} can locate the layer-2
+     * DlCachedClientPool entry even if the Configuration is mutated afterwards.
+     */
+    private final String metastoreUri;
+    /*
+     * Tombstone flag set by {@link #close()}.  Concurrent callers that already
+     * have a reference to this catalog and are mid-operation will hit
+     * {@link #ensureOpen()} and receive a clear, retryable IllegalStateException
+     * instead of an NPE on a nulled-out delegate.
+     */
+    private volatile boolean closed = false;
 
     public IcebergHiveCatalog(String catalogLocation,
                               IcebergUtilities icebergUtilities,
@@ -70,11 +83,45 @@ public class IcebergHiveCatalog implements IcebergCatalog {
         this.icebergUtilities = icebergUtilities;
         this.configuration = configuration;
         this.catalogLocation = catalogLocation;
+        this.metastoreUri = configuration.get(HiveConf.ConfVars.METASTOREURIS.varname, "");
 
         if (isUseGopherClient) {
             createGopherHiveCatalog(catalogLocation, icebergUtilities, configuration, secureLogin, serverName, configFile, gopherProperties);
         } else {
             createDefaultHiveCatalog(catalogLocation, icebergUtilities, configuration, secureLogin, serverName, configFile);
+        }
+    }
+
+    /**
+     * Drop the layer-2 thrift client pool tied to this catalog's metastore URI
+     * and mark this catalog as evicted.  Idempotent.  Called by the
+     * IcebergCatalogWrapper cache's removal listener when this catalog is
+     * invalidated after a connection-class failure.
+     */
+    @Override
+    public synchronized void close() {
+        if (closed) {
+            return;
+        }
+        closed = true;
+        if (!metastoreUri.isEmpty()) {
+            try {
+                DlCachedClientPool.invalidate(metastoreUri);
+            } catch (RuntimeException e) {
+                LOG.warn("Error invalidating DlCachedClientPool for metastoreUri={}", metastoreUri, e);
+            }
+        }
+        // Deliberately do NOT null out hiveCatalog: any concurrent caller that
+        // already obtained a reference will be stopped by ensureOpen() with a
+        // clear IllegalStateException, instead of an opaque NPE further down.
+        LOG.info("Closed IcebergHiveCatalog (metastoreUri={})", metastoreUri);
+    }
+
+    private void ensureOpen() {
+        if (closed) {
+            throw new IllegalStateException(
+                "IcebergHiveCatalog already closed (cache evicted due to upstream error); "
+                + "retry to fault-in a fresh catalog");
         }
     }
 
@@ -146,6 +193,7 @@ public class IcebergHiveCatalog implements IcebergCatalog {
             PartitionSpec spec,
             String location,
             Map<String, String> properties) {
+        ensureOpen();
         if (catalogLocation != null && !catalogLocation.isEmpty()) {
             if (location == null || location.isEmpty()) {
                 if (identifier.namespace().length() == 0) {
@@ -165,6 +213,7 @@ public class IcebergHiveCatalog implements IcebergCatalog {
 
     @Override
     public Table loadTable(String tableName) throws Exception {
+        ensureOpen();
         TableIdentifier tableId = icebergUtilities.getIcebergTableIdentifier(tableName);
         return loadTable(tableId, null, null);
     }
@@ -172,23 +221,27 @@ public class IcebergHiveCatalog implements IcebergCatalog {
     @Override
     public Table loadTable(TableIdentifier tableId, String tableLocation,
                            Map<String, String> properties) throws Exception {
+        ensureOpen();
         Preconditions.checkState(tableId != null);
         return hiveCatalog.loadTable(tableId);
     }
 
     @Override
     public boolean dropTable(String tableName, boolean purge) {
+        ensureOpen();
         throw new UnsupportedOperationException("Iceberg accessor does not support dropTable operation.");
     }
 
     @Override
     public void renameTable(String tableName, String newTableName) {
+        ensureOpen();
         throw new UnsupportedOperationException("Iceberg accessor does not support renameTable operation.");
     }
 
     @Override
     public boolean createNamespace(String catalogName, String namespaceName,
                                    Map<String, String> properties) throws Exception {
+        ensureOpen();
         throw new UnsupportedOperationException("Hive catalog does not support createNamespace operation.");
     }
 }

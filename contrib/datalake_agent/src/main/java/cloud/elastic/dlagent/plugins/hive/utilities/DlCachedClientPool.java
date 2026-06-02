@@ -35,6 +35,7 @@ import java.util.concurrent.TimeUnit;
 
 public class DlCachedClientPool implements ClientPool<IMetaStoreClient, TException> {
     private static Cache<String, DlHiveClientPool> clientPoolCache;
+    private static final Object INIT_LOCK = new Object();
 
     private final Configuration conf;
     private final String metastoreUri;
@@ -72,18 +73,39 @@ public class DlCachedClientPool implements ClientPool<IMetaStoreClient, TExcepti
                 conf, secureLogin, serverName, configFile));
     }
 
-    private synchronized void init() {
+    private void init() {
+        // clientPoolCache is static; guard initialization with a static lock so two
+        // concurrent first-time constructors do not race to build two caches and lose one.
         if (clientPoolCache == null) {
-            clientPoolCache =
-                    Caffeine.newBuilder()
-                            .expireAfterAccess(evictionInterval, TimeUnit.MILLISECONDS)
-                            .removalListener((key, value, cause) -> ((DlHiveClientPool) value).close())
-                            .build();
+            synchronized (INIT_LOCK) {
+                if (clientPoolCache == null) {
+                    clientPoolCache =
+                            Caffeine.newBuilder()
+                                    .expireAfterAccess(evictionInterval, TimeUnit.MILLISECONDS)
+                                    .removalListener((key, value, cause) -> {
+                                        if (value != null) ((DlHiveClientPool) value).close();
+                                    })
+                                    .build();
+                }
+            }
         }
     }
 
     static Cache<String, DlHiveClientPool> clientPoolCache() {
         return clientPoolCache;
+    }
+
+    /**
+     * Force-evict the cached {@link DlHiveClientPool} for the given metastore URI.
+     * Triggered by {@link cloud.elastic.dlagent.plugins.iceberg.IcebergHiveCatalog#close()}
+     * when an upstream catalog is dropped due to a connection-class failure, so the next
+     * request rebuilds the thrift connection pool instead of reusing the broken one.
+     */
+    public static void invalidate(String metastoreUri) {
+        Cache<String, DlHiveClientPool> c = clientPoolCache;
+        if (c != null && metastoreUri != null && !metastoreUri.isEmpty()) {
+            c.invalidate(metastoreUri);
+        }
     }
 
     @Override
