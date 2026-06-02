@@ -232,6 +232,8 @@ table_state_init(TableMetadataState *state)
 	state->last_base_metadata_location = NULL;
 	state->first_modified_at_level = 0;
 	state->is_internal = false;
+	state->is_builtin_catalog = false;
+	state->dirty = false;
 	state->data_files = NIL;
 	state->delete_files = NIL;
 	state->level_history = NIL;
@@ -288,6 +290,13 @@ table_state_rollback_to_level(TableMetadataState *state, int target_level)
 											   entry->prev_data_files_count);
 		state->delete_files = truncate_file_list(state->delete_files,
 												 entry->prev_delete_files_count);
+
+		/*
+		 * The accumulated file set changed; under deferred materialization
+		 * (issue #323) current_metadata_location may not reflect the
+		 * truncated list, so force a re-materialize on the next scan/commit.
+		 */
+		state->dirty = true;
 
 		/* Pop this history entry (don't pfree prev strings - transferred above) */
 		pfree(entry);
@@ -953,6 +962,26 @@ pg_iceberg_tracker_register_table(Oid relid,
 
 	MemoryContextSwitchTo(oldcxt);
 
+	/*
+	 * Determine whether this table is backed by the builtin catalog, using
+	 * the same predicate as the commit path. Only builtin tables defer
+	 * metadata materialization (issue #323); non-builtin catalogs commit to
+	 * the external catalog inside apply_updates_with_rebase and must stay
+	 * eager. Default to false (eager) if the catalog cannot be determined.
+	 */
+	{
+		IcebergTableInfo *reg_table_info = pg_iceberg_get_table_info(relid);
+
+		state->is_builtin_catalog =
+			(reg_table_info != NULL &&
+			 reg_table_info->catalog_server_name != NULL)
+			? pg_iceberg_is_builtin_catalog(reg_table_info->catalog_server_name)
+			: false;
+
+		if (reg_table_info != NULL)
+			pg_iceberg_free_table_info(reg_table_info);
+	}
+
 	if (latest_metadata_location)
 		pfree(latest_metadata_location);
 
@@ -1458,13 +1487,14 @@ pg_iceberg_tracker_apply_updates_with_rebase(Oid relid,
 	 * In this case, our current metadata is still valid.
 	 */
 	if (num_new_data_files == 0 && num_new_delete_files == 0 &&
+		!state->dirty &&
 		state->last_base_metadata_location != NULL &&
 		strcmp(state->last_base_metadata_location,
 			   latest_global_location) == 0)
 	{
 		elog(DEBUG1,
 			 "metadata tracker: rebase skipped for table %u "
-			 "(no new files, global unchanged)",
+			 "(no new files, global unchanged, not dirty)",
 			 relid);
 
 		pfree(latest_global_location);
@@ -1551,6 +1581,9 @@ pg_iceberg_tracker_apply_updates_with_rebase(Oid relid,
 		pfree(state->current_metadata_location);
 	state->current_metadata_location = new_metadata_location;
 
+	/* All accumulated files are now reflected in current_metadata_location. */
+	state->dirty = false;
+
 	MemoryContextSwitchTo(oldcxt);
 
 	pg_iceberg_free_table_info(table_info);
@@ -1570,6 +1603,93 @@ pg_iceberg_tracker_apply_updates_with_rebase(Oid relid,
 		 list_length(state->delete_files));
 
 	return state->current_metadata_location;
+}
+
+/*
+ * pg_iceberg_tracker_accumulate_files
+ *    Append new files to the tracker WITHOUT generating metadata.
+ *
+ * This is the deferred counterpart of apply_updates_with_rebase: it performs
+ * only the cheap part (push a level-history undo point + append the new files
+ * to the accumulated lists) and marks the table dirty. It does NOT serialize
+ * the accumulated list or call the agent, so per-statement cost is O(new
+ * files) instead of O(total files). The expensive materialization is deferred
+ * to the next scan (pg_iceberg_tracker_get_scan_metadata_location) or to
+ * commit (tracker_commit_all), both of which call apply_updates_with_rebase
+ * with empty new-file arrays and will now act because the table is dirty.
+ *
+ * Only used for builtin-catalog tables (issue #323). Non-builtin catalogs
+ * still go through apply_updates_with_rebase per statement, because there the
+ * agent call commits to the external catalog and must not be deferred.
+ */
+void
+pg_iceberg_tracker_accumulate_files(Oid relid,
+									const TrackedDataFile *new_data_files,
+									int num_new_data_files,
+									const TrackedDataFile *new_delete_files,
+									int num_new_delete_files)
+{
+	TableMetadataState *state;
+	int			nest_level;
+	int			prev_data_count;
+	int			prev_delete_count;
+	MemoryContext oldcxt;
+
+	/* Nothing to accumulate. */
+	if (num_new_data_files == 0 && num_new_delete_files == 0)
+		return;
+
+	state = (TableMetadataState *)
+		hash_search(tracker_table, &relid, HASH_FIND, NULL);
+	if (state == NULL)
+		ereport(ERROR,
+				(errcode(ERRCODE_INTERNAL_ERROR),
+				 errmsg("table %u not registered in metadata tracker",
+						relid)));
+
+	nest_level = GetCurrentTransactionNestLevel();
+	prev_data_count = list_length(state->data_files);
+	prev_delete_count = list_length(state->delete_files);
+
+	oldcxt = MemoryContextSwitchTo(tracker_context);
+
+	{
+		LevelHistoryEntry *entry =
+			(LevelHistoryEntry *) palloc(sizeof(LevelHistoryEntry));
+
+		entry->nest_level = nest_level;
+		entry->prev_metadata_location =
+			state->current_metadata_location
+			? pstrdup(state->current_metadata_location)
+			: NULL;
+		entry->prev_last_base =
+			state->last_base_metadata_location
+			? pstrdup(state->last_base_metadata_location)
+			: NULL;
+		entry->prev_data_files_count = prev_data_count;
+		entry->prev_delete_files_count = prev_delete_count;
+
+		state->level_history = lappend(state->level_history, entry);
+	}
+
+	state->data_files = append_files_to_list(state->data_files,
+											 new_data_files,
+											 num_new_data_files);
+	state->delete_files = append_files_to_list(state->delete_files,
+											   new_delete_files,
+											   num_new_delete_files);
+
+	MemoryContextSwitchTo(oldcxt);
+
+	/* Defer materialization: regenerated lazily on next scan or at commit. */
+	state->dirty = true;
+
+	elog(DEBUG1,
+		 "metadata tracker: accumulated +%d data, +%d delete files for "
+		 "table %u at level %d (deferred; total %d data, %d delete)",
+		 num_new_data_files, num_new_delete_files, relid, nest_level,
+		 list_length(state->data_files),
+		 list_length(state->delete_files));
 }
 
 /*

@@ -166,6 +166,24 @@ typedef struct TableMetadataState
 	 * Each entry captures metadata location + file counts BEFORE a change.
 	 */
 	List   *level_history;
+
+	/*
+	 * True when this table's catalog is the builtin catalog. Only builtin
+	 * tables defer metadata materialization (issue #323): on non-builtin
+	 * catalogs (Polaris/Hive) apply_updates_with_rebase commits to the
+	 * external catalog inside the agent call, so per-statement eager
+	 * behavior must be preserved there.
+	 */
+	bool	is_builtin_catalog;
+
+	/*
+	 * True when data_files/delete_files hold accumulated changes that are
+	 * not yet reflected in current_metadata_location (deferred
+	 * materialization). The expensive rebase + agent metadata generation is
+	 * triggered lazily on the next scan (read-your-own-writes) or at commit,
+	 * instead of after every statement, avoiding O(N^2) rewrites (issue #323).
+	 */
+	bool	dirty;
 } TableMetadataState;
 
 
@@ -216,6 +234,22 @@ extern void pg_iceberg_tracker_register_table(Oid relid,
  *          Returns NULL if there's nothing to rebase.
  */
 extern char *pg_iceberg_tracker_apply_updates_with_rebase(
+												Oid relid,
+												const TrackedDataFile *new_data_files,
+												int num_new_data_files,
+												const TrackedDataFile *new_delete_files,
+												int num_new_delete_files);
+
+/*
+ * Accumulate new files into the tracker WITHOUT materializing metadata.
+ *
+ * Cheap (O(new files)) per call: pushes a savepoint-rollback history entry
+ * and appends the files to the accumulated lists, marking the table dirty.
+ * The expensive rebase + agent metadata generation is deferred to the next
+ * scan (read-your-own-writes) or to commit. Used for builtin-catalog tables
+ * to avoid O(N^2) per-statement intermediate metadata rewrites (issue #323).
+ */
+extern void pg_iceberg_tracker_accumulate_files(
 												Oid relid,
 												const TrackedDataFile *new_data_files,
 												int num_new_data_files,

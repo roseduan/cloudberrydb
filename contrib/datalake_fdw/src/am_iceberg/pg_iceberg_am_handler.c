@@ -317,18 +317,39 @@ iceberg_modify_finish(IcebergModifyDesc *modifyDesc)
 										&new_delete_files, &num_delete_files);
 
 		/*
-		 * Hand the parsed files to the tracker.  Internally this will:
-		 *   1. Read the latest global metadata from catalog
-		 *   2. Rebase ALL accumulated files (prior stmts + this stmt)
-		 *   3. Call the agent to generate a new intermediate metadata file
-		 *   4. Update tracker state
+		 * Hand the parsed files to the tracker.
 		 *
-		 * The actual catalog update (CAS) is deferred to PRE_COMMIT.
+		 * Builtin catalog (issue #323): only ACCUMULATE the files here. The
+		 * expensive rebase + intermediate metadata generation is deferred to
+		 * the next scan (read-your-own-writes) or to PRE_COMMIT, instead of
+		 * being run after every statement. Running it per statement
+		 * re-serialized the entire accumulated file list and generated a new
+		 * metadata file each time -- O(N^2) work and unbounded coordinator
+		 * memory growth in a single large transaction (e.g. JDBC
+		 * executeBatch), eventually OOM-killing the backend.
+		 *
+		 * Non-builtin catalog: keep eager per-statement behavior. There the
+		 * agent call inside apply_updates_with_rebase commits to the external
+		 * catalog, so it must not be deferred.
+		 *
+		 * In both cases the authoritative catalog update (CAS) happens at
+		 * PRE_COMMIT in tracker_commit_all().
 		 */
-		pg_iceberg_tracker_apply_updates_with_rebase(
-			RelationGetRelid(rel),
-			new_data_files, num_data_files,
-			new_delete_files, num_delete_files);
+		{
+			TableMetadataState *track_state =
+				pg_iceberg_tracker_get_table_state(RelationGetRelid(rel));
+
+			if (track_state != NULL && track_state->is_builtin_catalog)
+				pg_iceberg_tracker_accumulate_files(
+					RelationGetRelid(rel),
+					new_data_files, num_data_files,
+					new_delete_files, num_delete_files);
+			else
+				pg_iceberg_tracker_apply_updates_with_rebase(
+					RelationGetRelid(rel),
+					new_data_files, num_data_files,
+					new_delete_files, num_delete_files);
+		}
 	}
 
 finish:
