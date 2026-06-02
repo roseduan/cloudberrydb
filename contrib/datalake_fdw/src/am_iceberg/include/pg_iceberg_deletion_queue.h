@@ -114,7 +114,7 @@ extern void pg_iceberg_deletion_queue_increment_retry(const char *path);
 
 /* Increment retry_count AND record the failure message in last_error */
 extern void pg_iceberg_deletion_queue_record_failure(const char *path,
-													 const char *errmsg);
+													 const char *err_text);
 
 /* Remove an entry by path */
 extern void pg_iceberg_deletion_queue_remove(const char *path);

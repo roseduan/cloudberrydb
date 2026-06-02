@@ -95,6 +95,17 @@ void agent_cli_wrapper_update_table(AgentCliHandle* handle, const char* table_na
 void agent_cli_wrapper_drop_table(AgentCliHandle* handle, const char* table_name, const char* json);
 void agent_cli_wrapper_get_statistics(AgentCliHandle* handle, const char* table_name, const char* json);
 
+/*
+ * File-level cleanup invoked by the deletion-queue consumer.  Issues an HTTP
+ * POST to <server_url>/api/v1/files/cleanup-from-metadata so dlagent walks the
+ * snapshot tree referenced by metadata_path (using fileio_config_json) and
+ * deletes every referenced object.  On failure populates handle->lastStatus /
+ * lastErrorMessage; callers MUST check via agent_cli_wrapper_check_exec_error_json.
+ */
+void agent_cli_wrapper_cleanup_metadata(AgentCliHandle* handle,
+										const char* metadata_path,
+										const char* fileio_config_json);
+
 /* Catalog management operations */
 void agent_cli_wrapper_create_catalog(AgentCliHandle* handle, const char* json);
 void agent_cli_wrapper_list_catalogs(AgentCliHandle* handle, const char* json);

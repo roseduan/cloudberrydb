@@ -34,6 +34,7 @@
 #include "postgres.h"
 
 #include "access/htup_details.h"
+#include "access/reloptions.h"
 #include "access/xact.h"
 #include "catalog/namespace.h"
 #include "catalog/pg_authid.h"
@@ -46,6 +47,7 @@
 #include "postmaster/autovacuum.h"
 #include "utils/acl.h"
 #include "utils/builtins.h"
+#include "utils/guc.h"
 #include "utils/lsyscache.h"
 #include "utils/memutils.h"
 #include "utils/snapmgr.h"
@@ -266,7 +268,7 @@ do_delete_for_entry(DeletionQueueEntry *e)
     server = GetForeignServer(server_oid);
 
     /* 2. Foreign volume (sanity: it must still belong to this server) */
-    volume_oid = get_foreign_volume_oid(e->volume_name, server_oid,
+    volume_oid = get_foreign_volume_oid(e->volume_name, e->server_name,
                                         /*missing_ok*/ true);
     if (!OidIsValid(volume_oid))
         ereport(ERROR,

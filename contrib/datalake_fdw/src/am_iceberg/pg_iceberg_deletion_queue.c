@@ -187,7 +187,7 @@ pg_iceberg_deletion_queue_insert(const char *path,
  */
 void
 pg_iceberg_deletion_queue_record_failure(const char *path,
-										 const char *errmsg)
+										 const char *err_text)
 {
 	Relation	queue_rel;
 	Oid			index_oid;
@@ -230,8 +230,8 @@ pg_iceberg_deletion_queue_record_failure(const char *path,
 		Int32GetDatum(old_retry_isnull ? 1 : DatumGetInt32(old_retry_datum) + 1);
 
 	replaces[Anum_deletion_queue_last_error - 1] = true;
-	if (errmsg && errmsg[0] != '\0')
-		values[Anum_deletion_queue_last_error - 1] = CStringGetTextDatum(errmsg);
+	if (err_text && err_text[0] != '\0')
+		values[Anum_deletion_queue_last_error - 1] = CStringGetTextDatum(err_text);
 	else
 		nulls[Anum_deletion_queue_last_error - 1] = true;
 

@@ -6,17 +6,12 @@
 #include "utils/memutils.h"
 #include "src/components/agent_cli/c_interface/agent_c_api.h"
 
-/* Agent CLI handle - same as existing structure */
-typedef struct AgentCliHandle
-{
-    agent_cli_handle_t handle;
-    agent_cli_status_t lastStatus;
-    const char *lastErrorMessage;
-    agent_cli_config_t *agentConfig;
-    agent_cli_response_t *currentResponse;
-    bool responseValid;
-    bool isValid;
-} AgentCliHandle;
+/*
+ * AgentCliHandle is defined canonically in agent_c_api.h (included above),
+ * which explicitly supersedes the definition that used to live here.
+ * Re-declaring the struct breaks any translation unit that includes both
+ * headers (e.g. pg_iceberg_av_consumer.c), so rely solely on agent_c_api.h.
+ */
 
 /* Resource management - same as existing structure */
 typedef struct AgentCliResource
