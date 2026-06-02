@@ -480,19 +480,32 @@ pg_iceberg_deletion_queue_get_batch(int batch_size, int max_retry)
 	for (int rowIndex = 0; rowIndex < SPI_processed; rowIndex++)
 	{
 		bool		isNull;
+		Datum		textDatum;
 		MemoryContext old_context = MemoryContextSwitchTo(caller_context);
 		DeletionQueueEntry *entry = palloc0(sizeof(DeletionQueueEntry));
 
-		entry->path           = GET_SPI_VALUE(TEXTOID,      rowIndex, 1, &isNull);
+		/*
+		 * TEXT columns may be SQL NULL (last_error is NULL for freshly
+		 * enqueued rows; the credential columns can be NULL for legacy
+		 * entries).  GET_SPI_VALUE(TEXTOID, ...) would call
+		 * TextDatumGetCString() on a 0 Datum and dereference NULL, so guard
+		 * each nullable text column on isNull explicitly.
+		 */
+#define SPI_TEXT_OR_NULL(col) \
+		(textDatum = GET_SPI_DATUM(rowIndex, (col), &isNull), \
+		 isNull ? NULL : TextDatumGetCString(textDatum))
+
+		entry->path           = SPI_TEXT_OR_NULL(1);
 		entry->table_oid      = GET_SPI_VALUE(OIDOID,       rowIndex, 2, &isNull);
 		entry->orphaned_at    = GET_SPI_VALUE(TIMESTAMPTZOID, rowIndex, 3, &isNull);
 		entry->retry_count    = GET_SPI_VALUE(INT4OID,      rowIndex, 4, &isNull);
 		entry->deletion_type  = (DeletionType) GET_SPI_VALUE(INT4OID, rowIndex, 5, &isNull);
-		entry->volume_name    = GET_SPI_VALUE(TEXTOID,      rowIndex, 6, &isNull);
-		entry->server_name    = GET_SPI_VALUE(TEXTOID,      rowIndex, 7, &isNull);
-		entry->owner_username = GET_SPI_VALUE(TEXTOID,      rowIndex, 8, &isNull);
-		entry->table_qname    = GET_SPI_VALUE(TEXTOID,      rowIndex, 9, &isNull);
-		entry->last_error     = GET_SPI_VALUE(TEXTOID,      rowIndex, 10, &isNull);
+		entry->volume_name    = SPI_TEXT_OR_NULL(6);
+		entry->server_name    = SPI_TEXT_OR_NULL(7);
+		entry->owner_username = SPI_TEXT_OR_NULL(8);
+		entry->table_qname    = SPI_TEXT_OR_NULL(9);
+		entry->last_error     = SPI_TEXT_OR_NULL(10);
+#undef SPI_TEXT_OR_NULL
 
 		result = lappend(result, entry);
 
