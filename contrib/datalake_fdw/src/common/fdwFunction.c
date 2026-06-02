@@ -301,7 +301,10 @@ fdwfunction_endScanStatus(dataLakeFdwScanState *dataLakesstate)
 
 	if (dataLakesstate->provider != NULL && Gp_role != GP_ROLE_DISPATCH)
 	{
+		/* Logical close, then delete the C++ provider object (issue #323). */
 		destroyHandler(dataLakesstate->provider);
+		destroyProvider(dataLakesstate->provider);
+		dataLakesstate->provider = NULL;
 	}
 	datalakeFreeDatalakeOptions(dataLakesstate->options);
 }
@@ -538,11 +541,23 @@ fdwfunction_endModify(ResultRelInfo *resultRelInfo)
 
 	if (dataLakesstate->provider)
 	{
+		/*
+		 * destroyHandler() only performs the logical close (flush the parquet
+		 * file to object storage); it does NOT free the C++ provider object.
+		 * destroyProvider() deletes the ProviderInternalWrapper (and with it
+		 * the writer + Arrow buffers). Missing this call leaked one full write
+		 * provider per INSERT statement on every segment, growing segment RSS
+		 * without bound in large transactions until OOM.  See issue #323.
+		 */
 		destroyHandler(dataLakesstate->provider);
+		destroyProvider(dataLakesstate->provider);
+		dataLakesstate->provider = NULL;
 	}
 	if (dataLakesstate->modify_state->us_provider)
 	{
 		destroyHandler(dataLakesstate->modify_state->us_provider);
+		destroyProvider(dataLakesstate->modify_state->us_provider);
+		dataLakesstate->modify_state->us_provider = NULL;
 	}
 	/* Free global fileIndexMap for Iceberg tables */
 	if (datalake_iceberg_file_index_map != NULL)
