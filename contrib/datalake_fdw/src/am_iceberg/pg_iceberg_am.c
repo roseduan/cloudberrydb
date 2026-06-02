@@ -212,7 +212,9 @@ pg_iceberg_rescan(TableScanDesc sscan, struct ScanKeyData *key, bool set_params,
 	IcebergScanDesc scan = (IcebergScanDesc) sscan;
 	FdwRoutine *fdw_routine = scan->scanState->fdwroutine;
 
-	fdw_routine->ReScanForeignScan(scan->scanState);
+	/* Defensive: an FDW without a ReScan callback must not crash the segment. */
+	if (fdw_routine->ReScanForeignScan != NULL)
+		fdw_routine->ReScanForeignScan(scan->scanState);
 }
 
 bool

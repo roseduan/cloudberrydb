@@ -137,6 +137,9 @@ static void
 icebergVolumeEndForeignScan(ForeignScanState *node);
 
 static void
+icebergVolumeReScanForeignScan(ForeignScanState *node);
+
+static void
 icebergVolumeBeginForeignModify(ModifyTableState *mtstate, ResultRelInfo *resultRelInfo, List *fdw_private, int subplan_index, int eflags);
 
 static TupleTableSlot *
@@ -181,6 +184,7 @@ iceberg_volume_fdw_handler(PG_FUNCTION_ARGS)
 	// scan operate
     fdw_routine->BeginForeignScan = icebergVolumeBeginForeignScan;
 	fdw_routine->IterateForeignScan = icebergVolumeIterateForeignScan;
+	fdw_routine->ReScanForeignScan = icebergVolumeReScanForeignScan;
 	fdw_routine->EndForeignScan = icebergVolumeEndForeignScan;
 
 	// insert operate
@@ -367,6 +371,43 @@ static void
 icebergVolumeEndForeignScan(ForeignScanState *node)
 {
 	datalakefdw_end_foreign_scan(node);
+}
+
+/*
+ * ReScanForeignScan
+ *		Restart the scan from the beginning (e.g. iceberg scan as a NestLoop
+ *		inner).  The Iceberg native CustomScan delegates here via
+ *		pg_iceberg_rescan(); before this callback existed the slot was NULL and
+ *		the indirect call crashed the segment.
+ *
+ *	icebergVolumeBeginForeignScan() (via datalakefdw_begin_foreign_scan) has
+ *	already built a dataLakeFdwScanState with the deserialized fragments and an
+ *	initialised provider.  We just rewind that provider's row reader (it keeps
+ *	its own task list / delete index), so no re-listing or re-dispatch occurs.
+ *
+ *	NB: do NOT reuse datalake_fdw's end+init rescan path here — its
+ *	fdwfunction_endScanStatus() pfree()s dataLakesstate->options, which the
+ *	subsequent re-init would then read (use-after-free).
+ */
+static void
+icebergVolumeReScanForeignScan(ForeignScanState *node)
+{
+	dataLakeFdwScanState *dataLakesstate;
+
+	if (node->fdw_state == NULL)
+		return;
+
+	dataLakesstate = (dataLakeFdwScanState *) node->fdw_state;
+
+	/*
+	 * The provider is only initialised on segments that received fragments;
+	 * on the dispatcher (or a segment with no selected partition) there is no
+	 * reader to rewind.
+	 */
+	if (Gp_role == GP_ROLE_DISPATCH || dataLakesstate->provider == NULL)
+		return;
+
+	reScanProvider(dataLakesstate->provider);
 }
 
 List *GetVolumeExternalFragmentList(char* agentClientJsonRespond)

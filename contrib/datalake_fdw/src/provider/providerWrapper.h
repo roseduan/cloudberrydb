@@ -39,6 +39,8 @@ const char* getReadProviderFileName(providerWrapper provider);
 
 void destroyHandler(providerWrapper provider);
 
+void reScanProvider(providerWrapper provider);
+
 void destroyProvider(providerWrapper provider);
 
 void *getProviderRowReader(providerWrapper provider);

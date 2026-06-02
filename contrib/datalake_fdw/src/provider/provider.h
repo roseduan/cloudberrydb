@@ -40,6 +40,10 @@ public:
 
 	virtual void destroyHandler();
 
+	/* Rewind the scan to the beginning for ExecReScan; no-op by default,
+	 * overridden by providers whose reader supports re-scan (e.g. Iceberg). */
+	virtual void reScan();
+
 	/* For fast-path scan bypass — returns NULL by default */
 	virtual void *getProtocolContext() { return NULL; }
 

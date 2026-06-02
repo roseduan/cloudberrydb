@@ -167,6 +167,11 @@ void Provider::destroyHandler()
 	return;
 }
 
+void Provider::reScan()
+{
+	return;
+}
+
 void Provider::setPartitionValue(void* values, void* nulls) {
 	return;
 }

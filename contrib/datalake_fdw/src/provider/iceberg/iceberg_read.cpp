@@ -71,5 +71,21 @@ void icebergRead::destroyHandler()
     datalakeCleanupContext(protocolContext);
 }
 
+void icebergRead::reScan()
+{
+    /*
+     * ExecReScan on the Iceberg scan: rewind the underlying row reader so the
+     * already-fetched task list is re-read from the start.  The reader (and
+     * its deleteIndex / file-index state) is preserved, so no object-storage
+     * re-listing or delete-file re-read is needed.
+     */
+    if (protocolContext != NULL &&
+        protocolContext->file != NULL &&
+        protocolContext->file->reader != NULL)
+    {
+        datalakeRowReaderRewind(protocolContext->file->reader);
+    }
+}
+
 }
 }

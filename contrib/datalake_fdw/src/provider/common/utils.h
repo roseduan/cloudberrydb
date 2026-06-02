@@ -100,10 +100,18 @@ typedef struct DatalakeRowReader
 	gopherFS				gopherFilesystem;
 	MemoryContext			mcxt;
 	int						curReaderIndex;
+	int						curTaskIndex;	/* cursor into fileScanTasks; advanced
+											 * instead of consuming the list, so the
+											 * scan can be rewound (see
+											 * datalakeRowReaderRewind) */
 	Reader					*handler;
 	char					format;
 	ExternalTableMetadata	*tableOptions;
 	MemoryContext			taskMcxt;
+	MemoryContext			taskListMcxt;	/* holds the persistent copy of
+											 * fileScanTasks; freed once at
+											 * datalakeRowReaderClose so the task
+											 * nodes survive a rewind (rescan) */
 	MemoryContext			curMcxt;
 	void 					*buffer;
 	bool					fileIndexMapInitialized;	/* Track if Iceberg file index map has been initialized */

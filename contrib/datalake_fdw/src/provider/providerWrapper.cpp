@@ -205,6 +205,22 @@ void destroyHandler(providerWrapper provider) {
 	return;
 }
 
+void reScanProvider(providerWrapper provider) {
+	try
+	{
+		provider->getContext()->reScan();
+	}
+	catch(std::exception &e)
+	{
+		elog(ERROR, "Datalake foreign table rescan failed, failed msg : %s", e.what());
+	}
+	catch (...)
+	{
+		elog(ERROR, "Datalake foreign table rescan failed.");
+	}
+	return;
+}
+
 void destroyProvider(providerWrapper provider) {
 	try
 	{

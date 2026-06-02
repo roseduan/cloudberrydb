@@ -26,6 +26,8 @@ public:
 
 	virtual void destroyHandler();
 
+	virtual void reScan();
+
 	virtual void *getProtocolContext() { return (void *) protocolContext; }
 
 private:

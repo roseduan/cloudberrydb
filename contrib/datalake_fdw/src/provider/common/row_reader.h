@@ -44,6 +44,7 @@ datalakeRowReaderFastNext(DatalakeRowReader *reader, DatalakeInternalRecord *rec
 	return false;
 }
 void datalakeRowReaderClose(DatalakeRowReader *reader);
+void datalakeRowReaderRewind(DatalakeRowReader *reader);
 
 /*
  * The following functions are migrated from datalake_extension.c in hashdata 3X.

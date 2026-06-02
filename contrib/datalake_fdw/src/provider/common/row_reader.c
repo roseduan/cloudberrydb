@@ -180,7 +180,22 @@ datalakeCreateRowReader(MemoryContext mcxt,
 	 */
 	oldcxt = MemoryContextSwitchTo(TopMemoryContext);
 
+	/*
+	 * Keep the task list in its own context (child of TopMemoryContext so it
+	 * still survives executor teardown during abort).  Unlike the old design
+	 * — where the per-file reader pfree()d each task as it finished — the list
+	 * is kept intact for the whole scan so it can be re-read on a rewind
+	 * (rescan); it is freed exactly once in datalakeRowReaderClose().
+	 */
+	reader->taskListMcxt = AllocSetContextCreate(TopMemoryContext,
+												 "RowReaderTaskListContext",
+												 ALLOCSET_DEFAULT_MINSIZE,
+												 ALLOCSET_DEFAULT_INITSIZE,
+												 ALLOCSET_DEFAULT_MAXSIZE);
+
+	MemoryContextSwitchTo(reader->taskListMcxt);
 	flatCombinedTasks(combinedScanTasks, &reader->fileScanTasks);
+	MemoryContextSwitchTo(TopMemoryContext);
 	list_free(combinedScanTasks);
 
 	reader->datafileDesc = createFieldDescription(tupleDesc);
@@ -286,7 +301,7 @@ datalakeRowReaderNext(DatalakeRowReader *reader, DatalakeInternalRecord *record)
 			MemoryContextSwitchTo(caller_cxt);
 			return true;
 		}
-		else if (list_length(reader->fileScanTasks) > 0)
+		else if (reader->curTaskIndex < list_length(reader->fileScanTasks))
 		{
 			DatalakeReaderInitInfo initInfo;
 			FileScanTask *curTask;
@@ -298,7 +313,7 @@ datalakeRowReaderNext(DatalakeRowReader *reader, DatalakeInternalRecord *record)
 			reader->handler->Close(reader->curReader);
 			MemoryContextSwitchTo(reader->curMcxt);
 
-			curTask = list_nth(reader->fileScanTasks, 0);
+			curTask = list_nth(reader->fileScanTasks, reader->curTaskIndex);
 
 			initInfo.taskId = reader->curReaderIndex++;
 			initInfo.mcxt = reader->mcxt;
@@ -326,8 +341,22 @@ datalakeRowReaderNext(DatalakeRowReader *reader, DatalakeInternalRecord *record)
 			MemoryContextReset(reader->taskMcxt);
 			MemoryContextSwitchTo(reader->taskMcxt);
 
+			/*
+			 * Hand the per-file reader a private copy of the task: the read
+			 * path (task reader, file reader, filters) destructively frees the
+			 * task, its dataFile/filePath and deletes when the file is closed.
+			 * The master list in taskListMcxt must stay intact so the scan can
+			 * be rewound (rescan).  The copy lives in taskMcxt (reset per file).
+			 */
+			initInfo.fileScanTask = (FileScanTask *) copyObject(curTask);
+
 			reader->curReader = reader->handler->Create(&initInfo);
-			reader->fileScanTasks = list_delete_first(reader->fileScanTasks);
+			/*
+			 * Advance the cursor instead of consuming the list, so the task
+			 * list stays intact and the scan can be rewound (rescan).  See
+			 * datalakeRowReaderRewind().
+			 */
+			reader->curTaskIndex++;
 		}
 		else
 		{
@@ -343,6 +372,41 @@ datalakeRowReaderNext(DatalakeRowReader *reader, DatalakeInternalRecord *record)
 	return false;
 }
 
+/*
+ * datalakeRowReaderRewind
+ *		Reset the reader to re-scan its tasks from the beginning.
+ *
+ * The scan is restarted in place: we close the file reader that is currently
+ * open and rewind the task cursor to 0, so the next datalakeRowReaderNext()
+ * re-opens the first task (this mirrors the initial-scan path, where curReader
+ * starts NULL and the first Next() falls through to open task 0).
+ *
+ * State that is identical across passes is deliberately KEPT to avoid
+ * re-reading object storage / rebuilding indexes:
+ *   - fileScanTasks            (the task list itself; only the cursor resets)
+ *   - deleteIndex / deleteIndexBuilt
+ *   - the global Iceberg file index map / fileIndexMapInitialized
+ *   - datafileDesc, buffer, taskMcxt
+ * We must NOT call datalakeRowReaderClose() here: it destroys deleteIndex,
+ * datafileDesc and taskMcxt and pfree()s the reader.
+ */
+void
+datalakeRowReaderRewind(DatalakeRowReader *reader)
+{
+	/* Close() tolerates a NULL curReader (e.g. after a fully drained scan). */
+	reader->handler->Close(reader->curReader);
+	reader->curReader = NULL;
+
+	/* Restart task iteration from the first file. */
+	reader->curTaskIndex = 0;
+	reader->curReaderIndex = 0;
+
+	/* Drop the fast-path cache; it points into the now-closed file reader. */
+	reader->deepNext = NULL;
+	reader->deepReader = NULL;
+	reader->deepFileId = 0;
+}
+
 void
 datalakeRowReaderClose(DatalakeRowReader *reader)
 {
@@ -354,6 +418,8 @@ datalakeRowReaderClose(DatalakeRowReader *reader)
 
 	list_free_deep(reader->datafileDesc);
 	MemoryContextDelete(reader->taskMcxt);
+	if (reader->taskListMcxt)
+		MemoryContextDelete(reader->taskListMcxt);
 	if (reader->buffer)
 		datalake_buffer_arr_destroy(reader->buffer);
 	pfree(reader);
