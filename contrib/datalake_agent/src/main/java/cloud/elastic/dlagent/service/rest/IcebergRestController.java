@@ -30,6 +30,8 @@ import org.apache.iceberg.ManifestFiles;
 import org.apache.iceberg.DataFile;
 import org.apache.iceberg.DeleteFile;
 import org.apache.iceberg.io.FileIO;
+import org.apache.iceberg.io.FileInfo;
+import org.apache.iceberg.io.SupportsPrefixOperations;
 import org.apache.iceberg.io.InputFile;
 import org.apache.iceberg.io.CloseableIterable;
 import org.apache.iceberg.hadoop.HadoopFileIO;
@@ -1194,73 +1196,97 @@ public class IcebergRestController {
         }
 
         // 2. Parse the metadata.json so we can walk the snapshot tree.
-        TableMetadata metadata;
-        try {
-            InputFile input = fileIO.newInputFile(metadataPath);
-            metadata = TableMetadataParser.read(fileIO, input);
-        } catch (Exception e) {
-            log.warn("Failed to parse metadata at {}: {}", metadataPath,
-                     e.getMessage());
-            return createErrorResponse(
-                "Failed to parse metadata: " + e.getMessage(),
-                "MetadataReadError", 400);
-        }
-
-        // 3. Collect every reachable file path.  Snapshot/manifest walking
-        //    can itself fail (e.g. a manifest already removed by an earlier
-        //    half-completed cleanup); treat those as per-file failures and
-        //    keep going.
         List<Map<String, String>> failed = new ArrayList<>();
         int deletedCount = 0;
-        List<String> toDelete = new ArrayList<>();
 
-        for (Snapshot snap : metadata.snapshots()) {
-            if (snap.manifestListLocation() != null) {
-                toDelete.add(snap.manifestListLocation());
-            }
+        // 2. Determine the table's managed storage root(s).
+        //
+        //    Cleanup must NOT depend on the snapshot graph being reachable: a
+        //    table that has had appends/updates/deletes/expiration -- or even a
+        //    plain multi-append table -- physically retains superseded
+        //    manifests, manifest lists, log-truncated metadata.json files and
+        //    version-hint.text that no metadata walk can enumerate.  Pre-commit
+        //    orphans (files written, then the commit failed/retried) are
+        //    likewise unreachable.  We therefore enumerate by LISTING the
+        //    table's storage location and delete every object found.
+        //
+        //    The primary root is derived purely from the metadata path so it is
+        //    robust even if metadata.json is corrupt or already gone:
+        //      s3a://bkt/db/t/metadata/v5.metadata.json -> s3a://bkt/db/t
+        String tableRoot = deriveTableRoot(metadataPath);
+
+        java.util.Set<String> listRoots    = new java.util.LinkedHashSet<>();
+        java.util.Set<String> allowedRoots = new java.util.LinkedHashSet<>();
+        addManagedRoot(listRoots, allowedRoots, tableRoot);
+
+        //    Best-effort parse only widens the managed roots: location() as a
+        //    cross-check, plus any custom write paths (object-storage mode or
+        //    write.{data,metadata}.path) that may live outside the table dir.
+        //    A parse failure is non-fatal -- listing tableRoot still removes
+        //    every physical file under the table directory.
+        try {
+            InputFile input = fileIO.newInputFile(metadataPath);
+            TableMetadata metadata = TableMetadataParser.read(fileIO, input);
+            addManagedRoot(listRoots, allowedRoots, metadata.location());
+            Map<String, String> props = metadata.properties();
+            addManagedRoot(listRoots, allowedRoots, props.get("write.data.path"));
+            addManagedRoot(listRoots, allowedRoots, props.get("write.metadata.path"));
+            addManagedRoot(listRoots, allowedRoots,
+                           props.get("write.object-storage.path"));
+        } catch (Exception e) {
+            log.warn("cleanup: metadata parse failed for {} ({}); proceeding "
+                     + "with path-derived root {}",
+                     metadataPath, e.getMessage(), tableRoot);
+        }
+
+        if (listRoots.isEmpty()) {
+            return createErrorResponse(
+                "cannot determine table root from metadataPath: " + metadataPath,
+                "BadRequestException", 400);
+        }
+
+        // 3. Enumerate physical files by recursively LISTING each managed root.
+        //    Listing finds everything the metadata graph cannot.
+        if (!(fileIO instanceof SupportsPrefixOperations)) {
+            return createErrorResponse(
+                "FileIO " + fileIO.getClass().getName() + " does not support "
+                    + "prefix listing; cannot guarantee complete cleanup",
+                "UnsupportedOperationException", 400);
+        }
+        SupportsPrefixOperations sp = (SupportsPrefixOperations) fileIO;
+
+        java.util.Set<String> toDelete = new java.util.LinkedHashSet<>();
+        for (String root : listRoots) {
+            // Trailing slash so "/db/t/" never matches a sibling "/db/t_foo/".
+            String prefix = root.endsWith("/") ? root : root + "/";
             try {
-                for (ManifestFile mf : snap.allManifests(fileIO)) {
-                    toDelete.add(mf.path());
-                    try (CloseableIterable<DataFile> data =
-                             ManifestFiles.read(mf, fileIO)) {
-                        for (DataFile df : data) {
-                            toDelete.add(df.path().toString());
-                        }
-                    } catch (Exception e) {
+                for (FileInfo fi : sp.listPrefix(prefix)) {
+                    String path = fi.location();
+                    // location boundary check: never delete anything that does
+                    // not fall under a known managed root for THIS table.
+                    if (!underAnyRoot(path, allowedRoots)) {
                         Map<String, String> err = new HashMap<>();
-                        err.put("path", mf.path());
-                        err.put("error", "read manifest data files: " + e.getMessage());
+                        err.put("path", path);
+                        err.put("error",
+                                "outside managed location; skipped for safety");
                         failed.add(err);
+                        continue;
                     }
-                    try (CloseableIterable<DeleteFile> del =
-                             ManifestFiles.readDeleteManifest(mf, fileIO, null)) {
-                        for (DeleteFile df : del) {
-                            toDelete.add(df.path().toString());
-                        }
-                    } catch (Exception e) {
-                        // Not all manifests carry delete files; ignore the
-                        // common "not a delete manifest" case quietly.
-                        if (!isNotDeleteManifest(e)) {
-                            Map<String, String> err = new HashMap<>();
-                            err.put("path", mf.path());
-                            err.put("error", "read manifest delete files: " + e.getMessage());
-                            failed.add(err);
-                        }
-                    }
+                    toDelete.add(path);
                 }
             } catch (Exception e) {
                 Map<String, String> err = new HashMap<>();
-                err.put("path", "snapshot:" + snap.snapshotId());
-                err.put("error", "walk manifests: " + e.getMessage());
+                err.put("path", prefix);
+                err.put("error", "listPrefix: " + e.getClass().getSimpleName()
+                        + ": " + e.getMessage());
                 failed.add(err);
             }
         }
 
-        // metadata.json itself is the very last delete so retries can find
-        // their way back to the tree.
-        toDelete.add(metadataPath);
-
-        // 4. Delete each, recording per-file failures.
+        // 4. Delete each listed object individually.  Per-file failures are
+        //    reported in failed[]; the consumer treats a non-empty failed[] as
+        //    ERROR, retries the queue entry, and after deletion_queue_max_retry
+        //    attempts moves it to the dead-letter queue.
         for (String p : toDelete) {
             try {
                 fileIO.deleteFile(p);
@@ -1277,10 +1303,76 @@ public class IcebergRestController {
         resp.setDeletedCount(deletedCount);
         resp.setFailed(failed);
 
-        log.info("Cleanup of {} finished: deleted={}, failed={}",
-                 metadataPath, deletedCount, failed.size());
+        log.info("Cleanup of {} finished: roots={}, deleted={}, failed={}",
+                 metadataPath, listRoots, deletedCount, failed.size());
 
         return ResponseEntity.ok(resp);
+    }
+
+    /**
+     * Derive a table's storage root from the absolute path to its
+     * metadata.json, by stripping the trailing "/metadata/<file>".  Robust
+     * even if metadata.json is unreadable.  Returns null if no usable root.
+     *
+     * <p>e.g. s3a://bkt/db/t/metadata/v5.metadata.json -> s3a://bkt/db/t
+     */
+    private static String deriveTableRoot(String metadataPath) {
+        if (metadataPath == null || metadataPath.isEmpty()) {
+            return null;
+        }
+        int i = metadataPath.lastIndexOf("/metadata/");
+        if (i > 0) {
+            return metadataPath.substring(0, i);
+        }
+        int s = metadataPath.lastIndexOf('/');
+        return s > 0 ? metadataPath.substring(0, s) : null;
+    }
+
+    /**
+     * Register a managed root for both listing (where to enumerate files) and
+     * the boundary allow-list (what we are permitted to delete).  No-op for
+     * null/empty.  Trailing slash is normalized away.
+     */
+    private static void addManagedRoot(java.util.Set<String> listRoots,
+                                       java.util.Set<String> allowedRoots,
+                                       String root) {
+        if (root == null || root.isEmpty()) {
+            return;
+        }
+        String r = root.endsWith("/") ? root.substring(0, root.length() - 1) : root;
+        listRoots.add(r);
+        allowedRoots.add(r);
+    }
+
+    /**
+     * Canonicalize a storage path for containment comparison: unify the
+     * "s3a://" and "s3://" schemes (Iceberg writes metadata as s3a:// but data
+     * file paths inside manifests as s3://) and strip any trailing slash.
+     */
+    private static String canonRoot(String p) {
+        if (p == null) {
+            return "";
+        }
+        String q = p;
+        if (q.startsWith("s3a://")) {
+            q = "s3://" + q.substring("s3a://".length());
+        }
+        if (q.endsWith("/")) {
+            q = q.substring(0, q.length() - 1);
+        }
+        return q;
+    }
+
+    /** True iff {@code path} is equal to, or strictly under, some managed root. */
+    private static boolean underAnyRoot(String path, java.util.Set<String> roots) {
+        String cp = canonRoot(path);
+        for (String r : roots) {
+            String cr = canonRoot(r);
+            if (cp.equals(cr) || cp.startsWith(cr + "/")) {
+                return true;
+            }
+        }
+        return false;
     }
 
     /**
@@ -1300,6 +1392,18 @@ public class IcebergRestController {
             putIfPresent(conf, cfg, "path_style_access", "fs.s3a.path.style.access");
             putIfPresent(conf, cfg, "access_key_id",     "fs.s3a.access.key");
             putIfPresent(conf, cfg, "secret_access_key", "fs.s3a.secret.key");
+            // Iceberg metadata is written with the "s3a://" scheme but the
+            // data files referenced inside the manifests use the bare "s3://"
+            // scheme.  Register S3AFileSystem for "s3" as well and mirror the
+            // credentials, otherwise fileIO.deleteFile() on a "s3://..." data
+            // file fails with "Failed to get file system" and the data files
+            // are left orphaned (only metadata gets cleaned up).
+            conf.set("fs.s3.impl", "org.apache.hadoop.fs.s3a.S3AFileSystem");
+            putIfPresent(conf, cfg, "endpoint",          "fs.s3.endpoint");
+            putIfPresent(conf, cfg, "region",            "fs.s3.endpoint.region");
+            putIfPresent(conf, cfg, "path_style_access", "fs.s3.path.style.access");
+            putIfPresent(conf, cfg, "access_key_id",     "fs.s3.access.key");
+            putIfPresent(conf, cfg, "secret_access_key", "fs.s3.secret.key");
         } else if ("hdfs".equals(type)) {
             putIfPresent(conf, cfg, "namenodes",          "dfs.namenode.rpc-address");
             putIfPresent(conf, cfg, "auth_method",        "hadoop.security.authentication");
