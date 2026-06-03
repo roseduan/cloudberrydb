@@ -13,6 +13,12 @@ S3_VERIFY_SQL = $(AUTOMATION_DIR)/prepare/prepare_s3/s3_verify_cb_write.sql
 # hadoop / hive install (the tools/bin/beeline wrapper requires HADOOP_HOME
 # which neither the dev container nor the CI runner has set up).  Override
 # with `make BEELINE=...` if you really need a different path.
+#
+# NOTE: the SQL is fed on stdin (`beeline ... < file.sql`), not via
+# `-f file.sql`.  With a containerized beeline, `-f` resolves the path
+# *inside* the hiveserver2 container where the host repo isn't mounted;
+# stdin is opened by the host shell, so the file is read host-side and
+# piped through `docker exec -i`.
 BEELINE ?= docker exec -i hiveserver2 /opt/hive/bin/beeline
 BEELINE_URL = jdbc:hive2://hiveserver2:10000/default
 
@@ -37,7 +43,7 @@ installcheck:
 	@mc rm --recursive --force local/warehouse/smoke-write-test/ 2>/dev/null || true
 	@echo "=== Preparing S3 test data via Hive (Hive writes -> CB reads) ==="
 	@if [ -f "$(S3_PREPARE_SQL)" ]; then \
-		$(BEELINE) -u "$(BEELINE_URL)" -n hive -f "$(S3_PREPARE_SQL)" 2>&1 || \
+		$(BEELINE) -u "$(BEELINE_URL)" -n hive < "$(S3_PREPARE_SQL)" 2>&1 || \
 		{ echo "ERROR: Failed to prepare S3 test data"; exit 1; }; \
 	else \
 		echo "ERROR: S3 prepare SQL not found at $(S3_PREPARE_SQL)"; exit 1; \
@@ -46,7 +52,7 @@ installcheck:
 	$(pg_regress_installcheck) $(REGRESS)
 	@echo "=== Verifying Hive can read CB-written data (CB writes -> Hive reads) ==="
 	@if [ -f "$(S3_VERIFY_SQL)" ]; then \
-		$(BEELINE) -u "$(BEELINE_URL)" -n hive -f "$(S3_VERIFY_SQL)" 2>&1 || \
+		$(BEELINE) -u "$(BEELINE_URL)" -n hive < "$(S3_VERIFY_SQL)" 2>&1 || \
 		{ echo "ERROR: CB->Hive verification failed"; exit 1; }; \
 	else \
 		echo "ERROR: Verify SQL not found at $(S3_VERIFY_SQL)"; exit 1; \
