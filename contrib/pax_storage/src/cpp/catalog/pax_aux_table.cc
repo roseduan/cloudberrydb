@@ -90,11 +90,10 @@ void CPaxCreateMicroPartitionTable(Relation rel) {
 
   // 1. create blocks table.
   //
-  // The aux relation lives in pg_ext_aux regardless of whether the
-  // parent is PERMANENT, UNLOGGED, or TEMP.  Persistence is
-  // propagated from the parent so the TOAST helper can route the
-  // TOAST companion + index correctly (pg_toast for permanent /
-  // unlogged, pg_toast_temp_<N> for temp).
+  // The aux relation always lives in pg_ext_aux, regardless of the
+  // parent's persistence.  See the persistence selection comment on
+  // the heap_create_with_catalog call below for why TEMP parents'
+  // aux is clamped to PERMANENT rather than passed through.
   snprintf(aux_relname, sizeof(aux_relname), "pg_pax_blocks_%u", pax_relid);
   aux_namespace_id = PG_EXTAUX_NAMESPACE;
   aux_relid = GetNewOidForRelation(pg_class_desc, ClassOidIndexId,
@@ -128,16 +127,25 @@ void CPaxCreateMicroPartitionTable(Relation rel) {
   }
 
   /*
-   * Aux inherits the parent's persistence (PERMANENT / UNLOGGED / TEMP).
-   * The aux relation itself always lives in pg_ext_aux; only its TOAST
-   * helper looks at persistence to decide whether to route into
-   * pg_toast (permanent / unlogged) or pg_toast_temp_<N> (temp).
+   * Aux inherits the parent's persistence for PERMANENT / UNLOGGED.
+   * TEMP is clamped down to PERMANENT: the aux lives in pg_ext_aux
+   * (NOT in pg_temp_<N>), so a TEMP-persistence row there would
+   * mis-trigger RELATION_IS_OTHER_TEMP — relcache sets
+   * rd_islocaltemp=false because pg_ext_aux is not a temp namespace,
+   * and any reindex_index() path on the aux (or anything that walks
+   * the catalog and stumbles on it) bails with "cannot reindex
+   * temporary tables of other sessions".  Clamping to PERMANENT
+   * avoids that mis-classification; the trade-off is that the aux
+   * of a TEMP PAX table outlives the session (already a known
+   * limitation — see the long-standing FIXME further up the file).
    */
   relid = heap_create_with_catalog(
       aux_relname, aux_namespace_id, InvalidOid, aux_relid, InvalidOid,
       InvalidOid, rel->rd_rel->relowner, HEAP_TABLE_AM_OID, tupdesc, NIL,
       RELKIND_RELATION,
-      rel->rd_rel->relpersistence,
+      rel->rd_rel->relpersistence == RELPERSISTENCE_TEMP
+          ? RELPERSISTENCE_PERMANENT
+          : rel->rd_rel->relpersistence,
       rel->rd_rel->relisshared, RelationIsMapped(rel), ONCOMMIT_NOOP,
       NULL,                         /* GP Policy */
       (Datum)0, false,              /* use _user_acl */

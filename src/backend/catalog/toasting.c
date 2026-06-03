@@ -168,18 +168,14 @@ create_toast_table(Relation rel, Oid toastOid, Oid toastIndexOid,
 	 * Toast tables for regular relations go in pg_toast; those for temp
 	 * relations go into the per-backend temp-toast-table namespace.
 	 *
-	 * The check has two arms because a TEMP relation can in principle
-	 * live outside a temp namespace.  In particular: PAX aux tables
-	 * (pg_pax_blocks_<oid>) always live in pg_ext_aux, but they
-	 * inherit their parent PAX table's persistence — including TEMP.
-	 * Without the explicit relpersistence check, the aux's TOAST would
-	 * incorrectly land in pg_toast (permanent), orphaning data after
-	 * the session ends.  By honouring the persistence flag, the
-	 * aux's TOAST goes to pg_toast_temp_<N> just like the parent's
-	 * own TOAST would (matching heap/AO behaviour).
+	 * Cloudberry used to have a third branch here that routed TOAST
+	 * for relations whose parent namespace was pg_ext_aux back into
+	 * pg_ext_aux too — this was inconsistent with how every other
+	 * Cloudberry / Postgres relation handles toasting.  Treat
+	 * pg_ext_aux parents like any other regular schema; their TOAST
+	 * lands in pg_toast.
 	 */
-	if (isTempOrTempToastNamespace(rel->rd_rel->relnamespace) ||
-		rel->rd_rel->relpersistence == RELPERSISTENCE_TEMP)
+	if (isTempOrTempToastNamespace(rel->rd_rel->relnamespace))
 		namespaceid = GetTempToastNamespace();
 	else
 		namespaceid = PG_TOAST_NAMESPACE;
