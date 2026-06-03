@@ -176,7 +176,7 @@ EXCEPTION WHEN OTHERS THEN
     DROP SERVER IF EXISTS ne_bad_vol_server;
 END $$;
 NOTICE:  server "ne_bad_vol_server" does not exist, skipping
-NOTICE:  Expected error: Failed to create Iceberg table: HTTP Status: 400, CURL Code: 0
+NOTICE:  Expected error: Failed to create Iceberg table: HTTP Status: 500, CURL Code: 0
 NOTICE:  table "ne_bad_vol_table" does not exist, skipping
 NOTICE:  foreign volume "ne_bad_volume" does not exist, skipping
 NOTICE:  server "ne_bad_vol_server" does not exist, skipping

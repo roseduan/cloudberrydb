@@ -205,9 +205,9 @@ DROP TABLE bt_str;
 -- ============================================================
 SELECT test_log('Test 6b: char(N) maps to Iceberg string');
 NOTICE:  [TEST] Test 6b: char(N) maps to Iceberg string
- test_log
+ test_log 
 ----------
-
+ 
 (1 row)
 
 CREATE ICEBERG TABLE bt_char (id bigint, val_c char(5));
@@ -219,7 +219,7 @@ SELECT id, '[' || val_c || ']' AS bracketed,
        length(val_c) AS chars,
        octet_length(val_c) AS bytes
 FROM bt_char ORDER BY id;
- id | bracketed | chars | bytes
+ id | bracketed | chars | bytes 
 ----+-----------+-------+-------
   1 | [A]       |     1 |     1
   2 | [A]       |     1 |     1

@@ -127,24 +127,13 @@ INSERT INTO td_tstz VALUES
     (1, '2024-01-01 00:00:00+00'),
     (2, '2024-06-15 12:30:45+05:30'),
     (3, '2024-12-31 23:59:59-08');
-ERROR:  Type Mismatch: data in val is as define OSS protocol not supported data type. in datalake foreign table, but in parquet not define 
-           Type Mapping Supported
- External Data Type  |  Parquet Data Type 
- --------------------------------------------------------------------
- bool                |  boolean
- int,int2,int4,int8  |  int32, int64
- date                |  int32
- float4,float8       |  float,   double
- interval            |  byteArray
- time                |  byteArray
- timestamp           |  int96, int64, int32
- numeric             |  int96
- char(n),varchar(n)  |  byteArray,  fixlenbyteArray
- bytea,text          |  byteArray,  fixlenbyteArray (parquetFileWriter.cpp:745)  (seg0 172.20.0.2:7002 pid=243664) (parquetFileWriter.cpp:745)
 SELECT * FROM td_tstz ORDER BY id;
- id | val 
-----+-----
-(0 rows)
+ id |          val           
+----+------------------------
+  1 | 2023-12-31 16:00:00-08
+  2 | 2024-06-15 00:00:45-07
+  3 | 2024-12-31 23:59:59-08
+(3 rows)
 
 DROP TABLE td_tstz;
 -- ============================================================

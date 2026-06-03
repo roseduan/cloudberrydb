@@ -7,11 +7,13 @@ AUTOMATION_DIR = $(shell cd ../../.. && pwd)
 S3_PREPARE_SQL = $(AUTOMATION_DIR)/prepare/prepare_s3/s3_smoke.sql
 S3_VERIFY_SQL = $(AUTOMATION_DIR)/prepare/prepare_s3/s3_verify_cb_write.sql
 
-# Hive/Hadoop environment for beeline.  The automation framework downloads
-# a beeline wrapper into tools/bin as part of `make install-tools`; prefer
-# that so the smoke suite does not depend on a system-wide Hive install
-# under /workspace/share.
-BEELINE ?= $(AUTOMATION_DIR)/tools/bin/beeline
+# Hive beeline.  Default: shell out into the hiveserver2 container's own
+# beeline (matches what services/datalake-test-env.yml ships and what the
+# .gitlab-ci.yml prep step uses).  This avoids depending on a local
+# hadoop / hive install (the tools/bin/beeline wrapper requires HADOOP_HOME
+# which neither the dev container nor the CI runner has set up).  Override
+# with `make BEELINE=...` if you really need a different path.
+BEELINE ?= docker exec -i hiveserver2 /opt/hive/bin/beeline
 BEELINE_URL = jdbc:hive2://hiveserver2:10000/default
 
 # MinIO endpoint (path-style, non-TLS)

@@ -160,7 +160,7 @@ EXCEPTION WHEN OTHERS THEN
     DROP SERVER IF EXISTS ne_bad_server;
 END $$;
 NOTICE:  server "ne_bad_server" does not exist, skipping
-NOTICE:  Expected error: failed to list directory: failed to list directory: "test/" GopherIOException: [FileSystem::getListObjects] oss list objects failed, error message [LIBOSS2] Reach the Retry limit, operation failed!. (fileSystemWrapper.cpp:157)  (seg1 slice1 172.20.0.2:7003 pid=245150)
+NOTICE:  Expected error: failed to list directory: failed to list directory: "test/" GopherIOException: [FileSystem::getListObjects] oss list objects failed, error message [LIBOSS2] Reach the Retry limit, operation failed!. (fileSystemWrapper.cpp:157)  (seg2 slice1 172.18.0.10:7004 pid=9083)
 NOTICE:  foreign table "ne_badhost" does not exist, skipping
 NOTICE:  server "ne_bad_server" does not exist, skipping
 NOTICE:  server "ne_bad_server" does not exist, skipping
@@ -185,7 +185,7 @@ EXCEPTION WHEN OTHERS THEN
     RAISE NOTICE 'Expected error: %', SQLERRM;
     DROP FOREIGN TABLE IF EXISTS ne_badfmt;
 END $$;
-NOTICE:  Expected error: invalid foreign format option "invalid_format". datalake support csv, text, custom, parquet, orc, avro, iceberg, hudi.  (seg1 172.20.0.2:7003 pid=245150)
+NOTICE:  Expected error: invalid foreign format option "invalid_format". datalake support csv, text, custom, parquet, orc, avro, iceberg, hudi.  (seg1 172.18.0.10:7003 pid=9082)
 NOTICE:  foreign table "ne_badfmt" does not exist, skipping
 -- ============================================================
 -- Test 6: Empty directory scan

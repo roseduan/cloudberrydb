@@ -168,39 +168,29 @@ INSERT INTO dt_alltypes VALUES (
     'hello world', 'varchar value',
     '2024-06-15', '2024-06-15 12:30:00', '2024-06-15 12:30:00+00'
 );
-ERROR:  Type Mismatch: data in col_tstz is as define OSS protocol not supported data type. in datalake foreign table, but in parquet not define 
-           Type Mapping Supported
- External Data Type  |  Parquet Data Type 
- --------------------------------------------------------------------
- bool                |  boolean
- int,int2,int4,int8  |  int32, int64
- date                |  int32
- float4,float8       |  float,   double
- interval            |  byteArray
- time                |  byteArray
- timestamp           |  int96, int64, int32
- numeric             |  int96
- char(n),varchar(n)  |  byteArray,  fixlenbyteArray
- bytea,text          |  byteArray,  fixlenbyteArray (parquetFileWriter.cpp:745)  (seg2 172.20.0.2:7004 pid=255454) (parquetFileWriter.cpp:745)
 SELECT col_bool, col_small, col_int, col_big FROM dt_alltypes;
- col_bool | col_small | col_int | col_big 
-----------+-----------+---------+---------
-(0 rows)
+ col_bool | col_small |  col_int   |       col_big       
+----------+-----------+------------+---------------------
+ t        |     32767 | 2147483647 | 9223372036854775807
+(1 row)
 
 SELECT col_real, col_double, col_decimal FROM dt_alltypes;
- col_real | col_double | col_decimal 
-----------+------------+-------------
-(0 rows)
+ col_real | col_double  | col_decimal 
+----------+-------------+-------------
+     3.14 | 2.718281828 |    12345.67
+(1 row)
 
 SELECT col_text, col_varchar FROM dt_alltypes;
- col_text | col_varchar 
-----------+-------------
-(0 rows)
+  col_text   |  col_varchar  
+-------------+---------------
+ hello world | varchar value
+(1 row)
 
 SELECT col_date, col_ts, col_tstz FROM dt_alltypes;
- col_date | col_ts | col_tstz 
-----------+--------+----------
-(0 rows)
+  col_date  |       col_ts        |        col_tstz        
+------------+---------------------+------------------------
+ 2024-06-15 | 2024-06-15 12:30:00 | 2024-06-15 05:30:00-07
+(1 row)
 
 DROP TABLE dt_alltypes;
 -- ============================================================
