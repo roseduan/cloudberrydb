@@ -10,9 +10,9 @@ SELECT test_log('Feature Test: FDW Format Reads');
 -- ============================================================
 DROP SERVER IF EXISTS fr_server CASCADE;
 CREATE SERVER fr_server FOREIGN DATA WRAPPER datalake_fdw
-OPTIONS (host 'lakehouse:9100', protocol 's3', isvirtual 'false', ishttps 'false');
+OPTIONS (host 'minio:9000', protocol 's3', isvirtual 'false', ishttps 'false');
 CREATE USER MAPPING FOR gpadmin SERVER fr_server
-OPTIONS (user 'gpadmin', accesskey 'admin', secretkey 'password');
+OPTIONS (user 'gpadmin', accesskey 'admin', secretkey 'admin12345');
 
 -- ============================================================
 -- Test 1: Parquet write + read roundtrip

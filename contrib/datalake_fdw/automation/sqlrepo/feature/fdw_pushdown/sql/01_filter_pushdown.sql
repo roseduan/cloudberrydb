@@ -10,9 +10,9 @@ SELECT test_log('Feature Test: FDW Filter Pushdown');
 -- ============================================================
 DROP SERVER IF EXISTS fp_server CASCADE;
 CREATE SERVER fp_server FOREIGN DATA WRAPPER datalake_fdw
-OPTIONS (host 'lakehouse:9100', protocol 's3', isvirtual 'false', ishttps 'false');
+OPTIONS (host 'minio:9000', protocol 's3', isvirtual 'false', ishttps 'false');
 CREATE USER MAPPING FOR gpadmin SERVER fp_server
-OPTIONS (user 'gpadmin', accesskey 'admin', secretkey 'password');
+OPTIONS (user 'gpadmin', accesskey 'admin', secretkey 'admin12345');
 
 -- Write 1000 rows of test data
 CREATE FOREIGN TABLE fp_data_w (

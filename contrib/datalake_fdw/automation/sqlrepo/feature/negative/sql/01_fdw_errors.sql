@@ -10,9 +10,9 @@ SELECT test_log('Feature Test: FDW Error Paths');
 -- ============================================================
 DROP SERVER IF EXISTS ne_server CASCADE;
 CREATE SERVER ne_server FOREIGN DATA WRAPPER datalake_fdw
-OPTIONS (host 'lakehouse:9100', protocol 's3', isvirtual 'false', ishttps 'false');
+OPTIONS (host 'minio:9000', protocol 's3', isvirtual 'false', ishttps 'false');
 CREATE USER MAPPING FOR gpadmin SERVER ne_server
-OPTIONS (user 'gpadmin', accesskey 'admin', secretkey 'password');
+OPTIONS (user 'gpadmin', accesskey 'admin', secretkey 'admin12345');
 
 -- Write valid ORC data for format mismatch test
 CREATE FOREIGN TABLE ne_orc_w (id int, name text)
@@ -83,7 +83,7 @@ BEGIN
     CREATE SERVER ne_bad_server FOREIGN DATA WRAPPER datalake_fdw
     OPTIONS (host 'invalid_host:9999', protocol 's3', isvirtual 'false', ishttps 'false');
     CREATE USER MAPPING FOR gpadmin SERVER ne_bad_server
-    OPTIONS (user 'gpadmin', accesskey 'admin', secretkey 'password');
+    OPTIONS (user 'gpadmin', accesskey 'admin', secretkey 'admin12345');
     CREATE FOREIGN TABLE ne_badhost (id int)
     SERVER ne_bad_server
     OPTIONS (filePath '/warehouse/test/', format 'parquet');

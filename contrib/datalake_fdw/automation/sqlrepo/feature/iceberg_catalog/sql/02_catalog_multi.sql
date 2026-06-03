@@ -16,10 +16,10 @@ CREATE USER MAPPING FOR current_user SERVER cm_cat_a_server;
 CREATE FOREIGN CATALOG cm_catalog_a SERVER cm_cat_a_server;
 
 CREATE SERVER cm_vol_a_server FOREIGN DATA WRAPPER iceberg_volume_fdw
-OPTIONS (type 's3', endpoint 'http://lakehouse:9100', region 'us-east-1',
+OPTIONS (type 's3', endpoint 'http://minio:9000', region 'us-east-1',
          bucket_name 'warehouse', path_style_access 'true');
 CREATE USER MAPPING FOR current_user SERVER cm_vol_a_server
-OPTIONS (access_key_id 'admin', secret_access_key 'password');
+OPTIONS (access_key_id 'admin', secret_access_key 'admin12345');
 CREATE FOREIGN VOLUME cm_volume_a SERVER cm_vol_a_server OPTIONS(base_path '/cm_vol_a/');
 
 -- Catalog B
@@ -28,10 +28,10 @@ CREATE USER MAPPING FOR current_user SERVER cm_cat_b_server;
 CREATE FOREIGN CATALOG cm_catalog_b SERVER cm_cat_b_server;
 
 CREATE SERVER cm_vol_b_server FOREIGN DATA WRAPPER iceberg_volume_fdw
-OPTIONS (type 's3', endpoint 'http://lakehouse:9100', region 'us-east-1',
+OPTIONS (type 's3', endpoint 'http://minio:9000', region 'us-east-1',
          bucket_name 'warehouse', path_style_access 'true');
 CREATE USER MAPPING FOR current_user SERVER cm_vol_b_server
-OPTIONS (access_key_id 'admin', secret_access_key 'password');
+OPTIONS (access_key_id 'admin', secret_access_key 'admin12345');
 CREATE FOREIGN VOLUME cm_volume_b SERVER cm_vol_b_server OPTIONS(base_path '/cm_vol_b/');
 
 -- ============================================================

@@ -10,9 +10,9 @@ SELECT test_log('Feature Test: FDW Advanced Pushdown');
 -- ============================================================
 DROP SERVER IF EXISTS ap_server CASCADE;
 CREATE SERVER ap_server FOREIGN DATA WRAPPER datalake_fdw
-OPTIONS (host 'lakehouse:9100', protocol 's3', isvirtual 'false', ishttps 'false');
+OPTIONS (host 'minio:9000', protocol 's3', isvirtual 'false', ishttps 'false');
 CREATE USER MAPPING FOR gpadmin SERVER ap_server
-OPTIONS (user 'gpadmin', accesskey 'admin', secretkey 'password');
+OPTIONS (user 'gpadmin', accesskey 'admin', secretkey 'admin12345');
 
 CREATE FOREIGN TABLE ap_data_w (
     id int, big_id bigint, amount decimal(10,2), val_r real,

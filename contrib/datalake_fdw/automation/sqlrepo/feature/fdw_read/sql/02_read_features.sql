@@ -10,9 +10,9 @@ SELECT test_log('Feature Test: FDW Read Features');
 -- ============================================================
 DROP SERVER IF EXISTS rf_server CASCADE;
 CREATE SERVER rf_server FOREIGN DATA WRAPPER datalake_fdw
-OPTIONS (host 'lakehouse:9100', protocol 's3', isvirtual 'false', ishttps 'false');
+OPTIONS (host 'minio:9000', protocol 's3', isvirtual 'false', ishttps 'false');
 CREATE USER MAPPING FOR gpadmin SERVER rf_server
-OPTIONS (user 'gpadmin', accesskey 'admin', secretkey 'password');
+OPTIONS (user 'gpadmin', accesskey 'admin', secretkey 'admin12345');
 
 -- Write base data for projection and filter tests
 CREATE FOREIGN TABLE rf_base_w (id int, name text, amount decimal(10,2), category int, flag boolean)

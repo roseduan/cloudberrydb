@@ -10,7 +10,7 @@ SELECT test_log('Feature Test: Hudi Basic Reads');
 -- ============================================================
 DROP SERVER IF EXISTS hudi_ft_server CASCADE;
 CREATE SERVER hudi_ft_server FOREIGN DATA WRAPPER datalake_fdw
-OPTIONS (hdfs_namenodes 'lakehouse', hdfs_port '8020', protocol 'hdfs',
+OPTIONS (hdfs_namenodes 'hadoop', hdfs_port '8020', protocol 'hdfs',
          hdfs_auth_method 'simple', hadoop_rpc_protection 'authentication');
 CREATE USER MAPPING FOR gpadmin SERVER hudi_ft_server OPTIONS (user 'gpadmin');
 
