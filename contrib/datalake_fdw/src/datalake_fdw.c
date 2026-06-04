@@ -22,10 +22,14 @@
 #include "access/formatter.h"
 #include "access/reloptions.h"
 #include "access/table.h"
+#include "access/tableam.h"
+#include "access/heapam.h"
 #include "access/detoast.h"
 #include "tcop/tcopprot.h"
 #include "cdb/cdbsreh.h"
 #include "cdb/cdbvars.h"
+#include "cdb/cdbdisp_query.h"
+#include "utils/builtins.h"
 #include "cdb/cdbsrlz.h"
 #include "cdb/cdbdisp.h"
 #include "commands/copy.h"
@@ -76,6 +80,7 @@
 #include "am_iceberg/include/pg_iceberg_extensible.h"
 #include "am_iceberg/include/pg_iceberg_custom_scan.h"
 #include "am_iceberg/include/pg_iceberg_am.h"
+#include "common/base64.h"
 
 
 PG_MODULE_MAGIC;
@@ -218,6 +223,17 @@ int icebergPostionDeletesThreshold;
 int hudiLogMergerThreshold;
 double hudiLogSizeScaleFactor;
 int external_table_limit_segment_num;
+/*
+ * Issue #352: internal QD->QE transport for Iceberg ANALYZE sampling.
+ * Hidden GUC carrying a "relid|base64(fragments);..." map.  The datalake agent
+ * runs only on the QD (datalake_proxy starts it under GP_ROLE_DISPATCH), so a
+ * QE has no local agent to enumerate fragments against; the QD therefore
+ * expands the fragment list here and ships it whole (base64 so the JSON payload
+ * cannot collide with the '|'/';' delimiters).  Not user-settable; see
+ * datalake.enable_iceberg_analyze_sampling for the user-facing on/off switch.
+ */
+char *analyze_iceberg_meta = NULL;
+bool enable_iceberg_analyze_sampling = true;
 bool enable_list_in_master;
 char *datalake_agent_server_url = NULL;
 bool skip_create_polaris_catalog;
@@ -307,6 +323,29 @@ _PG_init(void)
 							1.3,
 							1,
 							10,
+							PGC_USERSET,
+							0,
+							NULL,
+							NULL,
+							NULL);
+
+	DefineCustomStringVariable("datalake.analyze_iceberg_meta",
+							"Internal QD->QE transport for Iceberg ANALYZE sampling (issue #352). Do not set manually.",
+							NULL,
+							&analyze_iceberg_meta,
+							"",
+							PGC_USERSET,
+							/* synced to QEs; hidden so it isn't a user-facing knob */
+							GUC_GPDB_NEED_SYNC | GUC_NO_SHOW_ALL | GUC_DISALLOW_IN_FILE,
+							NULL,
+							NULL,
+							NULL);
+
+	DefineCustomBoolVariable("datalake.enable_iceberg_analyze_sampling",
+							"Collect per-column statistics for Iceberg tables by sampling during ANALYZE (issue #352). When off, ANALYZE only refreshes pg_class.reltuples/relpages from metadata.",
+							NULL,
+							&enable_iceberg_analyze_sampling,
+							true,
 							PGC_USERSET,
 							0,
 							NULL,
@@ -418,47 +457,69 @@ _PG_init(void)
 }
 
 /*
- * Return true iff rels is non-empty and every VacuumRelation in it resolves
- * to an existing relation whose access method is the Iceberg table AM.
- * Used to short-circuit ANALYZE against Iceberg tables in the plugin
- * instead of letting the kernel dispatch pg_relation_size() to QEs.
+ * Collect the OIDs of Iceberg-AM relations targeted by an ANALYZE (issue #352).
+ *
+ * Handles an explicit or mixed rel list (filtering to the Iceberg ones) as
+ * well as a database-wide ANALYZE (rels == NIL), where every Iceberg table in
+ * the database is returned by scanning pg_class.  Non-Iceberg rels are ignored;
+ * they take the standard ANALYZE path.  Caller frees the returned list.
  */
-static bool
-all_vacuum_rels_are_iceberg(List *rels)
+static List *
+collect_iceberg_analyze_relids(List *rels)
 {
-	ListCell   *lc;
+	List	   *result = NIL;
 
 	if (rels == NIL)
-		return false;
-
-	foreach(lc, rels)
 	{
-		VacuumRelation *vrel = lfirst_node(VacuumRelation, lc);
-		Oid			relid;
-		HeapTuple	tup;
-		bool		is_iceberg;
+		/* Database-wide ANALYZE: find every Iceberg table via pg_class. */
+		Relation		pgclass;
+		TableScanDesc	scan;
+		HeapTuple		tup;
 
-		if (OidIsValid(vrel->oid))
-			relid = vrel->oid;
-		else if (vrel->relation != NULL)
-			relid = RangeVarGetRelid(vrel->relation, NoLock, true);
-		else
-			return false;
+		pgclass = table_open(RelationRelationId, AccessShareLock);
+		scan = table_beginscan_catalog(pgclass, 0, NULL);
+		while ((tup = heap_getnext(scan, ForwardScanDirection)) != NULL)
+		{
+			Form_pg_class classform = (Form_pg_class) GETSTRUCT(tup);
 
-		if (!OidIsValid(relid))
-			return false;
-
-		tup = SearchSysCache1(RELOID, ObjectIdGetDatum(relid));
-		if (!HeapTupleIsValid(tup))
-			return false;
-
-		is_iceberg = (((Form_pg_class) GETSTRUCT(tup))->relam == ICEBERG_AM_OID);
-		ReleaseSysCache(tup);
-
-		if (!is_iceberg)
-			return false;
+			if (classform->relam == ICEBERG_AM_OID &&
+				classform->relkind == RELKIND_RELATION)
+				result = lappend_oid(result, classform->oid);
+		}
+		table_endscan(scan);
+		table_close(pgclass, AccessShareLock);
 	}
-	return true;
+	else
+	{
+		ListCell   *lc;
+
+		foreach(lc, rels)
+		{
+			VacuumRelation *vrel = lfirst_node(VacuumRelation, lc);
+			Oid			relid;
+			HeapTuple	tup;
+			bool		is_iceberg;
+
+			if (OidIsValid(vrel->oid))
+				relid = vrel->oid;
+			else if (vrel->relation != NULL)
+				relid = RangeVarGetRelid(vrel->relation, NoLock, true);
+			else
+				continue;
+			if (!OidIsValid(relid))
+				continue;
+
+			tup = SearchSysCache1(RELOID, ObjectIdGetDatum(relid));
+			if (!HeapTupleIsValid(tup))
+				continue;
+			is_iceberg = (((Form_pg_class) GETSTRUCT(tup))->relam == ICEBERG_AM_OID);
+			ReleaseSysCache(tup);
+
+			if (is_iceberg)
+				result = lappend_oid(result, relid);
+		}
+	}
+	return result;
 }
 
 /*
@@ -571,49 +632,139 @@ datalake_ProcessUtility(PlannedStmt *pstmt,
 			 *
 			 * See hashdata-lightning issue #339.
 			 */
-			if (Gp_role == GP_ROLE_DISPATCH &&
-				!vacstmt->is_vacuumcmd &&
-				all_vacuum_rels_are_iceberg(vacstmt->rels))
+			if (Gp_role == GP_ROLE_DISPATCH && !vacstmt->is_vacuumcmd)
 			{
+				List	   *ice_relids = collect_iceberg_analyze_relids(vacstmt->rels);
+				bool		only_iceberg = (vacstmt->rels != NIL &&
+											list_length(ice_relids) == list_length(vacstmt->rels));
 				ListCell   *lc;
+				StringInfoData map;
 
-				foreach(lc, vacstmt->rels)
+				/* No Iceberg tables involved: plain standard ANALYZE. */
+				if (ice_relids == NIL)
+					break;
+
+				initStringInfo(&map);
+
+				/*
+				 * Refresh pg_class.reltuples/relpages for every Iceberg rel
+				 * from catalog metadata (issue #339), and -- when sampling is
+				 * enabled -- record relid|metadata_location|is_internal so the
+				 * QE side can enumerate fragments via the agent (the Iceberg
+				 * metadata catalog rows are QD-only).  Covers explicit, mixed,
+				 * and database-wide (rels == NIL) ANALYZE.
+				 */
+				foreach(lc, ice_relids)
 				{
-					VacuumRelation *vrel = lfirst_node(VacuumRelation, lc);
-					Oid			relid;
+					Oid			relid = lfirst_oid(lc);
 					Relation	rel;
 
-					if (OidIsValid(vrel->oid))
-						relid = vrel->oid;
-					else if (vrel->relation != NULL)
-						/*
-						 * Resolve the OID without taking a lock here.  The
-						 * subsequent table_open() is the sole acquirer of
-						 * ShareUpdateExclusiveLock; passing the lockmode to
-						 * RangeVarGetRelid would acquire it a second time
-						 * via LockRelationOid, and table_close() would only
-						 * release one hold -- leaking the extra lock until
-						 * transaction end.  This matches analyze.c's
-						 * expand_vacuum_rel() pattern.
-						 */
-						relid = RangeVarGetRelid(vrel->relation,
-												 NoLock,
-												 true);
-					else
+					/*
+					 * try_table_open returns NULL if the relation was dropped
+					 * concurrently (possible during a database-wide ANALYZE
+					 * that enumerated tables from pg_class) -- skip it instead
+					 * of failing the whole statement.
+					 */
+					rel = try_table_open(relid, ShareUpdateExclusiveLock, false);
+					if (rel == NULL)
 						continue;
 
-					if (!OidIsValid(relid))
+					/*
+					 * Honor ANALYZE privileges: never refresh/lock or ship the
+					 * metadata of a table the caller may not analyze.  The
+					 * kernel skips such tables for a database-wide ANALYZE too,
+					 * so this keeps the pre-pass consistent and avoids touching
+					 * other owners' tables.
+					 */
+					if (!pg_class_ownercheck(relid, GetUserId()))
+					{
+						table_close(rel, ShareUpdateExclusiveLock);
 						continue;
+					}
 
-					rel = table_open(relid, ShareUpdateExclusiveLock);
 					pg_iceberg_refresh_pg_class_stats(rel);
+
+					if (enable_iceberg_analyze_sampling)
+					{
+						IcebergMetadataInfo *mi = pg_iceberg_get_metadata_info(relid);
+						IcebergTableInfo *ti = pg_iceberg_get_table_info(relid);
+						char	   *fragments;
+						char	   *frag_b64;
+						int			raw_len;
+						int			enc_buf;
+						int			enc_len;
+
+						/*
+						 * Enumerate the fragment list HERE on the QD: the
+						 * datalake agent is QD-only, so a QE cannot expand it
+						 * (would fail with CURL code 7).  Ship the expanded
+						 * list, base64-encoded, instead of just the location.
+						 */
+						fragments = pg_iceberg_get_fragments_with_catalog(
+											rel, ti, mi->metadata_location,
+											mi->is_internal, NULL);
+						raw_len = strlen(fragments);
+						enc_buf = pg_b64_enc_len(raw_len);
+						frag_b64 = palloc(enc_buf + 1);
+						enc_len = pg_b64_encode(fragments, raw_len,
+												frag_b64, enc_buf);
+						frag_b64[enc_len] = '\0';
+
+						if (map.len > 0)
+							appendStringInfoChar(&map, ';');
+						appendStringInfo(&map, "%u|%s", relid, frag_b64);
+
+						pfree(frag_b64);
+						pfree(fragments);
+						pg_iceberg_free_table_info(ti);
+						pg_iceberg_free_metadata_info(mi);
+					}
+
 					table_close(rel, ShareUpdateExclusiveLock);
 				}
 
 				ereport(NOTICE,
-						(errmsg("ANALYZE on Iceberg tables refreshed pg_class.reltuples/relpages from Iceberg catalog metadata"),
-						 errhint("Column-level statistics live in the Iceberg manifests and are consulted via tableam callbacks.")));
-				return;
+						(errmsg("ANALYZE on Iceberg tables refreshed pg_class.reltuples/relpages from Iceberg catalog metadata")));
+
+				if (!enable_iceberg_analyze_sampling)
+				{
+					/*
+					 * Sampling off: metadata-only refresh.  Short-circuit only
+					 * when every target is Iceberg (issue #339 behavior); for a
+					 * mixed or database-wide list, fall through so non-Iceberg
+					 * rels still get analyzed -- the Iceberg rels are skipped by
+					 * pg_iceberg_acquire_sample_rows (no map was shipped).
+					 */
+					pfree(map.data);
+					list_free(ice_relids);
+					if (only_iceberg)
+						return;
+					break;
+				}
+
+				/*
+				 * Issue #352: ship the relid->metadata_location map to the QEs,
+				 * then fall through to standard ANALYZE.  do_analyze_rel then
+				 * dispatches per-row sampling (gp_acquire_sample_rows) to the
+				 * QEs, which read this hidden GUC to enumerate fragments and
+				 * populate pg_statistic.  SetConfigOption seeds gangs created
+				 * afterwards; CdbDispatchSetCommand pushes to existing gangs.
+				 */
+				SetConfigOption("datalake.analyze_iceberg_meta", map.data,
+								PGC_USERSET, PGC_S_SESSION);
+				{
+					StringInfoData setcmd;
+
+					initStringInfo(&setcmd);
+					appendStringInfo(&setcmd,
+									 "SET datalake.analyze_iceberg_meta TO %s",
+									 quote_literal_cstr(map.data));
+					CdbDispatchSetCommand(setcmd.data, false);
+					pfree(setcmd.data);
+				}
+				pfree(map.data);
+				list_free(ice_relids);
+				/* fall through to standard ANALYZE */
 			}
 			break;
 		}

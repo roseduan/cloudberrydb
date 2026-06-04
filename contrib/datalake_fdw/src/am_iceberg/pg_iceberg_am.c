@@ -23,6 +23,7 @@
 #include "utils/guc.h"
 #include "utils/guc_tables.h"
 #include "utils/sampling.h"
+#include "common/base64.h"
 #include "miscadmin.h"
 #include "lib/stringinfo.h"
 #include "utils/memutils.h"
@@ -38,6 +39,7 @@
 #include "catalog/pg_operator.h"
 #include "catalog/pg_am.h"
 #include "executor/executor.h"
+#include "access/htup_details.h"
 #include "nodes/plannodes.h"
 #include "cdb/cdbutil.h"
 #include "cdb/cdbvars.h"
@@ -613,32 +615,224 @@ pg_iceberg_resolve_modify_location(Relation rel, CmdType operation)
 	return location;
 }
 
+/* Defined later in this file; reused here as a generic "scan with a
+ * dispatched fragment list" helper for ANALYZE sampling. */
+static TableScanDesc pg_iceberg_begin_vacuum_scan(Relation rel,
+												  List *vacuum_am_private,
+												  CustomScanState **out_scan_state,
+												  CustomScan **out_scan_plan,
+												  TupleTableSlot **out_scan_slot);
+
+/* GUC set by the QD in datalake_ProcessUtility's ANALYZE branch (issue #352). */
+extern char *analyze_iceberg_meta;
+
 /*
- * Iceberg ANALYZE does not run per-row sampling.  The planner obtains its
- * cardinality estimates from pg_iceberg_estimate_rel_size(), which reads
- * recordCount / bytesInDataFile directly from the Iceberg catalog on the
- * QD, so detailed pg_statistic entries for individual columns are not
- * collected here.
+ * Build a scan fragment list on the QE for ANALYZE sampling.  The datalake
+ * agent runs only on the QD, so the QE cannot enumerate fragments itself;
+ * the QD already expanded the list and shipped it (base64-encoded) via
+ * datalake.analyze_iceberg_meta.  Here we just locate this relation's entry,
+ * decode it, and parse it -- no agent contact.  Returns NIL when the GUC is
+ * unset or carries no entry for this relation, so the caller can fall back.
+ */
+static List *
+pg_iceberg_build_sample_am_private(Relation rel)
+{
+	char			   *frag_b64 = NULL;
+	char			   *fragments;
+	List			   *am_private = NIL;
+	Oid					myrelid = RelationGetRelid(rel);
+	char			   *copy;
+	char			   *entry;
+	char			   *saveptr = NULL;
+	int					b64_len;
+	int					dec_buf;
+	int					dec_len;
+
+	if (analyze_iceberg_meta == NULL || analyze_iceberg_meta[0] == '\0')
+		return NIL;
+
+	/* Find this relation's entry in the "relid|base64(fragments);..." map. */
+	copy = pstrdup(analyze_iceberg_meta);
+	for (entry = strtok_r(copy, ";", &saveptr);
+		 entry != NULL;
+		 entry = strtok_r(NULL, ";", &saveptr))
+	{
+		char   *sep = strchr(entry, '|');
+
+		if (sep == NULL)
+			continue;
+		if ((Oid) strtoul(entry, NULL, 10) != myrelid)
+			continue;
+
+		frag_b64 = pstrdup(sep + 1);
+		break;
+	}
+	pfree(copy);
+
+	if (frag_b64 == NULL)
+		return NIL;		/* no map entry for this relation */
+
+	/* Decode the fragment list the QD expanded for us. */
+	b64_len = strlen(frag_b64);
+	dec_buf = pg_b64_dec_len(b64_len);
+	fragments = palloc(dec_buf + 1);
+	dec_len = pg_b64_decode(frag_b64, b64_len, fragments, dec_buf);
+	fragments[dec_len] = '\0';
+
+	am_private = parseIcebergFragmentResponse(fragments, dec_len);
+	am_private = list_concat(am_private,
+							 datalakeSelectRandomSegments(getgpsegmentCount(),
+														  getgpsegmentCount()));
+
+	pfree(fragments);
+	pfree(frag_b64);
+
+	return am_private;
+}
+
+/*
+ * pg_iceberg_acquire_sample_rows
  *
- * datalake_ProcessUtility short-circuits ANALYZE on Iceberg relations before
- * it reaches do_analyze_rel, so this callback is effectively unreachable for
- * plain ANALYZE statements.  It is retained as a defensive no-op in case a
- * partitioned parent's ANALYZE path drags an Iceberg partition into the
- * kernel sampler.
+ * relation_acquire_sample_rows() implementation for the Iceberg AM (issue
+ * #352).  Runs on each QE under the kernel's gp_acquire_sample_rows dispatch.
+ *
+ * We build this scan's fragment list from the metadata_location the QD shipped
+ * (pg_iceberg_build_sample_am_private), scan the segment-local fragments, and
+ * Vitter-reservoir-sample up to targrows rows (same algorithm as
+ * acquire_sample_rows() in analyze.c).  The kernel then computes real
+ * per-column statistics (NDV/MCV/histogram) from the sample.
+ *
+ * This used to be a no-op: ANALYZE only refreshed pg_class.reltuples from
+ * metadata and never populated pg_statistic, which left ORCA without column
+ * selectivity and produced catastrophic join orders on low-cardinality
+ * predicates (e.g. TPC-DS Q24 c_birth_country = upper(ca_country)).
  */
 int
 pg_iceberg_acquire_sample_rows(Relation relation, int elevel,
 							   HeapTuple *rows, int targrows,
 							   double *totalrows, double *totaldeadrows)
 {
+	List			   *am_private;
+	TableScanDesc		scan_desc;
+	CustomScanState	   *scan_state = NULL;
+	CustomScan		   *scan_plan = NULL;
+	TupleTableSlot	   *slot = NULL;
+	int					numrows = 0;
+	double				samplerows = 0;
+	double				rowstoskip = -1;	/* -1 means not set yet */
+	ReservoirStateData	rstate;
+	MemoryContext		anl_cxt = CurrentMemoryContext;
+	MemoryContext		temp_cxt;
+
+	Assert(targrows > 0);
+
 	*totalrows = 0;
 	*totaldeadrows = 0;
 
-	ereport(elevel,
-			(errmsg("\"%s\": iceberg ANALYZE skips per-row sampling; stats come from metadata",
-					RelationGetRelationName(relation))));
+	/*
+	 * Build this scan's fragment list (+ segment-selection trailer) from the
+	 * Iceberg catalog, exactly as the executor does for a normal scan.  The
+	 * trailer plus GpIdentity.segindex makes each QE read only its own share.
+	 */
+	am_private = pg_iceberg_build_sample_am_private(relation);
+	if (am_private == NIL)
+	{
+		/*
+		 * No metadata_location was shipped for this relation: ANALYZE sampling
+		 * is disabled, or this analyze did not pass through
+		 * datalake_ProcessUtility (e.g. gp_autostats issues ExecVacuum
+		 * directly).  The QE cannot read the QD-only Iceberg metadata catalog,
+		 * so skip sampling rather than erroring.  Best-effort: return this
+		 * segment's reltuples if it happens to be set (it usually is not on a
+		 * QE, since the refresh runs only on the QD), so we at least avoid
+		 * making things worse than the pre-#352 no-op.  Run a plain
+		 * ANALYZE <table> to actually collect column statistics.
+		 */
+		double		cur = relation->rd_rel->reltuples;
 
-	return 0;
+		*totalrows = (cur > 0) ? cur : 0;
+		*totaldeadrows = 0;
+		ereport(elevel,
+				(errmsg("\"%s\": iceberg ANALYZE skipped per-row sampling; no metadata location shipped to this segment",
+						RelationGetRelationName(relation))));
+		return 0;
+	}
+
+	scan_desc = pg_iceberg_begin_vacuum_scan(relation, am_private,
+											 &scan_state, &scan_plan, &slot);
+
+	reservoir_init_selection_state(&rstate, targrows);
+
+	temp_cxt = AllocSetContextCreate(CurrentMemoryContext,
+									 "iceberg analyze sample",
+									 ALLOCSET_DEFAULT_SIZES);
+
+	while (pg_iceberg_getnextslot(scan_desc, ForwardScanDirection, slot))
+	{
+		MemoryContext	oldcontext;
+		int				pos;
+
+		vacuum_delay_point();
+
+		oldcontext = MemoryContextSwitchTo(temp_cxt);
+
+		samplerows += 1;
+		if (numrows < targrows)
+		{
+			/* First targrows rows are always included into the sample. */
+			pos = numrows++;
+		}
+		else
+		{
+			/* Vitter's algorithm; see acquire_sample_rows() in analyze.c. */
+			if (rowstoskip < 0)
+				rowstoskip = reservoir_get_next_S(&rstate, samplerows, targrows);
+
+			if (rowstoskip <= 0)
+			{
+				pos = (int) (targrows * sampler_random_fract(rstate.randstate));
+				Assert(pos >= 0 && pos < targrows);
+				heap_freetuple(rows[pos]);
+			}
+			else
+				pos = -1;		/* skip this row */
+
+			rowstoskip -= 1;
+		}
+
+		if (pos >= 0)
+		{
+			/* Sample tuples must outlive the scan: copy into the ANALYZE cxt. */
+			MemoryContextSwitchTo(anl_cxt);
+			rows[pos] = ExecCopySlotHeapTuple(slot);
+		}
+
+		MemoryContextSwitchTo(oldcontext);
+		ExecClearTuple(slot);
+		MemoryContextReset(temp_cxt);
+	}
+
+	pg_iceberg_endscan(scan_desc);
+	if (slot)
+		ExecDropSingleTupleTableSlot(slot);
+	if (scan_state)
+		pfree(scan_state);
+	if (scan_plan)
+		pfree(scan_plan);
+	MemoryContextDelete(temp_cxt);
+
+	/*
+	 * We scanned every local row, so samplerows is the exact per-segment live
+	 * row count; the dispatcher sums these across segments for reltuples.
+	 */
+	*totalrows = samplerows;
+	*totaldeadrows = 0;
+
+	ereport(elevel,
+			(errmsg("\"%s\": iceberg ANALYZE scanned %.0f rows, %d rows in sample",
+					RelationGetRelationName(relation), samplerows, numrows)));
+
+	return numrows;
 }
 
 /* --- DML Implementation --- */
