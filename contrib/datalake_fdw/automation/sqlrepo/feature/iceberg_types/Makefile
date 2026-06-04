@@ -3,7 +3,7 @@
 PGXS := $(shell pg_config --pgxs)
 include $(PGXS)
 
-REGRESS = 01_basic_types 02_temporal_decimal
+REGRESS = 01_basic_types 02_temporal_decimal 03_char_types
 
 installcheck:
 	$(pg_regress_installcheck) $(REGRESS)

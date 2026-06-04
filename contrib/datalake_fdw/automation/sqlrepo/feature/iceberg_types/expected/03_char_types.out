@@ -13,10 +13,58 @@
 -- file once against a real catalog/volume (`make installcheck` from this
 -- automation directory).  Hand-authoring it is fragile because the psql
 -- column widths depend on the actual returned bpchar bytes.
-
 \i ../../../lib/sql/common_setup.sql
+-- common_setup.sql
+-- Base setup for all datalake_fdw tests
+-- This file should be included at the beginning of all test SQL files
+-- Create required extensions
+CREATE EXTENSION IF NOT EXISTS datalake_fdw;
+NOTICE:  extension "datalake_fdw" already exists, skipping
+CREATE EXTENSION IF NOT EXISTS hive_connector;
+NOTICE:  extension "hive_connector" already exists, skipping
+-- gp_exttable_delimiter may not be available in all environments.
+-- Silence the "already exists, skipping" NOTICE emitted in CI where the
+-- extension has been created by an earlier test or initdb step.
+SET client_min_messages = WARNING;
+DO $$ BEGIN
+    CREATE EXTENSION IF NOT EXISTS gp_exttable_delimiter;
+EXCEPTION WHEN OTHERS THEN
+    -- Extension not available, skip silently
+END $$;
+RESET client_min_messages;
+-- Create foreign data wrapper if not already present
+-- Note: CREATE FOREIGN DATA WRAPPER does not support IF NOT EXISTS syntax
+DO $$ BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_foreign_data_wrapper WHERE fdwname = 'datalake_fdw') THEN
+        EXECUTE 'CREATE FOREIGN DATA WRAPPER datalake_fdw
+            HANDLER datalake_fdw_handler
+            VALIDATOR datalake_fdw_validator
+            OPTIONS (mpp_execute ''all segments'')';
+    END IF;
+END $$;
+-- Set standard date style for consistent output
+SET datestyle = ISO, MDY;
+-- Create logging utility function
+CREATE OR REPLACE FUNCTION test_log(message text)
+RETURNS void AS $$
+BEGIN
+    RAISE NOTICE '[TEST] %', message;
+END;
+$$ LANGUAGE plpgsql;
+-- Log setup completion
+SELECT test_log('Common setup completed');
+NOTICE:  [TEST] Common setup completed
+ test_log 
+----------
+ 
+(1 row)
 
 SELECT test_log('Feature Test: Iceberg CHAR(N) Full Coverage');
+NOTICE:  [TEST] Feature Test: Iceberg CHAR(N) Full Coverage
+ test_log 
+----------
+ 
+(1 row)
 
 -- ============================================================
 -- Setup: Catalog and volume
@@ -25,7 +73,6 @@ CREATE SERVER ct_catalog_server FOREIGN DATA WRAPPER iceberg_catalog_fdw;
 CREATE USER MAPPING FOR current_user SERVER ct_catalog_server;
 CREATE FOREIGN CATALOG ct_catalog SERVER ct_catalog_server;
 SET iceberg_default_catalog = 'ct_catalog';
-
 CREATE SERVER ct_volume_server FOREIGN DATA WRAPPER iceberg_volume_fdw
 OPTIONS (type 's3', endpoint 'http://minio:9000', region 'us-east-1',
          bucket_name 'warehouse', path_style_access 'true');
@@ -33,35 +80,62 @@ CREATE USER MAPPING FOR current_user SERVER ct_volume_server
 OPTIONS (access_key_id 'admin', secret_access_key 'admin12345');
 CREATE FOREIGN VOLUME ct_volume SERVER ct_volume_server OPTIONS(base_path '/ct_volume/');
 SET iceberg_default_volume = 'ct_volume';
-
 -- ============================================================
 -- Test 1: default CHAR (= CHAR(1))
 -- ============================================================
 SELECT test_log('Test 1: default CHAR (no length spec)');
+NOTICE:  [TEST] Test 1: default CHAR (no length spec)
+ test_log 
+----------
+ 
+(1 row)
 
 CREATE ICEBERG TABLE ct_default (id bigint, c char);
 INSERT INTO ct_default VALUES (1, 'A'), (2, ' '), (3, NULL);
 SELECT id, length(c) AS chars, octet_length(c) AS bytes, c IS NULL AS is_null
 FROM ct_default ORDER BY id;
-DROP TABLE ct_default;
+ id | chars | bytes | is_null 
+----+-------+-------+---------
+  1 |     1 |     1 | f
+  2 |     0 |     0 | f
+  3 |       |       | t
+(3 rows)
 
+DROP TABLE ct_default;
 -- ============================================================
 -- Test 2: CHAR(1)
 -- ============================================================
 SELECT test_log('Test 2: CHAR(1)');
+NOTICE:  [TEST] Test 2: CHAR(1)
+ test_log 
+----------
+ 
+(1 row)
 
 CREATE ICEBERG TABLE ct_c1 (id bigint, c char(1));
 INSERT INTO ct_c1 VALUES (1, 'A'), (2, 'Z'), (3, ' '), (4, NULL);
 SELECT id, length(c) AS chars, octet_length(c) AS bytes, c IS NULL AS is_null
 FROM ct_c1 ORDER BY id;
-DROP TABLE ct_c1;
+ id | chars | bytes | is_null 
+----+-------+-------+---------
+  1 |     1 |     1 | f
+  2 |     1 |     1 | f
+  3 |     0 |     0 | f
+  4 |       |       | t
+(4 rows)
 
+DROP TABLE ct_c1;
 -- ============================================================
 -- Test 3: CHAR(5) -- the canonical issue #340 repro shape
 -- Iceberg trim semantics: stored bytes = trimmed value, so octet_length()
 -- reflects strlen rather than the typmod N (this diverges from heap).
 -- ============================================================
 SELECT test_log('Test 3: CHAR(5) basic shapes');
+NOTICE:  [TEST] Test 3: CHAR(5) basic shapes
+ test_log 
+----------
+ 
+(1 row)
 
 CREATE ICEBERG TABLE ct_c5 (label text, c char(5));
 INSERT INTO ct_c5 VALUES
@@ -73,12 +147,26 @@ INSERT INTO ct_c5 VALUES
     ('6_null',    NULL);
 SELECT label, length(c) AS chars, octet_length(c) AS bytes, c IS NULL AS is_null
 FROM ct_c5 ORDER BY label;
-DROP TABLE ct_c5;
+   label   | chars | bytes | is_null 
+-----------+-------+-------+---------
+ 1_full    |     5 |     5 | f
+ 2_pad_1   |     1 |     1 | f
+ 3_pad_4sp |     1 |     1 | f
+ 4_all_sp  |     0 |     0 | f
+ 5_empty   |     0 |     0 | f
+ 6_null    |       |       | t
+(6 rows)
 
+DROP TABLE ct_c5;
 -- ============================================================
 -- Test 4: CHAR(100) -- longer values exercise buffer resize paths
 -- ============================================================
 SELECT test_log('Test 4: CHAR(100)');
+NOTICE:  [TEST] Test 4: CHAR(100)
+ test_log 
+----------
+ 
+(1 row)
 
 CREATE ICEBERG TABLE ct_c100 (id bigint, c char(100));
 INSERT INTO ct_c100 VALUES
@@ -89,13 +177,25 @@ INSERT INTO ct_c100 VALUES
 SELECT id, length(c) AS chars, octet_length(c) AS bytes,
        (left(c, 5) = 'xxxxx' OR left(c, 5) = 'yyyyy' OR left(c, 5) = 'short' OR left(c, 5) = '') AS sample_ok
 FROM ct_c100 ORDER BY id;
-DROP TABLE ct_c100;
+ id | chars | bytes | sample_ok 
+----+-------+-------+-----------
+  1 |    80 |    80 | t
+  2 |   100 |   100 | t
+  3 |     0 |     0 | t
+  4 |     5 |     5 | t
+(4 rows)
 
+DROP TABLE ct_c100;
 -- ============================================================
 -- Test 5: UTF-8 / multi-byte -- length() counts characters,
 -- octet_length() counts bytes.  No trailing spaces inserted so trim is a no-op.
 -- ============================================================
 SELECT test_log('Test 5: UTF-8 multi-byte');
+NOTICE:  [TEST] Test 5: UTF-8 multi-byte
+ test_log 
+----------
+ 
+(1 row)
 
 CREATE ICEBERG TABLE ct_utf8 (id bigint, c char(10));
 INSERT INTO ct_utf8 VALUES
@@ -105,13 +205,25 @@ INSERT INTO ct_utf8 VALUES
     (4, 'plain');           -- 5 chars, 5 bytes (ASCII baseline)
 SELECT id, length(c) AS chars, octet_length(c) AS bytes
 FROM ct_utf8 ORDER BY id;
-DROP TABLE ct_utf8;
+ id | chars | bytes 
+----+-------+-------
+  1 |     2 |     6
+  2 |     4 |     8
+  3 |     1 |     4
+  4 |     5 |     5
+(4 rows)
 
+DROP TABLE ct_utf8;
 -- ============================================================
 -- Test 6: special whitespace -- only ASCII space (0x20) is trimmed;
 -- tab / newline / CR are kept verbatim.
 -- ============================================================
 SELECT test_log('Test 6: tab / CR / LF preserved (only space trimmed)');
+NOTICE:  [TEST] Test 6: tab / CR / LF preserved (only space trimmed)
+ test_log 
+----------
+ 
+(1 row)
 
 CREATE ICEBERG TABLE ct_ws (id bigint, c char(10));
 INSERT INTO ct_ws VALUES
@@ -121,12 +233,24 @@ INSERT INTO ct_ws VALUES
     (4, 'noend');           -- 5 chars baseline
 SELECT id, length(c) AS chars, octet_length(c) AS bytes
 FROM ct_ws ORDER BY id;
-DROP TABLE ct_ws;
+ id | chars | bytes 
+----+-------+-------
+  1 |     8 |     8
+  2 |     6 |     6
+  3 |     4 |     4
+  4 |     5 |     5
+(4 rows)
 
+DROP TABLE ct_ws;
 -- ============================================================
 -- Test 7: mixed NULL / non-NULL in a single column
 -- ============================================================
 SELECT test_log('Test 7: mixed NULL / non-NULL');
+NOTICE:  [TEST] Test 7: mixed NULL / non-NULL
+ test_log 
+----------
+ 
+(1 row)
 
 CREATE ICEBERG TABLE ct_nulls (id bigint, c char(5));
 INSERT INTO ct_nulls VALUES
@@ -139,12 +263,21 @@ SELECT count(*) FILTER (WHERE c IS NULL)     AS null_cnt,
        count(*) FILTER (WHERE c IS NOT NULL) AS not_null_cnt,
        count(*)                              AS total
 FROM ct_nulls;
-DROP TABLE ct_nulls;
+ null_cnt | not_null_cnt | total 
+----------+--------------+-------
+        2 |            3 |     5
+(1 row)
 
+DROP TABLE ct_nulls;
 -- ============================================================
 -- Test 8: Large batch -- crosses BATCH_WRITE_SIZE / row-group boundary
 -- ============================================================
 SELECT test_log('Test 8: large batch (cross batch / row-group)');
+NOTICE:  [TEST] Test 8: large batch (cross batch / row-group)
+ test_log 
+----------
+ 
+(1 row)
 
 CREATE ICEBERG TABLE ct_big (id bigint, c char(5));
 INSERT INTO ct_big
@@ -154,34 +287,55 @@ SELECT g,
             ELSE NULL
        END
 FROM generate_series(1, 5000) AS g;
-
 SELECT count(*) AS total_rows,
        count(*) FILTER (WHERE c = 'ABCDE') AS exact_full,
        count(*) FILTER (WHERE c = 'A')     AS exact_short,
        count(*) FILTER (WHERE c IS NULL)   AS nulls
 FROM ct_big;
-DROP TABLE ct_big;
+ total_rows | exact_full | exact_short | nulls 
+------------+------------+-------------+-------
+       5000 |       1666 |        1667 |  1667
+(1 row)
 
+DROP TABLE ct_big;
 -- ============================================================
 -- Test 9: INSERT ... SELECT from heap
 -- ============================================================
 SELECT test_log('Test 9: INSERT ... SELECT FROM heap');
+NOTICE:  [TEST] Test 9: INSERT ... SELECT FROM heap
+ test_log 
+----------
+ 
+(1 row)
 
 CREATE TABLE ct_heap_src (id bigint, c char(5));
+NOTICE:  Table doesn't have 'DISTRIBUTED BY' clause -- Using column named 'id' as the Apache Cloudberry data distribution key for this table.
+HINT:  The 'DISTRIBUTED BY' clause determines the distribution of data. Make sure column(s) chosen are the optimal data distribution key to minimize skew.
 INSERT INTO ct_heap_src VALUES
     (1, 'ABCDE'), (2, 'A'), (3, '   '), (4, NULL);
-
 CREATE ICEBERG TABLE ct_from_heap (id bigint, c char(5));
 INSERT INTO ct_from_heap SELECT * FROM ct_heap_src;
 SELECT id, length(c) AS chars, octet_length(c) AS bytes, c IS NULL AS is_null
 FROM ct_from_heap ORDER BY id;
+ id | chars | bytes | is_null 
+----+-------+-------+---------
+  1 |     5 |     5 | f
+  2 |     1 |     1 | f
+  3 |     0 |     0 | f
+  4 |       |       | t
+(4 rows)
+
 DROP TABLE ct_from_heap;
 DROP TABLE ct_heap_src;
-
 -- ============================================================
 -- Test 10: filter / sort / group / aggregate
 -- ============================================================
 SELECT test_log('Test 10: filter / sort / aggregate');
+NOTICE:  [TEST] Test 10: filter / sort / aggregate
+ test_log 
+----------
+ 
+(1 row)
 
 CREATE ICEBERG TABLE ct_query (id bigint, c char(5));
 INSERT INTO ct_query VALUES
@@ -191,22 +345,55 @@ INSERT INTO ct_query VALUES
     (4, 'A    '),    -- on disk equals 'A' after trim
     (5, 'BB'),
     (6, NULL);
-
 SELECT count(*) AS eq_abcde       FROM ct_query WHERE c = 'ABCDE';
+ eq_abcde 
+----------
+        2
+(1 row)
+
 SELECT count(*) AS eq_a           FROM ct_query WHERE c = 'A';
+ eq_a 
+------
+    2
+(1 row)
+
 SELECT count(*) AS is_null_cnt    FROM ct_query WHERE c IS NULL;
+ is_null_cnt 
+-------------
+           1
+(1 row)
+
 SELECT count(*) AS is_not_null    FROM ct_query WHERE c IS NOT NULL;
+ is_not_null 
+-------------
+           5
+(1 row)
+
 SELECT count(*) AS like_a_pct     FROM ct_query WHERE c LIKE 'A%';
+ like_a_pct 
+------------
+          4
+(1 row)
+
 SELECT count(DISTINCT c)          AS distinct_cnt,
        min(c)                     AS min_c,
        max(c)                     AS max_c
 FROM ct_query;
-DROP TABLE ct_query;
+ distinct_cnt | min_c | max_c 
+--------------+-------+-------
+            3 | A     | BB
+(1 row)
 
+DROP TABLE ct_query;
 -- ============================================================
 -- Test 11: string functions
 -- ============================================================
 SELECT test_log('Test 11: string functions');
+NOTICE:  [TEST] Test 11: string functions
+ test_log 
+----------
+ 
+(1 row)
 
 CREATE ICEBERG TABLE ct_fn (id bigint, c char(5));
 INSERT INTO ct_fn VALUES
@@ -219,12 +406,24 @@ SELECT id,
        lower(c)                   AS lo,
        substring(c FROM 1 FOR 3)  AS sub13
 FROM ct_fn ORDER BY id;
-DROP TABLE ct_fn;
+ id |  up   |  lo   | sub13 
+----+-------+-------+-------
+  1 | ABCDE | abcde | ABC
+  2 | ABCDE | abcde | aBc
+  3 | A     | a     | A
+  4 |       |       | 
+(4 rows)
 
+DROP TABLE ct_fn;
 -- ============================================================
 -- Test 12: UPDATE / DELETE on CHAR(N)
 -- ============================================================
 SELECT test_log('Test 12: UPDATE / DELETE');
+NOTICE:  [TEST] Test 12: UPDATE / DELETE
+ test_log 
+----------
+ 
+(1 row)
 
 CREATE ICEBERG TABLE ct_dml (id bigint, label text, c char(5));
 INSERT INTO ct_dml VALUES
@@ -232,20 +431,35 @@ INSERT INTO ct_dml VALUES
     (2, 'b', 'A'),
     (3, 'c', NULL),
     (4, 'd', 'ZZZZ');
-
 UPDATE ct_dml SET c = 'XYZ' WHERE label = 'b';
 SELECT id, label, length(c) AS chars, octet_length(c) AS bytes
 FROM ct_dml ORDER BY id;
+ id | label | chars | bytes 
+----+-------+-------+-------
+  1 | a     |     5 |     5
+  2 | b     |     3 |     3
+  3 | c     |       |      
+  4 | d     |     4 |     4
+(4 rows)
 
 DELETE FROM ct_dml WHERE c IS NULL;
 SELECT count(*) AS remaining FROM ct_dml;
-DROP TABLE ct_dml;
+ remaining 
+-----------
+         3
+(1 row)
 
+DROP TABLE ct_dml;
 -- ============================================================
 -- Test 13: mixed types in one wide table -- CHAR cells must not
 -- corrupt adjacent columns.
 -- ============================================================
 SELECT test_log('Test 13: mixed types in one table');
+NOTICE:  [TEST] Test 13: mixed types in one table
+ test_log 
+----------
+ 
+(1 row)
 
 CREATE ICEBERG TABLE ct_mixed (
     id   bigint,
@@ -261,12 +475,24 @@ INSERT INTO ct_mixed VALUES
     (2, NULL,    'short',     'A',     ' ', 0,   '1970-01-01'),
     (3, 'mix',   NULL,        '   ',   'Y', -1,  NULL),
     (4, '',      '',          NULL,    NULL, NULL, '2099-12-31');
-
 SELECT id, t, v,
        length(c5) AS c5_chars, octet_length(c5) AS c5_bytes,
        length(c1) AS c1_chars, octet_length(c1) AS c1_bytes,
        n, d
 FROM ct_mixed ORDER BY id;
-DROP TABLE ct_mixed;
+ id |   t   |   v   | c5_chars | c5_bytes | c1_chars | c1_bytes | n  |     d      
+----+-------+-------+----------+----------+----------+----------+----+------------
+  1 | hello | world |        5 |        5 |        1 |        1 | 42 | 2026-01-15
+  2 |       | short |        1 |        1 |        0 |        0 |  0 | 1970-01-01
+  3 | mix   |       |        0 |        0 |        1 |        1 | -1 | 
+  4 |       |       |          |          |          |          |    | 2099-12-31
+(4 rows)
 
+DROP TABLE ct_mixed;
 SELECT test_log('Feature Test: Iceberg CHAR(N) Full Coverage - DONE');
+NOTICE:  [TEST] Feature Test: Iceberg CHAR(N) Full Coverage - DONE
+ test_log 
+----------
+ 
+(1 row)
+
