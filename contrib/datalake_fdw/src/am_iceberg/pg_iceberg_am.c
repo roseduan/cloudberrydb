@@ -450,6 +450,102 @@ pg_iceberg_take_modify_fragments(Oid relid)
 	return fragments;
 }
 
+/* ----------------------------------------------------------------
+ * ANALYZE-time fragments cache (issue #352)
+ *
+ * A process-local map keyed by relid carrying each target relation's
+ * fragment-list JSON for an in-flight ANALYZE.  The QD expands every
+ * fragment list (the datalake agent is QD-only) and ships them to the
+ * QEs as a PgIcebergAnalyzeDispatch ExtensibleNode; the QE handler
+ * resets and refills this cache, and pg_iceberg_acquire_sample_rows
+ * consumes (and removes) the entry so a stale list cannot be reused
+ * by a later statement.
+ *
+ * The strings live in TopMemoryContext because the dispatch and the
+ * sampling query are separate statements on the QE; take hands the
+ * string to the caller, which must pfree it.
+ * ----------------------------------------------------------------
+ */
+typedef struct AnalyzeFragmentsEntry
+{
+	Oid		relid;			/* hash key */
+	char   *fragments;		/* fragment-list JSON, in TopMemoryContext */
+} AnalyzeFragmentsEntry;
+
+static HTAB *analyze_fragments_cache = NULL;
+
+static void
+analyze_fragments_cache_ensure(void)
+{
+	HASHCTL ctl;
+
+	if (analyze_fragments_cache != NULL)
+		return;
+
+	MemSet(&ctl, 0, sizeof(ctl));
+	ctl.keysize = sizeof(Oid);
+	ctl.entrysize = sizeof(AnalyzeFragmentsEntry);
+	ctl.hcxt = TopMemoryContext;
+
+	analyze_fragments_cache = hash_create("iceberg analyze fragments cache",
+										  16, &ctl,
+										  HASH_ELEM | HASH_BLOBS | HASH_CONTEXT);
+}
+
+void
+pg_iceberg_stash_analyze_fragments(Oid relid, const char *fragments)
+{
+	AnalyzeFragmentsEntry  *entry;
+	bool					found;
+
+	if (!OidIsValid(relid) || fragments == NULL || fragments[0] == '\0')
+		return;
+
+	analyze_fragments_cache_ensure();
+	entry = (AnalyzeFragmentsEntry *) hash_search(analyze_fragments_cache,
+												  &relid, HASH_ENTER, &found);
+	if (found && entry->fragments != NULL)
+		pfree(entry->fragments);
+	entry->fragments = MemoryContextStrdup(TopMemoryContext, fragments);
+}
+
+char *
+pg_iceberg_take_analyze_fragments(Oid relid)
+{
+	AnalyzeFragmentsEntry  *entry;
+	char				   *fragments;
+
+	if (analyze_fragments_cache == NULL || !OidIsValid(relid))
+		return NULL;
+
+	entry = (AnalyzeFragmentsEntry *) hash_search(analyze_fragments_cache,
+												  &relid, HASH_FIND, NULL);
+	if (entry == NULL)
+		return NULL;
+
+	fragments = entry->fragments;
+	hash_search(analyze_fragments_cache, &relid, HASH_REMOVE, NULL);
+	return fragments;
+}
+
+void
+pg_iceberg_reset_analyze_fragments(void)
+{
+	HASH_SEQ_STATUS			status;
+	AnalyzeFragmentsEntry  *entry;
+
+	if (analyze_fragments_cache == NULL)
+		return;
+
+	hash_seq_init(&status, analyze_fragments_cache);
+	while ((entry = (AnalyzeFragmentsEntry *) hash_seq_search(&status)) != NULL)
+	{
+		if (entry->fragments != NULL)
+			pfree(entry->fragments);
+		hash_search(analyze_fragments_cache, &entry->relid, HASH_REMOVE, NULL);
+	}
+}
+
 void
 pg_iceberg_estimate_rel_size(Relation rel, int32 *attr_widths, BlockNumber *pages,
 							  double *tuples, double *allvisfrac)
@@ -623,69 +719,31 @@ static TableScanDesc pg_iceberg_begin_vacuum_scan(Relation rel,
 												  CustomScan **out_scan_plan,
 												  TupleTableSlot **out_scan_slot);
 
-/* GUC set by the QD in datalake_ProcessUtility's ANALYZE branch (issue #352). */
-extern char *analyze_iceberg_meta;
-
 /*
  * Build a scan fragment list on the QE for ANALYZE sampling.  The datalake
  * agent runs only on the QD, so the QE cannot enumerate fragments itself;
- * the QD already expanded the list and shipped it (base64-encoded) via
- * datalake.analyze_iceberg_meta.  Here we just locate this relation's entry,
- * decode it, and parse it -- no agent contact.  Returns NIL when the GUC is
- * unset or carries no entry for this relation, so the caller can fall back.
+ * the QD already expanded the list and shipped it as a
+ * PgIcebergAnalyzeDispatch ExtensibleNode, whose handler stashed it into
+ * the analyze fragments cache.  Here we just consume this relation's entry
+ * and parse it -- no agent contact.  Returns NIL when the cache carries no
+ * entry for this relation, so the caller can fall back.
  */
 static List *
 pg_iceberg_build_sample_am_private(Relation rel)
 {
-	char			   *frag_b64 = NULL;
 	char			   *fragments;
-	List			   *am_private = NIL;
-	Oid					myrelid = RelationGetRelid(rel);
-	char			   *copy;
-	char			   *entry;
-	char			   *saveptr = NULL;
-	int					b64_len;
-	int					dec_buf;
-	int					dec_len;
+	List			   *am_private;
 
-	if (analyze_iceberg_meta == NULL || analyze_iceberg_meta[0] == '\0')
-		return NIL;
+	fragments = pg_iceberg_take_analyze_fragments(RelationGetRelid(rel));
+	if (fragments == NULL)
+		return NIL;		/* no entry shipped for this relation */
 
-	/* Find this relation's entry in the "relid|base64(fragments);..." map. */
-	copy = pstrdup(analyze_iceberg_meta);
-	for (entry = strtok_r(copy, ";", &saveptr);
-		 entry != NULL;
-		 entry = strtok_r(NULL, ";", &saveptr))
-	{
-		char   *sep = strchr(entry, '|');
-
-		if (sep == NULL)
-			continue;
-		if ((Oid) strtoul(entry, NULL, 10) != myrelid)
-			continue;
-
-		frag_b64 = pstrdup(sep + 1);
-		break;
-	}
-	pfree(copy);
-
-	if (frag_b64 == NULL)
-		return NIL;		/* no map entry for this relation */
-
-	/* Decode the fragment list the QD expanded for us. */
-	b64_len = strlen(frag_b64);
-	dec_buf = pg_b64_dec_len(b64_len);
-	fragments = palloc(dec_buf + 1);
-	dec_len = pg_b64_decode(frag_b64, b64_len, fragments, dec_buf);
-	fragments[dec_len] = '\0';
-
-	am_private = parseIcebergFragmentResponse(fragments, dec_len);
+	am_private = parseIcebergFragmentResponse(fragments, strlen(fragments));
 	am_private = list_concat(am_private,
 							 datalakeSelectRandomSegments(getgpsegmentCount(),
 														  getgpsegmentCount()));
 
 	pfree(fragments);
-	pfree(frag_b64);
 
 	return am_private;
 }
@@ -696,10 +754,10 @@ pg_iceberg_build_sample_am_private(Relation rel)
  * relation_acquire_sample_rows() implementation for the Iceberg AM (issue
  * #352).  Runs on each QE under the kernel's gp_acquire_sample_rows dispatch.
  *
- * We build this scan's fragment list from the metadata_location the QD shipped
- * (pg_iceberg_build_sample_am_private), scan the segment-local fragments, and
- * Vitter-reservoir-sample up to targrows rows (same algorithm as
- * acquire_sample_rows() in analyze.c).  The kernel then computes real
+ * We build this scan's fragment list from the expanded fragment payload the
+ * QD shipped (pg_iceberg_build_sample_am_private), scan the segment-local
+ * fragments, and Vitter-reservoir-sample up to targrows rows (same algorithm
+ * as acquire_sample_rows() in analyze.c).  The kernel then computes real
  * per-column statistics (NDV/MCV/histogram) from the sample.
  *
  * This used to be a no-op: ANALYZE only refreshed pg_class.reltuples from
@@ -738,7 +796,7 @@ pg_iceberg_acquire_sample_rows(Relation relation, int elevel,
 	if (am_private == NIL)
 	{
 		/*
-		 * No metadata_location was shipped for this relation: ANALYZE sampling
+		 * No fragment list was shipped for this relation: ANALYZE sampling
 		 * is disabled, or this analyze did not pass through
 		 * datalake_ProcessUtility (e.g. gp_autostats issues ExecVacuum
 		 * directly).  The QE cannot read the QD-only Iceberg metadata catalog,

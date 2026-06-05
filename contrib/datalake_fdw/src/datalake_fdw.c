@@ -80,7 +80,6 @@
 #include "am_iceberg/include/pg_iceberg_extensible.h"
 #include "am_iceberg/include/pg_iceberg_custom_scan.h"
 #include "am_iceberg/include/pg_iceberg_am.h"
-#include "common/base64.h"
 
 
 PG_MODULE_MAGIC;
@@ -224,15 +223,12 @@ int hudiLogMergerThreshold;
 double hudiLogSizeScaleFactor;
 int external_table_limit_segment_num;
 /*
- * Issue #352: internal QD->QE transport for Iceberg ANALYZE sampling.
- * Hidden GUC carrying a "relid|base64(fragments);..." map.  The datalake agent
- * runs only on the QD (datalake_proxy starts it under GP_ROLE_DISPATCH), so a
- * QE has no local agent to enumerate fragments against; the QD therefore
- * expands the fragment list here and ships it whole (base64 so the JSON payload
- * cannot collide with the '|'/';' delimiters).  Not user-settable; see
- * datalake.enable_iceberg_analyze_sampling for the user-facing on/off switch.
+ * Issue #352: user-facing switch for Iceberg ANALYZE sampling.  The QD->QE
+ * fragment transport is a PgIcebergAnalyzeDispatch ExtensibleNode (see
+ * pg_iceberg_extensible.c), NOT a synced GUC: a synced GUC travels in the
+ * gang-connection startup packet, and a large table's fragment list blows
+ * past MAX_STARTUP_PACKET_LENGTH, making every gang creation fail.
  */
-char *analyze_iceberg_meta = NULL;
 bool enable_iceberg_analyze_sampling = true;
 bool enable_list_in_master;
 char *datalake_agent_server_url = NULL;
@@ -325,18 +321,6 @@ _PG_init(void)
 							10,
 							PGC_USERSET,
 							0,
-							NULL,
-							NULL,
-							NULL);
-
-	DefineCustomStringVariable("datalake.analyze_iceberg_meta",
-							"Internal QD->QE transport for Iceberg ANALYZE sampling (issue #352). Do not set manually.",
-							NULL,
-							&analyze_iceberg_meta,
-							"",
-							PGC_USERSET,
-							/* synced to QEs; hidden so it isn't a user-facing knob */
-							GUC_GPDB_NEED_SYNC | GUC_NO_SHOW_ALL | GUC_DISALLOW_IN_FILE,
 							NULL,
 							NULL,
 							NULL);
@@ -603,10 +587,11 @@ datalake_ProcessUtility(PlannedStmt *pstmt,
 		case T_ExtensibleNode:
 		{
 			/*
-			 * Iceberg ships AM-private payloads (e.g. VACUUM rewrite tasks)
-			 * to QEs as ExtensibleNodes through CdbDispatchUtilityStatement.
-			 * Recognise and execute them here; standard_ProcessUtility has
-			 * no T_ExtensibleNode case and would error out.
+			 * Iceberg ships AM-private payloads (VACUUM rewrite tasks,
+			 * ANALYZE fragment lists) to QEs as ExtensibleNodes through
+			 * CdbDispatchUtilityStatement.  Recognise and execute them here;
+			 * standard_ProcessUtility has no T_ExtensibleNode case and would
+			 * error out.
 			 */
 			if (pg_iceberg_handle_extensible_utility(pstmt->utilityStmt))
 				return;
@@ -617,20 +602,19 @@ datalake_ProcessUtility(PlannedStmt *pstmt,
 			VacuumStmt *vacstmt = (VacuumStmt *) pstmt->utilityStmt;
 
 			/*
-			 * Plain ANALYZE on Iceberg relations skips per-row sampling —
-			 * the Postgres planner can pick up cardinality via the tableam
-			 * relation_estimate_size callback (iceberg_estimate_rel_size),
-			 * but ORCA reads rel->rd_rel->reltuples directly and never
-			 * calls the callback.  So we refresh pg_class.reltuples and
-			 * pg_class.relpages from the Iceberg catalog metadata here,
-			 * then short-circuit before the kernel dispatches sampling to
-			 * QEs (which cannot reach the Iceberg catalog service).
+			 * Plain ANALYZE on Iceberg relations: refresh pg_class.reltuples
+			 * and pg_class.relpages from the Iceberg catalog metadata (ORCA
+			 * reads rel->rd_rel->reltuples directly and never calls the
+			 * tableam relation_estimate_size callback; issue #339), and --
+			 * when sampling is enabled (issue #352) -- expand every target
+			 * rel's fragment list on the QD and ship it to the QEs before
+			 * falling through to standard ANALYZE, so the per-row sampling
+			 * dispatched by do_analyze_rel can scan without contacting the
+			 * QD-only Iceberg catalog service.
 			 *
 			 * VACUUM — with or without ANALYZE — still goes through the
 			 * default path where iceberg_relation_vacuum handles the AM
 			 * work via ExtensibleNode dispatch.
-			 *
-			 * See hashdata-lightning issue #339.
 			 */
 			if (Gp_role == GP_ROLE_DISPATCH && !vacstmt->is_vacuumcmd)
 			{
@@ -638,21 +622,20 @@ datalake_ProcessUtility(PlannedStmt *pstmt,
 				bool		only_iceberg = (vacstmt->rels != NIL &&
 											list_length(ice_relids) == list_length(vacstmt->rels));
 				ListCell   *lc;
-				StringInfoData map;
+				List	   *frag_relids = NIL;
+				List	   *frag_payloads = NIL;
 
 				/* No Iceberg tables involved: plain standard ANALYZE. */
 				if (ice_relids == NIL)
 					break;
 
-				initStringInfo(&map);
-
 				/*
 				 * Refresh pg_class.reltuples/relpages for every Iceberg rel
 				 * from catalog metadata (issue #339), and -- when sampling is
-				 * enabled -- record relid|metadata_location|is_internal so the
-				 * QE side can enumerate fragments via the agent (the Iceberg
-				 * metadata catalog rows are QD-only).  Covers explicit, mixed,
-				 * and database-wide (rels == NIL) ANALYZE.
+				 * enabled -- collect each rel's expanded fragment list so the
+				 * QEs can sample without touching the QD-only Iceberg metadata
+				 * catalog.  Covers explicit, mixed, and database-wide
+				 * (rels == NIL) ANALYZE.
 				 */
 				foreach(lc, ice_relids)
 				{
@@ -689,33 +672,21 @@ datalake_ProcessUtility(PlannedStmt *pstmt,
 						IcebergMetadataInfo *mi = pg_iceberg_get_metadata_info(relid);
 						IcebergTableInfo *ti = pg_iceberg_get_table_info(relid);
 						char	   *fragments;
-						char	   *frag_b64;
-						int			raw_len;
-						int			enc_buf;
-						int			enc_len;
 
 						/*
 						 * Enumerate the fragment list HERE on the QD: the
 						 * datalake agent is QD-only, so a QE cannot expand it
 						 * (would fail with CURL code 7).  Ship the expanded
-						 * list, base64-encoded, instead of just the location.
+						 * list instead of just the location.
 						 */
 						fragments = pg_iceberg_get_fragments_with_catalog(
 											rel, ti, mi->metadata_location,
 											mi->is_internal, NULL);
-						raw_len = strlen(fragments);
-						enc_buf = pg_b64_enc_len(raw_len);
-						frag_b64 = palloc(enc_buf + 1);
-						enc_len = pg_b64_encode(fragments, raw_len,
-												frag_b64, enc_buf);
-						frag_b64[enc_len] = '\0';
 
-						if (map.len > 0)
-							appendStringInfoChar(&map, ';');
-						appendStringInfo(&map, "%u|%s", relid, frag_b64);
+						frag_relids = lappend_oid(frag_relids, relid);
+						frag_payloads = lappend(frag_payloads,
+												makeString(fragments));
 
-						pfree(frag_b64);
-						pfree(fragments);
 						pg_iceberg_free_table_info(ti);
 						pg_iceberg_free_metadata_info(mi);
 					}
@@ -733,9 +704,8 @@ datalake_ProcessUtility(PlannedStmt *pstmt,
 					 * when every target is Iceberg (issue #339 behavior); for a
 					 * mixed or database-wide list, fall through so non-Iceberg
 					 * rels still get analyzed -- the Iceberg rels are skipped by
-					 * pg_iceberg_acquire_sample_rows (no map was shipped).
+					 * pg_iceberg_acquire_sample_rows (no payload was shipped).
 					 */
-					pfree(map.data);
 					list_free(ice_relids);
 					if (only_iceberg)
 						return;
@@ -743,26 +713,43 @@ datalake_ProcessUtility(PlannedStmt *pstmt,
 				}
 
 				/*
-				 * Issue #352: ship the relid->metadata_location map to the QEs,
-				 * then fall through to standard ANALYZE.  do_analyze_rel then
-				 * dispatches per-row sampling (gp_acquire_sample_rows) to the
-				 * QEs, which read this hidden GUC to enumerate fragments and
-				 * populate pg_statistic.  SetConfigOption seeds gangs created
-				 * afterwards; CdbDispatchSetCommand pushes to existing gangs.
+				 * Issue #352: ship every target rel's fragment list to the QEs
+				 * as a PgIcebergAnalyzeDispatch ExtensibleNode, then fall
+				 * through to standard ANALYZE.  do_analyze_rel then dispatches
+				 * per-row sampling (gp_acquire_sample_rows) to the QEs, whose
+				 * pg_iceberg_acquire_sample_rows consumes the stashed lists to
+				 * populate pg_statistic.
+				 *
+				 * The payload must NOT travel as a synced GUC: makeOptions()
+				 * embeds synced GUCs into the gang-connection startup packet,
+				 * and a single large table's fragment list (e.g. TPC-DS
+				 * store_sales, ~136kB) exceeds MAX_STARTUP_PACKET_LENGTH
+				 * (64000), so the segment postmasters reject every gang
+				 * connection ("invalid length of startup packet") and ANALYZE
+				 * dies with "failed to acquire resources".  The utility
+				 * dispatch below rides the normal query channel, which has no
+				 * such limit, and reaches the same writer-gang QEs that the
+				 * sampling query will use.  If the gang is recreated between
+				 * the two statements the stash is lost and the QEs degrade to
+				 * the no-payload skip path (reltuples-only, no error).
 				 */
-				SetConfigOption("datalake.analyze_iceberg_meta", map.data,
-								PGC_USERSET, PGC_S_SESSION);
+				if (frag_relids != NIL)
 				{
-					StringInfoData setcmd;
+					PgIcebergAnalyzeDispatchNode *dispatch_node;
 
-					initStringInfo(&setcmd);
-					appendStringInfo(&setcmd,
-									 "SET datalake.analyze_iceberg_meta TO %s",
-									 quote_literal_cstr(map.data));
-					CdbDispatchSetCommand(setcmd.data, false);
-					pfree(setcmd.data);
+					dispatch_node = (PgIcebergAnalyzeDispatchNode *)
+						newNode(sizeof(PgIcebergAnalyzeDispatchNode),
+								T_ExtensibleNode);
+					dispatch_node->node.extnodename =
+						PG_ICEBERG_ANALYZE_DISPATCH_NODE;
+					dispatch_node->relids = frag_relids;
+					dispatch_node->fragments = frag_payloads;
+
+					CdbDispatchUtilityStatement((Node *) dispatch_node,
+												DF_CANCEL_ON_ERROR,
+												NIL,
+												NULL);
 				}
-				pfree(map.data);
 				list_free(ice_relids);
 				/* fall through to standard ANALYZE */
 			}

@@ -5,9 +5,12 @@
 -- per-column NDV/MCV and chose catastrophic join orders on low-cardinality
 -- predicates (TPC-DS Q24: c_birth_country = upper(ca_country)).
 --
--- The fix samples rows on the QEs during ANALYZE (the QD ships each table's
--- metadata_location via a hidden, synced GUC so the QE can enumerate fragments
--- through the agent) and lets the kernel compute real column statistics.
+-- The fix samples rows on the QEs during ANALYZE (the QD expands each table's
+-- fragment list -- the datalake agent is QD-only -- and ships it to the QEs as
+-- a PgIcebergAnalyzeDispatch ExtensibleNode over the normal query channel; a
+-- synced GUC would ride the gang-connection startup packet and overflow
+-- MAX_STARTUP_PACKET_LENGTH on large tables) and lets the kernel compute real
+-- column statistics.
 --
 -- NOTE: this copy targets the in-container dev MinIO (172.17.0.2:9000,
 -- minioadmin).  For CI, point the volume at the lakehouse stack
@@ -72,7 +75,8 @@ SELECT count(*) AS cols_when_off FROM pg_stats WHERE tablename = 'anlz_t';
 RESET datalake.enable_iceberg_analyze_sampling;
 
 -- ============================================================
--- T4: the internal transport GUC is hidden; only the switch is user-visible
+-- T4: only the sampling switch is user-visible (the fragment transport is
+-- an ExtensibleNode dispatch, not a GUC)
 -- ============================================================
 SELECT name FROM pg_settings WHERE name LIKE 'datalake.%analyze%' ORDER BY name;
 

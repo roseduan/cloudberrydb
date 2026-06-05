@@ -109,6 +109,76 @@ static const ExtensibleNodeMethods pg_iceberg_vacuum_dispatch_methods = {
 
 
 /* ----------------------------------------------------------------
+ *	ExtensibleNode methods for PgIcebergAnalyzeDispatchNode
+ * ----------------------------------------------------------------
+ */
+
+static void
+copyPgIcebergAnalyzeDispatch(struct ExtensibleNode *enew,
+							 const struct ExtensibleNode *eold)
+{
+	PgIcebergAnalyzeDispatchNode *newnode = (PgIcebergAnalyzeDispatchNode *) enew;
+	const PgIcebergAnalyzeDispatchNode *oldnode = (const PgIcebergAnalyzeDispatchNode *) eold;
+
+	newnode->relids = (List *) copyObject(oldnode->relids);
+	newnode->fragments = (List *) copyObject(oldnode->fragments);
+}
+
+static bool
+equalPgIcebergAnalyzeDispatch(const struct ExtensibleNode *a,
+							  const struct ExtensibleNode *b)
+{
+	const PgIcebergAnalyzeDispatchNode *na = (const PgIcebergAnalyzeDispatchNode *) a;
+	const PgIcebergAnalyzeDispatchNode *nb = (const PgIcebergAnalyzeDispatchNode *) b;
+
+	return equal(na->relids, nb->relids) && equal(na->fragments, nb->fragments);
+}
+
+static void
+outPgIcebergAnalyzeDispatch(struct StringInfoData *str,
+							const struct ExtensibleNode *enode)
+{
+	const PgIcebergAnalyzeDispatchNode *node = (const PgIcebergAnalyzeDispatchNode *) enode;
+	char	   *tmp;
+
+	appendStringInfoString(str, " :relids ");
+	tmp = nodeToString(node->relids);
+	appendStringInfoString(str, tmp);
+	pfree(tmp);
+
+	appendStringInfoString(str, " :fragments ");
+	tmp = nodeToString(node->fragments);
+	appendStringInfoString(str, tmp);
+	pfree(tmp);
+}
+
+static void
+readPgIcebergAnalyzeDispatch(struct ExtensibleNode *enode)
+{
+	PgIcebergAnalyzeDispatchNode *local_node = (PgIcebergAnalyzeDispatchNode *) enode;
+	const char *token;
+	int			length;
+
+	token = pg_strtok(&length);		/* skip :relids */
+	(void) token;
+	local_node->relids = (List *) nodeRead(NULL, 0);
+
+	token = pg_strtok(&length);		/* skip :fragments */
+	(void) token;
+	local_node->fragments = (List *) nodeRead(NULL, 0);
+}
+
+static const ExtensibleNodeMethods pg_iceberg_analyze_dispatch_methods = {
+	.extnodename = PG_ICEBERG_ANALYZE_DISPATCH_NODE,
+	.node_size = sizeof(PgIcebergAnalyzeDispatchNode),
+	.nodeCopy = copyPgIcebergAnalyzeDispatch,
+	.nodeEqual = equalPgIcebergAnalyzeDispatch,
+	.nodeOut = outPgIcebergAnalyzeDispatch,
+	.nodeRead = readPgIcebergAnalyzeDispatch,
+};
+
+
+/* ----------------------------------------------------------------
  *	Registration
  * ----------------------------------------------------------------
  */
@@ -117,6 +187,7 @@ void
 pg_iceberg_register_extensible_nodes(void)
 {
 	RegisterExtensibleNodeMethods(&pg_iceberg_vacuum_dispatch_methods);
+	RegisterExtensibleNodeMethods(&pg_iceberg_analyze_dispatch_methods);
 }
 
 
@@ -192,6 +263,26 @@ pg_iceberg_handle_extensible_utility(Node *parsetree)
 		relation_close(rel, NoLock);
 
 		pg_iceberg_send_result_to_qd(results);
+
+		return true;
+	}
+
+	if (strcmp(enode->extnodename, PG_ICEBERG_ANALYZE_DISPATCH_NODE) == 0)
+	{
+		PgIcebergAnalyzeDispatchNode *stmt = (PgIcebergAnalyzeDispatchNode *) enode;
+		ListCell   *lcr;
+		ListCell   *lcf;
+
+		/*
+		 * A fresh dispatch defines the complete relid set of the in-flight
+		 * ANALYZE; drop whatever an earlier (possibly aborted) ANALYZE left
+		 * behind so a stale fragment list can never be consumed.
+		 */
+		pg_iceberg_reset_analyze_fragments();
+
+		forboth(lcr, stmt->relids, lcf, stmt->fragments)
+			pg_iceberg_stash_analyze_fragments(lfirst_oid(lcr),
+											   strVal(lfirst(lcf)));
 
 		return true;
 	}

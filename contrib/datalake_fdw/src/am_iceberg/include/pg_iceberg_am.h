@@ -103,6 +103,15 @@ extern List *pg_iceberg_list_data_fragments(Relation rel);
 extern void pg_iceberg_stash_modify_fragments(Oid relid, List *fragments);
 extern List *pg_iceberg_take_modify_fragments(Oid relid);
 
+/*
+ * Process-local cache of ANALYZE-time fragment lists, keyed by relid.
+ * Filled on the QE by the PgIcebergAnalyzeDispatch ExtensibleNode handler,
+ * consumed by pg_iceberg_acquire_sample_rows (issue #352).
+ */
+extern void pg_iceberg_stash_analyze_fragments(Oid relid, const char *fragments);
+extern char *pg_iceberg_take_analyze_fragments(Oid relid);
+extern void pg_iceberg_reset_analyze_fragments(void);
+
 extern char *pg_iceberg_resolve_modify_location(Relation rel, CmdType operation);
 extern int pg_iceberg_acquire_sample_rows(Relation relation, int elevel,
 										  HeapTuple *rows, int targrows,
