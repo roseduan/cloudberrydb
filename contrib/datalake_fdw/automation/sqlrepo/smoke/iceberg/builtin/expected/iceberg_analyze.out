@@ -21,21 +21,24 @@ INSERT INTO an_test SELECT i, 'name_' || i, i * 10, 'cat_' || (i % 5)
 FROM generate_series(1, 200) i;
 -- ANALYZE triggers sample_rows and estimate_rel_size
 ANALYZE an_test;
-NOTICE:  ANALYZE is a no-op for Iceberg tables; planner stats come from Iceberg catalog metadata
+NOTICE:  ANALYZE on Iceberg tables refreshed pg_class.reltuples/relpages from Iceberg catalog metadata
+HINT:  Column-level statistics live in the Iceberg manifests and are consulted via tableam callbacks.
 -- Verify stats collected
 SELECT reltuples > 0 AS has_stats FROM pg_class WHERE relname = 'an_test';
  has_stats 
 -----------
- f
+ t
 (1 row)
 
 -- ANALYZE after more inserts
 INSERT INTO an_test SELECT i, 'extra_' || i, i, 'cat_x' FROM generate_series(201, 300) i;
 ANALYZE an_test;
-NOTICE:  ANALYZE is a no-op for Iceberg tables; planner stats come from Iceberg catalog metadata
+NOTICE:  ANALYZE on Iceberg tables refreshed pg_class.reltuples/relpages from Iceberg catalog metadata
+HINT:  Column-level statistics live in the Iceberg manifests and are consulted via tableam callbacks.
 -- Second ANALYZE after more data
 ANALYZE an_test;
-NOTICE:  ANALYZE is a no-op for Iceberg tables; planner stats come from Iceberg catalog metadata
+NOTICE:  ANALYZE on Iceberg tables refreshed pg_class.reltuples/relpages from Iceberg catalog metadata
+HINT:  Column-level statistics live in the Iceberg manifests and are consulted via tableam callbacks.
 -- pg_relation_size triggers pg_iceberg_relation_size
 SELECT pg_relation_size('an_test') >= 0 AS size_ok;
  size_ok 

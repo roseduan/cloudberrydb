@@ -85,7 +85,8 @@ SELECT relname, count(*) > 0 AS on_qe
 -- Test 4: ANALYZE uses sample_rows internally
 -- ============================================================
 ANALYZE if_cache_tbl;
-NOTICE:  ANALYZE is a no-op for Iceberg tables; planner stats come from Iceberg catalog metadata
+NOTICE:  ANALYZE on Iceberg tables refreshed pg_class.reltuples/relpages from Iceberg catalog metadata
+HINT:  Column-level statistics live in the Iceberg manifests and are consulted via tableam callbacks.
 -- ============================================================
 -- Test 6: Multiple tables -> cache management
 -- ============================================================
