@@ -31,6 +31,15 @@ REGRESS = s3_smoke s3_write_smoke
 PGPORT ?= 7000
 export PGPORT
 
+# SMOKE_S3_SKIP_PREP=1 skips the beeline prep/verify steps.  In CI the smoke
+# harness runs inside the devel test container, where the docker CLI has no
+# reachable daemon, so the default `docker exec -i hiveserver2 ...` BEELINE
+# dies instantly.  The .gitlab-ci.yml job script already runs the exact same
+# prep (docker cp + beeline -f) on the runner before launching the harness,
+# so the in-Makefile prep is redundant there; the CB->Hive verify step is
+# skipped as well (no working beeline inside the container).
+SMOKE_S3_SKIP_PREP ?=
+
 installcheck:
 	@echo "=== Configuring mc alias for MinIO ==="
 	@mc alias set local $(MC_ALIAS_URL) $(MC_ALIAS_KEY) $(MC_ALIAS_SECRET) 2>/dev/null || true
@@ -41,8 +50,10 @@ installcheck:
 	@mc rm --recursive --force local/warehouse/s3-smoke-hive-text/ 2>/dev/null || true
 	@mc rm --recursive --force local/warehouse/s3-smoke-hive-csv/ 2>/dev/null || true
 	@mc rm --recursive --force local/warehouse/smoke-write-test/ 2>/dev/null || true
-	@echo "=== Preparing S3 test data via Hive (Hive writes -> CB reads) ==="
-	@if [ -f "$(S3_PREPARE_SQL)" ]; then \
+	@if [ -n "$(SMOKE_S3_SKIP_PREP)" ]; then \
+		echo "=== Skipping S3 Hive prep (SMOKE_S3_SKIP_PREP set; prepared by CI job script) ==="; \
+	elif [ -f "$(S3_PREPARE_SQL)" ]; then \
+		echo "=== Preparing S3 test data via Hive (Hive writes -> CB reads) ==="; \
 		$(BEELINE) -u "$(BEELINE_URL)" -n hive < "$(S3_PREPARE_SQL)" 2>&1 || \
 		{ echo "ERROR: Failed to prepare S3 test data"; exit 1; }; \
 	else \
@@ -50,8 +61,10 @@ installcheck:
 	fi
 	@echo "=== Running pg_regress tests ==="
 	$(pg_regress_installcheck) $(REGRESS)
-	@echo "=== Verifying Hive can read CB-written data (CB writes -> Hive reads) ==="
-	@if [ -f "$(S3_VERIFY_SQL)" ]; then \
+	@if [ -n "$(SMOKE_S3_SKIP_PREP)" ]; then \
+		echo "=== Skipping CB->Hive verify (SMOKE_S3_SKIP_PREP set; no beeline in this container) ==="; \
+	elif [ -f "$(S3_VERIFY_SQL)" ]; then \
+		echo "=== Verifying Hive can read CB-written data (CB writes -> Hive reads) ==="; \
 		$(BEELINE) -u "$(BEELINE_URL)" -n hive < "$(S3_VERIFY_SQL)" 2>&1 || \
 		{ echo "ERROR: CB->Hive verification failed"; exit 1; }; \
 	else \
