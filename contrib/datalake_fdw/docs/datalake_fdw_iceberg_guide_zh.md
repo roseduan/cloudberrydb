@@ -635,7 +635,7 @@ SELECT * FROM iceberg_toolkit.get_fragments('orders'::regclass);
 |------|---------|
 | `TRUNCATE <iceberg_table>` | `iceberg_relation_nontransactional_truncate` 实现为空；表内容不会被清空。需要清空请用 `DELETE FROM` 或 `DROP TABLE` 重建 |
 | `CREATE INDEX ... ON <iceberg_table>` | `iceberg_index_build_range_scan` 直接返回 0；索引对象创建后无任何条目 |
-| `ANALYZE <iceberg_table>` | 抛 NOTICE：`ANALYZE is a no-op for Iceberg tables; planner stats come from Iceberg catalog metadata`。统计来自 manifest |
+| `ANALYZE <iceberg_table>` | 非完全 no-op：会从 Iceberg catalog 元数据刷新 `pg_class.reltuples/relpages` 并抛 NOTICE：`ANALYZE on Iceberg tables refreshed pg_class.reltuples/relpages from Iceberg catalog metadata`；列级统计仍来自 manifest，不做采样 |
 | `PRIMARY KEY` / `UNIQUE` / `FOREIGN KEY` / `CHECK` 约束 | DDL 接受但无 Iceberg 端唯一索引承载，运行时不强制 |
 
 #### 4.11.3 显式拒绝
@@ -858,4 +858,4 @@ DROP SERVER cat_server CASCADE;  -- 级联删除所有依赖对象
 | `failed to commit iceberg metadata for table %u after %d retries due to concurrent updates` | 并发写入冲突 CAS 重试 10 次仍失败（详见 4.11.4） | 把多笔写合并成一笔事务、降低并发写并发度，或排查是否有外部引擎同时在写同一张表 |
 | `not supported`（来自 pg_iceberg_am_handler.c:496） | 触发了 TID range scan 路径 | 改用基于普通列的谓词，避免 `ctid <@ ...` 之类查询 |
 | `API not supported for iceberg relations` | 调用了 heap-only API（多见于第三方扩展或 ANALYZE 内部 block API） | 见 4.11.3；或避免该扩展直接走 iceberg 表 |
-| `ANALYZE is a no-op for Iceberg tables; planner stats come from Iceberg catalog metadata` | 不是错误，只是 NOTICE | 统计信息来自 Iceberg manifest，不需要 ANALYZE 采样 |
+| `ANALYZE on Iceberg tables refreshed pg_class.reltuples/relpages from Iceberg catalog metadata` | 不是错误，只是 NOTICE | ANALYZE 仅刷新 reltuples/relpages（供 ORCA 使用）；列级统计来自 Iceberg manifest，不做采样 |
