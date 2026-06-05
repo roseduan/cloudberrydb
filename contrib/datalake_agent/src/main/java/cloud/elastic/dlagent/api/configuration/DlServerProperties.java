@@ -50,6 +50,13 @@ public class DlServerProperties {
     @Setter
     private TaskExecutionProperties task = new TaskExecutionProperties();
 
+    /**
+     * Customizable settings for iceberg plugins through dlagent
+     */
+    @Getter
+    @Setter
+    private Iceberg iceberg = new Iceberg();
+
     @Getter
     @Setter
     public static class Tomcat {
@@ -68,6 +75,19 @@ public class DlServerProperties {
          * Timeout for reading data from upload requests, if disableUploadTimeout is set to false.
          */
         private Duration connectionUploadTimeout = Duration.ofMinutes(5); // 5 min is default Tomcat setting
+
+    }
+
+    @Getter
+    @Setter
+    public static class Iceberg {
+
+        /**
+         * Idle expiration (expireAfterAccess) for the cached hive catalogs in
+         * IcebergCatalogWrapper.  An entry that has not been read for this
+         * long is evicted and its underlying HMS connections are closed.
+         */
+        private Duration hiveCatalogCacheTtl = Duration.ofMinutes(5);
 
     }
 }

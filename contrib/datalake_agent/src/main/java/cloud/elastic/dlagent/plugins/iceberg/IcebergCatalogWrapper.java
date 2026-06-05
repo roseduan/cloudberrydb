@@ -19,6 +19,7 @@
 
 package cloud.elastic.dlagent.plugins.iceberg;
 
+import cloud.elastic.dlagent.api.configuration.DlServerProperties;
 import cloud.elastic.dlagent.api.error.DlRuntimeException;
 import cloud.elastic.dlagent.api.error.UnsupportedTypeException;
 import cloud.elastic.dlagent.api.model.Metadata;
@@ -26,11 +27,14 @@ import cloud.elastic.dlagent.api.model.RequestContext;
 import cloud.elastic.dlagent.api.security.SecureLogin;
 import cloud.elastic.dlagent.plugins.iceberg.utilities.IcebergUtilities;
 import cloud.elastic.dlagent.plugins.hudi.utilities.FilePathUtils;
+import com.google.common.annotations.VisibleForTesting;
 import com.google.common.cache.Cache;
 import com.google.common.cache.CacheBuilder;
 import com.google.common.cache.RemovalListener;
+import com.google.common.hash.Hashing;
 import com.google.common.util.concurrent.UncheckedExecutionException;
 import org.apache.commons.lang.StringUtils;
+import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.hive.conf.HiveConf;
 import org.apache.iceberg.Schema;
 import org.apache.iceberg.Table;
@@ -41,8 +45,13 @@ import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Component;
 
 import java.io.IOException;
+import java.nio.charset.StandardCharsets;
+import java.time.Duration;
 import java.util.ArrayList;
+import java.util.Map;
+import java.util.TreeMap;
 import java.util.concurrent.ExecutionException;
+import java.util.concurrent.TimeUnit;
 
 @Component
 public class IcebergCatalogWrapper {
@@ -54,9 +63,29 @@ public class IcebergCatalogWrapper {
     private IcebergUtilities icebergUtilities;
     private SecureLogin secureLogin;
 
-    public IcebergCatalogWrapper () {
-        LOG.info("Creating iceberg catalogCache ...");
+    /**
+     * Creates the wrapper with the hive catalog cache.  Entries idle for
+     * longer than the configured TTL (dlagent.iceberg.hive-catalog-cache-ttl)
+     * are evicted, complementing the connection-failure invalidation done by
+     * {@link InvalidatingHiveCatalog}: the TTL reclaims idle catalogs and
+     * heals configuration drift, the proxy reacts to runtime failures.
+     */
+    @Autowired
+    public IcebergCatalogWrapper (DlServerProperties serverProperties) {
+        Duration ttl = serverProperties.getIceberg().getHiveCatalogCacheTtl();
+        if (ttl.isZero() || ttl.isNegative()) {
+            /*
+             * Guava rejects a negative TTL at build time but silently accepts
+             * zero, which evicts every entry on its next access -- the cache
+             * degenerates to rebuilding the HMS catalog (and its client pool)
+             * on every request.  Fail startup with a clear message instead.
+             */
+            throw new IllegalArgumentException(
+                    "dlagent.iceberg.hive-catalog-cache-ttl must be positive, got: " + ttl);
+        }
+        LOG.info("Creating iceberg catalogCache with idle TTL {} ...", ttl);
         catalogCache = CacheBuilder.newBuilder()
+                .expireAfterAccess(ttl.toMillis(), TimeUnit.MILLISECONDS)
                 .removalListener((RemovalListener<String, IcebergHiveCatalog>) notification -> {
                     LOG.info("Removed iceberg catalogCache entry key={} cause={}",
                             notification.getKey(),
@@ -133,9 +162,63 @@ public class IcebergCatalogWrapper {
         }
     }
 
-    private String formCatalogCacheKey(RequestContext context) {
-        return String.format("%s:%s", context.getServerName(),
-                context.getConfiguration().get(HiveConf.ConfVars.METASTOREURIS.varname));
+    /**
+     * Hadoop/Hive configuration keys that define the metastore connection
+     * and its authentication.  Deliberately a fixed list: the per-request
+     * Configuration also carries request-scoped properties (e.g. the
+     * dlagent.session.user synthetic property), and hashing the whole
+     * Configuration would fragment the cache per request.
+     */
+    private static final String[] CONNECTION_CONFIG_KEYS = {
+            HiveConf.ConfVars.METASTOREURIS.varname,
+            "hadoop.security.authentication",
+            "hive.metastore.sasl.enabled",
+            "hive.metastore.kerberos.principal",
+            SecureLogin.CONFIG_KEY_SERVICE_PRINCIPAL,
+            SecureLogin.CONFIG_KEY_SERVICE_KEYTAB,
+    };
+
+    /**
+     * Forms the hive catalog cache key by hashing the full connection
+     * definition: server name, server config directory, warehouse path,
+     * metastore URI, authentication settings and all gopher (storage)
+     * properties such as endpoint/bucket/credentials/region.  Any change to
+     * the connection configuration therefore maps to a new cache entry, so a
+     * reconfigured server picks up its new settings without an agent restart
+     * (the stale entry simply idles out via the cache TTL).  Hashing also
+     * keeps credentials out of the log lines that print the key.
+     */
+    @VisibleForTesting
+    String formCatalogCacheKey(RequestContext context) {
+        Configuration configuration = context.getConfiguration();
+        StringBuilder connectionInfo = new StringBuilder();
+        appendKeyValue(connectionInfo, "serverName", context.getServerName());
+        appendKeyValue(connectionInfo, "config", context.getConfig());
+        appendKeyValue(connectionInfo, "warehouse", context.getPath());
+        for (String key : CONNECTION_CONFIG_KEYS) {
+            appendKeyValue(connectionInfo, key, configuration == null ? null : configuration.get(key));
+        }
+        // TreeMap orders the storage properties so the hash is stable.
+        Map<String, String> gopherProperties = context.getGopherProperties();
+        if (gopherProperties != null) {
+            for (Map.Entry<String, String> entry : new TreeMap<>(gopherProperties).entrySet()) {
+                appendKeyValue(connectionInfo, entry.getKey(), entry.getValue());
+            }
+        }
+        return Hashing.sha256()
+                .hashString(connectionInfo, StandardCharsets.UTF_8)
+                .toString();
+    }
+
+    private static void appendKeyValue(StringBuilder sb, String key, String value) {
+        // '\n' cannot appear in these one-line settings, so it unambiguously
+        // delimits the key=value pairs; null and "" hash differently.
+        sb.append(key).append('=').append(value).append('\n');
+    }
+
+    @VisibleForTesting
+    Cache<String, IcebergHiveCatalog> getCatalogCache() {
+        return catalogCache;
     }
 
     private IcebergHiveCatalog getHiveCatalog(RequestContext context) throws IOException {
