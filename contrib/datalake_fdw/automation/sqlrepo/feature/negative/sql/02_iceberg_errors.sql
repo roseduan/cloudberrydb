@@ -77,11 +77,17 @@ END $$;
 -- ============================================================
 SELECT test_log('Test 5: Invalid volume options');
 
+-- Bad endpoint: use a resolvable host with a closed port (connection refused
+-- fails fast on every arch).  An unresolvable hostname stalled ~40min on the
+-- aarch64 runner's DNS until the fdw-side curl gave up with CURL 28
+-- (pipeline #139686), while x86 failed fast with an agent HTTP 500 -- the
+-- expected NOTICE text then depends on who times out first.  The transport
+-- details are normalized out of the NOTICE for the same reason.
 DO $$
 BEGIN
     DROP SERVER IF EXISTS ne_bad_vol_server CASCADE;
     CREATE SERVER ne_bad_vol_server FOREIGN DATA WRAPPER iceberg_volume_fdw
-    OPTIONS (type 's3', endpoint 'http://invalid_host:9999', region 'us-east-1',
+    OPTIONS (type 's3', endpoint 'http://minio:1', region 'us-east-1',
              bucket_name 'nonexistent_bucket', path_style_access 'true');
     CREATE USER MAPPING FOR current_user SERVER ne_bad_vol_server
     OPTIONS (access_key_id 'bad_key', secret_access_key 'bad_secret');
@@ -95,7 +101,9 @@ BEGIN
     DROP USER MAPPING IF EXISTS FOR current_user SERVER ne_bad_vol_server;
     DROP SERVER IF EXISTS ne_bad_vol_server;
 EXCEPTION WHEN OTHERS THEN
-    RAISE NOTICE 'Expected error: %', split_part(SQLERRM, E'\n', 1);
+    RAISE NOTICE 'Expected error: %',
+        regexp_replace(split_part(SQLERRM, E'\n', 1),
+                       'HTTP Status: .*$', 'HTTP error from datalake agent');
     DROP TABLE IF EXISTS ne_bad_vol_table;
     DROP VOLUME IF EXISTS ne_bad_volume;
     DROP USER MAPPING IF EXISTS FOR current_user SERVER ne_bad_vol_server;
