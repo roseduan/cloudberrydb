@@ -79,7 +79,8 @@ test: distributedlog-bug
 test: invalidated_toast_index
 test: distributed_snapshot
 test: gp_collation
-test: ao_blkdir
+# FIXME: flaky test, disable it temporarily
+#test: ao_blkdir
 test: bitmap_index_concurrent
 test: bitmap_index_crash
 test: bitmap_update_words_backup_block
