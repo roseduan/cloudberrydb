@@ -295,6 +295,22 @@ typedef struct MotionIPCLayer
 extern MotionIPCLayer *CurrentMotionIPCLayer;
 
 /*
+ * CBDB_PARALLEL: optional hook invoked by an interconnect receive loop each
+ * time it wakes (e.g. on its periodic timeout) without having delivered a
+ * tuple.  It lets a backend that is blocked receiving do cooperative work
+ * instead of waiting indefinitely.  It is used by a parallel hash-join worker
+ * draining a Motion on the inner (build) side: when a sibling needs to grow
+ * batches, the blocked worker must come to the grow barrier, otherwise the
+ * single-threaded, head-of-line-blocked Motion sender can never feed the
+ * still-building siblings and the build deadlocks.  Set/cleared by the
+ * executor around the grow-sensitive receive; NULL the rest of the time, so
+ * there is no cost for any other receive.
+ */
+typedef void (*MotionRecvIdleCallback) (void *arg);
+extern MotionRecvIdleCallback MotionRecvIdleHook;
+extern void *MotionRecvIdleHookArg;
+
+/*
  * Called by interconnect.so to register a new IPC layer implement.
  */
 extern void RegisterIPCLayerImpl(MotionIPCLayer *impl);

@@ -303,7 +303,7 @@ CPhysicalHashJoin::PdsMatch(CMemoryPool *mp, CDistributionSpec *pds,
 			{
 				GPOS_ASSERT(1 == ulSourceChildIndex);
 				return GPOS_NEW(mp) CDistributionSpecNonSingleton(
-					true /*fAllowReplicated*/, true /*fAllowWorker*/);
+					true /*fAllowReplicated*/, false /*fAllowWorker*/);
 			}
 
 			GPOS_ASSERT(0 == ulSourceChildIndex);
@@ -349,7 +349,7 @@ CPhysicalHashJoin::PdsMatch(CMemoryPool *mp, CDistributionSpec *pds,
 				}
 				// inner child is replicated, request outer child to have non-singleton distribution
 				return GPOS_NEW(mp) CDistributionSpecNonSingleton(
-					true /*fAllowReplicated*/, true /*fAllowWorker*/);
+					true /*fAllowReplicated*/, false /*fAllowWorker*/);
 			}
 
 			GPOS_ASSERT(0 == ulSourceChildIndex);
@@ -836,7 +836,7 @@ CPhysicalHashJoin::PdsRequiredReplicate(
 				CDistributionSpec::EdtTaintedReplicated == pdsInner->Edt() ||
 				CDistributionSpec::EdtReplicatedWorkers == pdsInner->Edt());
 	return GPOS_NEW(mp) CDistributionSpecNonSingleton(
-		true /*fAllowReplicated*/, true /*fAllowWorker*/);
+		true /*fAllowReplicated*/, false /*fAllowWorker*/);
 }
 
 

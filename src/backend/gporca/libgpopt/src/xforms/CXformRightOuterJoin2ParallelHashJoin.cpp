@@ -98,6 +98,22 @@ CXformRightOuterJoin2ParallelHashJoin::Exfp(CExpressionHandle &exprhdl) const
 		return CXform::ExfpNone;
 	}
 
+	// Forbid the parallel hash join when the probe (outer) child is a
+	// universal/general relation, i.e. it references no distributed table
+	// (e.g. a full join of two universal generate_series/unnest views).  Such
+	// a child holds a full copy on every worker; ORCA only deduplicates it at
+	// the segment level (a gp_execution_segment() hash filter), which is
+	// worker-blind.  As the probe side of a parallel hash join, every worker
+	// on the surviving segment re-emits the whole probe, doubling the result.
+	// The build (inner) side is unaffected -- a broadcast/universal build is
+	// built once per segment -- so we only check the outer child here; the
+	// commuted orientation (universal as the build side) and the non-parallel
+	// hash join remain available and are correct.
+	if (0 == exprhdl.DeriveTableDescriptor(0)->Size())
+	{
+		return CXform::ExfpNone;
+	}
+
 	// Use the same logic as regular hash join transformation
 	return CXformUtils::ExfpLogicalJoin2PhysicalJoin(exprhdl);
 }

@@ -31,6 +31,10 @@
 
 MotionIPCLayer *CurrentMotionIPCLayer = NULL;
 
+/* CBDB_PARALLEL: see MotionRecvIdleHook in ml_ipc.h. */
+MotionRecvIdleCallback MotionRecvIdleHook = NULL;
+void	   *MotionRecvIdleHookArg = NULL;
+
 static int CurrentIPCLayerImplNum = 0;
 static MotionIPCLayer* IPCLayerImpls[MAX_NUMBER_TYPES];
 

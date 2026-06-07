@@ -174,12 +174,15 @@ CPhysicalInnerIndexNLJoin::Ped(CMemoryPool *mp, CExpressionHandle &exprhdl,
 
 	// otherwise, require outer child to be replicated.
 	//
-	// When the outer subtree contains a CPhysicalParallelCTEConsumer, the
-	// consumer delivers a worker-partitioned stream (WORKER_RANDOM) that
-	// still runs inside the worker-level gang established by the enclosing
-	// parallel Sequence.  A plain EdtReplicated request there gets
-	// satisfied by CPhysicalMotionBroadcast, which at execution time
-	// delivers one copy per receiver in the target gang.  Under a
+	// When the outer subtree runs inside a worker-level parallel gang -- be
+	// it because it contains a CPhysicalParallelCTEConsumer (which delivers
+	// a worker-partitioned stream inside the gang established by the
+	// enclosing parallel Sequence) or because it is a bare parallel scan
+	// that is broadcast into a worker-level gang (e.g. TPC-DS q64: "item"
+	// broadcast into the worker-level gang feeding a Parallel Hash Join,
+	// with a non-parallel inner Bitmap scan) -- a plain EdtReplicated
+	// request gets satisfied by CPhysicalMotionBroadcast, which at execution
+	// time delivers one copy per receiver in the target gang.  Under a
 	// worker-level gang (nworkers * nsegments receivers) that duplicates
 	// each outer tuple to every worker on every segment; the non-parallel
 	// inner IndexScan then runs once per worker per segment and doubles
@@ -190,11 +193,12 @@ CPhysicalInnerIndexNLJoin::Ped(CMemoryPool *mp, CExpressionHandle &exprhdl,
 	// the single-worker-per-segment execution the non-parallel inner
 	// IndexScan assumes.
 	//
-	// This is restricted to the CTE-consumer shape on purpose: a bare
-	// CPhysicalParallel{Seq,Index,...}Scan as outer is already handled
-	// correctly by segment-level Broadcast because the non-CTE parallel
-	// scan path does not inject a redistribute-then-broadcast chain whose
-	// receivers are worker-level.
+	// CUtils::UlExtractWorkersFromGroup() walks the outer group (stopping at
+	// Motion boundaries) and returns the worker count of any worker-level
+	// parallel source -- parallel scan or parallel CTE consumer -- or 0 when
+	// the outer is not worker-level parallel, in which case we fall through
+	// to plain Replicated (a segment-level Broadcast, which is correct
+	// there).
 	//
 	// The match type for this request has to be "Satisfy" since EdtReplicated
 	// is required only property. Since a Broadcast motion will always
@@ -213,7 +217,8 @@ CPhysicalInnerIndexNLJoin::Ped(CMemoryPool *mp, CExpressionHandle &exprhdl,
 		if (nullptr != pgexpr && child_index < pgexpr->Arity())
 		{
 			CGroup *pgroupOuter = (*pgexpr)[child_index];
-			ULONG ulWorkers = UlExtractParallelCTEConsumerWorkers(pgroupOuter);
+			ULONG ulWorkers = CUtils::UlExtractWorkersFromGroup(
+				pgroupOuter, true /*fStopAtMotion*/);
 			if (0 < ulWorkers)
 			{
 				return GPOS_NEW(mp) CEnfdDistribution(
@@ -268,88 +273,5 @@ CPhysicalInnerIndexNLJoin::FParentAllowsWorkerLevelGang(
 			return false;
 	}
 }
-
-//---------------------------------------------------------------------------
-//	@function:
-//		UlExtractParallelCTEConsumerWorkersInternal
-//
-//	@doc:
-//		Recursive worker for UlExtractParallelCTEConsumerWorkers.  Uses a
-//		visited-group bitset so cycles in the memo DAG (groups referencing
-//		themselves via exploration alternatives) do not cause unbounded
-//		recursion.
-//
-//---------------------------------------------------------------------------
-static ULONG
-UlExtractParallelCTEConsumerWorkersInternal(CGroup *pgroup, CBitSet *visited)
-{
-	if (nullptr == pgroup || visited->Get(pgroup->Id()))
-	{
-		return 0;
-	}
-	visited->ExchangeSet(pgroup->Id());
-
-	CGroupProxy gp(pgroup);
-	CGroupExpression *pgexpr = gp.PgexprFirst();
-	while (nullptr != pgexpr)
-	{
-		COperator *pop = pgexpr->Pop();
-		if (COperator::EopPhysicalParallelCTEConsumer == pop->Eopid())
-		{
-			return CPhysicalParallelCTEConsumer::PopConvert(pop)
-				->UlParallelWorkers();
-		}
-
-		// Stop recursion at Motion boundaries: a Motion delineates a
-		// separate slice, so a parallel CTE consumer below a Motion does
-		// not determine the current IndexApply's gang layout.
-		if (CUtils::FPhysicalMotion(pop))
-		{
-			pgexpr = gp.PgexprNext(pgexpr);
-			continue;
-		}
-
-		const ULONG arity = pgexpr->Arity();
-		for (ULONG ul = 0; ul < arity; ul++)
-		{
-			ULONG ulWorkers = UlExtractParallelCTEConsumerWorkersInternal(
-				(*pgexpr)[ul], visited);
-			if (0 < ulWorkers)
-			{
-				return ulWorkers;
-			}
-		}
-		pgexpr = gp.PgexprNext(pgexpr);
-	}
-	return 0;
-}
-
-//---------------------------------------------------------------------------
-//	@function:
-//		CPhysicalInnerIndexNLJoin::UlExtractParallelCTEConsumerWorkers
-//
-//	@doc:
-//		Walk the outer group subtree (stopping at Motion boundaries) and
-//		return the worker count of the first CPhysicalParallelCTEConsumer
-//		found; return 0 if none exists.  Used to decide whether the
-//		IndexApply outer lives inside a worker-level parallel gang driven
-//		by a parallel CTE.
-//
-//---------------------------------------------------------------------------
-ULONG
-CPhysicalInnerIndexNLJoin::UlExtractParallelCTEConsumerWorkers(CGroup *pgroup)
-{
-	if (nullptr == pgroup)
-	{
-		return 0;
-	}
-
-	CMemoryPool *mp = COptCtxt::PoctxtFromTLS()->Pmp();
-	CBitSet *visited = GPOS_NEW(mp) CBitSet(mp);
-	ULONG ulWorkers = UlExtractParallelCTEConsumerWorkersInternal(pgroup, visited);
-	visited->Release();
-	return ulWorkers;
-}
-
 
 // EOF

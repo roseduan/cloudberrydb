@@ -51,6 +51,7 @@
 #include "cdb/cdbexplain.h"
 #include "cdb/cdbutil.h"
 #include "cdb/cdbvars.h"
+#include "cdb/ml_ipc.h"
 
 #include "utils/memutils.h"
 #include "utils/syscache.h"
@@ -61,6 +62,8 @@ static void ExecHashIncreaseNumBatches(HashJoinTable hashtable);
 static void ExecHashIncreaseNumBuckets(HashJoinTable hashtable);
 static void ExecParallelHashIncreaseNumBatches(HashJoinTable hashtable);
 static void ExecParallelHashIncreaseNumBuckets(HashJoinTable hashtable);
+static bool ExecParallelHashHelpGrowIfPending(HashJoinTable hashtable);
+static void ExecParallelHashRecvIdleCallback(void *arg);
 static void ExecHashBuildSkewHash(HashJoinTable hashtable, Hash *node,
 								  int mcvsToUse);
 static void ExecHashSkewTableInsert(HashState *hashState,
@@ -255,6 +258,64 @@ MultiExecPrivateHash(HashState *node)
 	hashtable->partialTuples = hashtable->totalTuples;
 }
 
+/*
+ * ExecParallelHashHelpGrowIfPending
+ *
+ * If another participant has already signalled that the shared hash table must
+ * grow, come and take part in the grow barrier even though we are not the one
+ * that hit the limit.  This mirrors the growth check at the top of
+ * ExecParallelHashTupleAlloc(); the difference is only that we can be called
+ * when we have no tuple to insert.
+ *
+ * It is used by a worker that is otherwise blocked receiving inner tuples from
+ * a Motion (see ExecParallelHashRecvIdleCallback).  The grow barrier is
+ * all-or-nothing, so if such a worker never arrives, the grow can never
+ * complete; and because the worker is parked draining nothing, the
+ * single-threaded Motion sender head-of-line blocks on it and can no longer
+ * feed the still-building siblings -- a deadlock.  Coming to the barrier here
+ * breaks that cycle.
+ *
+ * Reading pstate->growth while a grow is pending is race-free in the only
+ * situation that matters: a parked sibling keeps the grower waiting at the
+ * ELECTING barrier, so growth stays NEED_MORE_* (it is reset only after that
+ * barrier releases, which needs us).  Returns true if it joined a grow.
+ */
+static bool
+ExecParallelHashHelpGrowIfPending(HashJoinTable hashtable)
+{
+	ParallelHashJoinState *pstate = hashtable->parallel_state;
+	ParallelHashGrowth growth;
+
+	LWLockAcquire(&pstate->lock, LW_SHARED);
+	growth = pstate->growth;
+	LWLockRelease(&pstate->lock);
+
+	if (growth == PHJ_GROWTH_NEED_MORE_BATCHES)
+		ExecParallelHashIncreaseNumBatches(hashtable);
+	else if (growth == PHJ_GROWTH_NEED_MORE_BUCKETS)
+		ExecParallelHashIncreaseNumBuckets(hashtable);
+	else
+		return false;
+
+	return true;
+}
+
+/*
+ * Hook (MotionRecvIdleHook) installed while a parallel hash worker is draining
+ * its inner Motion.  The interconnect calls it whenever a receive wakes
+ * without a tuple; we use the opportunity to drain any pending grow rounds so
+ * we reach the grow barrier instead of starving the sender.  It is a no-op
+ * once growth is OK/DISABLED, so it is harmless if it fires during the probe.
+ */
+static void
+ExecParallelHashRecvIdleCallback(void *arg)
+{
+	HashJoinTable hashtable = (HashJoinTable) arg;
+
+	while (ExecParallelHashHelpGrowIfPending(hashtable))
+		;
+}
+
 /* ----------------------------------------------------------------
  *		MultiExecParallelHash
  *
@@ -275,6 +336,8 @@ MultiExecParallelHash(HashState *node)
 	uint32		hashvalue;
 	Barrier    *build_barrier;
 	int			i;
+	MotionRecvIdleCallback save_idle_hook;
+	void	   *save_idle_arg;
 
 	/*
 	 * get state info from node
@@ -330,6 +393,21 @@ MultiExecParallelHash(HashState *node)
 				ExecParallelHashIncreaseNumBuckets(hashtable);
 			ExecParallelHashEnsureBatchAccessors(hashtable);
 			ExecParallelHashTableSetCurrentBatch(hashtable, 0);
+
+			/*
+			 * CBDB_PARALLEL: while we drain our inner Motion, let the
+			 * interconnect call us back (on its periodic receive wakeups) if a
+			 * sibling has signalled a grow, so we come to the grow barrier
+			 * instead of waiting for a tuple the head-of-line-blocked sender
+			 * can no longer deliver.  Save/restore keeps this correct under
+			 * nested parallel hash builds; the hook is also cleared when the
+			 * hash table is destroyed, in case an error unwinds past here.
+			 */
+			save_idle_hook = MotionRecvIdleHook;
+			save_idle_arg = MotionRecvIdleHookArg;
+			MotionRecvIdleHook = ExecParallelHashRecvIdleCallback;
+			MotionRecvIdleHookArg = hashtable;
+
 			for (;;)
 			{
 				bool		hashkeys_null = false;
@@ -375,6 +453,10 @@ MultiExecParallelHash(HashState *node)
 					break;
 				}
 			}
+
+			/* CBDB_PARALLEL: done draining our inner Motion; disarm the hook. */
+			MotionRecvIdleHook = save_idle_hook;
+			MotionRecvIdleHookArg = save_idle_arg;
 
 			/* CBDB_PARALLEL: No need to flush tuples if phs_lasj_has_null. */
 			/*
@@ -1089,6 +1171,17 @@ ExecHashTableDestroy(HashState *hashState, HashJoinTable hashtable)
 
 	Assert(hashtable);
 	Assert(!hashtable->eagerlyReleased);
+
+	/*
+	 * CBDB_PARALLEL: if an error unwound while this table's parallel build had
+	 * the inner-Motion idle hook armed (see MultiExecParallelHash), disarm it
+	 * now so a later receive cannot dereference a freed hash table.
+	 */
+	if (MotionRecvIdleHookArg == (void *) hashtable)
+	{
+		MotionRecvIdleHook = NULL;
+		MotionRecvIdleHookArg = NULL;
+	}
 
 	/*
 	 * Make sure all the temp files are closed.

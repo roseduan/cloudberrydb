@@ -92,6 +92,11 @@ CXformGbAgg2ParallelHashAgg::Exfp(CExpressionHandle &exprhdl) const
 		return CXform::ExfpNone;
 	}
 
+	if (COptCtxt::PoctxtFromTLS()->HasReplicatedTables())
+	{
+		return CXform::ExfpNone;
+	}
+
 	if (!COptCtxt::PoctxtFromTLS()->HasParallelOperators())
 	{
 		return CXform::ExfpNone;

@@ -120,7 +120,16 @@ CDistributionSpecReplicatedWorkers::FSatisfies(const CDistributionSpec *pds) con
 	}
 	if (EdtNonSingleton == pds->Edt())
 	{
-		return CDistributionSpecNonSingleton::PdsConvert(pds)->FAllowWorker();
+		// A worker-level replicated distribution satisfies a NonSingleton
+		// requirement only when that requirement allows worker-level
+		// distribution AND allows replicated.  A request that disallows
+		// replicated (fAllowReplicated == false) -- e.g. the parallel hash
+		// join probe-side request, which keeps the outer partitioned -- must
+		// not be satisfied by a broadcast (ReplicatedWorkers) child.
+		const CDistributionSpecNonSingleton *pdsNonSingleton =
+			CDistributionSpecNonSingleton::PdsConvert(pds);
+		return pdsNonSingleton->FAllowWorker() &&
+			   pdsNonSingleton->FAllowReplicated();
 	}
 
 	return false;

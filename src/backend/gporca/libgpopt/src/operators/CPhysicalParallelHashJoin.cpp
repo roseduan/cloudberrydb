@@ -300,10 +300,13 @@ CPhysicalParallelHashJoin::PdsRequiredReplicateWorkers(
 		}
 	}
 
-	// Fallback: request worker-level non-singleton so HashedWorker,
-	// ReplicatedWorkers and WorkerRandom can all satisfy it without
-	// forcing a redistribute motion.
-	return GPOS_NEW(mp) CDistributionSpecNonSingleton(true /*fAllowReplicated*/,
+	// Fallback: request worker-level non-singleton so a partitioned probe
+	// (HashedWorker or WorkerRandom) can satisfy it without forcing a
+	// redistribute motion.  fAllowReplicated is false so a broadcast probe --
+	// whether segment-level Replicated or worker-level ReplicatedWorkers --
+	// cannot satisfy this request: the outer stays partitioned while only the
+	// inner (build) side is broadcast.
+	return GPOS_NEW(mp) CDistributionSpecNonSingleton(false /*fAllowReplicated*/,
 													 true /*fAllowWorker*/);
 }
 
@@ -743,6 +746,41 @@ CPhysicalParallelHashJoin::FValidContext(
 		}
 	}
 
+	/* Probe (outer) side must actually run worker-parallel in THIS context.
+	 *
+	 * m_ulProbeWorkers extracted above via UlExtractWorkersFromGroup() is
+	 * group-level: it returns a positive worker count whenever ANY expression
+	 * in the outer group is a worker-level parallel source (e.g. the item
+	 * ParallelTableScan), even when the best plan chosen for this context is a
+	 * non-parallel subtree -- a plain Hash Join whose store_sales scan carries
+	 * no worker motion.  Such an outer derives a segment-level (non-worker)
+	 * distribution, so the parallel hash join above it executes once per worker
+	 * per segment and doubles the join output.
+	 *
+	 * Reject the context unless the outer's best plan actually derives a
+	 * worker-partitioned distribution (HashedWorker or WorkerRandom), i.e. a
+	 * probe parallel degree >= 2.  Only the probe side is constrained here; the
+	 * build side may stay segment-level Hashed with a worker-shared hash table.
+	 */
+	if (nullptr != pdrgpocChild && pdrgpocChild->Size() >= 2)
+	{
+		COptimizationContext *pocOuter = (*pdrgpocChild)[0];
+		if (nullptr != pocOuter && nullptr != pocOuter->PccBest())
+		{
+			CDrvdPropPlan *pdpplanOuter = pocOuter->PccBest()->Pdpplan();
+			if (nullptr != pdpplanOuter)
+			{
+				const CDistributionSpec::EDistributionType dtOuterDrvd =
+					pdpplanOuter->Pds()->Edt();
+				if (CDistributionSpec::EdtHashedWorker != dtOuterDrvd &&
+					CDistributionSpec::EdtWorkerRandom != dtOuterDrvd)
+				{
+					return false;
+				}
+			}
+		}
+	}
+
 	// Lightweight pruning based on children required distributions (when available).
 	// Do NOT attempt to inspect derived child properties here. We only reject
 	// obviously incompatible contexts to reduce search:
@@ -775,9 +813,19 @@ CPhysicalParallelHashJoin::FValidContext(
 		}
 
 		// Outer/probe side must allow parallelism: require Any or WorkerRandom.
+		// A NonSingleton requirement that allows worker-level distribution is
+		// also acceptable: it is the outer requirement produced by a
+		// BroadcastWorkers request (see PdsRequiredReplicateWorkers), and a
+		// worker-parallel outer plan satisfies it without forcing a redistribute
+		// motion.  Without this, the BroadcastWorkers alternative is always
+		// rejected here and a small inner can never be broadcast in parallel.
+		BOOL fOuterNonSingletonAllowsWorker =
+			CDistributionSpec::EdtNonSingleton == dtOuter &&
+			CDistributionSpecNonSingleton::PdsConvert(pdsOuterReq)->FAllowWorker();
 		if (dtOuter != CDistributionSpec::EdtAny &&
 			dtOuter != CDistributionSpec::EdtWorkerRandom &&
-			dtOuter != CDistributionSpec::EdtHashedWorker)
+			dtOuter != CDistributionSpec::EdtHashedWorker &&
+			!fOuterNonSingletonAllowsWorker)
 		{
 			return false;
 		}

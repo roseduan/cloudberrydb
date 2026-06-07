@@ -14,6 +14,7 @@
 #include "gpopt/base/CDistributionSpecNonSingleton.h"
 #include "gpopt/base/CDistributionSpecReplicated.h"
 #include "gpopt/base/CDistributionSpecReplicatedWorkers.h"
+#include "gpopt/base/CUtils.h"
 #include "gpopt/exception.h"
 #include "gpopt/operators/CExpressionHandle.h"
 #include "gpopt/operators/CPhysicalInnerIndexNLJoin.h"
@@ -174,9 +175,9 @@ CPhysicalLeftOuterIndexNLJoin::Ped(CMemoryPool *mp, CExpressionHandle &exprhdl,
 
 	// otherwise, require outer child to be replicated.
 	// See CPhysicalInnerIndexNLJoin::Ped for the full rationale: when the
-	// outer subtree contains a CPhysicalParallelCTEConsumer (i.e. the join
-	// runs inside a worker-level parallel gang driven by a parallel CTE),
-	// upgrade the requirement to EdtReplicatedWorkers so the enforcer picks
+	// outer subtree runs inside a worker-level parallel gang (it contains a
+	// parallel scan or a CPhysicalParallelCTEConsumer), upgrade the
+	// requirement to EdtReplicatedWorkers so the enforcer picks
 	// BroadcastWorkers, which delivers each outer tuple to exactly one
 	// worker per segment at runtime and avoids duplicating the non-parallel
 	// inner IndexScan's output.
@@ -188,9 +189,8 @@ CPhysicalLeftOuterIndexNLJoin::Ped(CMemoryPool *mp, CExpressionHandle &exprhdl,
 		if (nullptr != pgexpr && child_index < pgexpr->Arity())
 		{
 			CGroup *pgroupOuter = (*pgexpr)[child_index];
-			ULONG ulWorkers =
-				CPhysicalInnerIndexNLJoin::UlExtractParallelCTEConsumerWorkers(
-					pgroupOuter);
+			ULONG ulWorkers = CUtils::UlExtractWorkersFromGroup(
+				pgroupOuter, true /*fStopAtMotion*/);
 			if (0 < ulWorkers)
 			{
 				return GPOS_NEW(mp) CEnfdDistribution(

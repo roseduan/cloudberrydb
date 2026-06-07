@@ -67,6 +67,19 @@ CXformImplementIntraSegmentParallelUnionAll::Exfp(
 		return CXform::ExfpNone;
 	}
 
+	/*
+	 * Check 3: Skip parallel union all when the query contains a replicated
+	 * table.  A replicated table already holds a full copy on every segment,
+	 * so spreading its scan across parallel workers would have each worker
+	 * emit only a partial copy, losing rows.  Use the query-level flag set
+	 * during translation, matching how the other parallel xforms gate on
+	 * replicated tables.
+	 */
+	if (COptCtxt::PoctxtFromTLS()->HasReplicatedTables())
+	{
+		return CXform::ExfpNone;
+	}
+
 	return CXform::ExfpHigh;
 }
 

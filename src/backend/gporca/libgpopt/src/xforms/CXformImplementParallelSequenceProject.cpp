@@ -36,6 +36,7 @@
 #include "gpopt/operators/CPatternLeaf.h"
 #include "gpopt/operators/CPhysicalParallelSequenceProject.h"
 #include "gpopt/operators/CScalarIdent.h"
+#include "gpopt/xforms/CXformUtils.h"
 #include "naucrates/md/IMDType.h"
 
 // Use gpdbwrappers for parallel checks
@@ -113,6 +114,18 @@ CXformImplementParallelSequenceProject::Exfp(
 	}
 
 	if (exprhdl.HasOuterRefs())
+	{
+		return CXform::ExfpNone;
+	}
+
+	/*
+	 * Skip parallel window when the relational child subtree contains a
+	 * replicated table.  A replicated table already holds a full copy on
+	 * every segment, so spreading its scan across parallel workers would
+	 * have each worker see only a partial copy, producing wrong window
+	 * results.  Keep the sequence project serial in that case.
+	 */
+	if (CXformUtils::FContainsReplicatedTable(exprhdl.DeriveTableDescriptor(0)))
 	{
 		return CXform::ExfpNone;
 	}

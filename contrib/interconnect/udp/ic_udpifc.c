@@ -4264,6 +4264,19 @@ void TeardownInterconnectUDP(ChunkTransportState *transportStates,
     /* TODO: should pass interconnect_handle_t as arg? */
     interconnect_handle_t *h = find_interconnect_handle(transportStates);
 
+	/*
+	 * CBDB_PARALLEL: disarm the parallel hash-join inner-Motion idle hook
+	 * unconditionally here.  The executor normally restores it when the build
+	 * drain loop ends (MultiExecParallelHash) and as a backstop when the hash
+	 * table is destroyed, but neither is guaranteed if an error unwinds out of
+	 * the build.  TeardownInterconnect is contractually called at the end of
+	 * every statement -- success or error -- so clearing it here makes sure a
+	 * stale hook can never fire during a later, unrelated Motion receive and
+	 * dereference a freed hash table.
+	 */
+	MotionRecvIdleHook = NULL;
+	MotionRecvIdleHookArg = NULL;
+
 	TeardownUDPIFCInterconnect(transportStates, hasErrors);
 
 	if (h != NULL)
@@ -4454,6 +4467,16 @@ receiveChunksUDPIFCLoop(ChunkTransportState *pTransportStates, ChunkTransportSta
 											"" /* databaseName */ ,
 											"" /* tableName */ );
 		ML_CHECK_FOR_INTERRUPTS(pTransportStates->teardownActive);
+
+		/*
+		 * CBDB_PARALLEL: we woke without having delivered a tuple yet.  Give a
+		 * blocked receiver a chance to do cooperative work (a parallel
+		 * hash-join worker comes here to help grow batches) so it does not
+		 * wait forever for a tuple the head-of-line-blocked sender can no
+		 * longer deliver.  No-op unless the executor armed the hook.
+		 */
+		if (MotionRecvIdleHook != NULL)
+			MotionRecvIdleHook(MotionRecvIdleHookArg);
 
 		/*
 		 * check to see if the dispatcher should cancel
