@@ -292,11 +292,22 @@ table_state_rollback_to_level(TableMetadataState *state, int target_level)
 												 entry->prev_delete_files_count);
 
 		/*
-		 * The accumulated file set changed; under deferred materialization
-		 * (issue #323) current_metadata_location may not reflect the
-		 * truncated list, so force a re-materialize on the next scan/commit.
+		 * The accumulated file set changed. Only builtin-catalog tables defer
+		 * materialization (issue #323): there current_metadata_location may no
+		 * longer reflect the truncated list, so force a re-materialize on the
+		 * next scan/commit.
+		 *
+		 * Non-builtin catalogs (Polaris/Hive) take the eager per-statement path
+		 * where apply_updates_with_rebase keeps current_metadata_location in
+		 * sync with the accumulated files at all times; the restored location
+		 * therefore already matches the truncated list. Forcing dirty there
+		 * would defeat the commit-time skip optimisation and make
+		 * apply_updates_with_rebase re-call the agent (which commits a snapshot
+		 * to the external catalog) on top of the subsequent
+		 * tracker_commit_external_table call -- a duplicate snapshot.
 		 */
-		state->dirty = true;
+		if (state->is_builtin_catalog)
+			state->dirty = true;
 
 		/* Pop this history entry (don't pfree prev strings - transferred above) */
 		pfree(entry);
@@ -402,8 +413,18 @@ destroy_tracker(void)
 static bool
 table_has_pending_changes(const TableMetadataState *state)
 {
-	/* If no current metadata location, certainly no changes yet */
-	if (state->current_metadata_location == NULL)
+	/*
+	 * No pending changes only when there is neither a metadata location nor
+	 * any accumulated files. Under deferred materialization (issue #323) files
+	 * are accumulated without updating current_metadata_location, so the file
+	 * counts must be checked before concluding there is nothing to commit --
+	 * otherwise a table could be silently skipped at PRE_COMMIT and its
+	 * accumulated data discarded. Checking the counts first also keeps the
+	 * strcmp below from dereferencing a NULL current_metadata_location.
+	 */
+	if (state->current_metadata_location == NULL &&
+		list_length(state->data_files) == 0 &&
+		list_length(state->delete_files) == 0)
 		return false;
 
 	/* Has accumulated files? */
