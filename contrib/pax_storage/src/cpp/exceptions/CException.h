@@ -28,6 +28,7 @@
 #pragma once
 #include "comm/cbdb_api.h"
 
+#include <exception>
 #include <sstream>
 #include <string>
 
@@ -62,17 +63,27 @@
 
 // catch c++ exception and rethrow ERROR to C code
 // only used by the outer c++ code called by C
-#define CBDB_CATCH_DEFAULT()                          \
-  }                                                   \
-  catch (cbdb::CException & e) {                      \
-    internal_cbdb_try_throw_error_ = true;            \
-    internal_cbdb_try_throw_error_with_stack_ = true; \
-    global_pg_error_message = elog_message();         \
-    elog(LOG, "\npax stack trace: \n%s", e.Stack());  \
-    global_exception = e;                             \
-  }                                                   \
-  catch (...) {                                       \
-    internal_cbdb_try_throw_error_ = true;            \
+//
+// The std::exception branch is defense-in-depth: any std::bad_alloc / other
+// std::exception that slips past the cbdb::CException path (e.g. raw `new`,
+// std::vector, std::string under OOM) still surfaces with e.what() instead of
+// degrading to the bare "__func__" fallback in CBDB_END_TRY.
+#define CBDB_CATCH_DEFAULT()                                 \
+  }                                                          \
+  catch (cbdb::CException & e) {                             \
+    internal_cbdb_try_throw_error_ = true;                   \
+    internal_cbdb_try_throw_error_with_stack_ = true;        \
+    global_pg_error_message = elog_message();                \
+    elog(LOG, "\npax stack trace: \n%s", e.Stack());         \
+    global_exception = e;                                    \
+  }                                                          \
+  catch (const std::exception & e) {                         \
+    internal_cbdb_try_throw_error_ = true;                   \
+    internal_cbdb_try_throw_error_with_stack_ = false;       \
+    error_message.Append("ERROR: %s", e.what());             \
+  }                                                          \
+  catch (...) {                                              \
+    internal_cbdb_try_throw_error_ = true;                   \
     internal_cbdb_try_throw_error_with_stack_ = false;
 
 // like PG_FINALLY

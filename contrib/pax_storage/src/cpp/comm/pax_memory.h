@@ -27,8 +27,11 @@
 
 #pragma once
 #include "comm/cbdb_api.h"
+#include <cstdio>
 #include <memory>
 #include <type_traits>
+
+#include "exceptions/CException.h"
 
 namespace pax {
 
@@ -39,10 +42,23 @@ public:
  virtual ~MemoryObject() = default;
 };
 
+// PAX_ALLOC failures raise a cbdb::CException of kExTypeOOM (instead of a raw
+// std::bad_alloc) so that the CBDB_CATCH_DEFAULT path preserves the "Out of
+// Memory" classification, a stack trace, and the requested size in the user-
+// visible ereport — rather than degrading to the bare "__func__" fallback in
+// CBDB_END_TRY which leaks internal file:line and hides the real cause.
+[[noreturn]] static inline void PaxRaiseOOM(const char *file, int line, const char *what, size_t size) {
+  char buf[96];
+  snprintf(buf, sizeof(buf), "%s: out of memory (requested %zu bytes)",
+           what, size);
+  cbdb::CException::Raise(file, line,
+                          cbdb::CException::ExType::kExTypeOOM, buf);
+}
+
 template <typename T=void>
 static inline T* PAX_ALLOC(size_t size) {
   auto p = malloc(size);
-  if (!p) throw std::bad_alloc{};
+  if (unlikely(!p)) PaxRaiseOOM(__FILE__, __LINE__, "PAX_ALLOC", size);
 
   return reinterpret_cast<T *>(p);
 }
@@ -57,7 +73,7 @@ static inline T* PAX_ALLOC0(size_t size) {
 template <typename T=void>
 static inline T* PAX_REALLOC(void *ptr, size_t new_size) {
   auto p = realloc(reinterpret_cast<void *>(ptr), new_size);
-  if (!p) throw std::bad_alloc{};
+  if (unlikely(!p)) PaxRaiseOOM(__FILE__, __LINE__, "PAX_REALLOC", new_size);
 
   return reinterpret_cast<T *>(p);
 }
