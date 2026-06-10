@@ -3,6 +3,15 @@
 
 \i ../../../lib/sql/common_setup.sql
 
+-- ORCA emits a "missing statistics" NOTICE for an Iceberg AM table only when
+-- it classifies the relation as non-foreign storage AND finds no column stats
+-- at plan time.  After VACUUM + ANALYZE (which on Iceberg refreshes only
+-- pg_class.reltuples, not pg_statistic) + further INSERTs, both of those
+-- conditions are transient, so the NOTICE appears non-deterministically across
+-- runs.  Suppress it here for stable regression output (same stabilizer used by
+-- src/test/regress: gporca, vacuum_gp, table_statistics, ...).
+SET optimizer_print_missing_stats = off;
+
 SELECT test_log('Feature Test: Iceberg VACUUM Basic');
 
 -- ============================================================

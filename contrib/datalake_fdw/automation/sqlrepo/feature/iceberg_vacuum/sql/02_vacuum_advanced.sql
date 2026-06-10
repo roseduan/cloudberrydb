@@ -3,6 +3,11 @@
 
 \i ../../../lib/sql/common_setup.sql
 
+-- See 01_vacuum_basic.sql: the ORCA "missing statistics" NOTICE for an Iceberg
+-- AM table is non-deterministic after VACUUM/ANALYZE/INSERT.  Suppress it for
+-- stable regression output.
+SET optimizer_print_missing_stats = off;
+
 SELECT test_log('Feature Test: Iceberg VACUUM Advanced');
 
 -- ============================================================
