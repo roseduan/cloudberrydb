@@ -4124,12 +4124,19 @@ CreateCommandTag(Node *parsetree)
 				ExtensibleNode *enode = (ExtensibleNode *) parsetree;
 
 				/*
-				 * Plugin-defined utility nodes. Iceberg VACUUM is dispatched
-				 * through an ExtensibleNode by the datalake_fdw plugin.
+				 * Plugin-defined utility nodes. Iceberg VACUUM and ANALYZE are
+				 * dispatched through ExtensibleNodes by the datalake_fdw plugin.
+				 * Both must map to a concrete command tag: the QE wraps the node
+				 * in a CMD_UTILITY PlannedStmt and exec_mpp_query feeds the tag to
+				 * PortalDefineQuery, which asserts commandTag != CMDTAG_UNKNOWN
+				 * whenever the statement list is non-empty (portalmem.c).
 				 */
 				if (enode->extnodename &&
 					strcmp(enode->extnodename, "PgIcebergVacuumDispatch") == 0)
 					tag = CMDTAG_VACUUM;
+				else if (enode->extnodename &&
+						 strcmp(enode->extnodename, "PgIcebergAnalyzeDispatch") == 0)
+					tag = CMDTAG_ANALYZE;
 				else
 					tag = CMDTAG_UNKNOWN;
 			}
