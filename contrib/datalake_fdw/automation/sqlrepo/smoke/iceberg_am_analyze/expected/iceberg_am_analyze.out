@@ -12,9 +12,8 @@
 -- MAX_STARTUP_PACKET_LENGTH on large tables) and lets the kernel compute real
 -- column statistics.
 --
--- NOTE: this copy targets the in-container dev MinIO (172.17.0.2:9000,
--- minioadmin).  For CI, point the volume at the lakehouse stack
--- (endpoint 'http://minio:9000', admin/admin12345) like iceberg_am_s3.
+-- Volume targets the lakehouse-stack MinIO (endpoint 'http://minio:9000',
+-- admin/admin12345), same as iceberg_am_s3.
 \i ../../../lib/sql/common_setup.sql
 -- common_setup.sql
 -- Base setup for all datalake_fdw tests
@@ -71,10 +70,10 @@ CREATE FOREIGN CATALOG anlz_cat SERVER anlz_cat_srv
 SET iceberg_default_catalog = 'anlz_cat';
 DROP SERVER IF EXISTS anlz_vol_srv CASCADE;
 CREATE SERVER anlz_vol_srv FOREIGN DATA WRAPPER iceberg_volume_fdw
-    OPTIONS (type 's3', endpoint 'http://172.17.0.2:9000', region 'us-east-1',
+    OPTIONS (type 's3', endpoint 'http://minio:9000', region 'us-east-1',
              bucket_name 'warehouse', path_style_access 'true');
 CREATE USER MAPPING FOR current_user SERVER anlz_vol_srv
-    OPTIONS (access_key_id 'minioadmin', secret_access_key 'minioadmin');
+    OPTIONS (access_key_id 'admin', secret_access_key 'admin12345');
 CREATE FOREIGN VOLUME anlz_vol SERVER anlz_vol_srv
     OPTIONS (base_path '/iceberg_am_analyze/', allow_writes 'true');
 SET iceberg_default_volume = 'anlz_vol';
