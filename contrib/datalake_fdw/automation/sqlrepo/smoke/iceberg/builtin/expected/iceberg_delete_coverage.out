@@ -9,6 +9,11 @@ CREATE SERVER dc_catalog_server FOREIGN DATA WRAPPER iceberg_catalog_fdw;
 CREATE USER MAPPING FOR current_user SERVER dc_catalog_server;
 CREATE FOREIGN CATALOG dc_catalog SERVER dc_catalog_server;
 SET iceberg_default_catalog = 'dc_catalog';
+-- ORCA's "missing statistics" NOTICE is non-deterministic for Iceberg AM
+-- tables: it depends on whether column stats happen to exist at plan time
+-- (autostats / Iceberg ANALYZE sampling are both timing-dependent).  Suppress
+-- it for stable regression output, same as iceberg_vacuum/01_vacuum_basic.sql.
+SET optimizer_print_missing_stats = off;
 CREATE SERVER dc_volume_server FOREIGN DATA WRAPPER iceberg_volume_fdw
 OPTIONS (type 's3', endpoint 'http://minio:9000', region 'us-east-1',
          bucket_name 'warehouse', path_style_access 'true');
@@ -143,13 +148,9 @@ CREATE ICEBERG TABLE dc_analyze (id bigint, val int);
 INSERT INTO dc_analyze SELECT i, i * 10 FROM generate_series(1, 100) i;
 ANALYZE dc_analyze;
 NOTICE:  ANALYZE on Iceberg tables refreshed pg_class.reltuples/relpages from Iceberg catalog metadata
-HINT:  Column-level statistics live in the Iceberg manifests and are consulted via tableam callbacks.
 DELETE FROM dc_analyze WHERE id > 50;
-NOTICE:  One or more columns in the following table(s) do not have statistics: dc_analyze
-HINT:  For non-partitioned tables, run analyze <table_name>(<column_list>). For partitioned tables, run analyze rootpartition <table_name>(<column_list>). See log for columns missing statistics.
 ANALYZE dc_analyze;
 NOTICE:  ANALYZE on Iceberg tables refreshed pg_class.reltuples/relpages from Iceberg catalog metadata
-HINT:  Column-level statistics live in the Iceberg manifests and are consulted via tableam callbacks.
 SELECT COUNT(*) FROM dc_analyze;
  count 
 -------

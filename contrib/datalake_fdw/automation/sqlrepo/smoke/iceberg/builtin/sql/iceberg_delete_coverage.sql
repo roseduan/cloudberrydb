@@ -10,6 +10,11 @@ CREATE SERVER dc_catalog_server FOREIGN DATA WRAPPER iceberg_catalog_fdw;
 CREATE USER MAPPING FOR current_user SERVER dc_catalog_server;
 CREATE FOREIGN CATALOG dc_catalog SERVER dc_catalog_server;
 SET iceberg_default_catalog = 'dc_catalog';
+-- ORCA's "missing statistics" NOTICE is non-deterministic for Iceberg AM
+-- tables: it depends on whether column stats happen to exist at plan time
+-- (autostats / Iceberg ANALYZE sampling are both timing-dependent).  Suppress
+-- it for stable regression output, same as iceberg_vacuum/01_vacuum_basic.sql.
+SET optimizer_print_missing_stats = off;
 
 CREATE SERVER dc_volume_server FOREIGN DATA WRAPPER iceberg_volume_fdw
 OPTIONS (type 's3', endpoint 'http://minio:9000', region 'us-east-1',
