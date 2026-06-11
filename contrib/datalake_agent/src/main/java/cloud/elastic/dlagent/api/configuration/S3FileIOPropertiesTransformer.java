@@ -76,6 +76,11 @@ public class S3FileIOPropertiesTransformer {
         putIfNotBlank(props, IcebergConfigConstants.FS_S3A_ACCESS_KEY,    volume.getAccessKeyId());
         putIfNotBlank(props, IcebergConfigConstants.FS_S3A_SECRET_KEY,   volume.getSecretAccessKey());
         putIfNotBlank(props, IcebergConfigConstants.FS_S3A_ENDPOINT,     volume.getVolumeEndpoint());
+        // Pin fs.s3a.endpoint.region alongside the endpoint: without it
+        // hadoop-aws 3.4.0 wraps the SDK client in S3CrossRegionSyncClient
+        // (HADOOP-18908), whose region probing bypasses the custom endpoint
+        // and times out on hosts without AWS egress.
+        putIfNotBlank(props, IcebergConfigConstants.FS_S3A_ENDPOINT_REGION, volume.getVolumeRegion());
         if (volume.getPathStyleAccess() != null) {
             props.put(IcebergConfigConstants.FS_S3A_PATH_STYLE_ACCESS,
                     Boolean.toString(volume.getPathStyleAccess()));

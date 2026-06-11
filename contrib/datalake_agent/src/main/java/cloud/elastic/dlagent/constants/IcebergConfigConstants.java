@@ -91,6 +91,7 @@ public final class IcebergConfigConstants {
     public static final String FS_S3A_ACCESS_KEY = "fs.s3a.access.key";
     public static final String FS_S3A_SECRET_KEY = "fs.s3a.secret.key";
     public static final String FS_S3A_ENDPOINT = "fs.s3a.endpoint";
+    public static final String FS_S3A_ENDPOINT_REGION = "fs.s3a.endpoint.region";
     public static final String FS_S3A_PATH_STYLE_ACCESS = "fs.s3a.path.style.access";
 
     // Hadoop implementation values

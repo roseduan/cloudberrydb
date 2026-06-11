@@ -1482,6 +1482,15 @@ public class IcebergRestController {
         if (accessKey != null) configuration.set(IcebergConfigConstants.FS_S3A_ACCESS_KEY, accessKey);
         if (secretKey != null) configuration.set(IcebergConfigConstants.FS_S3A_SECRET_KEY, secretKey);
         if (endpoint != null) configuration.set(IcebergConfigConstants.FS_S3A_ENDPOINT, endpoint);
+        /*
+         * hadoop-aws 3.4.0 (HADOOP-18908): when fs.s3a.endpoint.region is not
+         * set, S3A wraps the SDK client in S3CrossRegionSyncClient, whose
+         * region probing bypasses the custom endpoint and dies with 60s
+         * ApiCallTimeoutException retry storms on hosts without AWS egress
+         * (CI runners).  Pin the region so S3A builds a plain client that
+         * talks only to the configured endpoint.
+         */
+        if (region != null) configuration.set(IcebergConfigConstants.FS_S3A_ENDPOINT_REGION, region);
         configuration.set(IcebergConfigConstants.FS_S3A_PATH_STYLE_ACCESS, pathStyleAccess.toString());
 
         // iceberg-aws (S3FileIO / ResolvingFileIO)
