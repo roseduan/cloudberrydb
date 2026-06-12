@@ -99,7 +99,8 @@ CXformBitmapTableGet2ParallelBitmapTableScan::Exfp(CExpressionHandle &exprhdl) c
 	if (storage_type == IMDRelation::ErelstorageAppendOnlyRows ||
 		storage_type == IMDRelation::ErelstorageAppendOnlyCols ||
 		storage_type == IMDRelation::ErelstoragePAX ||
-		storage_type == IMDRelation::ErelstorageMixedPartitioned)
+		storage_type == IMDRelation::ErelstorageMixedPartitioned ||
+		storage_type == IMDRelation::ErelstorageIceberg)
 	{
 		return CXform::ExfpNone;
 	}

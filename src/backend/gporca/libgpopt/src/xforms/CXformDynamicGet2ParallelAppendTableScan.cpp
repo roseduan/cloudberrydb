@@ -89,6 +89,7 @@ CXformDynamicGet2ParallelAppendTableScan::Exfp(CExpressionHandle &exprhdl) const
 	if (ptabdesc->GetRelDistribution() == IMDRelation::EreldistrReplicated ||
 		ptabdesc->GetRelDistribution() == IMDRelation::EreldistrMasterOnly ||
 		ptabdesc->RetrieveRelStorageType() == IMDRelation::ErelstorageMixedPartitioned ||
+		ptabdesc->RetrieveRelStorageType() == IMDRelation::ErelstorageIceberg ||
 		COptCtxt::PoctxtFromTLS()->HasReplicatedTables())
 	{
 		return CXform::ExfpNone;

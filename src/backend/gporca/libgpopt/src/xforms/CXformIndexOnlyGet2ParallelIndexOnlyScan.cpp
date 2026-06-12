@@ -104,6 +104,7 @@ CXformIndexOnlyGet2ParallelIndexOnlyScan::Exfp(
 
 	if (ptabdesc->GetRelDistribution() == IMDRelation::EreldistrReplicated ||
 		ptabdesc->GetRelDistribution() == IMDRelation::EreldistrMasterOnly ||
+		ptabdesc->RetrieveRelStorageType() == IMDRelation::ErelstorageIceberg ||
 		COptCtxt::PoctxtFromTLS()->HasReplicatedTables())
 	{
 		return CXform::ExfpNone;
