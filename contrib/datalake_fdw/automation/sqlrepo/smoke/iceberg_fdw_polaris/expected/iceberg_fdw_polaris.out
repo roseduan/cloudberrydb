@@ -1,0 +1,146 @@
+-- Iceberg FDW foreign table over a Polaris catalog (issue #844).
+--
+-- The dlproxy getFragments request must deliver the gopher connection config
+-- to the agent, or the agent fails to build its GopherFileIO with "Gopher
+-- Worker path is required".  Four independent breaks are covered here:
+--   - the fragment-cache branch of iceberg_get_external_fragments omitted the
+--     config JSON request body entirely;
+--   - gopher.worker_path was silently dropped from the emitted JSON
+--     (offsetof(worker_path) == 0 collided with the "no mapping" sentinel);
+--   - the agent had no POST /dlproxy/read mapping, so body-carrying requests
+--     bounced with 404 (and were retried 10x as "dlagent not ready");
+--   - the agent merged the request's legacy gopher values BEFORE the baseline
+--     fileIOProps, letting empty baseline worker/connect paths clobber them.
+--
+-- The table is created and populated through the iceberg AM (CREATE ICEBERG
+-- TABLE) and then read back through a datalake_fdw foreign table, which is
+-- the dlproxy read path.
+--
+-- Requires the lakehouse stack (MinIO http://minio:9000 admin/admin12345) and
+-- a Polaris server (http://polaris:8181, realm POLARIS, root/s3cr3t) with the
+-- catalog polaris_default_catalog; see run.sh for the pre-clean.
+\i ../../../lib/sql/common_setup.sql
+-- common_setup.sql
+-- Base setup for all datalake_fdw tests
+-- This file should be included at the beginning of all test SQL files
+-- Create required extensions
+CREATE EXTENSION IF NOT EXISTS datalake_fdw;
+CREATE EXTENSION IF NOT EXISTS hive_connector;
+-- gp_exttable_delimiter may not be available in all environments.
+-- Silence the "already exists, skipping" NOTICE emitted in CI where the
+-- extension has been created by an earlier test or initdb step.
+SET client_min_messages = WARNING;
+DO $$ BEGIN
+    CREATE EXTENSION IF NOT EXISTS gp_exttable_delimiter;
+EXCEPTION WHEN OTHERS THEN
+    -- Extension not available, skip silently
+END $$;
+RESET client_min_messages;
+-- Create foreign data wrapper if not already present
+-- Note: CREATE FOREIGN DATA WRAPPER does not support IF NOT EXISTS syntax
+DO $$ BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_foreign_data_wrapper WHERE fdwname = 'datalake_fdw') THEN
+        EXECUTE 'CREATE FOREIGN DATA WRAPPER datalake_fdw
+            HANDLER datalake_fdw_handler
+            VALIDATOR datalake_fdw_validator
+            OPTIONS (mpp_execute ''all segments'')';
+    END IF;
+END $$;
+-- Set standard date style for consistent output
+SET datestyle = ISO, MDY;
+-- Create logging utility function
+CREATE OR REPLACE FUNCTION test_log(message text)
+RETURNS void AS $$
+BEGIN
+    RAISE NOTICE '[TEST] %', message;
+END;
+$$ LANGUAGE plpgsql;
+-- Log setup completion
+SELECT test_log('Common setup completed');
+NOTICE:  [TEST] Common setup completed
+ test_log 
+----------
+ 
+(1 row)
+
+SET client_min_messages = WARNING;
+-- ===== Producer side: iceberg AM table on the Polaris catalog =====
+DROP SERVER IF EXISTS fdwpol_vol_srv CASCADE;
+CREATE SERVER fdwpol_vol_srv FOREIGN DATA WRAPPER iceberg_volume_fdw
+    OPTIONS (type 's3', endpoint 'http://minio:9000', region 'us-east-1',
+             bucket_name 'warehouse', path_style_access 'true');
+CREATE USER MAPPING FOR current_user SERVER fdwpol_vol_srv
+    OPTIONS (access_key_id 'admin', secret_access_key 'admin12345');
+CREATE FOREIGN VOLUME fdwpol_vol SERVER fdwpol_vol_srv
+    OPTIONS (base_path '/iceberg_fdw_polaris/', allow_writes 'true');
+SET iceberg_default_volume = 'fdwpol_vol';
+DROP SERVER IF EXISTS fdwpol_cat_srv CASCADE;
+CREATE SERVER fdwpol_cat_srv FOREIGN DATA WRAPPER iceberg_catalog_fdw
+    OPTIONS (type 'polaris', url 'http://polaris:8181/api/catalog',
+             polaris_server_realm 'POLARIS');
+CREATE USER MAPPING FOR current_user SERVER fdwpol_cat_srv
+    OPTIONS (client_id 'root', client_secret 's3cr3t', scope 'PRINCIPAL_ROLE:ALL');
+CREATE FOREIGN CATALOG fdwpol_cat SERVER fdwpol_cat_srv
+    OPTIONS (catalog_name 'polaris_default_catalog', default_namespace 'public');
+SET iceberg_default_catalog = 'fdwpol_cat';
+DROP TABLE IF EXISTS fdwpol_t;
+CREATE ICEBERG TABLE fdwpol_t (id int, v text);
+INSERT INTO fdwpol_t VALUES (1, 'a'), (2, 'b'), (3, 'c'), (4, 'd'), (5, 'e');
+-- ===== Consumer side: datalake_fdw foreign table (dlproxy read path) =====
+DROP SERVER IF EXISTS fdwpol_oss_srv CASCADE;
+CREATE SERVER fdwpol_oss_srv FOREIGN DATA WRAPPER datalake_fdw
+    OPTIONS (host 'minio:9000', protocol 's3', isvirtual 'false', ishttps 'false');
+CREATE USER MAPPING FOR current_user SERVER fdwpol_oss_srv
+    OPTIONS (user 'gpadmin', accesskey 'admin', secretkey 'admin12345');
+DROP SERVER IF EXISTS fdwpol_meta_srv CASCADE;
+CREATE SERVER fdwpol_meta_srv FOREIGN DATA WRAPPER datalake_fdw
+    OPTIONS (polaris_server_url 'http://polaris:8181/api/catalog',
+             polaris_server_realm 'POLARIS');
+CREATE USER MAPPING FOR current_user SERVER fdwpol_meta_srv
+    OPTIONS (client_id 'root', client_secret 's3cr3t', scope 'PRINCIPAL_ROLE:ALL');
+DROP FOREIGN TABLE IF EXISTS fdwpol_read;
+CREATE FOREIGN TABLE fdwpol_read (id int, v text)
+SERVER fdwpol_oss_srv
+OPTIONS (
+    filePath '/warehouse/iceberg_fdw_polaris/',
+    catalog_type 'polaris',
+    server_name 'fdwpol_meta_srv',
+    table_identifier 'polaris_default_catalog.public.fdwpol_t',
+    format 'iceberg'
+);
+-- fragment-cache branch (default on)
+SELECT * FROM fdwpol_read ORDER BY id;
+ id | v 
+----+---
+  1 | a
+  2 | b
+  3 | c
+  4 | d
+  5 | e
+(5 rows)
+
+SELECT count(*) FROM fdwpol_read;
+ count 
+-------
+     5
+(1 row)
+
+SELECT id, v FROM fdwpol_read WHERE id >= 4 ORDER BY id;
+ id | v 
+----+---
+  4 | d
+  5 | e
+(2 rows)
+
+-- non-cached branch (POST with config body)
+SET datalake.enable_iceberg_fragment_cache = off;
+SELECT count(*) FROM fdwpol_read;
+ count 
+-------
+     5
+(1 row)
+
+RESET datalake.enable_iceberg_fragment_cache;
+-- cleanup
+DROP FOREIGN TABLE fdwpol_read;
+DROP TABLE fdwpol_t;

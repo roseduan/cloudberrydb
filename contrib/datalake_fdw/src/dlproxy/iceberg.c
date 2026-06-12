@@ -6,6 +6,7 @@
 #include "headers.h"
 #include "protocol.h"
 #include "iceberg_common.h"
+#include "icebergConfig.h"
 #include "cdb/cdbtm.h"
 #include "cdb/cdbvars.h"
 #include "utils/guc.h"
@@ -281,6 +282,24 @@ iceberg_get_external_fragments(Oid relid,
 
 			datalake_churl_headers_append(context->churl_headers, "X-GP-OPTIONS-SCAN-TYPE", "snapshot");
 			datalake_churl_headers_append(context->churl_headers, "X-GP-OPTIONS-METHOD", "getFragments");
+
+			/*
+			 * Attach the iceberg config JSON (gopher connection keys etc.)
+			 * exactly like internal_get_external_fragments() does.  This
+			 * cached variant used to omit it, so the agent had no
+			 * gopher.worker_path / volume credentials and failed to
+			 * initialize GopherFileIO for catalogs that need them, e.g.
+			 * Polaris ("Gopher Worker path is required", issue #844).
+			 */
+			{
+				char *jsonConfig = getIcebergConfigJsonString(relid);
+
+				if (jsonConfig != NULL && strlen(jsonConfig) > 0)
+				{
+					context->request_body = pstrdup(jsonConfig);
+					context->request_body_len = strlen(jsonConfig);
+				}
+			}
 
 			/* Send conditional snapshot ID if we have a cached entry */
 			if (cachedSnapshotId >= 0)

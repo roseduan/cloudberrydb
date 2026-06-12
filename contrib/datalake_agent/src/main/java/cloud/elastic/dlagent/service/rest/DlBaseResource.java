@@ -68,10 +68,27 @@ public abstract class DlBaseResource<T> extends DlErrorReporter<T> {
      */
     protected ResponseEntity<T> processRequest(final MultiValueMap<String, String> headers,
                                                final HttpServletRequest httpServletRequest) {
+        return processRequest(headers, httpServletRequest, null);
+    }
+
+    /**
+     * Variant that also accepts a request body.  The legacy dlproxy protocol
+     * carries the iceberg config JSON (gopher.* connection keys emitted by
+     * contrib/datalake_fdw/src/dlproxy/icebergConfig.c) in the body; the
+     * parser stores it in RequestContext.icebergConfigJsonString.
+     *
+     * @param headers            http servlet request headers
+     * @param httpServletRequest http servlet request
+     * @param requestBody        request body, may be null
+     * @return response entity to give to container
+     */
+    protected ResponseEntity<T> processRequest(final MultiValueMap<String, String> headers,
+                                               final HttpServletRequest httpServletRequest,
+                                               final String requestBody) {
         // use the request processing algorithm as a lambda for the invoking and error handling logic
         T response = this.invokeWithErrorHandling(
                 () -> {
-                    RequestContext context = parser.parseRequest(headers);
+                    RequestContext context = parser.parseRequest(headers, requestBody);
                     return produceResponse(context, httpServletRequest);
                 }
         );

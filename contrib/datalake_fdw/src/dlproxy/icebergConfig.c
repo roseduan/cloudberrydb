@@ -37,6 +37,15 @@ typedef struct GopherConfigMapping
     size_t struct_offset;       /* Offset of the field in gopherOptions struct */
 } GopherConfigMapping;
 
+/*
+ * Marker for mapping entries with no gopherOptions field.  Zero cannot serve
+ * as the marker: worker_path is the FIRST member of gopherOptions, so its
+ * offsetof() is 0, and using 0 as the sentinel silently dropped
+ * gopher.worker_path from every emitted config -- the agent then failed to
+ * create its GopherClient with "Gopher Worker path is required" (issue #844).
+ */
+#define GOPHER_FIELD_NONE ((size_t) -1)
+
 /* Mapping table for Gopher configuration */
 static const GopherConfigMapping gopher_config_mapping[] = {
     /* Basic Gopher configuration */
@@ -45,12 +54,18 @@ static const GopherConfigMapping gopher_config_mapping[] = {
     {"gopher.connect_plasma_path", "connect_plasma_path", GOPHER_TYPE_STRING, offsetof(gopherOptions, connect_plasma_path)},
     {"gopher.ufs_type", "ufs_type", GOPHER_TYPE_STRING, offsetof(gopherOptions, gopherType)},
     {"gopher.uriPrefix", "uri_prefix", GOPHER_TYPE_STRING, offsetof(gopherOptions, protocol)},
-    {"gopher.cache_strategy", "cache_strategy", GOPHER_TYPE_STRING, offsetof(gopherOptions, gopherType)},
-    {"gopher.gopher_mode", "gopher_mode", GOPHER_TYPE_STRING, offsetof(gopherOptions, gopherType)},
-    {"gopher.logLevel", "log_level", GOPHER_TYPE_STRING, offsetof(gopherOptions, gopherType)},
-    {"gopher.liboss2LogSeverity", "liboss2_log_severity", GOPHER_TYPE_STRING, offsetof(gopherOptions, gopherType)},
-    {"gopher.cache_predict_num", "cache_predict_num", GOPHER_TYPE_INT, 0},
-    {"gopher.local_path", "local_path", GOPHER_TYPE_STRING, 0},
+    /*
+     * cache_strategy / gopher_mode / log_level / liboss2_log_severity have no
+     * gopherOptions source field.  They used to alias gopherType, which
+     * stamped the protocol name (e.g. "s3") into all four keys; emit nothing
+     * and let the gopher library defaults apply instead.
+     */
+    {"gopher.cache_strategy", "cache_strategy", GOPHER_TYPE_STRING, GOPHER_FIELD_NONE},
+    {"gopher.gopher_mode", "gopher_mode", GOPHER_TYPE_STRING, GOPHER_FIELD_NONE},
+    {"gopher.logLevel", "log_level", GOPHER_TYPE_STRING, GOPHER_FIELD_NONE},
+    {"gopher.liboss2LogSeverity", "liboss2_log_severity", GOPHER_TYPE_STRING, GOPHER_FIELD_NONE},
+    {"gopher.cache_predict_num", "cache_predict_num", GOPHER_TYPE_INT, GOPHER_FIELD_NONE},
+    {"gopher.local_path", "local_path", GOPHER_TYPE_STRING, GOPHER_FIELD_NONE},
 
     /* Gopher OSS configuration */
     {"gopher.bucket", "bucket", GOPHER_TYPE_STRING, offsetof(gopherOptions, bucket)},
@@ -61,27 +76,27 @@ static const GopherConfigMapping gopher_config_mapping[] = {
     {"gopher.useVirtualHost", "use_virtual_host", GOPHER_TYPE_BOOL, offsetof(gopherOptions, useVirtualHost)},
     {"gopher.useHttps", "use_https", GOPHER_TYPE_BOOL, offsetof(gopherOptions, useHttps)},
     {"gopher.useListV2", "use_list_v2", GOPHER_TYPE_BOOL, offsetof(gopherOptions, useListV2)},
-    {"gopher.max_read_connection", "max_read_connection", GOPHER_TYPE_INT, 0},
-    {"gopher.maxHttpRetry", "max_http_retry", GOPHER_TYPE_INT, 0},
-    {"gopher.oss_min_delay_time", "oss_min_delay_time", GOPHER_TYPE_INT, 0},
+    {"gopher.max_read_connection", "max_read_connection", GOPHER_TYPE_INT, GOPHER_FIELD_NONE},
+    {"gopher.maxHttpRetry", "max_http_retry", GOPHER_TYPE_INT, GOPHER_FIELD_NONE},
+    {"gopher.oss_min_delay_time", "oss_min_delay_time", GOPHER_TYPE_INT, GOPHER_FIELD_NONE},
 
     /* Gopher HDFS configuration */
     {"gopher.name_node", "name_node", GOPHER_TYPE_STRING, offsetof(gopherOptions, hdfs_namenode_host)},
     {"gopher.port", "port", GOPHER_TYPE_INT, offsetof(gopherOptions, hdfs_namenode_port)},
     {"gopher.auth_method", "auth_method", GOPHER_TYPE_STRING, offsetof(gopherOptions, hdfs_auth_method)},
-    {"gopher.krb_delegation_token", "krb_delegation_token", GOPHER_TYPE_STRING, 0},
+    {"gopher.krb_delegation_token", "krb_delegation_token", GOPHER_TYPE_STRING, GOPHER_FIELD_NONE},
     {"gopher.krb5_ticket_cache_path", "krb5_ticket_cache_path", GOPHER_TYPE_STRING, offsetof(gopherOptions, krb5_ccname)},
-    {"gopher.krb_server_key_file", "krb_server_key_file", GOPHER_TYPE_STRING, 0},
+    {"gopher.krb_server_key_file", "krb_server_key_file", GOPHER_TYPE_STRING, GOPHER_FIELD_NONE},
     {"gopher.krb_principal", "krb_principal", GOPHER_TYPE_STRING, offsetof(gopherOptions, krb_principal)},
     {"gopher.hadoop_rpc_protection", "hadoop_rpc_protection", GOPHER_TYPE_STRING, offsetof(gopherOptions, hadoop_rpc_protection)},
     {"gopher.is_ha_supported", "is_ha_supported", GOPHER_TYPE_BOOL, offsetof(gopherOptions, is_ha_supported)},
     {"gopher.data_transfer_protocol", "data_transfer_protocol", GOPHER_TYPE_BOOL, offsetof(gopherOptions, data_transfer_protocol)},
     {"gopher.hdfs_ha_configs_num", "hdfs_ha_configs_num", GOPHER_TYPE_INT, offsetof(gopherOptions, hdfs_ha_configs_num)},
-    {"gopher.hdfs_tbds_secureid", "hdfs_tbds_secureid", GOPHER_TYPE_STRING, 0},
-    {"gopher.hdfs_tbds_securekey", "hdfs_tbds_securekey", GOPHER_TYPE_STRING, 0},
-    {"gopher.hdfs_tbds_username", "hdfs_tbds_username", GOPHER_TYPE_STRING, 0},
+    {"gopher.hdfs_tbds_secureid", "hdfs_tbds_secureid", GOPHER_TYPE_STRING, GOPHER_FIELD_NONE},
+    {"gopher.hdfs_tbds_securekey", "hdfs_tbds_securekey", GOPHER_TYPE_STRING, GOPHER_FIELD_NONE},
+    {"gopher.hdfs_tbds_username", "hdfs_tbds_username", GOPHER_TYPE_STRING, GOPHER_FIELD_NONE},
     {"gopher.hdfs_username", "hdfs_username", GOPHER_TYPE_STRING, offsetof(gopherOptions, hdfs_user)},
-    {"gopher.dfs_client_use_datanode_hostname", "dfs_client_use_datanode_hostname", GOPHER_TYPE_BOOL, 0},
+    {"gopher.dfs_client_use_datanode_hostname", "dfs_client_use_datanode_hostname", GOPHER_TYPE_BOOL, GOPHER_FIELD_NONE},
 
     /* HDFS HA configuration */
     {"gopher.dfs_nameservices", "dfs_nameservices", GOPHER_TYPE_STRING, offsetof(gopherOptions, dfs_name_services)},
@@ -114,7 +129,7 @@ convertIcebergConfigToJsonObject(gopherOptions *gopher)
         void *field_ptr = NULL;
 
         /* Skip fields that don't have a direct mapping in the struct */
-        if (mapping->struct_offset == 0)
+        if (mapping->struct_offset == GOPHER_FIELD_NONE)
             continue;
 
         /* Calculate pointer to the field in the struct */

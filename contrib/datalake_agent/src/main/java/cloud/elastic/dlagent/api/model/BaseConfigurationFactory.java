@@ -195,23 +195,6 @@ public class BaseConfigurationFactory implements ConfigurationFactory {
                 context.setIcebergConfigUseDefaultCatalogImpl(catalogImplRaw.toString());
             }
 
-            // Legacy dlproxy shape: top-level "gopher" object whose entries are
-            // already pre-prefixed (or are bare runtime keys that we coerce to
-            // the gopher.* namespace below).
-            Object legacyGopher = jsonMap.get("gopher");
-            if (legacyGopher instanceof Map) {
-                @SuppressWarnings("unchecked")
-                Map<String, Object> gopherMap = (Map<String, Object>) legacyGopher;
-                for (Map.Entry<String, Object> entry : gopherMap.entrySet()) {
-                    if (entry.getValue() == null) {
-                        continue;
-                    }
-                    String key = entry.getKey();
-                    String propKey = key.startsWith("gopher.") ? key : "gopher." + key;
-                    context.getGopherProperties().put(propKey, entry.getValue().toString());
-                }
-            }
-
             // New REST shape: hand the request body to the single iceberg parser.
             cloud.elastic.dlagent.api.model.iceberg.IcebergRequestConfig cfg =
                     icebergRequestParser.parse(jsonMap);
@@ -230,6 +213,30 @@ public class BaseConfigurationFactory implements ConfigurationFactory {
             Map<String, String> fileIOProps = cfg.getFileIOProps();
             if (fileIOProps != null && !fileIOProps.isEmpty()) {
                 context.getGopherProperties().putAll(fileIOProps);
+            }
+
+            // Legacy dlproxy shape: top-level "gopher" object whose entries are
+            // already pre-prefixed (or are bare runtime keys that we coerce to
+            // the gopher.* namespace below).
+            //
+            // Merged LAST: for a legacy-shape request the parser above sees no
+            // IcebergConfig section and still emits its baseline fileIOProps
+            // (application.properties defaults with empty worker/connect
+            // paths); merging the legacy values first let those empty baseline
+            // values clobber the real ones from the request, and GopherClient
+            // creation failed with "Gopher Worker path is required" (#844).
+            Object legacyGopher = jsonMap.get("gopher");
+            if (legacyGopher instanceof Map) {
+                @SuppressWarnings("unchecked")
+                Map<String, Object> gopherMap = (Map<String, Object>) legacyGopher;
+                for (Map.Entry<String, Object> entry : gopherMap.entrySet()) {
+                    if (entry.getValue() == null) {
+                        continue;
+                    }
+                    String key = entry.getKey();
+                    String propKey = key.startsWith("gopher.") ? key : "gopher." + key;
+                    context.getGopherProperties().put(propKey, entry.getValue().toString());
+                }
             }
         } catch (Exception e) {
             LOG.error("Failed to init iceberg config from json string", e);

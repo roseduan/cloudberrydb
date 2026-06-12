@@ -413,6 +413,17 @@ datalakeDoRPC_once(datalake_gphadoop_context *context)
 	{
 		/* For requests with body payload (POST with JSON configuration) */
 		context->churl_handle = datalake_churl_init_upload(context->uri.data, context->churl_headers);
+
+		/*
+		 * datalake_churl_init_upload stamps "Content-Type:
+		 * application/octet-stream", but this branch always carries the
+		 * iceberg config JSON; the agent's POST /dlproxy/read mapping
+		 * consumes application/json, so fix the header up (mirrors the
+		 * /dlproxy/write handling in the file_list branch above).
+		 */
+		datalake_churl_headers_override(context->churl_headers,
+										"Content-Type", "application/json");
+
 		datalake_churl_write(context->churl_handle, context->request_body, context->request_body_len);
 		/* Signal end of data */
 		datalake_churl_write(context->churl_handle, NULL, 0);
@@ -451,12 +462,17 @@ datalakeDoRPC_once(datalake_gphadoop_context *context)
 static bool
 is_dlagent_connect_error(ErrorData *edata)
 {
-	if (edata->sqlerrcode == ERRCODE_CONNECTION_EXCEPTION)
-		return true;
-
-	/* CURLE_COULDNT_CONNECT (7) surfaces as a generic internal error */
+	/*
+	 * libchurl reports every dlproxy/dlagent HTTP error response with
+	 * ERRCODE_CONNECTION_EXCEPTION, so the sqlerrcode alone cannot
+	 * distinguish "agent not up yet" from a genuine server-side failure.
+	 * Treating the latter as transient repeated it ten times under a
+	 * misleading "dlagent not ready" message before surfacing the real
+	 * error (issue #844).  Match the curl connect-failure texts instead.
+	 */
 	if (edata->message &&
 		(strstr(edata->message, "Couldn't connect") ||
+		 strstr(edata->message, "couldn't connect") ||
 		 strstr(edata->message, "Connection refused")))
 		return true;
 
@@ -700,14 +716,18 @@ internal_get_external_fragments(char *profile,
 		datalake_churl_headers_append(context->churl_headers, "X-GP-OPTIONS-SCAN-TYPE", "snapshot");
 		datalake_churl_headers_append(context->churl_headers, "X-GP-OPTIONS-METHOD", "getFragments");
 
-		/* Add JSON configuration to the request (Iceberg only) */
+		/*
+		 * Add JSON configuration to the request (Iceberg only).  Content-Type
+		 * is fixed up inside datalakeDoRPC_once (the upload init would
+		 * otherwise stamp octet-stream); no Content-Length here -- the upload
+		 * path uses chunked transfer encoding and a conflicting length header
+		 * makes servers reject the request.
+		 */
 		if (pg_strcasecmp(profile, "iceberg") == 0)
 		{
 			char *jsonConfig = getIcebergConfigJsonString(relid);
 			if (jsonConfig != NULL && strlen(jsonConfig) > 0)
 			{
-				datalake_churl_headers_append(context->churl_headers, "Content-Type", "application/json");
-				datalake_churl_headers_append(context->churl_headers, "Content-Length", psprintf("%zu", strlen(jsonConfig)));
 				context->request_body = pstrdup(jsonConfig);
 				context->request_body_len = strlen(jsonConfig);
 			}

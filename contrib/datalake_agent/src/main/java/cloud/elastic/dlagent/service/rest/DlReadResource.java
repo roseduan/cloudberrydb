@@ -70,6 +70,27 @@ public class DlReadResource extends DlBaseResource<StreamingResponseBody> {
     }
 
     /**
+     * REST endpoint for read-class requests (e.g. getFragments) that carry
+     * the legacy dlproxy iceberg config JSON in the request body.  A GET
+     * cannot carry a body, so the C side POSTs whenever it has a config
+     * payload (dlproxy/protocol.c, dlproxy/iceberg.c); without this mapping
+     * those requests bounced off Spring with a 404 and the agent never saw
+     * the gopher.* connection keys (issue #844).
+     *
+     * @param requestBody iceberg config JSON, may be absent
+     * @param headers     http headers from request that carry all parameters
+     * @param request     HTTP servlet request
+     * @return response object containing stream that will output records
+     */
+    @PostMapping(value = "/read", produces = MediaType.APPLICATION_OCTET_STREAM_VALUE,
+                 consumes = MediaType.APPLICATION_JSON_VALUE)
+    public ResponseEntity<StreamingResponseBody> readWithConfig(@RequestBody(required = false) String requestBody,
+                                                                @RequestHeader MultiValueMap<String, String> headers,
+                                                                HttpServletRequest request) {
+        return processRequest(headers, request, requestBody);
+    }
+
+    /**
      * REST endpoint for write data requests.
      *
      * @param fileListRequest JSON request body containing file list

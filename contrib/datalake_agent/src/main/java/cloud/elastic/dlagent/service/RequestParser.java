@@ -34,4 +34,17 @@ public interface RequestParser<T> {
      * @return parsed information as an instance of RequestContext
      */
     RequestContext parseRequest(T request);
+
+    /**
+     * Parses a given request into request context, additionally taking the
+     * request body (the legacy dlproxy protocol carries the iceberg config
+     * JSON there).
+     *
+     * @param request     the request
+     * @param requestBody the request body, may be null
+     * @return parsed request context
+     */
+    default RequestContext parseRequest(T request, String requestBody) {
+        return parseRequest(request);
+    }
 }
