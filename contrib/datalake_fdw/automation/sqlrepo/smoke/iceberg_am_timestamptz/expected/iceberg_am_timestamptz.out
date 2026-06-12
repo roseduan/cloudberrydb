@@ -1,0 +1,137 @@
+-- Iceberg AM timestamptz interop (issue #366).
+--
+-- CREATE ICEBERG TABLE used to declare PG timestamptz columns as Iceberg
+-- "timestamp" (without zone) in the table schema, so external engines read
+-- the stored UTC microseconds as a zone-less wall clock: Spark either
+-- refused the scan ("Cannot handle timestamp without timezone fields") or,
+-- with spark.sql.iceberg.handle-timestamp-without-timezone=true, displayed
+-- a session-timezone-dependent wrong-looking value.  psql round trips never
+-- noticed because our writer and reader are symmetric.
+--
+-- The column must be declared as Iceberg "timestamptz" (isAdjustedToUTC);
+-- run.sh asserts that on the metadata.json and (when a Spark container is
+-- available) cross-checks the value Spark reads.
+--
+-- Targets the lakehouse stack MinIO (endpoint http://minio:9000,
+-- admin/admin12345) like iceberg_am_hadoop_s3.
+\i ../../../lib/sql/common_setup.sql
+-- common_setup.sql
+-- Base setup for all datalake_fdw tests
+-- This file should be included at the beginning of all test SQL files
+-- Create required extensions
+CREATE EXTENSION IF NOT EXISTS datalake_fdw;
+CREATE EXTENSION IF NOT EXISTS hive_connector;
+-- gp_exttable_delimiter may not be available in all environments.
+-- Silence the "already exists, skipping" NOTICE emitted in CI where the
+-- extension has been created by an earlier test or initdb step.
+SET client_min_messages = WARNING;
+DO $$ BEGIN
+    CREATE EXTENSION IF NOT EXISTS gp_exttable_delimiter;
+EXCEPTION WHEN OTHERS THEN
+    -- Extension not available, skip silently
+END $$;
+RESET client_min_messages;
+-- Create foreign data wrapper if not already present
+-- Note: CREATE FOREIGN DATA WRAPPER does not support IF NOT EXISTS syntax
+DO $$ BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_foreign_data_wrapper WHERE fdwname = 'datalake_fdw') THEN
+        EXECUTE 'CREATE FOREIGN DATA WRAPPER datalake_fdw
+            HANDLER datalake_fdw_handler
+            VALIDATOR datalake_fdw_validator
+            OPTIONS (mpp_execute ''all segments'')';
+    END IF;
+END $$;
+-- Set standard date style for consistent output
+SET datestyle = ISO, MDY;
+-- Create logging utility function
+CREATE OR REPLACE FUNCTION test_log(message text)
+RETURNS void AS $$
+BEGIN
+    RAISE NOTICE '[TEST] %', message;
+END;
+$$ LANGUAGE plpgsql;
+-- Log setup completion
+SELECT test_log('Common setup completed');
+psql:../../../lib/sql/common_setup.sql:43: NOTICE:  [TEST] Common setup completed
+ test_log 
+----------
+ 
+(1 row)
+
+SET client_min_messages = WARNING;
+SET DateStyle = 'ISO, YMD';
+SET timezone = 'Asia/Shanghai';
+DROP SERVER IF EXISTS tz_cat_srv CASCADE;
+CREATE SERVER tz_cat_srv FOREIGN DATA WRAPPER iceberg_catalog_fdw
+    OPTIONS (type 'hadoop');
+CREATE USER MAPPING FOR current_user SERVER tz_cat_srv;
+CREATE FOREIGN CATALOG tz_cat SERVER tz_cat_srv
+    OPTIONS (warehouse_location_prefix 's3a://warehouse/iceberg_am_timestamptz/');
+SET iceberg_default_catalog = 'tz_cat';
+DROP SERVER IF EXISTS tz_vol_srv CASCADE;
+CREATE SERVER tz_vol_srv FOREIGN DATA WRAPPER iceberg_volume_fdw
+    OPTIONS (type 's3', endpoint 'http://minio:9000', region 'us-east-1',
+             bucket_name 'warehouse', path_style_access 'true');
+CREATE USER MAPPING FOR current_user SERVER tz_vol_srv
+    OPTIONS (access_key_id 'admin', secret_access_key 'admin12345');
+CREATE FOREIGN VOLUME tz_vol SERVER tz_vol_srv
+    OPTIONS (base_path '/iceberg_am_timestamptz/', allow_writes 'true');
+SET iceberg_default_volume = 'tz_vol';
+DROP TABLE IF EXISTS tz_repro;
+CREATE ICEBERG TABLE tz_repro (id int, descr text, t timestamptz)
+  OPTIONS (namespace 'demo', table 'tz_repro');
+INSERT INTO tz_repro VALUES
+  (1, 'New Year 2024 02:00 +08 (Beijing)', timestamptz '2024-01-01 02:00:00+08'),
+  (2, 'UTC noon', timestamptz '2024-06-15 12:00:00+00'),
+  (3, 'NY morning', timestamptz '2024-03-10 08:30:00-05');
+SELECT id, descr, t FROM tz_repro ORDER BY id;
+ id |               descr               |           t            
+----+-----------------------------------+------------------------
+  1 | New Year 2024 02:00 +08 (Beijing) | 2024-01-01 02:00:00+08
+  2 | UTC noon                          | 2024-06-15 20:00:00+08
+  3 | NY morning                        | 2024-03-10 21:30:00+08
+(3 rows)
+
+-- instants survive a timezone change of the reading session
+SET timezone = 'UTC';
+SELECT id, t FROM tz_repro ORDER BY id;
+ id |           t            
+----+------------------------
+  1 | 2023-12-31 18:00:00+00
+  2 | 2024-06-15 12:00:00+00
+  3 | 2024-03-10 13:30:00+00
+(3 rows)
+
+SET timezone = 'Asia/Shanghai';
+-- predicate on the timestamptz column
+SELECT id, t FROM tz_repro WHERE t = timestamptz '2024-01-01 02:00:00+08';
+ id |           t            
+----+------------------------
+  1 | 2024-01-01 02:00:00+08
+(1 row)
+
+SELECT id, t FROM tz_repro WHERE t > timestamptz '2024-02-01 00:00:00+08' ORDER BY id;
+ id |           t            
+----+------------------------
+  2 | 2024-06-15 20:00:00+08
+  3 | 2024-03-10 21:30:00+08
+(2 rows)
+
+-- UPDATE and DELETE keep instant semantics (delete files + new data files)
+UPDATE tz_repro SET t = t + interval '1 hour' WHERE id = 2;
+SELECT id, t FROM tz_repro ORDER BY id;
+ id |           t            
+----+------------------------
+  1 | 2024-01-01 02:00:00+08
+  2 | 2024-06-15 21:00:00+08
+  3 | 2024-03-10 21:30:00+08
+(3 rows)
+
+DELETE FROM tz_repro WHERE t < timestamptz '2024-01-02 00:00:00+08';
+SELECT id, t FROM tz_repro ORDER BY id;
+ id |           t            
+----+------------------------
+  2 | 2024-06-15 21:00:00+08
+  3 | 2024-03-10 21:30:00+08
+(2 rows)
+

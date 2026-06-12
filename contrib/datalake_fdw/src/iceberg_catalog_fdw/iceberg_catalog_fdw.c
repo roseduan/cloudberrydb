@@ -1196,8 +1196,15 @@ static const char* mapPostgresToIcebergType(Oid pgType, int32 typemod)
         case DATEOID:
             return DATALAKEFDW_ICEBERG_TYPE_DATE;
         case TIMESTAMPOID:
-        case TIMESTAMPTZOID:
             return DATALAKEFDW_ICEBERG_TYPE_TIMESTAMP;
+        case TIMESTAMPTZOID:
+            /*
+             * PG timestamptz stores UTC instants, which is exactly Iceberg's
+             * timestamptz (isAdjustedToUTC).  Declaring it as plain timestamp
+             * made external engines (Spark/Trino/Flink) read the stored UTC
+             * microseconds as a zone-less wall clock (issue #366).
+             */
+            return DATALAKEFDW_ICEBERG_TYPE_TIMESTAMPTZ;
         case BYTEAOID:
             return DATALAKEFDW_ICEBERG_TYPE_BINARY;
         default:

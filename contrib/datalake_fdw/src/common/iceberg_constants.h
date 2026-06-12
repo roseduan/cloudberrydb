@@ -79,6 +79,7 @@
 #define DATALAKEFDW_ICEBERG_TYPE_STRING                  "string"
 #define DATALAKEFDW_ICEBERG_TYPE_DATE                    "date"
 #define DATALAKEFDW_ICEBERG_TYPE_TIMESTAMP               "timestamp"
+#define DATALAKEFDW_ICEBERG_TYPE_TIMESTAMPTZ             "timestamptz"
 #define DATALAKEFDW_ICEBERG_TYPE_BINARY                  "binary"
 
 /* ========== Server Type Values ========== */
