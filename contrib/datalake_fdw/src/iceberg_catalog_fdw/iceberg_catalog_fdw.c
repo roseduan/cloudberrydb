@@ -1028,6 +1028,41 @@ static agentcli_cJSON* createIcebergVolumeConfig(IcebergVolumeOptions *volumeOpt
     if (volumeOpt->volume_server.server_name && strlen(volumeOpt->volume_server.server_name) > 0)
         agentcli_cJSON_AddStringToObject(volumeConfig, "server_name", volumeOpt->volume_server.server_name);
 
+    /*
+     * HDFS volume options; wire keys equal the SQL OPTION names. Only what
+     * the user wrote is sent -- absent keys fall back to the gphdfs.conf
+     * section on the agent side.
+     */
+    if (volumeOpt->volume_server.server_type != NULL &&
+        pg_strcasecmp(volumeOpt->volume_server.server_type, "hdfs") == 0)
+    {
+        const struct {
+            const char *key;
+            const char *value;
+        } hdfsOptions[] = {
+            {DATALAKEFDW_ICEBERG_KEY_HDFS_NAMENODES, volumeOpt->volume_server.hdfs_namenodes},
+            {DATALAKEFDW_ICEBERG_KEY_HDFS_PORT, volumeOpt->volume_server.hdfs_port},
+            {DATALAKEFDW_ICEBERG_KEY_HDFS_AUTH_METHOD, volumeOpt->volume_server.hdfs_auth_method},
+            {DATALAKEFDW_ICEBERG_KEY_KRB_PRINCIPAL, volumeOpt->volume_server.krb_principal},
+            {DATALAKEFDW_ICEBERG_KEY_KRB_PRINCIPAL_KEYTAB, volumeOpt->volume_server.krb_principal_keytab},
+            {DATALAKEFDW_ICEBERG_KEY_KRB_SERVICE_PRINCIPAL, volumeOpt->volume_server.krb_service_principal},
+            {DATALAKEFDW_ICEBERG_KEY_HADOOP_RPC_PROTECTION, volumeOpt->volume_server.hadoop_rpc_protection},
+            {DATALAKEFDW_ICEBERG_KEY_DATA_TRANSFER_PROTOCOL, volumeOpt->volume_server.data_transfer_protocol},
+            {DATALAKEFDW_ICEBERG_KEY_IS_HA_SUPPORTED, volumeOpt->volume_server.is_ha_supported},
+            {DATALAKEFDW_ICEBERG_KEY_DFS_NAMESERVICES, volumeOpt->volume_server.dfs_nameservices},
+            {DATALAKEFDW_ICEBERG_KEY_DFS_HA_NAMENODES, volumeOpt->volume_server.dfs_ha_namenodes},
+            {DATALAKEFDW_ICEBERG_KEY_DFS_NAMENODE_RPC_ADDRESS, volumeOpt->volume_server.dfs_namenode_rpc_address},
+            {DATALAKEFDW_ICEBERG_KEY_DFS_CLIENT_FAILOVER_PROXY_PROVIDER, volumeOpt->volume_server.dfs_client_failover_proxy_provider},
+            {DATALAKEFDW_ICEBERG_KEY_DFS_CLIENT_USE_DATANODE_HOSTNAME, volumeOpt->volume_server.dfs_client_use_datanode_hostname},
+        };
+
+        for (size_t i = 0; i < lengthof(hdfsOptions); i++)
+        {
+            if (hdfsOptions[i].value && strlen(hdfsOptions[i].value) > 0)
+                agentcli_cJSON_AddStringToObject(volumeConfig, hdfsOptions[i].key, hdfsOptions[i].value);
+        }
+    }
+
     return volumeConfig;
 }
 

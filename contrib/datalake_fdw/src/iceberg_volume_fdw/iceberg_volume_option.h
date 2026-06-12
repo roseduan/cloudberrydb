@@ -29,6 +29,28 @@ typedef struct IcebergVolumeServerOptions
 	char *multi_tenant_app_name;
 	char *consent_url;
 	bool hierarchical;
+
+	/*
+	 * HDFS specific options. Names match the datalake_fdw hdfs SERVER
+	 * options (datalake_def.h) and the gphdfs.conf keys -- one vocabulary
+	 * everywhere. Booleans stay strings here so absence (NULL) is
+	 * distinguishable from an explicit value; the agent merges SQL options
+	 * over the server_name conf section per key.
+	 */
+	char *hdfs_namenodes;			/* host or host:port; HA: nameservice name */
+	char *hdfs_port;
+	char *hdfs_auth_method;			/* simple / kerberos */
+	char *krb_principal;
+	char *krb_principal_keytab;
+	char *krb_service_principal;
+	char *hadoop_rpc_protection;
+	char *data_transfer_protocol;	/* "true" / "false" */
+	char *is_ha_supported;			/* "true" / "false" */
+	char *dfs_nameservices;
+	char *dfs_ha_namenodes;
+	char *dfs_namenode_rpc_address;
+	char *dfs_client_failover_proxy_provider;
+	char *dfs_client_use_datanode_hostname;	/* "true" / "false" */
 } IcebergVolumeServerOptions;
 
 /* Structure for S3 user mapping options */

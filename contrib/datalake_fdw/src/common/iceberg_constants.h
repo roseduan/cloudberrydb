@@ -28,6 +28,22 @@
 #define DATALAKEFDW_ICEBERG_KEY_SECRET_ACCESS_KEY        "secret_access_key"
 #define DATALAKEFDW_ICEBERG_OPTION_LOCATION              "location"
 
+/* HDFS volume keys; the wire keys equal the SQL OPTION names */
+#define DATALAKEFDW_ICEBERG_KEY_HDFS_NAMENODES           "hdfs_namenodes"
+#define DATALAKEFDW_ICEBERG_KEY_HDFS_PORT                "hdfs_port"
+#define DATALAKEFDW_ICEBERG_KEY_HDFS_AUTH_METHOD         "hdfs_auth_method"
+#define DATALAKEFDW_ICEBERG_KEY_KRB_PRINCIPAL            "krb_principal"
+#define DATALAKEFDW_ICEBERG_KEY_KRB_PRINCIPAL_KEYTAB     "krb_principal_keytab"
+#define DATALAKEFDW_ICEBERG_KEY_KRB_SERVICE_PRINCIPAL    "krb_service_principal"
+#define DATALAKEFDW_ICEBERG_KEY_HADOOP_RPC_PROTECTION    "hadoop_rpc_protection"
+#define DATALAKEFDW_ICEBERG_KEY_DATA_TRANSFER_PROTOCOL   "data_transfer_protocol"
+#define DATALAKEFDW_ICEBERG_KEY_IS_HA_SUPPORTED          "is_ha_supported"
+#define DATALAKEFDW_ICEBERG_KEY_DFS_NAMESERVICES         "dfs_nameservices"
+#define DATALAKEFDW_ICEBERG_KEY_DFS_HA_NAMENODES         "dfs_ha_namenodes"
+#define DATALAKEFDW_ICEBERG_KEY_DFS_NAMENODE_RPC_ADDRESS "dfs_namenode_rpc_address"
+#define DATALAKEFDW_ICEBERG_KEY_DFS_CLIENT_FAILOVER_PROXY_PROVIDER "dfs_client_failover_proxy_provider"
+#define DATALAKEFDW_ICEBERG_KEY_DFS_CLIENT_USE_DATANODE_HOSTNAME   "dfs_client_use_datanode_hostname"
+
 /* ========== Request Keys ========== */
 #define DATALAKEFDW_ICEBERG_KEY_NAME                     "name"
 #define DATALAKEFDW_ICEBERG_KEY_SCHEMA                   "schema"

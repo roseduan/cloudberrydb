@@ -90,6 +90,7 @@ public final class IcebergConfigConstants {
         public static final String HDFS_AUTH_METHOD = "hdfs_auth_method";
         public static final String KRB_PRINCIPAL = "krb_principal";
         public static final String KRB_PRINCIPAL_KEYTAB = "krb_principal_keytab";
+        public static final String KRB_SERVICE_PRINCIPAL = "krb_service_principal";
         public static final String HADOOP_RPC_PROTECTION = "hadoop_rpc_protection";
         public static final String DATA_TRANSFER_PROTOCOL = "data_transfer_protocol";
         public static final String IS_HA_SUPPORTED = "is_ha_supported";

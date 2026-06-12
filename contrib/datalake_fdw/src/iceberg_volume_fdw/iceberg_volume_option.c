@@ -1,5 +1,6 @@
 #include "iceberg_volume_option.h"
 #include "src/common/parser_option.h"
+#include "src/common/iceberg_constants.h"
 #include "postgres.h"
 #include "fmgr.h"
 #include "foreign/foreign.h"
@@ -101,6 +102,28 @@ static void parseIcebergVolumeServerOptions(IcebergVolumeServerOptions *options,
         options->multi_tenant_app_name = getStringOption(server_options, DATALAKE_ICEBERG_VOLUME_MULTI_TENANT_APP_NAME);
         options->consent_url = getStringOption(server_options, DATALAKE_ICEBERG_VOLUME_CONSENT_URL);
         options->hierarchical = getBoolOption(server_options, DATALAKE_ICEBERG_VOLUME_HIERARCHICAL, false);
+    }
+    else if (options->server_type != NULL && pg_strcasecmp(options->server_type, DATALAKE_ICEBERG_VOLUME_SERVER_TYPE_HDFS) == 0) {
+        /*
+         * HDFS specific options. Option names match the datalake_fdw hdfs
+         * SERVER options and the gphdfs.conf keys. All optional: anything
+         * left NULL falls back to the server_name conf section on the agent
+         * side (SQL OPTIONS win per key).
+         */
+        options->hdfs_namenodes = getStringOption(server_options, DATALAKEFDW_ICEBERG_KEY_HDFS_NAMENODES);
+        options->hdfs_port = getStringOption(server_options, DATALAKEFDW_ICEBERG_KEY_HDFS_PORT);
+        options->hdfs_auth_method = getStringOption(server_options, DATALAKEFDW_ICEBERG_KEY_HDFS_AUTH_METHOD);
+        options->krb_principal = getStringOption(server_options, DATALAKEFDW_ICEBERG_KEY_KRB_PRINCIPAL);
+        options->krb_principal_keytab = getStringOption(server_options, DATALAKEFDW_ICEBERG_KEY_KRB_PRINCIPAL_KEYTAB);
+        options->krb_service_principal = getStringOption(server_options, DATALAKEFDW_ICEBERG_KEY_KRB_SERVICE_PRINCIPAL);
+        options->hadoop_rpc_protection = getStringOption(server_options, DATALAKEFDW_ICEBERG_KEY_HADOOP_RPC_PROTECTION);
+        options->data_transfer_protocol = getStringOption(server_options, DATALAKEFDW_ICEBERG_KEY_DATA_TRANSFER_PROTOCOL);
+        options->is_ha_supported = getStringOption(server_options, DATALAKEFDW_ICEBERG_KEY_IS_HA_SUPPORTED);
+        options->dfs_nameservices = getStringOption(server_options, DATALAKEFDW_ICEBERG_KEY_DFS_NAMESERVICES);
+        options->dfs_ha_namenodes = getStringOption(server_options, DATALAKEFDW_ICEBERG_KEY_DFS_HA_NAMENODES);
+        options->dfs_namenode_rpc_address = getStringOption(server_options, DATALAKEFDW_ICEBERG_KEY_DFS_NAMENODE_RPC_ADDRESS);
+        options->dfs_client_failover_proxy_provider = getStringOption(server_options, DATALAKEFDW_ICEBERG_KEY_DFS_CLIENT_FAILOVER_PROXY_PROVIDER);
+        options->dfs_client_use_datanode_hostname = getStringOption(server_options, DATALAKEFDW_ICEBERG_KEY_DFS_CLIENT_USE_DATANODE_HOSTNAME);
     }
 }
 

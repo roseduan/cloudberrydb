@@ -315,6 +315,14 @@ public class IcebergRequestConfigParser {
         info.setDfsNamenodeRpcAddress(stringOrNull(body.get(IcebergConfigConstants.ICEBERG_VOLUME_CONFIG.DFS_NAMENODE_RPC_ADDRESS)));
         info.setDfsClientFailoverProxyProvider(stringOrNull(body.get(IcebergConfigConstants.ICEBERG_VOLUME_CONFIG.DFS_CLIENT_FAILOVER_PROXY_PROVIDER)));
         info.setDfsClientUseDatanodeHostname(booleanOrNull(body.get(IcebergConfigConstants.ICEBERG_VOLUME_CONFIG.DFS_CLIENT_USE_DATANODE_HOSTNAME)));
+        /* No typed VolumeInfo field; travels via extras, same as file mode. */
+        String krbServicePrincipal = stringOrNull(body.get(
+                IcebergConfigConstants.ICEBERG_VOLUME_CONFIG.KRB_SERVICE_PRINCIPAL));
+        if (krbServicePrincipal != null) {
+            info.getExtraProperties().put(
+                    IcebergConfigConstants.ICEBERG_VOLUME_CONFIG.KRB_SERVICE_PRINCIPAL,
+                    krbServicePrincipal);
+        }
         return info;
     }
 
