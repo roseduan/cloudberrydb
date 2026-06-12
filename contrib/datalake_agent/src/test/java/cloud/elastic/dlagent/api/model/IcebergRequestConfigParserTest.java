@@ -107,12 +107,37 @@ public class IcebergRequestConfigParserTest {
     }
 
     @Test
-    public void parse_catalogFromSiteFileWhenServerNameGiven() {
+    public void parse_catalogMergesSiteFileUnderSqlOptions() {
         Map<String, Object> request = new HashMap<>();
         Map<String, Object> ic = new HashMap<>();
         Map<String, Object> catalog = new HashMap<>();
         catalog.put("server_name", "hivecluster");
-        catalog.put("server_type", "ignored_when_server_name_given");
+        catalog.put("server_type", "hive");
+        ic.put("IcebergCatalogConfig", catalog);
+        request.put("IcebergConfig", ic);
+
+        CatalogInfo siteResult = new CatalogInfo();
+        siteResult.setHiveMetastoreUri("thrift://from-site:9083");
+        siteResult.setAuthMethod("kerberos");
+        when(siteLoader.loadHiveSite("hivecluster")).thenReturn(siteResult);
+
+        IcebergRequestConfig out = parser.parse(request);
+
+        // keys absent from SQL fall back to the conf section ...
+        assertEquals("thrift://from-site:9083", out.getCatalog().getHiveMetastoreUri());
+        assertEquals("kerberos", out.getCatalog().getAuthMethod());
+        // ... while SQL OPTIONS sibling fields are KEPT (merge, not replace)
+        assertEquals("hive", out.getCatalog().getServerType());
+        verify(siteLoader, times(1)).loadHiveSite("hivecluster");
+    }
+
+    @Test
+    public void parse_catalogSqlOptionWinsOverSiteFile() {
+        Map<String, Object> request = new HashMap<>();
+        Map<String, Object> ic = new HashMap<>();
+        Map<String, Object> catalog = new HashMap<>();
+        catalog.put("server_name", "hivecluster");
+        catalog.put("hive_metastore_uri", "thrift://from-sql:9083");
         ic.put("IcebergCatalogConfig", catalog);
         request.put("IcebergConfig", ic);
 
@@ -122,10 +147,7 @@ public class IcebergRequestConfigParserTest {
 
         IcebergRequestConfig out = parser.parse(request);
 
-        assertEquals("thrift://from-site:9083", out.getCatalog().getHiveMetastoreUri());
-        // SQL OPTIONS sibling fields are IGNORED in favor of the site file
-        assertNull(out.getCatalog().getServerType());
-        verify(siteLoader, times(1)).loadHiveSite("hivecluster");
+        assertEquals("thrift://from-sql:9083", out.getCatalog().getHiveMetastoreUri());
     }
 
     // ---- volume source selection ------------------------------------------
@@ -153,27 +175,103 @@ public class IcebergRequestConfigParserTest {
     }
 
     @Test
-    public void parse_volumeFromS3SiteFileWhenServerNameGiven() {
+    public void parse_volumeMergesSiteFileUnderSqlOptions() {
         Map<String, Object> request = new HashMap<>();
         Map<String, Object> ic = new HashMap<>();
         Map<String, Object> volume = new HashMap<>();
         volume.put("server_name", "myvolume");
         volume.put("volume_server_type", "s3");
-        // even if SQL OPTIONS volume fields are present they are ignored
-        volume.put("volume_endpoint", "http://ignored");
+        // a key written in SQL OPTIONS wins over the conf section ...
+        volume.put("volume_endpoint", "http://from-sql");
+        // ... and SQL-only keys survive conf-file mode (used to be dropped)
+        volume.put("base_path", "/warehouse/");
         ic.put("IcebergVolumeConfig", volume);
         request.put("IcebergConfig", ic);
         request.put("location", "s3a://mybucket/path");
 
         VolumeInfo siteResult = new VolumeInfo();
-        siteResult.setVolumeEndpoint("http://site-loaded");
+        siteResult.setVolumeEndpoint("http://from-site");
+        siteResult.setAccessKeyId("site-ak");
+        siteResult.setSecretAccessKey("site-sk");
         when(siteLoader.loadS3Site("myvolume", "s3a://mybucket/path")).thenReturn(siteResult);
 
         IcebergRequestConfig out = parser.parse(request);
 
-        assertEquals("http://site-loaded", out.getVolume().getVolumeEndpoint());
+        assertEquals("http://from-sql", out.getVolume().getVolumeEndpoint());
+        assertEquals("/warehouse/", out.getVolume().getBasePath());
+        // keys absent from SQL fall back to the conf section
+        assertEquals("site-ak", out.getVolume().getAccessKeyId());
+        assertEquals("site-sk", out.getVolume().getSecretAccessKey());
         verify(siteLoader, times(1)).loadS3Site("myvolume", "s3a://mybucket/path");
         verify(siteLoader, never()).loadHdfsSite(any());
+    }
+
+    @Test
+    public void parse_volumeExplicitFalseBoolOverridesSiteFile() {
+        Map<String, Object> request = new HashMap<>();
+        Map<String, Object> ic = new HashMap<>();
+        Map<String, Object> volume = new HashMap<>();
+        volume.put("server_name", "myvolume");
+        volume.put("volume_server_type", "s3");
+        // explicitly false in SQL: must override a true in the conf section
+        volume.put("path_style_access", false);
+        ic.put("IcebergVolumeConfig", volume);
+        request.put("IcebergConfig", ic);
+
+        VolumeInfo siteResult = new VolumeInfo();
+        siteResult.setPathStyleAccess(true);
+        when(siteLoader.loadS3Site(any(), any())).thenReturn(siteResult);
+
+        IcebergRequestConfig out = parser.parse(request);
+
+        assertEquals(Boolean.FALSE, out.getVolume().getPathStyleAccess());
+    }
+
+    @Test
+    public void parse_volumeBoolAbsentFallsBackToSiteFile() {
+        Map<String, Object> request = new HashMap<>();
+        Map<String, Object> ic = new HashMap<>();
+        Map<String, Object> volume = new HashMap<>();
+        volume.put("server_name", "myvolume");
+        volume.put("volume_server_type", "s3");
+        ic.put("IcebergVolumeConfig", volume);
+        request.put("IcebergConfig", ic);
+
+        VolumeInfo siteResult = new VolumeInfo();
+        siteResult.setPathStyleAccess(true);
+        when(siteLoader.loadS3Site(any(), any())).thenReturn(siteResult);
+
+        IcebergRequestConfig out = parser.parse(request);
+
+        assertEquals(Boolean.TRUE, out.getVolume().getPathStyleAccess());
+    }
+
+    @Test
+    public void parse_volumeHdfsBodyKeysParseAndMerge() {
+        Map<String, Object> request = new HashMap<>();
+        Map<String, Object> ic = new HashMap<>();
+        Map<String, Object> volume = new HashMap<>();
+        volume.put("server_name", "hdfsvolume");
+        volume.put("volume_server_type", "hdfs");
+        // wire keys equal the SQL OPTION names; spliced port wins
+        volume.put("hdfs_namenodes", "192.168.1.10:8020");
+        volume.put("hdfs_port", "9000");
+        volume.put("hdfs_auth_method", "kerberos");
+        ic.put("IcebergVolumeConfig", volume);
+        request.put("IcebergConfig", ic);
+
+        VolumeInfo siteResult = new VolumeInfo();
+        siteResult.setHdfsAuthMethod("simple");
+        siteResult.setKrbPrincipal("gpadmin@REALM.COM");
+        when(siteLoader.loadHdfsSite("hdfsvolume")).thenReturn(siteResult);
+
+        IcebergRequestConfig out = parser.parse(request);
+
+        assertEquals("192.168.1.10", out.getVolume().getHdfsNamenodeHost());
+        assertEquals("8020", out.getVolume().getHdfsNamenodePort());
+        // SQL wins on conflict, conf fills the gaps
+        assertEquals("kerberos", out.getVolume().getHdfsAuthMethod());
+        assertEquals("gpadmin@REALM.COM", out.getVolume().getKrbPrincipal());
     }
 
     @Test

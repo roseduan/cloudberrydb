@@ -43,12 +43,15 @@ import java.util.Map;
  *
  * <p>Pipeline:
  * <ol>
- *   <li><b>Phase 1</b>: read {@code IcebergCatalogConfig.server_name} and
- *       {@code IcebergVolumeConfig.server_name} from the request.</li>
- *   <li><b>Phase 2</b>: <em>mutually exclusive</em> source selection based on
- *       the two server names — when set, the catalog/volume info comes
- *       entirely from the corresponding site file (gphive.conf / s3.conf /
- *       gphdfs.conf); otherwise from SQL OPTIONS.</li>
+ *   <li><b>Phase 1</b>: parse the SQL OPTIONS sections
+ *       ({@code IcebergCatalogConfig} / {@code IcebergVolumeConfig}) from the
+ *       request body.</li>
+ *   <li><b>Phase 2</b>: when a {@code server_name} is set, load the matching
+ *       site file section (gphive.conf / s3.conf / gphdfs.conf) and merge it
+ *       <em>underneath</em> the SQL values, per key: a key written in SQL
+ *       OPTIONS wins; keys absent from SQL fall back to the conf section
+ *       (the Hadoop site-file habit). The conf file acts as site-wide
+ *       defaults, SQL as per-object overrides.</li>
  *   <li><b>Phase 3</b>: parse {@code IcebergAdditionalConfig} and the gopher
  *       runtime block ({@code fileIOConfig.gopherConfig.common}).</li>
  *   <li><b>Phase 4</b>: branch on the {@code gopher.enabled} baseline:
@@ -148,27 +151,100 @@ public class IcebergRequestConfigParser {
         return out;
     }
 
-    // ---- Phase 2: server_name XOR SQL OPTIONS -----------------------------
+    // ---- Phase 2: SQL OPTIONS override the server_name conf section --------
 
     private CatalogInfo resolveCatalog(Map<String, Object> icebergConfig) {
-        Map<String, Object> body = catalogSection(icebergConfig);
-        String serverName = stringOrNull(maybeNested(body, IcebergConfigConstants.ICEBERG_CATALOG_CONFIG.SERVER_NAME));
-        if (serverName != null && !serverName.isEmpty()) {
-            return siteConfigLoader.loadHiveSite(serverName);
+        CatalogInfo sql = parseCatalogFromBody(catalogSection(icebergConfig));
+        if (isBlank(sql.getServerName())) {
+            return sql;
         }
-        return parseCatalogFromBody(body);
+        CatalogInfo file = siteConfigLoader.loadHiveSite(sql.getServerName());
+        return mergeCatalog(sql, file);
     }
 
     private VolumeInfo resolveVolume(Map<String, Object> icebergConfig, String location) {
-        Map<String, Object> body = volumeSection(icebergConfig);
-        String serverName = stringOrNull(maybeNested(body, IcebergConfigConstants.ICEBERG_VOLUME_CONFIG.SERVER_NAME));
-        String volumeType = stringOrNull(maybeNested(body, IcebergConfigConstants.ICEBERG_VOLUME_CONFIG.VOLUME_SERVER_TYPE));
-        if (serverName != null && !serverName.isEmpty()) {
-            return "hdfs".equalsIgnoreCase(volumeType)
-                    ? siteConfigLoader.loadHdfsSite(serverName)
-                    : siteConfigLoader.loadS3Site(serverName, location);
+        VolumeInfo sql = parseVolumeFromBody(volumeSection(icebergConfig));
+        if (isBlank(sql.getServerName())) {
+            return sql;
         }
-        return parseVolumeFromBody(body);
+        VolumeInfo file = "hdfs".equalsIgnoreCase(sql.getVolumeServerType())
+                ? siteConfigLoader.loadHdfsSite(sql.getServerName())
+                : siteConfigLoader.loadS3Site(sql.getServerName(), location);
+        return mergeVolume(sql, file);
+    }
+
+    /**
+     * Fill every null field of the SQL-parsed {@link CatalogInfo} from the
+     * site-file one. Explicit per-field (no reflection) so the merged surface
+     * stays reviewable. Returns the (mutated) SQL object.
+     */
+    private static CatalogInfo mergeCatalog(CatalogInfo sql, CatalogInfo file) {
+        sql.setServerType(or(sql.getServerType(), file.getServerType()));
+        sql.setHiveMetastoreUri(or(sql.getHiveMetastoreUri(), file.getHiveMetastoreUri()));
+        sql.setUsername(or(sql.getUsername(), file.getUsername()));
+        sql.setAuthMethod(or(sql.getAuthMethod(), file.getAuthMethod()));
+        sql.setKrbServicePrincipal(or(sql.getKrbServicePrincipal(), file.getKrbServicePrincipal()));
+        sql.setKrbClientPrincipal(or(sql.getKrbClientPrincipal(), file.getKrbClientPrincipal()));
+        sql.setKrbClientKeytab(or(sql.getKrbClientKeytab(), file.getKrbClientKeytab()));
+        sql.setCatalogName(or(sql.getCatalogName(), file.getCatalogName()));
+        sql.setEnableMetadataCache(or(sql.getEnableMetadataCache(), file.getEnableMetadataCache()));
+        sql.setMetadataCacheTtl(or(sql.getMetadataCacheTtl(), file.getMetadataCacheTtl()));
+        sql.setAutoRefreshMetadata(or(sql.getAutoRefreshMetadata(), file.getAutoRefreshMetadata()));
+        sql.setWarehouseLocationPrefix(or(sql.getWarehouseLocationPrefix(), file.getWarehouseLocationPrefix()));
+        sql.setPolarisServerUrl(or(sql.getPolarisServerUrl(), file.getPolarisServerUrl()));
+        sql.setPolarisServerRealm(or(sql.getPolarisServerRealm(), file.getPolarisServerRealm()));
+        sql.setClientId(or(sql.getClientId(), file.getClientId()));
+        sql.setClientSecret(or(sql.getClientSecret(), file.getClientSecret()));
+        sql.setScope(or(sql.getScope(), file.getScope()));
+        for (Map.Entry<String, String> extra : file.getExtraProperties().entrySet()) {
+            sql.getExtraProperties().putIfAbsent(extra.getKey(), extra.getValue());
+        }
+        return sql;
+    }
+
+    /**
+     * Fill every null field of the SQL-parsed {@link VolumeInfo} from the
+     * site-file one. Note that {@code hdfs_namenodes} splicing happens before
+     * the merge, so host and port fall back independently. Returns the
+     * (mutated) SQL object.
+     */
+    private static VolumeInfo mergeVolume(VolumeInfo sql, VolumeInfo file) {
+        sql.setVolumeServerType(or(sql.getVolumeServerType(), file.getVolumeServerType()));
+        sql.setVolumeEndpoint(or(sql.getVolumeEndpoint(), file.getVolumeEndpoint()));
+        sql.setVolumeRegion(or(sql.getVolumeRegion(), file.getVolumeRegion()));
+        sql.setBucketName(or(sql.getBucketName(), file.getBucketName()));
+        sql.setPathStyleAccess(or(sql.getPathStyleAccess(), file.getPathStyleAccess()));
+        sql.setAccessKeyId(or(sql.getAccessKeyId(), file.getAccessKeyId()));
+        sql.setSecretAccessKey(or(sql.getSecretAccessKey(), file.getSecretAccessKey()));
+        sql.setBasePath(or(sql.getBasePath(), file.getBasePath()));
+        sql.setEnableCaching(or(sql.getEnableCaching(), file.getEnableCaching()));
+        sql.setAllowWrites(or(sql.getAllowWrites(), file.getAllowWrites()));
+        sql.setUsername(or(sql.getUsername(), file.getUsername()));
+        sql.setHdfsNamenodeHost(or(sql.getHdfsNamenodeHost(), file.getHdfsNamenodeHost()));
+        sql.setHdfsNamenodePort(or(sql.getHdfsNamenodePort(), file.getHdfsNamenodePort()));
+        sql.setIsHaSupported(or(sql.getIsHaSupported(), file.getIsHaSupported()));
+        sql.setDfsNameservices(or(sql.getDfsNameservices(), file.getDfsNameservices()));
+        sql.setDfsHaNamenodes(or(sql.getDfsHaNamenodes(), file.getDfsHaNamenodes()));
+        sql.setDfsNamenodeRpcAddress(or(sql.getDfsNamenodeRpcAddress(), file.getDfsNamenodeRpcAddress()));
+        sql.setDfsClientFailoverProxyProvider(or(sql.getDfsClientFailoverProxyProvider(), file.getDfsClientFailoverProxyProvider()));
+        sql.setDfsClientUseDatanodeHostname(or(sql.getDfsClientUseDatanodeHostname(), file.getDfsClientUseDatanodeHostname()));
+        sql.setHdfsAuthMethod(or(sql.getHdfsAuthMethod(), file.getHdfsAuthMethod()));
+        sql.setKrbPrincipal(or(sql.getKrbPrincipal(), file.getKrbPrincipal()));
+        sql.setKrbPrincipalKeytab(or(sql.getKrbPrincipalKeytab(), file.getKrbPrincipalKeytab()));
+        sql.setHadoopRpcProtection(or(sql.getHadoopRpcProtection(), file.getHadoopRpcProtection()));
+        sql.setDataTransferProtocol(or(sql.getDataTransferProtocol(), file.getDataTransferProtocol()));
+        for (Map.Entry<String, String> extra : file.getExtraProperties().entrySet()) {
+            sql.getExtraProperties().putIfAbsent(extra.getKey(), extra.getValue());
+        }
+        return sql;
+    }
+
+    private static <T> T or(T sqlValue, T fileValue) {
+        return sqlValue != null ? sqlValue : fileValue;
+    }
+
+    private static boolean isBlank(String s) {
+        return s == null || s.isEmpty();
     }
 
     // ---- Phase 3: typed parse of remaining sections -----------------------
@@ -223,6 +299,22 @@ public class IcebergRequestConfigParser {
         info.setEnableCaching(booleanOrNull(body.get(IcebergConfigConstants.ICEBERG_VOLUME_CONFIG.ENABLE_CACHING)));
         info.setAllowWrites(booleanOrNull(body.get(IcebergConfigConstants.ICEBERG_VOLUME_CONFIG.ALLOW_WRITES)));
         info.setUsername(stringOrNull(body.get(IcebergConfigConstants.ICEBERG_VOLUME_CONFIG.USERNAME)));
+
+        /* HDFS volume options; wire keys equal the SQL OPTION names. */
+        info.applyHdfsNamenodes(
+                stringOrNull(body.get(IcebergConfigConstants.ICEBERG_VOLUME_CONFIG.HDFS_NAMENODES)),
+                stringOrNull(body.get(IcebergConfigConstants.ICEBERG_VOLUME_CONFIG.HDFS_PORT)));
+        info.setHdfsAuthMethod(stringOrNull(body.get(IcebergConfigConstants.ICEBERG_VOLUME_CONFIG.HDFS_AUTH_METHOD)));
+        info.setKrbPrincipal(stringOrNull(body.get(IcebergConfigConstants.ICEBERG_VOLUME_CONFIG.KRB_PRINCIPAL)));
+        info.setKrbPrincipalKeytab(stringOrNull(body.get(IcebergConfigConstants.ICEBERG_VOLUME_CONFIG.KRB_PRINCIPAL_KEYTAB)));
+        info.setHadoopRpcProtection(stringOrNull(body.get(IcebergConfigConstants.ICEBERG_VOLUME_CONFIG.HADOOP_RPC_PROTECTION)));
+        info.setDataTransferProtocol(stringOrNull(body.get(IcebergConfigConstants.ICEBERG_VOLUME_CONFIG.DATA_TRANSFER_PROTOCOL)));
+        info.setIsHaSupported(booleanOrNull(body.get(IcebergConfigConstants.ICEBERG_VOLUME_CONFIG.IS_HA_SUPPORTED)));
+        info.setDfsNameservices(stringOrNull(body.get(IcebergConfigConstants.ICEBERG_VOLUME_CONFIG.DFS_NAMESERVICES)));
+        info.setDfsHaNamenodes(stringOrNull(body.get(IcebergConfigConstants.ICEBERG_VOLUME_CONFIG.DFS_HA_NAMENODES)));
+        info.setDfsNamenodeRpcAddress(stringOrNull(body.get(IcebergConfigConstants.ICEBERG_VOLUME_CONFIG.DFS_NAMENODE_RPC_ADDRESS)));
+        info.setDfsClientFailoverProxyProvider(stringOrNull(body.get(IcebergConfigConstants.ICEBERG_VOLUME_CONFIG.DFS_CLIENT_FAILOVER_PROXY_PROVIDER)));
+        info.setDfsClientUseDatanodeHostname(booleanOrNull(body.get(IcebergConfigConstants.ICEBERG_VOLUME_CONFIG.DFS_CLIENT_USE_DATANODE_HOSTNAME)));
         return info;
     }
 

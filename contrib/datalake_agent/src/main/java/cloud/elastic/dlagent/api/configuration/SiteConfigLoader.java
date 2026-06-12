@@ -256,19 +256,8 @@ public class SiteConfigLoader {
         info.setServerName(volumeServerName);
         info.setVolumeServerType("hdfs");
 
-        // hdfs_namenodes carries "host" or "host:port"; a port spliced into
-        // the value wins over the separate hdfs_port key. HA deployments put
-        // the nameservice name here (no port).
-        String namenodes = asString(serverMap.get("hdfs_namenodes"));
-        String port = asString(serverMap.get("hdfs_port"));
-        if (namenodes != null && namenodes.indexOf(':') >= 0) {
-            int idx = namenodes.lastIndexOf(':');
-            info.setHdfsNamenodeHost(namenodes.substring(0, idx));
-            info.setHdfsNamenodePort(namenodes.substring(idx + 1));
-        } else {
-            info.setHdfsNamenodeHost(namenodes);
-            info.setHdfsNamenodePort(port);
-        }
+        info.applyHdfsNamenodes(asString(serverMap.get("hdfs_namenodes")),
+                asString(serverMap.get("hdfs_port")));
 
         info.setHdfsAuthMethod(asString(serverMap.get("hdfs_auth_method")));
         info.setKrbPrincipal(asString(serverMap.get("krb_principal")));

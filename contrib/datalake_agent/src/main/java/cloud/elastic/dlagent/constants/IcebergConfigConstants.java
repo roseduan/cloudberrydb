@@ -84,6 +84,20 @@ public final class IcebergConfigConstants {
         public static final String ENABLE_CACHING = "enable_caching";
         public static final String ALLOW_WRITES = "allow_writes";
         public static final String USERNAME = "username";
+        // HDFS volume options; wire keys equal the SQL OPTION names.
+        public static final String HDFS_NAMENODES = "hdfs_namenodes";
+        public static final String HDFS_PORT = "hdfs_port";
+        public static final String HDFS_AUTH_METHOD = "hdfs_auth_method";
+        public static final String KRB_PRINCIPAL = "krb_principal";
+        public static final String KRB_PRINCIPAL_KEYTAB = "krb_principal_keytab";
+        public static final String HADOOP_RPC_PROTECTION = "hadoop_rpc_protection";
+        public static final String DATA_TRANSFER_PROTOCOL = "data_transfer_protocol";
+        public static final String IS_HA_SUPPORTED = "is_ha_supported";
+        public static final String DFS_NAMESERVICES = "dfs_nameservices";
+        public static final String DFS_HA_NAMENODES = "dfs_ha_namenodes";
+        public static final String DFS_NAMENODE_RPC_ADDRESS = "dfs_namenode_rpc_address";
+        public static final String DFS_CLIENT_FAILOVER_PROXY_PROVIDER = "dfs_client_failover_proxy_provider";
+        public static final String DFS_CLIENT_USE_DATANODE_HOSTNAME = "dfs_client_use_datanode_hostname";
     }
 
     // Hadoop configuration keys

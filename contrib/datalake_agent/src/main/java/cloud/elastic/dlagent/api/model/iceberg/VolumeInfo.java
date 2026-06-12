@@ -94,4 +94,27 @@ public class VolumeInfo {
      * Hadoop Configuration).
      */
     private Map<String, String> extraProperties = new HashMap<>();
+
+    /**
+     * Apply the user-facing {@code hdfs_namenodes} / {@code hdfs_port} option
+     * pair onto the typed host/port fields. {@code hdfs_namenodes} carries
+     * {@code host} or {@code host:port}; a port spliced into the value wins
+     * over the separate {@code hdfs_port} option. HA deployments put the
+     * nameservice name here (no port). Null inputs leave the fields untouched
+     * so absent options stay mergeable.
+     */
+    public void applyHdfsNamenodes(String namenodes, String port) {
+        if (namenodes != null && namenodes.indexOf(':') >= 0) {
+            int idx = namenodes.lastIndexOf(':');
+            this.hdfsNamenodeHost = namenodes.substring(0, idx);
+            this.hdfsNamenodePort = namenodes.substring(idx + 1);
+            return;
+        }
+        if (namenodes != null) {
+            this.hdfsNamenodeHost = namenodes;
+        }
+        if (port != null) {
+            this.hdfsNamenodePort = port;
+        }
+    }
 }
