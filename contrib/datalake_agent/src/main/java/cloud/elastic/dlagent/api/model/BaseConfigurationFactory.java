@@ -37,6 +37,7 @@ import cloud.elastic.dlagent.plugins.hudi.utilities.FilePathUtils;
 import java.io.FileInputStream;
 import java.io.InputStream;
 import java.util.HashMap;
+import java.util.LinkedHashMap;
 import java.util.Map;
 
 import org.yaml.snakeyaml.Yaml;
@@ -60,6 +61,32 @@ public class BaseConfigurationFactory implements ConfigurationFactory {
             "krb_principal_keytab", SecureLogin.CONFIG_KEY_SERVICE_KEYTAB,
             "hadoop_rpc_protection","hadoop.rpc.protection",
             "data_transfer_protocol", "dfs.encrypt.data.transfer");
+
+    /*
+     * The iceberg conf-file format renamed the site-file keys to the SQL
+     * OPTION names (see SiteConfigLoader). This legacy generic-FDW path keeps
+     * reading the old spellings, so a file migrated to the new format is
+     * translated back before the transforms below run. New key wins (with a
+     * warning) when a section carries both spellings.
+     */
+    private static final Map<String, String> s3NewToLegacyKeys = ImmutableMap.<String, String>builder()
+            .put("type", "fs.gopher.ufs_type")
+            .put("endpoint", "fs.s3a.endpoint")
+            .put("region", "fs.s3a.endpoint.region")
+            .put("path_style_access", "fs.s3a.path.style.access")
+            .put("access_key_id", "fs.s3a.access.key")
+            .put("secret_access_key", "fs.s3a.secret.key")
+            .build();
+
+    private static final Map<String, String> hdfsNewToLegacyKeys = ImmutableMap.of(
+            "hdfs_namenodes", "hdfs_namenode_host",
+            "hdfs_port", "hdfs_namenode_port",
+            "dfs_nameservices", "dfs.nameservices",
+            "dfs_ha_namenodes", "dfs.ha.namenodes",
+            "dfs_namenode_rpc_address", "dfs.namenode.rpc-address");
+
+    private static final Map<String, String> hiveNewToLegacyKeys = ImmutableMap.of(
+            "url", "uris");
 
     /** Resolver that owns gopher baseline + per-request normalization (single source of truth). */
     private final GopherPropertiesResolver gopherResolver;
@@ -268,16 +295,64 @@ public class BaseConfigurationFactory implements ConfigurationFactory {
             }
 
             if (configFile.equals("gphive.conf")) {
-                transformHiveConfig(serverConfig, configuration);
+                transformHiveConfig(normalizeSiteKeys(serverConfig, configFile, hiveNewToLegacyKeys), configuration);
             } else if (configFile.equals("gphdfs.conf")) {
-                transformHdfsConfig(serverConfig, configuration);
+                transformHdfsConfig(normalizeSiteKeys(serverConfig, configFile, hdfsNewToLegacyKeys), configuration);
             } else if (configFile.equals("s3.conf")) {
-                transformS3Config(serverConfig, configuration, location);
+                transformS3Config(normalizeSiteKeys(serverConfig, configFile, s3NewToLegacyKeys), configuration, location);
             }
         } catch (Exception e) {
             throw new RuntimeException(String.format("Unable to read configuration for server \"%s\" from \"%s\": %s",
                     serverName, configFile, e.toString()));
         }
+    }
+
+    /**
+     * Translate the SQL-OPTION-named site keys back to the legacy spellings
+     * this path's transforms understand. Returns a fresh map; the input is
+     * not modified. New key wins (with a warning) when both spellings appear.
+     */
+    Map<String, Object> normalizeSiteKeys(Map<String, Object> serverMap,
+                                          String configFile,
+                                          Map<String, String> newToLegacy) {
+        Map<String, Object> out = new LinkedHashMap<>(serverMap);
+        newToLegacy.forEach((newKey, legacyKey) -> {
+            Object value = out.get(newKey);
+            if (value == null) {
+                return;
+            }
+            if (out.containsKey(legacyKey)) {
+                LOG.warn("config {}: both \"{}\" and legacy \"{}\" present; using \"{}\"",
+                        configFile, newKey, legacyKey, newKey);
+            }
+            out.put(legacyKey, value);
+            out.remove(newKey);
+        });
+
+        if ("gphdfs.conf".equals(configFile)) {
+            // hdfs_namenodes may splice "host:port"; the legacy transforms
+            // expect separate host/port keys, with the spliced port winning.
+            Object host = out.get("hdfs_namenode_host");
+            if (host instanceof String && ((String) host).indexOf(':') >= 0) {
+                String hostPort = (String) host;
+                int idx = hostPort.lastIndexOf(':');
+                out.put("hdfs_namenode_host", hostPort.substring(0, idx));
+                out.put("hdfs_namenode_port", hostPort.substring(idx + 1));
+            }
+            // The legacy failover provider key embeds the nameservice name.
+            Object provider = out.remove("dfs_client_failover_proxy_provider");
+            Object nameServices = out.get("dfs.nameservices");
+            if (provider != null && nameServices != null
+                    && !nameServices.toString().isEmpty()) {
+                out.put("dfs.client.failover.proxy.provider." + nameServices, provider);
+            } else if (provider != null) {
+                LOG.warn("config {}: \"dfs_client_failover_proxy_provider\" is set but "
+                        + "\"dfs_nameservices\" is missing or empty; cannot build the "
+                        + "per-nameservice legacy key, so the failover proxy provider "
+                        + "is dropped", configFile);
+            }
+        }
+        return out;
     }
 
     private void transformS3Config(Map<String, Object> serverMap, Configuration configuration, String location) {
@@ -313,6 +388,16 @@ public class BaseConfigurationFactory implements ConfigurationFactory {
                 configuration.set(key, value.toString());
             }
         });
+
+        // New-format sections carry "type" instead of "fs.defaultFS"; derive
+        // the default filesystem so the non-gopher path keeps working with a
+        // file written for the iceberg key vocabulary (Hadoop only ships the
+        // s3a connector, whatever the s3/s3v2 type says).
+        if (!isGopherMode && !serverMap.containsKey("fs.defaultFS")
+                && serverMap.containsKey("fs.gopher.ufs_type")
+                && bucketName[0] != null && !bucketName[0].isEmpty()) {
+            configuration.set("fs.defaultFS", String.format("s3a://%s", bucketName[0]));
+        }
     }
 
     private void transformOptions(Map<String, Object> serverMap,
