@@ -394,9 +394,29 @@ public class IcebergServiceImpl implements IcebergService {
             summary = Collections.emptyMap();
         }
         Map<String, String> statistics = new HashMap<>();
-        statistics.put("total-records", summary.getOrDefault("total-records", "0"));
+        // The snapshot summary's "total-records" counts every row stored in
+        // the data files, including rows superseded by delete files, so a
+        // table whose rows were UPDATEd reports old + new versions.  Report
+        // live rows instead: position deletes remove exactly one row each;
+        // equality deletes are subtracted as a best-effort estimate.
+        long totalRecords = parseLongOrZero(summary.get("total-records"));
+        long positionDeletes = parseLongOrZero(summary.get("total-position-deletes"));
+        long equalityDeletes = parseLongOrZero(summary.get("total-equality-deletes"));
+        long liveRecords = Math.max(0L, totalRecords - positionDeletes - equalityDeletes);
+        statistics.put("total-records", Long.toString(liveRecords));
         statistics.put("total-files-size", summary.getOrDefault("total-files-size", "0"));
         return objectMapper.writeValueAsString(statistics);
+    }
+
+    private static long parseLongOrZero(String value) {
+        if (value == null) {
+            return 0L;
+        }
+        try {
+            return Long.parseLong(value.trim());
+        } catch (NumberFormatException e) {
+            return 0L;
+        }
     }
 
     /**

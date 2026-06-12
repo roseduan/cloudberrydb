@@ -94,7 +94,30 @@ ANALYZE anlz_t, anlz_heap;
 SELECT tablename, count(*) AS ncols FROM pg_stats
  WHERE tablename IN ('anlz_t','anlz_heap') GROUP BY tablename ORDER BY tablename;
 
+-- ============================================================
+-- T6: reltuples reflects live rows after UPDATE (issue #364)
+-- (regression: the agent's "total-records" comes from the Iceberg snapshot
+--  summary, which counts superseded row versions too; and the metadata
+--  refresh's inplace pg_class write made do_analyze_rel skip the corrective
+--  sampled write.  reltuples must stay at the live row count, with sampling
+--  both on and off.)
+-- ============================================================
+DROP TABLE IF EXISTS anlz_upd;
+CREATE ICEBERG TABLE anlz_upd (id bigint, v int);
+INSERT INTO anlz_upd SELECT g, g % 100 FROM generate_series(1, 10000) g;
+ANALYZE anlz_upd;
+SELECT reltuples::bigint AS reltuples_after_insert FROM pg_class WHERE relname = 'anlz_upd';
+UPDATE anlz_upd SET v = v + 1 WHERE id <= 5000;
+ANALYZE anlz_upd;
+SELECT reltuples::bigint AS reltuples_after_update FROM pg_class WHERE relname = 'anlz_upd';
+SET datalake.enable_iceberg_analyze_sampling = off;
+ANALYZE anlz_upd;
+SELECT reltuples::bigint AS reltuples_sampling_off FROM pg_class WHERE relname = 'anlz_upd';
+RESET datalake.enable_iceberg_analyze_sampling;
+SELECT count(*) AS live_rows FROM anlz_upd;
+
 -- cleanup
 DROP TABLE anlz_t;
 DROP TABLE anlz_t2;
 DROP TABLE anlz_heap;
+DROP TABLE anlz_upd;

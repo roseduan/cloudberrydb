@@ -17,6 +17,7 @@
 #include "access/multixact.h"
 #include "access/table.h"
 #include "access/tableam.h"
+#include "access/xact.h"
 #include "catalog/oid_dispatch.h"
 #include "commands/vacuum.h"
 #include "libpq/libpq-int.h"
@@ -684,6 +685,18 @@ pg_iceberg_refresh_pg_class_stats(Relation rel)
 						InvalidMultiXactId,
 						false,		/* in_outer_xact */
 						false);		/* isvacuum */
+
+	/*
+	 * vac_update_relstats writes pg_class with heap_inplace_update; the
+	 * invalidation it queues is only executed at the next command counter
+	 * increment.  When ANALYZE sampling follows this refresh in the same
+	 * command (datalake_ProcessUtility falls through to standard ANALYZE),
+	 * do_analyze_rel's own vac_update_relstats would otherwise compare the
+	 * sampled row count against a stale syscache copy and skip its write,
+	 * leaving our metadata-derived estimate in place even when the exact
+	 * sampled count differs (issue #364).  Force the invalidation out now.
+	 */
+	CommandCounterIncrement();
 
 	pfree(statistics);
 	pg_iceberg_free_metadata_info(metadata_info);
