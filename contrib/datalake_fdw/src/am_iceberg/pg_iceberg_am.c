@@ -185,7 +185,8 @@ pg_iceberg_scan_begin_extractcolumns(Relation rel,
 
 	table_info = pg_iceberg_get_table_info(RelationGetRelid(rel));
 	if (ps && ps->plan && IsA(ps->plan, CustomScan))
-		am_private = ((CustomScan *) ps->plan)->custom_private;
+		am_private = pg_iceberg_materialize_am_private(
+			((CustomScan *) ps->plan)->custom_private);
 
 	scan->scanState = iceberg_create_foreign_scan_state(scan, ps,
 														table_info->volume_server_name,
@@ -235,18 +236,20 @@ pg_iceberg_getnextslot(TableScanDesc sscan, ScanDirection direction, TupleTableS
 
 /* --- Planner Helpers --- */
 
-List *
-pg_iceberg_build_scan_am_private(Relation rel, struct PlanState *ps, int random_segment_num)
+/*
+ * Fetch the current snapshot's fragment list for `rel` from the datalake
+ * agent and return it as the agent's JSON wire format (which carries the
+ * delete files deduplicated in a global "deleteFiles" array referenced by
+ * index from each task).  Must run on the QD.
+ */
+static char *
+iceberg_fetch_fragments_json(Relation rel, IcebergTableInfo *table_info,
+							 bool *is_internal_out)
 {
-	List			   *am_private = NIL;
-	char			   *fragments = NULL;
+	char			   *fragments;
 	char			   *scan_metadata_location;
 	bool				is_internal;
-	IcebergTableInfo   *table_info;
 	TableMetadataState *tstate;
-	int					segment_count = getgpsegmentCount();
-
-	table_info = pg_iceberg_get_table_info(RelationGetRelid(rel));
 
 	/*
 	 * Obtain metadata location and is_internal for scan planning.
@@ -282,8 +285,64 @@ pg_iceberg_build_scan_am_private(Relation rel, struct PlanState *ps, int random_
 
 	pfree(scan_metadata_location);
 
-	am_private = list_concat(am_private,
-							 parseIcebergFragmentResponse(fragments, strlen(fragments)));
+	if (is_internal_out)
+		*is_internal_out = is_internal;
+
+	return fragments;
+}
+
+/*
+ * pg_iceberg_materialize_am_private
+ *
+ * The QD ships the fragment list inside the plan as a single JSON String
+ * (the agent's deduplicated wire format) rather than as an expanded
+ * FileScanTask node tree: nodeToString() has no notion of shared nodes, so
+ * it would copy every delete-file FileFragment into each task referencing
+ * it.  On an unpartitioned table every delete file applies to every older
+ * data file, which makes the serialized plan -- and its deserialized copy
+ * in every QE's MessageContext -- O(data files x delete files) and was
+ * observed at hundreds of MB per backend (issue #362).
+ *
+ * Detect the String carrier here, at scan open, and parse it back into the
+ * in-memory form ([ExternalTableMetadata, combinedTask lists..., trailers]);
+ * the parsed form re-shares the delete fragments via the deleteIndexes in
+ * the JSON.  A list that already starts with ExternalTableMetadata (e.g.
+ * the VACUUM/ANALYZE sampling paths build it directly) passes through.
+ */
+List *
+pg_iceberg_materialize_am_private(List *am_private)
+{
+	char	   *json;
+	List	   *parsed;
+
+	if (am_private == NIL || !IsA(linitial(am_private), String))
+		return am_private;
+
+	json = strVal(linitial(am_private));
+	parsed = parseIcebergFragmentResponse(json, strlen(json));
+
+	/* Re-append the trailers (catalog properties / segment selection). */
+	return list_concat(parsed, list_copy_tail(am_private, 1));
+}
+
+List *
+pg_iceberg_build_scan_am_private(Relation rel, struct PlanState *ps, int random_segment_num)
+{
+	List			   *am_private = NIL;
+	char			   *fragments = NULL;
+	bool				is_internal;
+	IcebergTableInfo   *table_info;
+	int					segment_count = getgpsegmentCount();
+
+	table_info = pg_iceberg_get_table_info(RelationGetRelid(rel));
+
+	fragments = iceberg_fetch_fragments_json(rel, table_info, &is_internal);
+
+	/*
+	 * Carry the raw JSON in the plan; pg_iceberg_materialize_am_private()
+	 * parses it at scan open (see commentary there -- issue #362).
+	 */
+	am_private = lappend(am_private, makeString(fragments));
 
 	if (!is_internal && checkIsPolarisCatalog(table_info->catalog_server_name, table_info->catalog_name))
 	{
@@ -323,59 +382,29 @@ pg_iceberg_build_scan_am_private(Relation rel, struct PlanState *ps, int random_
 }
 
 /*
- * pg_iceberg_list_data_fragments
- *		Return the raw fragment list ([ExternalTableMetadata, combinedTask0,
- *		combinedTask1, ...]) for the current Iceberg snapshot of `rel`.
- *
- * Strips the catalog_properties / random_segments trailers that
- * pg_iceberg_build_scan_am_private appends for the scan path, so the
- * result is directly consumable by icebergFileIndexMapPopulateFromAllFragments.
+ * pg_iceberg_list_data_fragments_json
+ *		Return the raw fragment payload for the current Iceberg snapshot of
+ *		`rel` as the agent's JSON wire format (no trailers).
  *
  * Caller MUST run this on the QD: it consults the local pg_iceberg_metadata
  * catalog (which is QD-only populated) via pg_iceberg_get_metadata_info().
  * Used by the planner-time hook to seed the per-statement modify-fragments
- * cache that is then dispatched to every QE (issue #333).
+ * cache that is then dispatched to every QE (issue #333).  The JSON keeps
+ * delete files deduplicated, so it is also the plan-carrier format that
+ * avoids the O(data files x delete files) serialization blowup (issue #362);
+ * parse with parseIcebergFragmentResponse() where the List form is needed.
  */
-List *
-pg_iceberg_list_data_fragments(Relation rel)
+char *
+pg_iceberg_list_data_fragments_json(Relation rel)
 {
 	char			   *fragments;
-	char			   *scan_metadata_location;
-	bool				is_internal;
 	IcebergTableInfo   *table_info;
-	TableMetadataState *tstate;
-	List			   *result;
 
 	table_info = pg_iceberg_get_table_info(RelationGetRelid(rel));
-
-	tstate = pg_iceberg_tracker_get_table_state(RelationGetRelid(rel));
-	if (tstate != NULL)
-	{
-		scan_metadata_location =
-			pg_iceberg_tracker_get_scan_metadata_location(RelationGetRelid(rel));
-		is_internal = tstate->is_internal;
-	}
-	else
-	{
-		IcebergMetadataInfo *metadata_info;
-
-		metadata_info = pg_iceberg_get_metadata_info(RelationGetRelid(rel));
-		scan_metadata_location = pstrdup(metadata_info->metadata_location);
-		is_internal = metadata_info->is_internal;
-		pg_iceberg_free_metadata_info(metadata_info);
-	}
-
-	fragments = pg_iceberg_get_fragments_with_catalog(rel,
-													  table_info,
-													  scan_metadata_location,
-													  is_internal,
-													  NULL);
-
-	pfree(scan_metadata_location);
+	fragments = iceberg_fetch_fragments_json(rel, table_info, NULL);
 	pg_iceberg_free_table_info(table_info);
 
-	result = parseIcebergFragmentResponse(fragments, strlen(fragments));
-	return result;
+	return fragments;
 }
 
 

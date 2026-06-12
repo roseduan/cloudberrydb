@@ -94,7 +94,8 @@ extern void pg_iceberg_refresh_pg_class_stats(Relation rel);
 
 extern List *pg_iceberg_build_scan_am_private(Relation rel, struct PlanState *ps,
 											   int random_segment_num);
-extern List *pg_iceberg_list_data_fragments(Relation rel);
+extern List *pg_iceberg_materialize_am_private(List *am_private);
+extern char *pg_iceberg_list_data_fragments_json(Relation rel);
 
 /*
  * Process-local cache of modify-time fragment lists, keyed by relid.

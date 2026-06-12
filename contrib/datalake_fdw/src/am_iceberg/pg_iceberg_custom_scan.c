@@ -45,6 +45,7 @@
 
 #include "include/pg_iceberg_am.h"
 #include "include/pg_iceberg_custom_scan.h"
+#include "../dlproxy/iceberg_common.h"
 
 #include "access/table.h"
 #include "src/datalake_def.h"
@@ -99,7 +100,7 @@ stash_modify_fragments_for_iceberg_modifies(PlannedStmt *stmt)
 	{
 		Index	rti = lfirst_int(lc);
 		Oid		relid;
-		List   *fragments;
+		char   *fragments_json;
 		Relation rel;
 
 		if (rti == 0 || rti > list_length(stmt->rtable))
@@ -117,22 +118,32 @@ stash_modify_fragments_for_iceberg_modifies(PlannedStmt *stmt)
 		}
 
 		rel = table_open(relid, NoLock);
-		fragments = pg_iceberg_list_data_fragments(rel);
+		fragments_json = pg_iceberg_list_data_fragments_json(rel);
 		table_close(rel, NoLock);
 
-		if (fragments != NIL)
+		if (fragments_json != NULL)
 		{
 			ListCell *prev_cell = list_nth_cell(mt->fdwPrivLists, i);
+			List	 *fragments;
 
+			/* QD-local consumers need the parsed (delete-sharing) form. */
+			fragments = parseIcebergFragmentResponse(fragments_json,
+													 strlen(fragments_json));
 			pg_iceberg_stash_modify_fragments(relid, fragments);
 
 			/*
-			 * Splice fragments into ModifyTable.fdwPrivLists so they get
-			 * dispatched with the plan.  The list is wrapped in list_make1
-			 * to keep a single slot per relation (per ModifyTable contract);
-			 * the consumer unwraps it in datalake_executor_start_hook.
+			 * Splice the fragments into ModifyTable.fdwPrivLists so they get
+			 * dispatched with the plan.  Ship the raw JSON (one String node)
+			 * rather than the parsed FileScanTask tree: nodeToString() would
+			 * duplicate every shared delete-file fragment into each task
+			 * referencing it, making the dispatched plan and every QE's
+			 * MessageContext O(data files x delete files) -- observed at
+			 * ~500MB per backend on zipper-style workloads (issue #362).
+			 * The slot is wrapped in list_make1 to keep one slot per relation
+			 * (per ModifyTable contract); the consumer unwraps and parses it
+			 * in restash_iceberg_modify_fragments_from_plan.
 			 */
-			lfirst(prev_cell) = list_make1(fragments);
+			lfirst(prev_cell) = list_make1(makeString(fragments_json));
 		}
 
 		i++;
@@ -461,6 +472,7 @@ restash_iceberg_modify_fragments_from_plan(PlannedStmt *stmt)
 		Index	rti = lfirst_int(lc_rel);
 		List   *priv = (List *) lfirst(lc_priv);
 		Oid		relid;
+		Node   *carrier;
 		List   *fragments;
 
 		if (priv == NIL || rti == 0 || rti > list_length(stmt->rtable))
@@ -470,8 +482,29 @@ restash_iceberg_modify_fragments_from_plan(PlannedStmt *stmt)
 		if (!is_iceberg_relation(relid))
 			continue;
 
-		/* Unwrap the list_make1(fragments) wrapper from the planner_hook. */
-		fragments = (List *) linitial(priv);
+		/* Unwrap the list_make1(...) wrapper from the planner_hook. */
+		carrier = (Node *) linitial(priv);
+		if (carrier == NULL)
+			continue;
+
+		if (IsA(carrier, String))
+		{
+			/*
+			 * JSON carrier (issue #362): parse the agent wire format back
+			 * into the in-memory fragment list; deleteIndexes in the JSON
+			 * re-share the delete-file fragments across tasks.
+			 */
+			char	   *json = strVal(carrier);
+
+			fragments = parseIcebergFragmentResponse(json, strlen(json));
+		}
+		else
+		{
+			/* Backward compat: pre-#362 QD placed a List * here directly. */
+			Assert(IsA(carrier, List));
+			fragments = (List *) carrier;
+		}
+
 		if (fragments == NIL)
 			continue;
 
