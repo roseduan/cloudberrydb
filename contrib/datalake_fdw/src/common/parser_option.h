@@ -7,6 +7,8 @@
 
 char* getStringOption(List *options, const char *optionName);
 bool getBoolOption(List *options, const char *optionName, bool defaultValue);
+bool getBoolOptionEx(List *options, const char *optionName, bool defaultValue,
+					 bool *isset);
 int getIntOption(List *options, const char *optionName, int defaultValue);
 
 #endif

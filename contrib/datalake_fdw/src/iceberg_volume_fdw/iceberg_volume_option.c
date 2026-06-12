@@ -62,7 +62,8 @@ static void parseIcebergVolumeServerOptions(IcebergVolumeServerOptions *options,
     options->endpoint = getStringOption(server_options, DATALAKE_ICEBERG_VOLUME_ENDPOINT);
     options->region = getStringOption(server_options, DATALAKE_ICEBERG_VOLUME_REGION);
     options->bucket_name = getStringOption(server_options, DATALAKE_ICEBERG_VOLUME_BUCKET_NAME);
-    options->path_style_access = getBoolOption(server_options, DATALAKE_ICEBERG_VOLUME_PATH_STYLE_ACCESS, false);
+    options->path_style_access = getBoolOptionEx(server_options, DATALAKE_ICEBERG_VOLUME_PATH_STYLE_ACCESS, false,
+                                                 &options->path_style_access_set);
 
     /*
      * Reject the deprecated s3a / s3av2 aliases at OPTION parse time. These

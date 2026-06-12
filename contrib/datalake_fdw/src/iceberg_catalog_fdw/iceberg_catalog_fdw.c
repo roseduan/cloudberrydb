@@ -1003,7 +1003,14 @@ static agentcli_cJSON* createIcebergVolumeConfig(IcebergVolumeOptions *volumeOpt
     if (volumeOpt->volume_server.bucket_name && strlen(volumeOpt->volume_server.bucket_name) > 0)
         agentcli_cJSON_AddStringToObject(volumeConfig, DATALAKEFDW_ICEBERG_KEY_BUCKET_NAME, volumeOpt->volume_server.bucket_name);
 
-    agentcli_cJSON_AddBoolToObject(volumeConfig, DATALAKEFDW_ICEBERG_KEY_PATH_STYLE_ACCESS, volumeOpt->volume_server.path_style_access);
+    /*
+     * Only emit path_style_access when the user actually wrote the OPTION.
+     * The agent merges SQL options over the server_name conf section per
+     * key, so an unconditional false here would shadow a true in the conf
+     * file even though the user never set anything.
+     */
+    if (volumeOpt->volume_server.path_style_access_set)
+        agentcli_cJSON_AddBoolToObject(volumeConfig, DATALAKEFDW_ICEBERG_KEY_PATH_STYLE_ACCESS, volumeOpt->volume_server.path_style_access);
 
     /* Diagnostic trace: see iceberg_volume_option.c step2 for context. */
     elog(DEBUG1, "[trace_ak] step3 createVolCfg: access_key_id len=%d, secret_access_key len=%d, will_add=%d/%d",

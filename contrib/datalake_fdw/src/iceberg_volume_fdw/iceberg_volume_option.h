@@ -12,6 +12,7 @@ typedef struct IcebergVolumeServerOptions
 	char *region;				   /* DATALAKE_ICEBERG_VOLUME_REGION */
 	char *bucket_name;			  /* DATALAKE_ICEBERG_VOLUME_BUCKET_NAME */
 	bool path_style_access;		 /* DATALAKE_ICEBERG_VOLUME_PATH_STYLE_ACCESS */
+	bool path_style_access_set;	 /* user actually wrote path_style_access */
 	
 	/* AWS specific options */
 	char *role_arn;
