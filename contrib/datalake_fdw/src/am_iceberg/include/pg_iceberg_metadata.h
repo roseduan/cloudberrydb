@@ -38,6 +38,9 @@ typedef struct IcebergMetadataInfo
 /* Helper to retrieve iceberg metadata information */
 extern IcebergMetadataInfo *pg_iceberg_get_metadata_info(Oid relid);
 
+/* Same, but returns NULL instead of erroring when no entry exists */
+extern IcebergMetadataInfo *pg_iceberg_get_metadata_info_missing_ok(Oid relid);
+
 /* Helper to free memory allocated in IcebergMetadataInfo */
 extern void pg_iceberg_free_metadata_info(IcebergMetadataInfo *info);
 

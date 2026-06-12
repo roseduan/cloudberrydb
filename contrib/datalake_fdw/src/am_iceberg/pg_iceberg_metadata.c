@@ -332,8 +332,8 @@ pg_iceberg_remove_metadata(Oid relid)
 	table_close(metadata_rel, RowExclusiveLock);
 }
 
-IcebergMetadataInfo *
-pg_iceberg_get_metadata_info(Oid relid)
+static IcebergMetadataInfo *
+pg_iceberg_get_metadata_info_internal(Oid relid, bool missing_ok)
 {
 	Relation	metadata_rel;
 	ScanKeyData skey[1];
@@ -366,6 +366,13 @@ pg_iceberg_get_metadata_info(Oid relid)
 
 	if (!HeapTupleIsValid(tuple))
 	{
+		if (missing_ok)
+		{
+			systable_endscan(scan);
+			table_close(metadata_rel, AccessShareLock);
+			pfree(info);
+			return NULL;
+		}
 		ereport(ERROR,
 				(errcode(ERRCODE_UNDEFINED_OBJECT),
 				 errmsg("iceberg metadata entry not found for relation %u", relid)));
@@ -395,6 +402,22 @@ pg_iceberg_get_metadata_info(Oid relid)
 	table_close(metadata_rel, AccessShareLock);
 
 	return info;
+}
+
+IcebergMetadataInfo *
+pg_iceberg_get_metadata_info(Oid relid)
+{
+	return pg_iceberg_get_metadata_info_internal(relid, false);
+}
+
+/*
+ * Like pg_iceberg_get_metadata_info(), but returns NULL instead of raising
+ * an error when the relation has no iceberg metadata entry.
+ */
+IcebergMetadataInfo *
+pg_iceberg_get_metadata_info_missing_ok(Oid relid)
+{
+	return pg_iceberg_get_metadata_info_internal(relid, true);
 }
 
 void

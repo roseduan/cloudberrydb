@@ -899,6 +899,23 @@ DefineRelation(CreateStmt *stmt, char relkind, Oid ownerId,
 	}
 
 	/*
+	 * Lake tables must be created through CREATE ICEBERG TABLE, which also
+	 * creates the pg_lake_table and iceberg metadata catalog entries the
+	 * iceberg AM relies on.  A relation created with the iceberg AM through
+	 * any other path (CREATE TABLE ... USING iceberg, CTAS, matview,
+	 * default_table_access_method, partition child) would be unusable and
+	 * undroppable, so reject it up front.  CreateLakeTableStmt embeds
+	 * CreateStmt as its first member, so nodeTag() distinguishes the paths.
+	 */
+	if (accessMethodId == ICEBERG_AM_OID &&
+		nodeTag(stmt) != T_CreateLakeTableStmt)
+		ereport(ERROR,
+				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+				 errmsg("cannot create table \"%s\" with access method \"iceberg\"",
+						stmt->relation->relname),
+				 errhint("Use CREATE ICEBERG TABLE instead.")));
+
+	/*
 	 * GPDB: for partitioned tables, inherit reloptions from the parent.
 	 * Note this is applicable only if the parent has the same AM as the child.
 	 */
@@ -16095,6 +16112,23 @@ ATPrepSetAccessMethod(AlteredTableInfo *tab, Relation rel, const char *amname)
 
 	if (rel->rd_rel->relam == amoid)
 		return;
+
+	/*
+	 * The iceberg AM relies on catalog entries that only the CREATE/DROP
+	 * ICEBERG TABLE paths manage, so a table cannot be converted to or from
+	 * it with SET ACCESS METHOD.
+	 */
+	if (amoid == ICEBERG_AM_OID)
+		ereport(ERROR,
+				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+				 errmsg("cannot change access method of table \"%s\" to \"iceberg\"",
+						RelationGetRelationName(rel)),
+				 errhint("Use CREATE ICEBERG TABLE to create an iceberg table.")));
+	if (RelationIsIceberg(rel))
+		ereport(ERROR,
+				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+				 errmsg("cannot change access method of lake table \"%s\"",
+						RelationGetRelationName(rel))));
 
 	/* Save info for Phase 3 to do the real work */
 	tab->rewrite |= AT_REWRITE_ACCESS_METHOD;

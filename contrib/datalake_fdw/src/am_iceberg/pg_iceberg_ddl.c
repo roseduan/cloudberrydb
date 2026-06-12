@@ -86,16 +86,28 @@ iceberg_object_access_hook(ObjectAccessType access, Oid classId, Oid objectId,
 				 * Before removing the metadata entry, enqueue the metadata
 				 * location into the deletion queue so the background cleanup
 				 * module can later parse it and delete all referenced files.
+				 *
+				 * Tolerate a missing metadata entry (e.g. a table created
+				 * with a bare CREATE TABLE ... USING iceberg before that
+				 * path was blocked): the table must remain droppable.
 				 */
-				IcebergMetadataInfo *info = pg_iceberg_get_metadata_info(objectId);
+				IcebergMetadataInfo *info =
+					pg_iceberg_get_metadata_info_missing_ok(objectId);
 
-				pg_iceberg_deletion_queue_insert(info->metadata_location,
-												 objectId,
-												 GetCurrentTimestamp(),
-												 DELETION_TYPE_METADATA);
-				pg_iceberg_free_metadata_info(info);
+				if (info != NULL)
+				{
+					pg_iceberg_deletion_queue_insert(info->metadata_location,
+													 objectId,
+													 GetCurrentTimestamp(),
+													 DELETION_TYPE_METADATA);
+					pg_iceberg_free_metadata_info(info);
 
-				pg_iceberg_remove_metadata(objectId);
+					pg_iceberg_remove_metadata(objectId);
+				}
+				else
+					ereport(WARNING,
+							(errmsg("iceberg metadata entry not found for table \"%s\", skipping iceberg metadata cleanup",
+									RelationGetRelationName(rel))));
 			}
 		}
 
