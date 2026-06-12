@@ -5,6 +5,7 @@
 #include <yaml.h>
 #include "config_parser.h"
 #include "hive_helper.h"
+#include "strings_util.h"
 
 typedef struct
 {
@@ -12,8 +13,16 @@ typedef struct
 	int			offset;
 } config_elt;
 
+/*
+ * The iceberg conf-file format renamed the site-file keys to the SQL OPTION
+ * names ("url" instead of "uris", "hdfs_namenodes"/"hdfs_port" instead of
+ * "hdfs_namenode_host"/"hdfs_namenode_port", compact underscore dfs_* HA
+ * keys).  These readers stay dual-track so a shared gphive.conf/gphdfs.conf
+ * migrated for iceberg keeps working here.
+ */
 static const config_elt configElts[] = {
 	{"uris", offsetof(ConfigItem, uris)},
+	{"url", offsetof(ConfigItem, uris)},
 	{"auth_method", offsetof(ConfigItem, authMethod)},
 	{"krb_service_principal", offsetof(ConfigItem, servicePrincipal)},
 	{"krb_client_principal", offsetof(ConfigItem, clientPrincipal)},
@@ -25,6 +34,8 @@ static const config_elt configElts[] = {
 static const config_elt hdfsConfigElts[] = {
 	{"hdfs_namenode_host", offsetof(HdfsConfigItem, host)},
 	{"hdfs_namenode_port", offsetof(HdfsConfigItem, port)},
+	{"hdfs_namenodes", offsetof(HdfsConfigItem, host)},
+	{"hdfs_port", offsetof(HdfsConfigItem, port)},
 	{"hdfs_auth_method", offsetof(HdfsConfigItem, authMethod)},
 	{"krb_principal", offsetof(HdfsConfigItem, krbPrincipal)},
 	{"krb_principal_keytab", offsetof(HdfsConfigItem, krbKeytab)},
@@ -33,6 +44,115 @@ static const config_elt hdfsConfigElts[] = {
 	{"krb_service_principal", offsetof(HdfsConfigItem, krbServicePrincipal)},
 	{"is_ha_supported", offsetof(HdfsConfigItem, enableHA)},
 };
+
+static HdfsHAConfEntry *
+makeHaEntry(char *key, char *value)
+{
+	HdfsHAConfEntry *ent = palloc0(sizeof(HdfsHAConfEntry));
+
+	ent->key = key;
+	ent->value = value;
+	return ent;
+}
+
+/*
+ * Post-process a parsed gphdfs.conf section written in the new format (keys
+ * equal to the SQL OPTION names) into the shapes the helpers downstream
+ * expect:
+ *
+ * - hdfs_namenodes may splice "host:port"; split it, the spliced port
+ *   winning over a separate hdfs_port key.  Default the port to 8020 when
+ *   only a host was given in non-HA mode.
+ * - the compact underscore HA keys (dfs_nameservices: ns,
+ *   dfs_ha_namenodes: nn1,nn2, dfs_namenode_rpc_address: addr1,addr2,
+ *   dfs_client_failover_proxy_provider) expand to the suffixed dotted
+ *   entries extractServiceName/extractNameNodes/extractRpcAddr look up
+ *   (dfs.ha.namenodes.<ns>, dfs.namenode.rpc-address.<ns>.<nn>, ...).
+ *
+ * Legacy-format sections come through unchanged: their keys match none of
+ * the rewrites.
+ */
+static void
+normalizeHdfsConfigItem(HdfsConfigItem *hci)
+{
+	ListCell   *lc;
+	char	   *nameServices = NULL;
+	char	   *haNamenodes = NULL;
+	char	   *rpcAddrs = NULL;
+	char	   *failoverProvider = NULL;
+	List	   *kept = NIL;
+	bool		isHa = hci->enableHA && strcmp(hci->enableHA, "true") == 0;
+
+	if (hci->host != NULL)
+	{
+		char	   *colon = strrchr(hci->host, ':');
+
+		/*
+		 * port is declared int64_t but holds a string everywhere (the parse
+		 * loop stores pnstrdup() through a char** cast and the SQL builder
+		 * prints it with %s); follow the same convention.
+		 */
+		if (colon != NULL)
+		{
+			*(char **) &hci->port = pstrdup(colon + 1);
+			*colon = '\0';
+		}
+		else if (hci->port == 0 && !isHa)
+			*(char **) &hci->port = pstrdup("8020");
+	}
+
+	foreach(lc, hci->haEntries)
+	{
+		HdfsHAConfEntry *ent = (HdfsHAConfEntry *) lfirst(lc);
+
+		if (strcmp(ent->key, "dfs_nameservices") == 0)
+			nameServices = ent->value;
+		else if (strcmp(ent->key, "dfs_ha_namenodes") == 0)
+			haNamenodes = ent->value;
+		else if (strcmp(ent->key, "dfs_namenode_rpc_address") == 0)
+			rpcAddrs = ent->value;
+		else if (strcmp(ent->key, "dfs_client_failover_proxy_provider") == 0)
+			failoverProvider = ent->value;
+		else
+			kept = lappend(kept, ent);
+	}
+
+	if (nameServices == NULL)
+		return;					/* legacy format (or no HA config at all) */
+
+	kept = lappend(kept, makeHaEntry(pstrdup("dfs.nameservices"), nameServices));
+
+	if (haNamenodes != NULL)
+		kept = lappend(kept, makeHaEntry(
+				psprintf("dfs.ha.namenodes.%s", nameServices), haNamenodes));
+
+	if (haNamenodes != NULL && rpcAddrs != NULL)
+	{
+		List	   *names = splitString_(haNamenodes, ',', '\0');
+		List	   *addrs = splitString_(rpcAddrs, ',', '\0');
+		ListCell   *nameCell;
+		ListCell   *addrCell;
+
+		if (list_length(names) != list_length(addrs))
+			elog(ERROR, "dfs_namenode_rpc_address lists %d address(es) but dfs_ha_namenodes lists %d namenode(s)",
+				 list_length(addrs), list_length(names));
+
+		forboth(nameCell, names, addrCell, addrs)
+		{
+			kept = lappend(kept, makeHaEntry(
+					psprintf("dfs.namenode.rpc-address.%s.%s",
+							 nameServices, (char *) lfirst(nameCell)),
+					pstrdup((char *) lfirst(addrCell))));
+		}
+	}
+
+	if (failoverProvider != NULL)
+		kept = lappend(kept, makeHaEntry(
+				psprintf("dfs.client.failover.proxy.provider.%s", nameServices),
+				failoverProvider));
+
+	hci->haEntries = kept;
+}
 
 void hiveConfCheck(ConfigItem *conf)
 {
@@ -291,6 +411,7 @@ parseHdfsConf(const char *configFile, bool isFullMode)
 				*(char **) eltPos = pnstrdup((const char *)nodeVal->data.scalar.value, nodeVal->data.scalar.length);
 			}
 		}
+		normalizeHdfsConfigItem(hci);
 		result = lappend(result, hci);
 	}
 
