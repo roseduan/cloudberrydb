@@ -1,13 +1,13 @@
 -- 03_char_types.sql
 -- Iceberg CHAR(N) full coverage (issue #340 regression).
 --
--- Iceberg has no fixed-length CHAR type.  Per commit 48bf8311b1a (issue #321),
--- CHAR(N) on Iceberg tables maps to Iceberg `string`: trailing spaces are
--- stripped at write time and never restored.  This matches Snowflake / Spark /
--- Trino / PrestoDB and diverges from heap PG semantics on octet_length() /
--- raw-byte queries.  Issue #340 reported total data loss caused by the reader
--- never being aligned with this convention; this file pins the round-trip
--- behaviour so it stays fixed.
+-- Iceberg has no fixed-length CHAR type, so CHAR(N) is stored as Iceberg
+-- `string` with trailing spaces stripped on disk (clean for Spark / Trino /
+-- PrestoDB).  On the PG side, CHAR(N) semantics are preserved: the value is
+-- blank-padded back to the declared length N on read (issue #321), mirroring
+-- PG's bpchar() coercion, so length / octet_length / comparison / concat are
+-- identical to a heap CHAR(N) column.  Issue #340 (empty string on SELECT) and
+-- issue #321 (trailing-space loss) are both pinned by this round-trip file.
 --
 -- NOTE on expected output: capture expected/03_char_types.out by running this
 -- file once against a real catalog/volume (`make installcheck` from this
@@ -58,8 +58,8 @@ DROP TABLE ct_c1;
 
 -- ============================================================
 -- Test 3: CHAR(5) -- the canonical issue #340 repro shape
--- Iceberg trim semantics: stored bytes = trimmed value, so octet_length()
--- reflects strlen rather than the typmod N (this diverges from heap).
+-- Iceberg stores the trimmed value on disk, but the reader re-pads to N, so
+-- octet_length() reflects the typmod N exactly like a heap CHAR(5) column.
 -- ============================================================
 SELECT test_log('Test 3: CHAR(5) basic shapes');
 
@@ -84,7 +84,7 @@ CREATE ICEBERG TABLE ct_c100 (id bigint, c char(100));
 INSERT INTO ct_c100 VALUES
     (1, repeat('x', 80)),       -- 80 chars, no trailing space
     (2, repeat('y', 100)),      -- full 100 chars
-    (3, repeat(' ', 100)),      -- 100 spaces -> trimmed to empty
+    (3, repeat(' ', 100)),      -- 100 spaces -> empty on disk, re-padded to 100 on read
     (4, 'short');
 SELECT id, length(c) AS chars, octet_length(c) AS bytes,
        (left(c, 5) = 'xxxxx' OR left(c, 5) = 'yyyyy' OR left(c, 5) = 'short' OR left(c, 5) = '') AS sample_ok
@@ -93,7 +93,8 @@ DROP TABLE ct_c100;
 
 -- ============================================================
 -- Test 5: UTF-8 / multi-byte -- length() counts characters,
--- octet_length() counts bytes.  No trailing spaces inserted so trim is a no-op.
+-- octet_length() counts bytes.  Values are blank-padded to N chars on read,
+-- so octet_length = byte_len(value) + (N - char_len) single-byte spaces.
 -- ============================================================
 SELECT test_log('Test 5: UTF-8 multi-byte');
 
@@ -108,8 +109,8 @@ FROM ct_utf8 ORDER BY id;
 DROP TABLE ct_utf8;
 
 -- ============================================================
--- Test 6: special whitespace -- only ASCII space (0x20) is trimmed;
--- tab / newline / CR are kept verbatim.
+-- Test 6: special whitespace -- only trailing ASCII space (0x20) is stripped
+-- on disk (then re-padded to N on read); tab / newline / CR are kept verbatim.
 -- ============================================================
 SELECT test_log('Test 6: tab / CR / LF preserved (only space trimmed)');
 
@@ -117,7 +118,7 @@ CREATE ICEBERG TABLE ct_ws (id bigint, c char(10));
 INSERT INTO ct_ws VALUES
     (1, E'tab\there'),      -- 8 chars: t a b \t h e r e
     (2, E'cr\rlf\n'),       -- 6 chars: c r \r l f \n  (no trailing space)
-    (3, E'mix\t '),         -- 'mix\t ' -> padded by PG to 10 -> last char must be \t after trim
+    (3, E'mix\t '),         -- PG pads to 10; trailing space stripped on disk, re-padded to 10 on read
     (4, 'noend');           -- 5 chars baseline
 SELECT id, length(c) AS chars, octet_length(c) AS bytes
 FROM ct_ws ORDER BY id;

@@ -89,9 +89,10 @@ DROP TABLE bt_str;
 -- Test 6b: char(N) maps to Iceberg `string`
 -- Verifies that CHAR(N) columns no longer emit
 --   WARNING: Unsupported PostgreSQL type OID: 1042, using string
--- and follow Snowflake / Spark / Trino / PrestoDB semantics:
--- trailing-space and right-padding are NOT preserved across
--- write/read; CHAR(N) effectively behaves like VARCHAR(N).
+-- and that PG CHAR(N) semantics match a heap table: the value is
+-- blank-padded back to N on read (issue #321), so length / octet_length
+-- and concatenation behave exactly like heap.  On disk the Iceberg
+-- `string` stays unpadded so Spark / Trino / PrestoDB see clean values.
 -- ============================================================
 SELECT test_log('Test 6b: char(N) maps to Iceberg string');
 

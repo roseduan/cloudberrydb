@@ -252,14 +252,7 @@ ParquetReader::readPrimitive(const TypeInfo &typInfo, bool &isNull)
 		case BYTEAOID:
 		case TEXTOID:
 		case VARCHAROID:
-		case BPCHAROID:
 		{
-			/*
-			 * BPCHAR on Iceberg is written as variable-length BYTE_ARRAY +
-			 * UTF8 (Iceberg `string`; see commit 48bf8311b1a / issue #321).
-			 * Trailing-space padding is not preserved on disk, so read it
-			 * back exactly like VARCHAR / TEXT, with no padding to N.
-			 */
 			parquet::ByteArray value;
 			((parquet::TypedScanner<parquet::ByteArrayType> *)scanner.get())->NextValue(&value, &isNull);
 			if (isNull)
@@ -279,6 +272,65 @@ ParquetReader::readPrimitive(const TypeInfo &typInfo, bool &isNull)
 			dataBuff *colBuffer = buffer_->getDataBuffer(typInfo.columnIndex_);
 			SET_VARSIZE(colBuffer->buffer, value.len + VARHDRSZ);
 			memcpy(VARDATA(colBuffer->buffer), value.ptr, value.len);
+			return PointerGetDatum(colBuffer->buffer);
+		}
+		case BPCHAROID:
+		{
+			/*
+			 * BPCHAR on Iceberg is written as variable-length BYTE_ARRAY +
+			 * UTF8 (Iceberg `string`; see commit 48bf8311b1a / issue #321),
+			 * with trailing spaces stripped at write time so external engines
+			 * (Spark/Trino) see clean strings.  To keep PG CHAR(N) semantics
+			 * identical to a heap table, re-pad the value with blanks up to the
+			 * declared length N on read, mirroring PG's bpchar() coercion
+			 * (src/backend/utils/adt/varchar.c).  N comes from atttypmod
+			 * (typeMod_ == N + VARHDRSZ); typeMod_ < VARHDRSZ means an
+			 * unbounded `char` with no length, which is never padded.
+			 */
+			parquet::ByteArray value;
+			((parquet::TypedScanner<parquet::ByteArrayType> *)scanner.get())->NextValue(&value, &isNull);
+			if (isNull)
+				PG_RETURN_DATUM(0);
+
+			int pad = 0;
+			if (typInfo.typeMod_ >= (int) VARHDRSZ)
+			{
+				int maxlen = typInfo.typeMod_ - VARHDRSZ;	/* declared char count N */
+				/*
+				 * Count UTF-8 code points directly (every byte that is not a
+				 * 10xxxxxx continuation byte starts a character) rather than
+				 * pg_mbstrlen_with_len(): the on-disk Iceberg `string` is always
+				 * UTF-8, so the character count must not depend on the database
+				 * encoding -- under a non-UTF-8 server encoding pg_mbstrlen_with_len
+				 * would mis-count and pad to the wrong length.
+				 */
+				int charlen = 0;
+				for (uint32 k = 0; k < value.len; k++)
+					if (((unsigned char) value.ptr[k] & 0xC0) != 0x80)
+						charlen++;
+				if (charlen < maxlen)
+					pad = maxlen - charlen;					/* blanks are single-byte */
+			}
+			uint32 totalLen = value.len + pad;
+
+			if (!buffer_)
+			{
+				bytea *result = (bytea *) gpdbPalloc(totalLen + VARHDRSZ);
+				SET_VARSIZE(result, totalLen + VARHDRSZ);
+				memcpy(VARDATA(result), value.ptr, value.len);
+				if (pad > 0)
+					memset(VARDATA(result) + value.len, ' ', pad);
+				return PointerGetDatum(result);
+			}
+			if (totalLen + VARHDRSZ > static_cast<uint32>(buffer_->getDataBuffer(typInfo.columnIndex_)->length))
+			{
+				buffer_->resizeDataBuffer(typInfo.columnIndex_, totalLen + VARHDRSZ);
+			}
+			dataBuff *colBuffer = buffer_->getDataBuffer(typInfo.columnIndex_);
+			SET_VARSIZE(colBuffer->buffer, totalLen + VARHDRSZ);
+			memcpy(VARDATA(colBuffer->buffer), value.ptr, value.len);
+			if (pad > 0)
+				memset(VARDATA(colBuffer->buffer) + value.len, ' ', pad);
 			return PointerGetDatum(colBuffer->buffer);
 		}
 		case UUIDOID:

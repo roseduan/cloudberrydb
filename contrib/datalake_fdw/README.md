@@ -341,15 +341,16 @@ OPTIONS (filePath 'icebergdb.iceberg_table1', catalog_type 'hive', server_name '
 
 The Iceberg specification has no fixed-length character type; the closest
 match is `string` (variable-length UTF-8).  `CHAR(N)` columns in
-ICEBERG TABLE are therefore mapped to the Iceberg `string` type, matching
-the behaviour of Snowflake, Spark, Trino and PrestoDB.
+ICEBERG TABLE are therefore stored as the Iceberg `string` type **without
+trailing-space padding** on disk, so external engines (Spark, Trino,
+PrestoDB, Snowflake) see clean, unpadded string values.
 
-A consequence is that PostgreSQL's standard CHAR right-padding and
-trailing-space semantics are **not** preserved across a write/read cycle:
-values written through `CHAR(N)` are stored without padding and read back
-without padding, effectively behaving like `VARCHAR(N)`.  Use heap tables
-or apply `RPAD()` at the application layer when strict CHAR(N) semantics
-are required.
+On the PostgreSQL side, standard `CHAR(N)` semantics are preserved: the
+value is blank-padded back to the declared length `N` when read, exactly
+as PG's `bpchar()` coercion does for heap tables.  A `CHAR(N)` Iceberg
+column therefore behaves identically to a heap `CHAR(N)` column for
+`length()`, `octet_length()`, comparison and concatenation — only the
+on-disk / cross-engine representation is the unpadded `string`.
 
 #### hudi
 ```

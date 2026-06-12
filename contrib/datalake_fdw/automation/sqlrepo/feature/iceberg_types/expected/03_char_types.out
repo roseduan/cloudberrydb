@@ -1,13 +1,13 @@
 -- 03_char_types.sql
 -- Iceberg CHAR(N) full coverage (issue #340 regression).
 --
--- Iceberg has no fixed-length CHAR type.  Per commit 48bf8311b1a (issue #321),
--- CHAR(N) on Iceberg tables maps to Iceberg `string`: trailing spaces are
--- stripped at write time and never restored.  This matches Snowflake / Spark /
--- Trino / PrestoDB and diverges from heap PG semantics on octet_length() /
--- raw-byte queries.  Issue #340 reported total data loss caused by the reader
--- never being aligned with this convention; this file pins the round-trip
--- behaviour so it stays fixed.
+-- Iceberg has no fixed-length CHAR type, so CHAR(N) is stored as Iceberg
+-- `string` with trailing spaces stripped on disk (clean for Spark / Trino /
+-- PrestoDB).  On the PG side, CHAR(N) semantics are preserved: the value is
+-- blank-padded back to the declared length N on read (issue #321), mirroring
+-- PG's bpchar() coercion, so length / octet_length / comparison / concat are
+-- identical to a heap CHAR(N) column.  Issue #340 (empty string on SELECT) and
+-- issue #321 (trailing-space loss) are both pinned by this round-trip file.
 --
 -- NOTE on expected output: capture expected/03_char_types.out by running this
 -- file once against a real catalog/volume (`make installcheck` from this
@@ -97,7 +97,7 @@ FROM ct_default ORDER BY id;
  id | chars | bytes | is_null 
 ----+-------+-------+---------
   1 |     1 |     1 | f
-  2 |     0 |     0 | f
+  2 |     0 |     1 | f
   3 |       |       | t
 (3 rows)
 
@@ -120,15 +120,15 @@ FROM ct_c1 ORDER BY id;
 ----+-------+-------+---------
   1 |     1 |     1 | f
   2 |     1 |     1 | f
-  3 |     0 |     0 | f
+  3 |     0 |     1 | f
   4 |       |       | t
 (4 rows)
 
 DROP TABLE ct_c1;
 -- ============================================================
 -- Test 3: CHAR(5) -- the canonical issue #340 repro shape
--- Iceberg trim semantics: stored bytes = trimmed value, so octet_length()
--- reflects strlen rather than the typmod N (this diverges from heap).
+-- Iceberg stores the trimmed value on disk, but the reader re-pads to N, so
+-- octet_length() reflects the typmod N exactly like a heap CHAR(5) column.
 -- ============================================================
 SELECT test_log('Test 3: CHAR(5) basic shapes');
 NOTICE:  [TEST] Test 3: CHAR(5) basic shapes
@@ -150,10 +150,10 @@ FROM ct_c5 ORDER BY label;
    label   | chars | bytes | is_null 
 -----------+-------+-------+---------
  1_full    |     5 |     5 | f
- 2_pad_1   |     1 |     1 | f
- 3_pad_4sp |     1 |     1 | f
- 4_all_sp  |     0 |     0 | f
- 5_empty   |     0 |     0 | f
+ 2_pad_1   |     1 |     5 | f
+ 3_pad_4sp |     1 |     5 | f
+ 4_all_sp  |     0 |     5 | f
+ 5_empty   |     0 |     5 | f
  6_null    |       |       | t
 (6 rows)
 
@@ -172,23 +172,24 @@ CREATE ICEBERG TABLE ct_c100 (id bigint, c char(100));
 INSERT INTO ct_c100 VALUES
     (1, repeat('x', 80)),       -- 80 chars, no trailing space
     (2, repeat('y', 100)),      -- full 100 chars
-    (3, repeat(' ', 100)),      -- 100 spaces -> trimmed to empty
+    (3, repeat(' ', 100)),      -- 100 spaces -> empty on disk, re-padded to 100 on read
     (4, 'short');
 SELECT id, length(c) AS chars, octet_length(c) AS bytes,
        (left(c, 5) = 'xxxxx' OR left(c, 5) = 'yyyyy' OR left(c, 5) = 'short' OR left(c, 5) = '') AS sample_ok
 FROM ct_c100 ORDER BY id;
  id | chars | bytes | sample_ok 
 ----+-------+-------+-----------
-  1 |    80 |    80 | t
+  1 |    80 |   100 | t
   2 |   100 |   100 | t
-  3 |     0 |     0 | t
-  4 |     5 |     5 | t
+  3 |     0 |   100 | t
+  4 |     5 |   100 | t
 (4 rows)
 
 DROP TABLE ct_c100;
 -- ============================================================
 -- Test 5: UTF-8 / multi-byte -- length() counts characters,
--- octet_length() counts bytes.  No trailing spaces inserted so trim is a no-op.
+-- octet_length() counts bytes.  Values are blank-padded to N chars on read,
+-- so octet_length = byte_len(value) + (N - char_len) single-byte spaces.
 -- ============================================================
 SELECT test_log('Test 5: UTF-8 multi-byte');
 NOTICE:  [TEST] Test 5: UTF-8 multi-byte
@@ -207,16 +208,16 @@ SELECT id, length(c) AS chars, octet_length(c) AS bytes
 FROM ct_utf8 ORDER BY id;
  id | chars | bytes 
 ----+-------+-------
-  1 |     2 |     6
-  2 |     4 |     8
-  3 |     1 |     4
-  4 |     5 |     5
+  1 |     2 |    14
+  2 |     4 |    14
+  3 |     1 |    13
+  4 |     5 |    10
 (4 rows)
 
 DROP TABLE ct_utf8;
 -- ============================================================
--- Test 6: special whitespace -- only ASCII space (0x20) is trimmed;
--- tab / newline / CR are kept verbatim.
+-- Test 6: special whitespace -- only trailing ASCII space (0x20) is stripped
+-- on disk (then re-padded to N on read); tab / newline / CR are kept verbatim.
 -- ============================================================
 SELECT test_log('Test 6: tab / CR / LF preserved (only space trimmed)');
 NOTICE:  [TEST] Test 6: tab / CR / LF preserved (only space trimmed)
@@ -229,16 +230,16 @@ CREATE ICEBERG TABLE ct_ws (id bigint, c char(10));
 INSERT INTO ct_ws VALUES
     (1, E'tab\there'),      -- 8 chars: t a b \t h e r e
     (2, E'cr\rlf\n'),       -- 6 chars: c r \r l f \n  (no trailing space)
-    (3, E'mix\t '),         -- 'mix\t ' -> padded by PG to 10 -> last char must be \t after trim
+    (3, E'mix\t '),         -- PG pads to 10; trailing space stripped on disk, re-padded to 10 on read
     (4, 'noend');           -- 5 chars baseline
 SELECT id, length(c) AS chars, octet_length(c) AS bytes
 FROM ct_ws ORDER BY id;
  id | chars | bytes 
 ----+-------+-------
-  1 |     8 |     8
-  2 |     6 |     6
-  3 |     4 |     4
-  4 |     5 |     5
+  1 |     8 |    10
+  2 |     6 |    10
+  3 |     4 |    10
+  4 |     5 |    10
 (4 rows)
 
 DROP TABLE ct_ws;
@@ -320,8 +321,8 @@ FROM ct_from_heap ORDER BY id;
  id | chars | bytes | is_null 
 ----+-------+-------+---------
   1 |     5 |     5 | f
-  2 |     1 |     1 | f
-  3 |     0 |     0 | f
+  2 |     1 |     5 | f
+  3 |     0 |     5 | f
   4 |       |       | t
 (4 rows)
 
@@ -381,7 +382,7 @@ SELECT count(DISTINCT c)          AS distinct_cnt,
 FROM ct_query;
  distinct_cnt | min_c | max_c 
 --------------+-------+-------
-            3 | A     | BB
+            3 | A     | BB   
 (1 row)
 
 DROP TABLE ct_query;
@@ -437,9 +438,9 @@ FROM ct_dml ORDER BY id;
  id | label | chars | bytes 
 ----+-------+-------+-------
   1 | a     |     5 |     5
-  2 | b     |     3 |     3
+  2 | b     |     3 |     5
   3 | c     |       |      
-  4 | d     |     4 |     4
+  4 | d     |     4 |     5
 (4 rows)
 
 DELETE FROM ct_dml WHERE c IS NULL;
@@ -483,8 +484,8 @@ FROM ct_mixed ORDER BY id;
  id |   t   |   v   | c5_chars | c5_bytes | c1_chars | c1_bytes | n  |     d      
 ----+-------+-------+----------+----------+----------+----------+----+------------
   1 | hello | world |        5 |        5 |        1 |        1 | 42 | 2026-01-15
-  2 |       | short |        1 |        1 |        0 |        0 |  0 | 1970-01-01
-  3 | mix   |       |        0 |        0 |        1 |        1 | -1 | 
+  2 |       | short |        1 |        5 |        0 |        1 |  0 | 1970-01-01
+  3 | mix   |       |        0 |        5 |        1 |        1 | -1 | 
   4 |       |       |          |          |          |          |    | 2099-12-31
 (4 rows)
 
