@@ -1656,6 +1656,16 @@ ProcessUtilitySlow(ParseState *pstate,
 							/* Remember transformed RangeVar for LAKE */
 							table_rv = cstmt->base.relation;
 
+							/*
+							 * Validate catalog/volume resolution up front:
+							 * DefineRelation dispatches the statement to the
+							 * QEs, so a failure raised only later inside
+							 * CreateLakeTable() would surface as a confusing
+							 * QE-annotated error (issue #845).
+							 */
+							if (Gp_role == GP_ROLE_DISPATCH)
+								ValidateLakeTableOptions(cstmt);
+
 							/* Create the table itself as a foreign table */
 							address = DefineRelation(&cstmt->base,
 													 RELKIND_RELATION,

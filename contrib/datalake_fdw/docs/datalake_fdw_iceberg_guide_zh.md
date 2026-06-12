@@ -316,7 +316,7 @@ CREATE FOREIGN VOLUME s3_vol SERVER s3_vol_srv
 |----------------|------------------|------|
 | `builtin` | s3 / hdfs | 内嵌目录服务 |
 | `hive` | s3 / hdfs | 元数据走 Hive Metastore |
-| `polaris` | 由 Polaris 服务端下发 | 通常不显式建 Volume |
+| `polaris` | s3 | 表数据物理路径由 Polaris 服务端下发，但**仍必须建 Volume**：QE 通过 Volume 的 endpoint 与 AK/SK 读写数据文件 |
 | `hadoop` | s3 / hdfs | warehouse_location_prefix 必填 |
 | `s3` | s3 | 仅对象存储 |
 
@@ -460,9 +460,10 @@ OPTIONS (
 ```
 
 **CATALOG / VOLUME 指定规则**：
-- 可省略 → 使用 `iceberg_default_catalog` / `iceberg_default_volume` GUC
-- Polaris Catalog 可不指定 Volume（存储配置由 Polaris 服务端下发）
-- Builtin / Hive Catalog 必须指定 Volume
+- 可省略子句 → 使用 `iceberg_default_catalog` / `iceberg_default_volume` GUC
+- 所有 Catalog 类型（含 Polaris）都**必须**有 Volume：Polaris 场景下表数据的物理路径由
+  Polaris 服务端下发，但 QE 读写数据文件仍使用 Volume 提供的存储 endpoint 与 AK/SK；
+  两者均未指定时建表报错 `no foreign volume specified`
 
 **数据路径组成**（新表）：
 ```

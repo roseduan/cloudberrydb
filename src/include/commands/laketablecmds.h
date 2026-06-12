@@ -34,6 +34,7 @@ extern const char *GetDefaultIcebergCatalog(void);
 extern const char *GetDefaultIcebergVolume(void);
 
 /* Lake table management */
+extern void ValidateLakeTableOptions(CreateLakeTableStmt *stmt);
 extern void CreateLakeTable(CreateLakeTableStmt *stmt, Oid relId);
 extern void RemoveLakeTableEntry(Oid relid);
 

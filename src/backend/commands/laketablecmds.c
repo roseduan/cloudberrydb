@@ -29,6 +29,7 @@
 #include "catalog/pg_type.h"
 #include "cdb/cdbvars.h"
 #include "commands/defrem.h"
+#include "commands/extension.h"
 #include "commands/laketablecmds.h"
 #include "foreign/foreign.h"
 #include "miscadmin.h"
@@ -235,6 +236,101 @@ validate_foreign_volume(const char *volume_name)
 }
 
 /*
+ * ResolveLakeTableOptions
+ *
+ * Resolve and validate the table type, catalog and volume of a
+ * CreateLakeTableStmt, returning the catalog/volume OIDs.
+ *
+ * Also exposed (via ValidateLakeTableOptions) so ProcessUtilitySlow can run
+ * the validation on the QD before DefineRelation: DefineRelation dispatches
+ * the statement to the QEs, so a validation failure raised only inside
+ * CreateLakeTable() would surface as a confusing QE-annotated error.
+ */
+static void
+ResolveLakeTableOptions(CreateLakeTableStmt *stmt,
+						Oid *catalog_oid_out, Oid *volume_oid_out)
+{
+	const char *catalog_name;
+	const char *volume_name;
+
+	/*
+	 * Lake tables are unusable without the datalake_fdw extension (its AM
+	 * handler raises the same error); check it first so the install hint
+	 * takes precedence over catalog/volume resolution errors.
+	 */
+	if (!OidIsValid(get_extension_oid("datalake_fdw", true)))
+		ereport(ERROR,
+				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+				 errmsg("the datalake_fdw extension is not installed in this database"),
+				 errhint("Install it first: CREATE EXTENSION IF NOT EXISTS datalake_fdw;")));
+
+	/* Validate table type */
+	validate_table_type(stmt->table_type);
+
+	/*
+	 * Determine catalog name: use explicit value if provided, otherwise
+	 * fall back to the iceberg_default_catalog GUC.  When the GUC is set
+	 * but its catalog has been dropped, say so instead of the generic
+	 * "no foreign catalog specified".
+	 */
+	catalog_name = stmt->foreign_catalog;
+	if (catalog_name == NULL || catalog_name[0] == '\0')
+	{
+		catalog_name = GetDefaultIcebergCatalog();
+		if (catalog_name == NULL &&
+			iceberg_default_catalog != NULL && iceberg_default_catalog[0] != '\0')
+			ereport(ERROR,
+					(errcode(ERRCODE_UNDEFINED_OBJECT),
+					 errmsg("default iceberg catalog \"%s\" does not exist",
+							iceberg_default_catalog),
+					 errhint("Set iceberg_default_catalog to an existing foreign catalog.")));
+	}
+
+	/*
+	 * Determine volume name: use explicit value if provided, otherwise
+	 * fall back to the iceberg_default_volume GUC.
+	 */
+	volume_name = stmt->foreign_volume;
+	if (volume_name == NULL || volume_name[0] == '\0')
+	{
+		volume_name = GetDefaultIcebergVolume();
+		if (volume_name == NULL &&
+			iceberg_default_volume != NULL && iceberg_default_volume[0] != '\0')
+			ereport(ERROR,
+					(errcode(ERRCODE_UNDEFINED_OBJECT),
+					 errmsg("default iceberg volume \"%s\" does not exist",
+							iceberg_default_volume),
+					 errhint("Set iceberg_default_volume to an existing foreign volume.")));
+	}
+
+	*catalog_oid_out = validate_foreign_catalog(catalog_name);
+
+	/*
+	 * A volume is required for every lake table, including tables on a
+	 * Polaris catalog: Polaris vends the table's physical location, but the
+	 * QEs still read and write the data files through the volume's storage
+	 * endpoint and credentials.  Without this check the missing volume only
+	 * surfaced later as "foreign volume with OID 0 does not exist" deep in
+	 * the iceberg AM create path (issue #845).
+	 */
+	*volume_oid_out = validate_foreign_volume(volume_name);
+}
+
+/*
+ * ValidateLakeTableOptions
+ *
+ * QD-side pre-DefineRelation validation wrapper; see ResolveLakeTableOptions.
+ */
+void
+ValidateLakeTableOptions(CreateLakeTableStmt *stmt)
+{
+	Oid			catalog_oid;
+	Oid			volume_oid;
+
+	ResolveLakeTableOptions(stmt, &catalog_oid, &volume_oid);
+}
+
+/*
  * CreateLakeTable
  *
  * Create a lake table entry in pg_lake_table after the base table has been created
@@ -248,35 +344,8 @@ CreateLakeTable(CreateLakeTableStmt *stmt, Oid relId)
 	HeapTuple	tuple;
 	Oid			catalog_oid;
 	Oid			volume_oid;
-	const char *catalog_name;
-	const char *volume_name;
 
-	/* Validate table type */
-	validate_table_type(stmt->table_type);
-
-	/*
-	 * Determine catalog name: use explicit value if provided, otherwise
-	 * fall back to the iceberg_default_catalog GUC.
-	 */
-	catalog_name = stmt->foreign_catalog;
-	if (catalog_name == NULL || catalog_name[0] == '\0')
-		catalog_name = GetDefaultIcebergCatalog();
-
-	/*
-	 * Determine volume name: use explicit value if provided, otherwise
-	 * fall back to the iceberg_default_volume GUC.
-	 */
-	volume_name = stmt->foreign_volume;
-	if (volume_name == NULL || volume_name[0] == '\0')
-		volume_name = GetDefaultIcebergVolume();
-
-	/* Validate and get OIDs */
-	catalog_oid = validate_foreign_catalog(catalog_name);
-
-	if (volume_name != NULL && volume_name[0] != '\0')
-		volume_oid = validate_foreign_volume(volume_name);
-	else
-		volume_oid = InvalidOid;
+	ResolveLakeTableOptions(stmt, &catalog_oid, &volume_oid);
 	/*
 	 * Advance command counter to ensure the pg_attribute tuple is visible;
 	 * the tuple might be updated to add constraints in previous step.

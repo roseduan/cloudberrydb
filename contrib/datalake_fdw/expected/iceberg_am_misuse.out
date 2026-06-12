@@ -1,0 +1,93 @@
+-- Regression test for issue #363: a relation created with the iceberg AM
+-- outside of CREATE ICEBERG TABLE has no pg_lake_table / iceberg metadata
+-- entries, making it unusable and undroppable.  All such creation paths must
+-- be rejected up front, and no orphan pg_class rows may be left behind.
+-- start_ignore
+DROP DATABASE IF EXISTS iceberg_am_misuse_db;
+NOTICE:  database "iceberg_am_misuse_db" does not exist, skipping
+CREATE DATABASE iceberg_am_misuse_db;
+\c iceberg_am_misuse_db
+CREATE EXTENSION datalake_fdw;
+-- end_ignore
+SELECT count(*) FROM pg_extension WHERE extname = 'datalake_fdw';
+ count 
+-------
+     1
+(1 row)
+
+-- plain CREATE TABLE ... USING iceberg
+CREATE TABLE misuse_plain (id bigint) USING iceberg;
+NOTICE:  Table doesn't have 'DISTRIBUTED BY' clause -- Using column named 'id' as the Apache Cloudberry data distribution key for this table.
+HINT:  The 'DISTRIBUTED BY' clause determines the distribution of data. Make sure column(s) chosen are the optimal data distribution key to minimize skew.
+ERROR:  cannot create table "misuse_plain" with access method "iceberg"
+HINT:  Use CREATE ICEBERG TABLE instead.
+-- CREATE TABLE AS
+CREATE TABLE misuse_ctas USING iceberg AS SELECT 1 AS id;
+NOTICE:  Table doesn't have 'DISTRIBUTED BY' clause. Creating a NULL policy entry.
+ERROR:  cannot create table "misuse_ctas" with access method "iceberg"
+HINT:  Use CREATE ICEBERG TABLE instead.
+-- CREATE MATERIALIZED VIEW
+CREATE MATERIALIZED VIEW misuse_mv USING iceberg AS SELECT 1 AS id;
+NOTICE:  Table doesn't have 'DISTRIBUTED BY' clause. Creating a NULL policy entry.
+ERROR:  cannot create table "misuse_mv" with access method "iceberg"
+HINT:  Use CREATE ICEBERG TABLE instead.
+-- via default_table_access_method
+SET default_table_access_method = iceberg;
+CREATE TABLE misuse_default (id int);
+NOTICE:  Table doesn't have 'DISTRIBUTED BY' clause -- Using column named 'id' as the Apache Cloudberry data distribution key for this table.
+HINT:  The 'DISTRIBUTED BY' clause determines the distribution of data. Make sure column(s) chosen are the optimal data distribution key to minimize skew.
+ERROR:  cannot create table "misuse_default" with access method "iceberg"
+HINT:  Use CREATE ICEBERG TABLE instead.
+RESET default_table_access_method;
+-- ALTER TABLE ... SET ACCESS METHOD
+CREATE TABLE misuse_heap (id int);
+NOTICE:  Table doesn't have 'DISTRIBUTED BY' clause -- Using column named 'id' as the Apache Cloudberry data distribution key for this table.
+HINT:  The 'DISTRIBUTED BY' clause determines the distribution of data. Make sure column(s) chosen are the optimal data distribution key to minimize skew.
+ALTER TABLE misuse_heap SET ACCESS METHOD iceberg;
+ERROR:  cannot change access method of table "misuse_heap" to "iceberg"
+HINT:  Use CREATE ICEBERG TABLE to create an iceberg table.
+DROP TABLE misuse_heap;
+-- no orphan relations may be left behind
+SELECT relname FROM pg_class WHERE relname LIKE 'misuse%' ORDER BY relname;
+ relname 
+---------
+(0 rows)
+
+-- ============================================================
+-- issue #845: CREATE ICEBERG TABLE without a volume must fail with an
+-- actionable message (it used to fail with "foreign volume with OID 0
+-- does not exist" deep in the AM create path), for every catalog type
+-- including Polaris.  A builtin catalog needs no external service, so it
+-- is enough to drive the CreateLakeTable validation here.
+-- ============================================================
+CREATE SERVER misuse_cat_srv FOREIGN DATA WRAPPER iceberg_catalog_fdw;
+CREATE USER MAPPING FOR current_user SERVER misuse_cat_srv;
+CREATE FOREIGN CATALOG misuse_cat SERVER misuse_cat_srv;
+SET iceberg_default_catalog = 'misuse_cat';
+-- no volume clause and no iceberg_default_volume
+CREATE ICEBERG TABLE misuse_no_volume (id bigint);
+ERROR:  no foreign volume specified
+HINT:  Specify VOLUME in CREATE TABLE or set iceberg_default_volume.
+-- iceberg_default_volume left pointing at a since-dropped volume must name it
+CREATE SERVER misuse_vol_srv FOREIGN DATA WRAPPER iceberg_volume_fdw
+    OPTIONS (type 's3', endpoint 'http://example.invalid:9000', region 'r',
+             bucket_name 'b', path_style_access 'true');
+CREATE USER MAPPING FOR current_user SERVER misuse_vol_srv
+    OPTIONS (access_key_id 'x', secret_access_key 'y');
+CREATE FOREIGN VOLUME misuse_vol SERVER misuse_vol_srv OPTIONS (base_path '/x/');
+SET iceberg_default_volume = 'misuse_vol';
+DROP VOLUME misuse_vol;
+CREATE ICEBERG TABLE misuse_no_volume (id bigint);
+ERROR:  default iceberg volume "misuse_vol" does not exist
+HINT:  Set iceberg_default_volume to an existing foreign volume.
+RESET iceberg_default_volume;
+RESET iceberg_default_catalog;
+SELECT relname FROM pg_class WHERE relname LIKE 'misuse%' ORDER BY relname;
+ relname 
+---------
+(0 rows)
+
+-- start_ignore
+\c contrib_regression
+DROP DATABASE iceberg_am_misuse_db;
+-- end_ignore
