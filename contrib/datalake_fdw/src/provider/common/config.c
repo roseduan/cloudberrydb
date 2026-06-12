@@ -20,12 +20,34 @@ typedef struct
 static const config_elt configElts[] = {
 	{"hdfs_namenode_host", offsetof(DatalakeHdfsConfigInfo, namenodeHost)},
 	{"hdfs_namenode_port", offsetof(DatalakeHdfsConfigInfo, namenodePort)},
+	/*
+	 * Aliases for the new conf format whose keys equal the SQL OPTION names
+	 * (see the iceberg guide 4.3 conf-file mode). This legacy reader stays
+	 * dual-track: old spellings keep working, files migrated for the
+	 * iceberg path keep working too.
+	 */
+	{"hdfs_namenodes", offsetof(DatalakeHdfsConfigInfo, namenodeHost)},
+	{"hdfs_port", offsetof(DatalakeHdfsConfigInfo, namenodePort)},
 	{"hdfs_auth_method", offsetof(DatalakeHdfsConfigInfo, authMethod)},
 	{"krb_principal", offsetof(DatalakeHdfsConfigInfo, krbPrincipal)},
 	{"krb_principal_keytab", offsetof(DatalakeHdfsConfigInfo, krbPrincipalKeytab)},
 	{"hadoop_rpc_protection", offsetof(DatalakeHdfsConfigInfo, hadoopRpcProtection)},
 	{"data_transfer_protocol", offsetof(DatalakeHdfsConfigInfo, dataTransferProtocol)},
 	{"is_ha_supported", offsetof(DatalakeHdfsConfigInfo, enableHa)}
+};
+
+/*
+ * New-format HA keys (underscore, equal to the SQL OPTION names) translated
+ * back to the dotted Hadoop keys this path forwards to gopher verbatim.
+ */
+static const struct
+{
+	const char *newKey;
+	const char *legacyKey;
+} haKeyAliases[] = {
+	{"dfs_nameservices", "dfs.nameservices"},
+	{"dfs_ha_namenodes", "dfs.ha.namenodes"},
+	{"dfs_namenode_rpc_address", "dfs.namenode.rpc-address"},
 };
 
 static int
@@ -46,6 +68,71 @@ static void
 GetGopherMetaPath(char *dest)
 {
 	sprintf(dest, "%s/%s", DataDir, GOPHERMETA_FOLDER);
+}
+
+/*
+ * Post-process a parsed section so the new conf format behaves like the
+ * legacy one downstream:
+ *
+ * - hdfs_namenodes may splice "host:port"; split it, the spliced port
+ *   winning over a separate hdfs_port key.  Default the port to 8020 when
+ *   only a host was given (the documented hdfs_port default).
+ * - translate the underscore dfs_* HA keys to the dotted Hadoop spellings
+ *   gopher expects, the failover provider regaining its per-nameservice
+ *   suffix.
+ *
+ * Legacy-format sections come through unchanged: their keys match none of
+ * the rewrites below.
+ */
+static void
+datalakeNormalizeHdfsConfig(DatalakeHdfsConfigInfo *hci)
+{
+	ListCell   *lc;
+	const char *nameServices = NULL;
+
+	if (hci->namenodeHost != NULL)
+	{
+		char *colon = strrchr(hci->namenodeHost, ':');
+
+		if (colon != NULL)
+		{
+			hci->namenodePort = pstrdup(colon + 1);
+			*colon = '\0';
+		}
+		else if (hci->namenodePort == NULL)
+			hci->namenodePort = pstrdup("8020");
+	}
+
+	foreach(lc, hci->haEntries)
+	{
+		DatalakeHdfsHAConfEntry *ent = (DatalakeHdfsHAConfEntry *) lfirst(lc);
+		int			i;
+
+		for (i = 0; i < lengthof(haKeyAliases); i++)
+		{
+			if (pg_strcasecmp(ent->key, haKeyAliases[i].newKey) == 0)
+			{
+				pfree(ent->key);
+				ent->key = pstrdup(haKeyAliases[i].legacyKey);
+				break;
+			}
+		}
+
+		if (pg_strcasecmp(ent->key, "dfs.nameservices") == 0)
+			nameServices = ent->value;
+	}
+
+	foreach(lc, hci->haEntries)
+	{
+		DatalakeHdfsHAConfEntry *ent = (DatalakeHdfsHAConfEntry *) lfirst(lc);
+
+		if (pg_strcasecmp(ent->key, "dfs_client_failover_proxy_provider") == 0 &&
+			nameServices != NULL)
+		{
+			pfree(ent->key);
+			ent->key = psprintf("dfs.client.failover.proxy.provider.%s", nameServices);
+		}
+	}
 }
 
 void
@@ -153,6 +240,8 @@ datalakeParseHdfsConfig(const char *configFile, const char *serverName)
 				hci->haEntries = lappend(hci->haEntries, ent);
 			}
 		}
+
+		datalakeNormalizeHdfsConfig(hci);
 
 		result = hci;
 		break;
