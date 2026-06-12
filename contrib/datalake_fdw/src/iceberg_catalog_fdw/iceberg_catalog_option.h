@@ -11,6 +11,7 @@ typedef struct IcebergCatalogServerOptions
 	char *server_name;				/* config file section name (e.g. hive.conf segment) */
 	char *hive_metastore_uri;		/* DATALAKE_ICEBERG_CATALOG_HIVE_METASTORE_URI */
 	char *polaris_server_url;		/* DATALAKE_ICEBERG_CATALOG_POLARIS_SERVER_URL */
+	char *polaris_server_realm;		/* DATALAKE_ICEBERG_CATALOG_POLARIS_SERVER_REALM */
 } IcebergCatalogServerOptions;
 
 /* Hive user mapping options */

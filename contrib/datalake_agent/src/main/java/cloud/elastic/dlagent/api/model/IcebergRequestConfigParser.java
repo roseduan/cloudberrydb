@@ -192,6 +192,7 @@ public class IcebergRequestConfigParser {
         info.setAutoRefreshMetadata(booleanOrNull(body.get(IcebergConfigConstants.ICEBERG_CATALOG_CONFIG.AUTO_REFRESH_METADATA)));
         info.setWarehouseLocationPrefix(stringOrNull(body.get(IcebergConfigConstants.ICEBERG_CATALOG_CONFIG.WAREHOUSE_LOCATION_PERFIX)));
         info.setPolarisServerUrl(stringOrNull(body.get(IcebergConfigConstants.ICEBERG_CATALOG_CONFIG.POLARIS_SERVER_URL)));
+        info.setPolarisServerRealm(stringOrNull(body.get(IcebergConfigConstants.ICEBERG_CATALOG_CONFIG.POLARIS_SERVER_REALM)));
         info.setClientId(stringOrNull(body.get(IcebergConfigConstants.ICEBERG_CATALOG_CONFIG.CLIENT_ID)));
         info.setClientSecret(stringOrNull(body.get(IcebergConfigConstants.ICEBERG_CATALOG_CONFIG.CLIENT_SECRET)));
         info.setScope(stringOrNull(body.get(IcebergConfigConstants.ICEBERG_CATALOG_CONFIG.SCOPE)));

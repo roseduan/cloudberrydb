@@ -18,6 +18,7 @@
 /* iceberg catalog server options */
 
 #define DATALAKE_ICEBERG_CATALOG_URL "url"
+#define DATALAKE_ICEBERG_CATALOG_POLARIS_SERVER_REALM "polaris_server_realm"
 
 /* iceberg catalog user mapping options */
 #define DATALAKE_ICEBERG_CATALOG_USERNAME "username"
@@ -59,6 +60,16 @@ static void
 parsePolarisCatalogServerOptions(IcebergCatalogServerOptions *options, List *server_options)
 {
     options->polaris_server_url = getStringOption(server_options, DATALAKE_ICEBERG_CATALOG_URL);
+
+    /*
+     * Realm sent as the Polaris-Realm header on every Polaris request
+     * (issue #841: it was hardcoded to "POLARIS" in the agent with no way
+     * to override it; servers configured with a different realm rejected
+     * the OAuth token request with 404 MissingOrInvalidRealm).  Optional;
+     * the agent keeps defaulting to "POLARIS" when unset.
+     */
+    options->polaris_server_realm = getStringOption(server_options,
+                                                    DATALAKE_ICEBERG_CATALOG_POLARIS_SERVER_REALM);
 }
 
 static void

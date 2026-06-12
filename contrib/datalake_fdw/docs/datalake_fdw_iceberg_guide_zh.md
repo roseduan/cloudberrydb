@@ -326,6 +326,7 @@ CREATE FOREIGN VOLUME s3_vol SERVER s3_vol_srv
 |------|------|------|
 | `type` | 全部（SERVER） | `builtin` / `hive` / `polaris` / `hadoop` / `s3` |
 | `url` | hive / polaris（SERVER） | hive: `thrift://host:9083`；polaris: REST 地址 |
+| `polaris_server_realm` | Polaris（SERVER） | 发往 Polaris 的 `Polaris-Realm` 请求头；不设置时默认 `POLARIS`，需与服务端配置的 realm 一致（如 `default`） |
 | `catalog_name` | Hive / Polaris | 远端 catalog 名称 |
 | `default_namespace` | 全部 | 默认命名空间 |
 | `enable_metadata_cache` | 全部 | 启用元数据缓存 |

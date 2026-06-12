@@ -856,6 +856,9 @@ addPolarisCatalogConfig(agentcli_cJSON *catalogConfig, IcebergCatalogOptions *op
     if (option->catalog_server.polaris_server_url && strlen(option->catalog_server.polaris_server_url) > 0)
         agentcli_cJSON_AddStringToObject(catalogConfig, DATALAKEFDW_ICEBERG_KEY_POLARIS_SERVER_URL, option->catalog_server.polaris_server_url);
 
+    if (option->catalog_server.polaris_server_realm && strlen(option->catalog_server.polaris_server_realm) > 0)
+        agentcli_cJSON_AddStringToObject(catalogConfig, DATALAKEFDW_ICEBERG_KEY_POLARIS_SERVER_REALM, option->catalog_server.polaris_server_realm);
+
     if (option->catalog_user.polaris.client_id && strlen(option->catalog_user.polaris.client_id) > 0)
         agentcli_cJSON_AddStringToObject(catalogConfig, DATALAKEFDW_ICEBERG_KEY_CLIENT_ID, option->catalog_user.polaris.client_id);
 

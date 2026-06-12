@@ -107,6 +107,7 @@ public class IcebergRequestConfig {
         putIfNotNull(out, prefix + IcebergConfigConstants.ICEBERG_CATALOG_CONFIG.AUTO_REFRESH_METADATA,  toStringOrNull(catalog.getAutoRefreshMetadata()));
         putIfNotNull(out, prefix + IcebergConfigConstants.ICEBERG_CATALOG_CONFIG.WAREHOUSE_LOCATION_PERFIX, catalog.getWarehouseLocationPrefix());
         putIfNotNull(out, prefix + IcebergConfigConstants.ICEBERG_CATALOG_CONFIG.POLARIS_SERVER_URL,     catalog.getPolarisServerUrl());
+        putIfNotNull(out, prefix + IcebergConfigConstants.ICEBERG_CATALOG_CONFIG.POLARIS_SERVER_REALM,   catalog.getPolarisServerRealm());
         putIfNotNull(out, prefix + IcebergConfigConstants.ICEBERG_CATALOG_CONFIG.CLIENT_ID,              catalog.getClientId());
         putIfNotNull(out, prefix + IcebergConfigConstants.ICEBERG_CATALOG_CONFIG.CLIENT_SECRET,          catalog.getClientSecret());
         putIfNotNull(out, prefix + IcebergConfigConstants.ICEBERG_CATALOG_CONFIG.SCOPE,                  catalog.getScope());

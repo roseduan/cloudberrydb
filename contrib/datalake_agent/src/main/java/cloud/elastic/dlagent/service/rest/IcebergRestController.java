@@ -1690,6 +1690,14 @@ public class IcebergRestController {
         if (!scope.isEmpty()) {
             configuration.set(IcebergConfigConstants.ICEBERG_CATALOG_CONFIG.SCOPE, scope);
         }
+
+        // Realm for the Polaris-Realm header; IcebergPolarisCatalog falls back
+        // to "POLARIS" when unset (issue #841).
+        String realmKey = IcebergConfigConstants.ICEBERG_CATALOG_CONFIG.ICEBERG_CATALOG_CONFIG_STRING + "." + IcebergConfigConstants.ICEBERG_CATALOG_CONFIG.POLARIS_SERVER_REALM;
+        String realm = properties.getOrDefault(realmKey, "");
+        if (!realm.isEmpty()) {
+            configuration.set(IcebergConfigConstants.ICEBERG_CATALOG_CONFIG.POLARIS_SERVER_REALM, realm);
+        }
         // Volume credentials reach IcebergPolarisCatalog through
         // gopherProperties (translated from SQL options by
         // GopherPropertiesResolver via IcebergRequestConfigParser); Polaris

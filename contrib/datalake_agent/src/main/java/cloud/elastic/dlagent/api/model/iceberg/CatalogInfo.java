@@ -70,6 +70,8 @@ public class CatalogInfo {
 
     /** Polaris-specific fields. */
     private String polarisServerUrl;
+    /** Realm sent as the Polaris-Realm header; agent defaults to "POLARIS" when unset (issue #841). */
+    private String polarisServerRealm;
     private String clientId;
     private String clientSecret;
     private String scope;

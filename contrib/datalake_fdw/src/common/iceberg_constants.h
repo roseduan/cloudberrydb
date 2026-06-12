@@ -12,6 +12,7 @@
 #define DATALAKEFDW_ICEBERG_KEY_AUTH_METHOD              "auth_method"
 #define DATALAKEFDW_ICEBERG_KEY_WAREHOUSE_LOCATION       "warehouse_location_prefix"
 #define DATALAKEFDW_ICEBERG_KEY_POLARIS_SERVER_URL       "polaris_server_url"
+#define DATALAKEFDW_ICEBERG_KEY_POLARIS_SERVER_REALM     "polaris_server_realm"
 #define DATALAKEFDW_ICEBERG_KEY_CLIENT_ID                "client_id"
 #define DATALAKEFDW_ICEBERG_KEY_CLIENT_SECRET            "client_secret"
 #define DATALAKEFDW_ICEBERG_KEY_CATALOG_NAME             "catalog_name"
