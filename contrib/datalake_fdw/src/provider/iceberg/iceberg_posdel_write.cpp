@@ -31,6 +31,9 @@ void icebergPosDeleteWrite::appendFileMeta()
 	MemoryContext oldContext = MemoryContextSwitchTo(CurrentMemoryContext->parent);
 	FileFragment *meta = (FileFragment*)palloc0(sizeof(FileFragment));
 	meta->filePath = pstrdup((append_file_prefix + file_name).c_str());
+	/* Class 1 (#344): delete this staging delete-file if the txn aborts. */
+	iceberg_register_staging_pending_delete(ss->rel, file_name.c_str(),
+											(void *) ss->options->gopher);
 	meta->fileSize = file_writer->getWrittenBytes();
 	meta->format = PARQUET;
 	meta->recordCount = tuple_num;
