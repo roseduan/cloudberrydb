@@ -77,6 +77,21 @@ open_deletion_queue_rel(Relation *rel_out, Oid *index_oid_out,
 		*index_oid_out = ICEBERG_DELETION_QUEUE_PKEY_OID;
 }
 
+/* ----------------------------------------------------------------
+ * Helper: open the dead-letter queue table and its index by stable OIDs
+ * pinned by iceberg-cdbinit--1.0.sql.  See iceberg_oids.h.
+ * ----------------------------------------------------------------
+ */
+static void
+open_deletion_failed_rel(Relation *rel_out, Oid *index_oid_out,
+						 LOCKMODE lockmode)
+{
+	*rel_out = table_open(ICEBERG_DELETION_FAILED_RELID, lockmode);
+
+	if (index_oid_out)
+		*index_oid_out = ICEBERG_DELETION_FAILED_PKEY_OID;
+}
+
 /* ================================================================
  * Insert
  * ================================================================
@@ -536,85 +551,93 @@ pg_iceberg_deletion_queue_get_batch(int batch_size, int max_retry)
  * either triages it (SELECT * FROM pg_iceberg_deletion_failed WHERE ...)
  * or replays it (SELECT pg_iceberg_retry_failed_deletion(path)).
  *
- * Both INSERT and DELETE run in the same SPI sub-transaction so they're
- * atomic; if either fails the queue row stays, the DLQ row is rolled back,
- * and the consumer's outer PG_CATCH falls back to record_failure.
+ * The copy (CatalogTupleInsert) and the source delete (CatalogTupleDelete)
+ * run in the caller's transaction so they're atomic; if either fails the
+ * queue row stays, the DLQ row is rolled back, and the consumer's outer
+ * PG_CATCH falls back to record_failure.  Heap-level catalog access is used
+ * (not SPI SQL) because both tables are pinned by OID in pg_ext_aux and are
+ * therefore system catalogs: SPI INSERT/DELETE would be rejected with
+ * "permission denied: ... is a system catalog" in the autovacuum worker,
+ * which does not enable allow_system_table_mods.
  */
 void
 pg_iceberg_deletion_queue_move_to_failed(const char *path,
 										 const char *final_errmsg)
 {
-	StringInfo	insert_sql = makeStringInfo();
-	StringInfo	delete_sql = makeStringInfo();
-	Oid			argtypes[2];
-	Datum		values[2];
-	char		nulls[2];
+	Relation	queue_rel;
+	Relation	failed_rel;
+	Oid			queue_index_oid;
+	ScanKeyData skey[1];
+	SysScanDesc scan;
+	HeapTuple	src;
+	HeapTuple	ftup;
+	TupleDesc	queue_desc;
+	TupleDesc	failed_desc;
+	Datum		values[Natts_deletion_failed];
+	bool		nulls[Natts_deletion_failed];
+	int			i;
 
 	Assert(path != NULL);
 
 	/*
-	 * INSERT INTO failed (...) SELECT (..., last_error=$2, failed_at=now())
-	 * FROM queue WHERE path = $1
-	 *
-	 * Doing it as one SQL statement keeps it readable and lets the planner
-	 * handle the NULL coalescing if final_errmsg is NULL.
+	 * The queue and DLQ tables are pinned by OID in pg_ext_aux, which makes
+	 * them system catalogs.  SPI SQL DML against a system catalog is rejected
+	 * ("permission denied: ... is a system catalog") unless
+	 * allow_system_table_mods is on, and the consumer runs in an autovacuum
+	 * worker that does not set it.  So mirror the heap-level pattern used by
+	 * _remove / _record_failure here: copy the queue row into the DLQ via
+	 * CatalogTupleInsert and delete the source via CatalogTupleDelete.  Both
+	 * happen in the caller's (sub)transaction, so they are still atomic.
 	 */
-	appendStringInfo(insert_sql,
-					 "INSERT INTO pg_ext_aux.pg_iceberg_deletion_failed "
-					 "    (path, table_name, orphaned_at, retry_count, deletion_type, "
-					 "     volume_name, server_name, owner_username, table_qname, "
-					 "     last_error, failed_at) "
-					 "SELECT path, table_name, orphaned_at, retry_count, deletion_type, "
-					 "       volume_name, server_name, owner_username, table_qname, "
-					 "       $2, pg_catalog.now() "
-					 "FROM " DELETION_QUEUE_TABLE " WHERE path = $1");
+	open_deletion_queue_rel(&queue_rel, &queue_index_oid, RowExclusiveLock);
+	open_deletion_failed_rel(&failed_rel, NULL, RowExclusiveLock);
 
-	appendStringInfo(delete_sql,
-					 "DELETE FROM " DELETION_QUEUE_TABLE " WHERE path = $1");
+	queue_desc = RelationGetDescr(queue_rel);
+	failed_desc = RelationGetDescr(failed_rel);
 
-	argtypes[0] = TEXTOID;
-	argtypes[1] = TEXTOID;
-	values[0]   = CStringGetTextDatum(path);
-	nulls[0]    = ' ';
+	/* Locate the source row by path using the unique index. */
+	ScanKeyInit(&skey[0],
+				Anum_deletion_queue_path,
+				BTEqualStrategyNumber, F_TEXTEQ,
+				CStringGetTextDatum(path));
+
+	scan = systable_beginscan(queue_rel, queue_index_oid, true, NULL, 1, skey);
+	src = systable_getnext(scan);
+
+	if (!HeapTupleIsValid(src))
+		ereport(ERROR,
+				(errcode(ERRCODE_UNDEFINED_OBJECT),
+				 errmsg("deletion queue entry not found for path \"%s\"", path)));
+
+	/*
+	 * Build the DLQ tuple.  Columns 1..9 are identical in both tables and are
+	 * copied verbatim (preserving SQL NULLs in the nullable credential
+	 * columns).  Column 10 (last_error) is overwritten with final_errmsg, and
+	 * column 11 (failed_at) is stamped with the current timestamp.
+	 */
+	memset(values, 0, sizeof(values));
+	memset(nulls, false, sizeof(nulls));
+
+	for (i = Anum_deletion_failed_path; i <= Anum_deletion_failed_table_qname; i++)
+		values[i - 1] = heap_getattr(src, i, queue_desc, &nulls[i - 1]);
 
 	if (final_errmsg && final_errmsg[0] != '\0')
-	{
-		values[1] = CStringGetTextDatum(final_errmsg);
-		nulls[1]  = ' ';
-	}
+		values[Anum_deletion_failed_last_error - 1] =
+			CStringGetTextDatum(final_errmsg);
 	else
-	{
-		values[1] = (Datum) 0;
-		nulls[1]  = 'n';
-	}
+		nulls[Anum_deletion_failed_last_error - 1] = true;
 
-	SPI_START();
+	values[Anum_deletion_failed_failed_at - 1] =
+		TimestampTzGetDatum(GetCurrentTimestamp());
 
-	{
-		bool readOnly = false;
-		int rc;
+	ftup = heap_form_tuple(failed_desc, values, nulls);
+	CatalogTupleInsert(failed_rel, ftup);
+	heap_freetuple(ftup);
 
-		rc = SPI_execute_with_args(insert_sql->data, 2, argtypes,
-								   values, nulls, readOnly, 0);
-		if (rc != SPI_OK_INSERT)
-			ereport(ERROR,
-					(errcode(ERRCODE_INTERNAL_ERROR),
-					 errmsg("failed to insert into pg_iceberg_deletion_failed for path \"%s\": SPI rc=%d",
-							path, rc)));
+	/* Remove the source row from the active queue. */
+	CatalogTupleDelete(queue_rel, &src->t_self);
 
-		rc = SPI_execute_with_args(delete_sql->data, 1, argtypes,
-								   values, nulls, readOnly, 0);
-		if (rc != SPI_OK_DELETE)
-			ereport(ERROR,
-					(errcode(ERRCODE_INTERNAL_ERROR),
-					 errmsg("failed to delete from pg_iceberg_deletion_queue for path \"%s\": SPI rc=%d",
-							path, rc)));
-	}
-
-	SPI_END();
-
-	pfree(insert_sql->data);
-	pfree(insert_sql);
-	pfree(delete_sql->data);
-	pfree(delete_sql);
+	systable_endscan(scan);
+	table_close(failed_rel, RowExclusiveLock);
+	table_close(queue_rel, RowExclusiveLock);
 }
