@@ -223,6 +223,11 @@ gopherFileInfo *FileSystem::listInfo(const char *path, int &count, int recursive
 	return res;
 }
 
+int FileSystem::deleteFile(const char *path) {
+	/* per-file delete; NOT gopherBatchDeleteFiles (known-buggy) */
+	return gopherDelete(fs, path);
+}
+
 gopherFileInfo* FileSystem::getFileInfo(const char* path) {
 	elog(DEBUG5, "Datalake foreign table gopherGetFileInfo path %s.", path);
 

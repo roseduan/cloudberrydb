@@ -51,6 +51,9 @@ public:
 
 	gopherFileInfo* getFileInfo(const char* path);
 
+	/* Best-effort single-object delete; returns gopherDelete() rc. */
+	int deleteFile(const char *path);
+
 	void freeListInfo(gopherFileInfo *list, int count);
 
 	// used internal for FileSystem.

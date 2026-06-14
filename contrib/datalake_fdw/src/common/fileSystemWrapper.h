@@ -37,6 +37,13 @@ void datalakeFreeListDir(ossFileStream file, gopherFileInfo *list, int count);
 int datalakeGopherDestroyHandle(ossFileStream file);
 
 void datalakeDestroyFileSystem(ossFileStream file);
+
+/*
+ * Best-effort delete of a single object `path`, using a fresh filesystem handle
+ * built from `gopherOpt` (a `gopherOptions *`). Returns 0 on success, non-zero
+ * otherwise. Never throws.
+ */
+int datalakeDeleteFileByOptions(void *gopherOpt, const char *path);
 #ifdef __cplusplus
 }
 #endif

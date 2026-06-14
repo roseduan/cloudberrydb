@@ -296,6 +296,39 @@ void datalakeDestroyFileSystem(ossFileStream file)
 	}
 }
 
+int datalakeDeleteFileByOptions(void *gopherOpt, const char *path)
+{
+	gopherConfig *conf = NULL;
+	ossFileStream fs = NULL;
+	int rc = -1;
+
+	if (gopherOpt == NULL || path == NULL)
+		return -1;
+
+	try
+	{
+		conf = datalakeCreateGopherConfig(gopherOpt);
+		fs = datalakeCreateFileSystem(conf);
+		rc = fs->getContext().deleteFile(path);   /* per-file */
+	}
+	catch (std::exception &e)
+	{
+		elog(WARNING, "datalakeDeleteFileByOptions: %s (path=%s)", e.what(), path);
+		rc = -1;
+	}
+	catch (...)
+	{
+		elog(WARNING, "datalakeDeleteFileByOptions: unknown error (path=%s)", path);
+		rc = -1;
+	}
+
+	if (fs)
+		datalakeDestroyFileSystem(fs);
+	if (conf)
+		datalakeFreeGopherConfig(conf);
+	return rc;
+}
+
 void splitString(std::string inputStr, std::string delimiter, std::vector<std::string> &out)
 {
 	std::string str = inputStr + delimiter;
