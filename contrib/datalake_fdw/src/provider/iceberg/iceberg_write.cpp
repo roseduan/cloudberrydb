@@ -54,6 +54,14 @@ void icebergWrite::appendFileMeta()
 	MemoryContext oldContext = MemoryContextSwitchTo(CurrentMemoryContext->parent);
 	FileFragment *meta = (FileFragment*)palloc0(sizeof(FileFragment));
 	meta->filePath = pstrdup((append_file_prefix + file_name).c_str());
+	/*
+	 * Class 1 (#344): delete this staging data file if the txn aborts.  Use
+	 * file_name -- the exact bucket-relative key createParquetWriter() wrote to
+	 * on a gopherFS built from ss->options->gopher -- NOT meta->filePath, which
+	 * carries the "<type>://<bucket>" URI prefix the gopher client does not want.
+	 */
+	iceberg_register_staging_pending_delete(ss->rel, file_name.c_str(),
+											(void *) ss->options->gopher);
 	meta->fileSize = file_writer->getWrittenBytes();
 	meta->format = PARQUET;
 	meta->recordCount = tuple_num;

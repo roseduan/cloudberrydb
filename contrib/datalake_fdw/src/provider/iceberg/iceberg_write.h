@@ -9,6 +9,7 @@
 extern "C" {
 	#include "src/provider/common/utils.h"
 	#include "src/provider/common/row_reader.h"
+	#include "src/am_iceberg/include/pg_iceberg_pending_delete.h"
 }
 
 namespace Datalake {
