@@ -1,0 +1,63 @@
+-- DROP SCHEMA CASCADE iceberg cleanup regression (issue #344, Class 2).
+--
+-- DROP SCHEMA x CASCADE deletes contained objects via PG's dependency walk
+-- (performDeletion -> deleteOneObject -> InvokeObjectDropHookArg), which fires
+-- datalake_fdw's OAT_DROP hook once per relation.  For native ICEBERG tables
+-- (is_iceberg_rel) the hook enqueues the table's metadata into
+-- pg_ext_aux.pg_iceberg_deletion_queue, exactly like a direct DROP TABLE; heap
+-- tables are skipped.  This test pins that contract.
+--
+-- The enqueue is asserted INSIDE the DROP's transaction so the result is
+-- immune to the async autovacuum consumer (it cannot see/drain uncommitted
+-- rows); no GUC toggling, no MinIO file inspection.
+CREATE EXTENSION IF NOT EXISTS datalake_fdw;
+SET DateStyle = 'ISO, YMD';
+-- catalog + volume setup (mirrors iceberg_namespace.sql / iceberg_acid_double_update.sql)
+CREATE SERVER dsc_catalog_server FOREIGN DATA WRAPPER iceberg_catalog_fdw;
+CREATE USER MAPPING FOR current_user SERVER dsc_catalog_server;
+CREATE FOREIGN CATALOG dsc_catalog SERVER dsc_catalog_server;
+SET iceberg_default_catalog = 'dsc_catalog';
+CREATE SERVER dsc_volume_server FOREIGN DATA WRAPPER iceberg_volume_fdw
+OPTIONS (type 's3', endpoint 'http://minio:9000', region 'us-east-1',
+         bucket_name 'warehouse', path_style_access 'true');
+CREATE USER MAPPING FOR current_user SERVER dsc_volume_server
+OPTIONS (access_key_id 'admin', secret_access_key 'admin12345');
+CREATE FOREIGN VOLUME dsc_volume SERVER dsc_volume_server OPTIONS(base_path '/dsc_volume/');
+SET iceberg_default_volume = 'dsc_volume';
+-- A schema with two native iceberg tables and one heap control table.
+CREATE SCHEMA dsc;
+CREATE ICEBERG TABLE dsc.a (id int, c text);
+INSERT INTO dsc.a SELECT g, 'x' FROM generate_series(1, 50) g;
+CREATE ICEBERG TABLE dsc.b (id int);
+INSERT INTO dsc.b SELECT generate_series(1, 30);
+CREATE TABLE dsc.h (id int) DISTRIBUTED BY (id);
+INSERT INTO dsc.h SELECT generate_series(1, 10);
+-- In-transaction assertion: only the two iceberg tables get enqueued.
+BEGIN;
+DROP SCHEMA dsc CASCADE;
+NOTICE:  drop cascades to 3 other objects
+DETAIL:  drop cascades to table dsc.a
+drop cascades to table dsc.b
+drop cascades to table dsc.h
+SELECT table_qname
+  FROM pg_ext_aux.pg_iceberg_deletion_queue
+ WHERE table_qname LIKE 'dsc.%'
+ ORDER BY table_qname;
+ table_qname 
+-------------
+ dsc.a
+ dsc.b
+(2 rows)
+
+COMMIT;
+-- Cleanup the enqueued rows (queue table has a pinned system OID).
+SET allow_system_table_mods = on;
+DELETE FROM pg_ext_aux.pg_iceberg_deletion_queue WHERE table_qname LIKE 'dsc.%';
+SET allow_system_table_mods = off;
+-- Cleanup catalog/volume.
+DROP VOLUME dsc_volume;
+DROP USER MAPPING FOR current_user SERVER dsc_volume_server;
+DROP SERVER dsc_volume_server;
+DROP CATALOG dsc_catalog;
+DROP USER MAPPING FOR current_user SERVER dsc_catalog_server;
+DROP SERVER dsc_catalog_server;
