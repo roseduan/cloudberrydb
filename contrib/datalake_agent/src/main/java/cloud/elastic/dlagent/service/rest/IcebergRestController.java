@@ -2147,13 +2147,46 @@ public class IcebergRestController {
      * iceberg_volume_fdw.parseVolumeOption fallback.
      */
     private void emitHdfsInline(Configuration configuration, Map<String, String> properties) {
-        String endpointKey = IcebergConfigConstants.ICEBERG_VOLUME_CONFIG.ICEBERG_VOLUME_CONFIG_STRING + "."
-            + IcebergConfigConstants.ICEBERG_VOLUME_CONFIG.VOLUME_ENDPOINT;
-        String endpoint = properties.getOrDefault(endpointKey, "");
+        String endpoint = properties.getOrDefault(volKey(
+            IcebergConfigConstants.ICEBERG_VOLUME_CONFIG.VOLUME_ENDPOINT), "");
 
-        if (!endpoint.isEmpty()) {
-            // Accept "hdfs://host:port" or just "host:port".
-            String defaultFS = endpoint.startsWith("hdfs://") ? endpoint : "hdfs://" + endpoint;
+        // Namenode host[:port] resolution. Prefer the explicit hdfs_namenodes /
+        // hdfs_port options; fall back to the legacy endpoint 'hdfs://host:port'.
+        // A port spliced into hdfs_namenodes wins over hdfs_port. HA deployments
+        // put the nameservice name in hdfs_namenodes (no port).
+        String namenodes = properties.getOrDefault(volKey(
+            IcebergConfigConstants.ICEBERG_VOLUME_CONFIG.HDFS_NAMENODES), "");
+        String port = properties.getOrDefault(volKey(
+            IcebergConfigConstants.ICEBERG_VOLUME_CONFIG.HDFS_PORT), "");
+        boolean isHa = "true".equalsIgnoreCase(properties.getOrDefault(volKey(
+            IcebergConfigConstants.ICEBERG_VOLUME_CONFIG.IS_HA_SUPPORTED), ""));
+
+        String host = "";
+        if (!namenodes.isEmpty()) {
+            host = namenodes;
+        } else if (!endpoint.isEmpty()) {
+            String hostPort = endpoint.replaceFirst("^hdfs://", "");
+            int colon = hostPort.lastIndexOf(':');
+            if (colon >= 0) {
+                host = hostPort.substring(0, colon);
+                if (port.isEmpty()) {
+                    port = hostPort.substring(colon + 1);
+                }
+            } else {
+                host = hostPort;
+            }
+        }
+        if (host.indexOf(':') >= 0) {
+            int colon = host.lastIndexOf(':');
+            port = host.substring(colon + 1);
+            host = host.substring(0, colon);
+        }
+        if (port.isEmpty() && !isHa) {
+            port = "8020";              // documented hdfs_port default
+        }
+
+        if (!host.isEmpty()) {
+            String defaultFS = "hdfs://" + host + (port.isEmpty() ? "" : ":" + port);
             // fs.defaultFS already set by setCatalogWarehouseInline for hadoop
             // catalog; only set when not already configured (e.g. builtin/hive
             // catalog with hdfs volume).
@@ -2163,11 +2196,65 @@ public class IcebergRestController {
             }
         }
 
+        String authMethod = properties.getOrDefault(volKey(
+            IcebergConfigConstants.ICEBERG_VOLUME_CONFIG.HDFS_AUTH_METHOD), "simple");
         // Default to simple auth when caller didn't specify; matches
         // the C-side iceberg_volume_fdw default in parseVolumeOption.
         if (configuration.get("hadoop.security.authentication") == null) {
-            configuration.set("hadoop.security.authentication", "simple");
+            configuration.set("hadoop.security.authentication", authMethod);
         }
+
+        // Gopher path: GopherFileSystem (the warehouse-dir filesystem when
+        // gopher.enabled and fs.hdfs.impl=GopherFileSystem) and
+        // convertProtocolConfiguration both read the fs.gopher.* keys; the
+        // native client also reads the bare gopher.* keys. Without these the
+        // gopher worker reaches HDFS with no namenode/port and fails with
+        // "Unrecognized hdfs port 0". Mirror the proven legacy
+        // transformHdfsConfig key set (both prefixes). emitS3Inline does the
+        // equivalent for object storage.
+        setGopherHdfsKey(configuration, "ufs_type", "hdfs");
+        setGopherHdfsKey(configuration, "name_node", host);
+        setGopherHdfsKey(configuration, "port", port);
+        setGopherHdfsKey(configuration, "auth_method", authMethod);
+        setGopherHdfsKey(configuration, "hadoop_rpc_protection", properties.get(volKey(
+            IcebergConfigConstants.ICEBERG_VOLUME_CONFIG.HADOOP_RPC_PROTECTION)));
+        setGopherHdfsKey(configuration, "data_transfer_protocol", properties.get(volKey(
+            IcebergConfigConstants.ICEBERG_VOLUME_CONFIG.DATA_TRANSFER_PROTOCOL)));
+        setGopherHdfsKey(configuration, "krb_principal", properties.get(volKey(
+            IcebergConfigConstants.ICEBERG_VOLUME_CONFIG.KRB_PRINCIPAL)));
+        setGopherHdfsKey(configuration, "krb_server_key_file", properties.get(volKey(
+            IcebergConfigConstants.ICEBERG_VOLUME_CONFIG.KRB_PRINCIPAL_KEYTAB)));
+        // Not gated on isHa: using the DataNode hostname (rather than IP) is
+        // meaningful in non-HA deployments too (e.g. a NAT between the segment
+        // hosts and the HDFS DataNodes).
+        setGopherHdfsKey(configuration, "dfs_client_use_datanode_hostname", properties.get(volKey(
+            IcebergConfigConstants.ICEBERG_VOLUME_CONFIG.DFS_CLIENT_USE_DATANODE_HOSTNAME)));
+        if (isHa) {
+            setGopherHdfsKey(configuration, "is_ha_supported", "true");
+            setGopherHdfsKey(configuration, "dfs_nameservices", properties.get(volKey(
+                IcebergConfigConstants.ICEBERG_VOLUME_CONFIG.DFS_NAMESERVICES)));
+            setGopherHdfsKey(configuration, "dfs_ha_namenodes", properties.get(volKey(
+                IcebergConfigConstants.ICEBERG_VOLUME_CONFIG.DFS_HA_NAMENODES)));
+            setGopherHdfsKey(configuration, "dfs_namenode_rpc_address", properties.get(volKey(
+                IcebergConfigConstants.ICEBERG_VOLUME_CONFIG.DFS_NAMENODE_RPC_ADDRESS)));
+            setGopherHdfsKey(configuration, "dfs_client_failover_proxy_provider", properties.get(volKey(
+                IcebergConfigConstants.ICEBERG_VOLUME_CONFIG.DFS_CLIENT_FAILOVER_PROXY_PROVIDER)));
+        }
+    }
+
+    /**
+     * Set a gopher HDFS connection key under both the bare {@code gopher.} and
+     * the {@code fs.gopher.} prefixes, matching the legacy transformHdfsConfig
+     * convention: GopherFileSystem / convertProtocolConfiguration read
+     * {@code fs.gopher.*}, the native client reads {@code gopher.*}. No-op on a
+     * null or empty value.
+     */
+    private void setGopherHdfsKey(Configuration configuration, String suffix, String value) {
+        if (value == null || value.isEmpty()) {
+            return;
+        }
+        configuration.set("gopher." + suffix, value);
+        configuration.set("fs.gopher." + suffix, value);
     }
 
     private void setHiveMetaInline(Configuration configuration, Map<String, String> properties) {
