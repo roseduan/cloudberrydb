@@ -47,6 +47,13 @@ public interface IcebergService {
     Map<String, Object> rowUpdate(String namespace, String tableName, Map<String, String> properties, RequestContext context) throws Exception;
 
     /**
+     * Truncate a builtin iceberg table to empty (metadata-only delete of all
+     * rows + new metadata.json).  Returns metadata-location, written-metadata-
+     * files, and a truncated flag (false when the table was already empty).
+     */
+    Map<String, Object> truncateTable(String namespace, String tableName, Map<String, String> properties, RequestContext context) throws Exception;
+
+    /**
      * Drop a table
      */
     boolean dropTable(String namespace, String tableName, boolean purgeRequested, Map<String, String> properties, RequestContext context) throws Exception;

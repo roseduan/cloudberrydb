@@ -289,7 +289,14 @@ public class IcebergServiceImpl implements IcebergService {
     }
 
     @Override
-    public boolean dropTable(String namespace, String tableName, boolean purgeRequested, 
+    public Map<String, Object> truncateTable(String namespace, String tableName, Map<String, String> properties,
+            RequestContext context) throws Exception {
+        IcebergMetadataFetcher fetcher = newFetcher(context);
+        return fetcher.truncateAndReturnLocation();
+    }
+
+    @Override
+    public boolean dropTable(String namespace, String tableName, boolean purgeRequested,
                              Map<String, String> properties, RequestContext context) throws Exception {
         IcebergCatalog catalog = icebergCatalogWrapper.getIcebergCatalog(context);
         return catalog.dropTable(tableName, purgeRequested);

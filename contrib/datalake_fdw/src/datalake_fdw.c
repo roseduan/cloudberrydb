@@ -801,6 +801,48 @@ datalake_ProcessUtility(PlannedStmt *pstmt,
 			}
 			break;
 		}
+		case T_TruncateStmt:
+		{
+			/*
+			 * TRUNCATE on builtin-catalog iceberg tables: run the standard
+			 * TRUNCATE first (permission checks + relfilenode swap, a no-op for
+			 * the iceberg AM whose data lives in object storage), then commit a
+			 * metadata-only delete and enqueue the pre-truncate files for async
+			 * cleanup.  QD-only; pg_iceberg_truncate_table no-ops on QEs.
+			 *
+			 * Only the explicitly-listed relations are handled here; CASCADE-
+			 * pulled dependents are not (uncommon for iceberg tables).
+			 */
+			TruncateStmt   *trunc = (TruncateStmt *) pstmt->utilityStmt;
+			List		   *ice_relids = NIL;
+			ListCell	   *lc;
+
+			if (Gp_role == GP_ROLE_DISPATCH)
+			{
+				foreach(lc, trunc->relations)
+				{
+					RangeVar   *rv = (RangeVar *) lfirst(lc);
+					Oid			relid = RangeVarGetRelid(rv, AccessShareLock, true);
+
+					if (OidIsValid(relid) && relid_is_iceberg(relid))
+						ice_relids = lappend_oid(ice_relids, relid);
+				}
+			}
+
+			if (datalake_prev_ProcessUtility)
+				(*datalake_prev_ProcessUtility) (pstmt, queryString, readOnlyTree,
+												 context, params, queryEnv,
+												 dest, qc);
+			else
+				standard_ProcessUtility(pstmt, queryString, readOnlyTree,
+										context, params, queryEnv,
+										dest, qc);
+
+			foreach(lc, ice_relids)
+				pg_iceberg_truncate_table(lfirst_oid(lc));
+
+			return;
+		}
 		default:
 			break;
 	}

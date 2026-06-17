@@ -124,6 +124,15 @@ Response AgentClient::update_table(const std::string& table_name,
     return execute_request("POST", url, request_json, request_config);
 }
 
+Response AgentClient::truncate_table(const std::string& table_name,
+                                    const std::string& request_json,
+                                    const RequestConfig* request_config) {
+    std::ostringstream endpoint;
+    endpoint << "api/v1/tables/" << table_name << "/truncate";
+    std::string url = build_url(endpoint.str());
+    return execute_request("POST", url, request_json, request_config);
+}
+
 Response AgentClient::drop_table(const std::string& table_name,
                                  const std::string& request_json,
                                  const RequestConfig* request_config) {

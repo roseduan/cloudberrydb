@@ -100,6 +100,10 @@ public:
                           const std::string& request_json,
                           const RequestConfig* request_config = nullptr);
 
+    Response truncate_table(const std::string& table_name,
+                            const std::string& request_json,
+                            const RequestConfig* request_config = nullptr);
+
     Response drop_table(const std::string& table_name,
                         const std::string& request_json,
                         const RequestConfig* request_config = nullptr);

@@ -55,6 +55,7 @@ import org.apache.iceberg.DeleteFile;
 import org.apache.iceberg.DataFile;
 import org.apache.iceberg.FileScanTask;
 import org.apache.iceberg.RowDelta;
+import org.apache.iceberg.expressions.Expressions;
 import org.apache.iceberg.expressions.Expression;
 import org.apache.iceberg.io.CloseableIterable;
 import org.apache.iceberg.io.FileIO;
@@ -368,6 +369,61 @@ public class IcebergMetadataFetcher extends BasePlugin implements MetadataFetche
         HasTableOperations txnTableOps = (HasTableOperations) txn.table();
         TableMetadata updatedMetadata = txnTableOps.operations().current();
         return writeMetadataFile(table, updatedMetadata);
+    }
+
+    /**
+     * Truncate a builtin iceberg table to empty: commit a metadata-only delete
+     * of every row (newDelete + alwaysTrue), producing a new snapshot that
+     * references no data files, then write the new metadata.json.  Same
+     * deferred-commit pattern as rowUpdateAndReturnLocation (Transaction +
+     * writeMetadataFile, no catalog commit).  The OLD data/metadata are not
+     * deleted here -- the caller enqueues the pre-truncate metadata.json so the
+     * async consumer removes them.
+     *
+     * Returns a map with:
+     *   metadata-location       -- new metadata.json (NULL/current if no-op)
+     *   written-metadata-files  -- files this commit wrote (new metadata.json +
+     *                              new snapshot manifest-list), for the caller
+     *                              to register for abort-time cleanup
+     *   truncated               -- false when the table was already empty
+     */
+    public Map<String, Object> truncateAndReturnLocation() throws Exception {
+        IcebergCatalog catalog = icebergClientWrapper.getIcebergCatalog(context);
+        Table table = catalog.loadTable(context.getDataSource());
+        healLegacyTableProperties(table);
+
+        Map<String, Object> result = new HashMap<>();
+        List<String> written = new ArrayList<>();
+
+        // Already-empty table (no snapshots): nothing to truncate, no orphans
+        // to enqueue.  Report no-op so the caller skips the queue + pointer swap.
+        if (table.currentSnapshot() == null) {
+            HasTableOperations ops = (HasTableOperations) table;
+            result.put("metadata-location", ops.operations().current().metadataFileLocation());
+            result.put("written-metadata-files", written);
+            result.put("truncated", false);
+            return result;
+        }
+
+        // Transaction wrapper: commit() writes manifest(s) only, does NOT update
+        // the catalog -- same deferred pattern as onlyBatchAppend.
+        Transaction txn = table.newTransaction();
+        txn.newDelete().deleteFromRowFilter(Expressions.alwaysTrue()).commit();
+
+        HasTableOperations txnTableOps = (HasTableOperations) txn.table();
+        TableMetadata updatedMetadata = txnTableOps.operations().current();
+        String newLocation = writeMetadataFile(table, updatedMetadata);
+
+        written.add(newLocation);
+        Snapshot snap = updatedMetadata.currentSnapshot();
+        if (snap != null && snap.manifestListLocation() != null) {
+            written.add(snap.manifestListLocation());
+        }
+
+        result.put("metadata-location", newLocation);
+        result.put("written-metadata-files", written);
+        result.put("truncated", true);
+        return result;
     }
 
     /**

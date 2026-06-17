@@ -703,6 +703,54 @@ pg_iceberg_modify_data_with_catalog(Relation rel,
 								 table_info->volume_name);
 }
 
+/*
+ * pg_iceberg_truncate_with_catalog
+ *    Truncate a builtin iceberg table: ask the agent to commit a metadata-only
+ *    delete of all rows on top of `metadata_location`, returning the new
+ *    metadata.json location.  No data_locations (no new files).  When the table
+ *    is already empty the agent returns the unchanged location, so the caller
+ *    detects a no-op by comparing against `metadata_location`.
+ */
+char *
+pg_iceberg_truncate_with_catalog(Relation rel,
+								 IcebergTableInfo *table_info,
+								 const char *metadata_location)
+{
+	const char *nameSpace;
+	const char *tableName;
+	const char *catalogName;
+
+	nameSpace = pg_iceberg_resolve_namespace(
+		table_info->opts ? table_info->opts->namespace : NULL,
+		table_info->catalog_server_name,
+		table_info->catalog_name,
+		rel);
+
+	if (table_info->opts == NULL || table_info->opts->table == NULL)
+	{
+		tableName = pstrdup(RelationGetRelationName(rel));
+		catalogName = NULL;
+	}
+	else
+	{
+		tableName = table_info->opts->table;
+		catalogName = table_info->opts->catalog;
+	}
+
+	return pg_iceberg_catalog_op(rel,
+								 ICEBERG_TRUNCATE,
+								 catalogName,
+								 nameSpace,
+								 tableName,
+								 NULL,	/* no data_locations */
+								 metadata_location,
+								 true,	/* is_internal: builtin only */
+								 table_info->catalog_server_name,
+								 table_info->catalog_name,
+								 table_info->volume_server_name,
+								 table_info->volume_name);
+}
+
 char *
 pg_iceberg_commit_data_with_catalog(Relation rel,
 									IcebergTableInfo *table_info,

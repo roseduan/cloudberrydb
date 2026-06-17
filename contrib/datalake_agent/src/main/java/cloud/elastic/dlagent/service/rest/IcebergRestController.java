@@ -528,6 +528,37 @@ public class IcebergRestController {
      * @param request Append request
      * @return Append operation result
      */
+    /**
+     * Truncate a builtin iceberg table to empty.  No fragments: the service
+     * commits a metadata-only delete of all rows and writes a new metadata.json.
+     */
+    @PostMapping({
+        "/{prefix}/tables/{table}/truncate",
+        "/tables/{table}/truncate"
+    })
+    public ResponseEntity<?> truncateToTable(
+            @PathVariable(value = "prefix", required = false) String prefix,
+            @PathVariable("table") String table,
+            @RequestBody Map<String, Object> request) throws Exception {
+
+        String namespace = (String) request.get("namespace");
+        if (namespace == null || namespace.trim().isEmpty()) {
+            throw new IllegalArgumentException("Namespace is required in request body");
+        }
+
+        log.info("Truncating table: {}.{}", namespace, table);
+
+        Map<String, String> properties = extractProperties(request);
+        RequestContext context = createRequestContext(namespace, table, properties);
+
+        Map<String, Object> result = icebergService.truncateTable(namespace, table, properties, context);
+
+        String etag = "truncate-" + System.currentTimeMillis() + "-" + Math.abs(result.hashCode());
+        return ResponseEntity.ok()
+                .header("ETag", etag)
+                .body(result);
+    }
+
     @PostMapping({
         "/{prefix}/tables/{table}/append",
         "/tables/{table}/append"

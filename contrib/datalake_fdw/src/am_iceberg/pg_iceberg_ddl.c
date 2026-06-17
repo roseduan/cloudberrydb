@@ -176,3 +176,105 @@ iceberg_object_access_hook(ObjectAccessType access, Oid classId, Oid objectId,
 	if (old_objectaccess_hook)
 		old_objectaccess_hook(access, classId, objectId, subId, arg);
 }
+
+/*
+ * pg_iceberg_truncate_table
+ *    Truncate a builtin-catalog iceberg table: commit a metadata-only delete
+ *    of all rows (new empty snapshot) and enqueue the pre-truncate metadata
+ *    tree for async deletion.  Driven by the TRUNCATE ProcessUtility hook.
+ *
+ *    QD-only (catalog/agent reachable only from the dispatcher).  Both the
+ *    deletion-queue insert and the metadata pointer swap are transactional, so
+ *    an aborted TRUNCATE keeps the old files and leaves the table unchanged.
+ *    Only the newly-written empty metadata.json would leak on abort -- the same
+ *    orphan class tracked for the abort-time metadata cleanup follow-up.
+ *
+ *    Scope: only native iceberg tables on the builtin catalog.  A non-builtin
+ *    (external-catalog) iceberg table errors out -- its storage is owned by the
+ *    external catalog.
+ */
+void
+pg_iceberg_truncate_table(Oid relid)
+{
+	Relation				rel;
+	IcebergMetadataInfo	   *meta_info;
+	IcebergTableInfo	   *table_info;
+	char				   *old_metadata;
+	char				   *new_metadata;
+
+	if (Gp_role != GP_ROLE_DISPATCH)
+		return;
+
+	rel = relation_open(relid, AccessShareLock);
+
+	if (!((rel->rd_rel->relkind == RELKIND_RELATION ||
+		   rel->rd_rel->relkind == RELKIND_MATVIEW) &&
+		  is_iceberg_rel(rel)))
+	{
+		relation_close(rel, AccessShareLock);
+		return;
+	}
+
+	meta_info = pg_iceberg_get_metadata_info_missing_ok(relid);
+	if (meta_info == NULL)
+	{
+		/* bare CREATE TABLE ... USING iceberg with no metadata: nothing to do */
+		relation_close(rel, AccessShareLock);
+		return;
+	}
+
+	table_info = pg_iceberg_get_table_info(relid);
+
+	if (!pg_iceberg_is_builtin_catalog(table_info->catalog_server_name))
+		ereport(ERROR,
+				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+				 errmsg("TRUNCATE is only supported for builtin-catalog iceberg tables"),
+				 errdetail("table \"%s\" is on an external catalog that owns its storage",
+						   RelationGetRelationName(rel))));
+
+	old_metadata = pstrdup(meta_info->metadata_location);
+
+	/* Agent commits a metadata-only delete of all rows; returns new metadata. */
+	new_metadata = pg_iceberg_truncate_with_catalog(rel, table_info, old_metadata);
+
+	/*
+	 * Already-empty table: the agent returns the unchanged location -> no-op.
+	 * Must NOT enqueue the live metadata (that would delete the empty table's
+	 * own files).
+	 */
+	if (new_metadata != NULL && strcmp(new_metadata, old_metadata) != 0)
+	{
+		char	   *owner_username = GetUserNameFromId(GetUserId(), false);
+		char	   *nspname = get_namespace_name(rel->rd_rel->relnamespace);
+		const char *relname = NameStr(rel->rd_rel->relname);
+		char	   *table_qname = nspname ?
+			psprintf("%s.%s", nspname, relname) : psprintf("%s", relname);
+
+		/*
+		 * Enqueue the OLD metadata tree for async deletion.  Transactional heap
+		 * insert: rolls back with the txn, so an aborted TRUNCATE keeps the old
+		 * files.  The new (empty) metadata is not reachable from the old one,
+		 * so the consumer leaves it intact.
+		 */
+		pg_iceberg_deletion_queue_insert(old_metadata,
+										 relid,
+										 table_info->volume_name,
+										 table_info->volume_server_name,
+										 owner_username,
+										 table_qname,
+										 GetCurrentTimestamp(),
+										 DELETION_TYPE_METADATA);
+
+		/* Swap the catalog pointer to the new empty metadata (CAS on old). */
+		pg_iceberg_update_metadata_cas(relid, new_metadata, old_metadata);
+
+		if (nspname)
+			pfree(nspname);
+		pfree(table_qname);
+	}
+
+	pg_iceberg_free_table_info(table_info);
+	pg_iceberg_free_metadata_info(meta_info);
+	pfree(old_metadata);
+	relation_close(rel, AccessShareLock);
+}

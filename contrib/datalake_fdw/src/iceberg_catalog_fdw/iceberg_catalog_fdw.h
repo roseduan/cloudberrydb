@@ -47,7 +47,8 @@ typedef enum {
 	ICEBERG_COMMIT_APPEND,    /* PRE_COMMIT append (AppendFiles + commit) */
 	ICEBERG_COMMIT_UPDATE,    /* PRE_COMMIT update (RowDelta + commit) */
 	ICEBERG_COMMIT_DELETE,    /* PRE_COMMIT delete (RowDelta + commit) */
-	ICEBERG_COMMIT_REWRITE    /* VACUUM commit (RewriteFiles + commit) */
+	ICEBERG_COMMIT_REWRITE,   /* VACUUM commit (RewriteFiles + commit) */
+	ICEBERG_TRUNCATE          /* TRUNCATE: metadata-only delete of all rows */
 } IcebergCatalogOperation;
 
 typedef enum {

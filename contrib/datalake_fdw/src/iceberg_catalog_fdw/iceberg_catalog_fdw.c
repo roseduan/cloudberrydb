@@ -136,6 +136,7 @@ static const char* mapPostgresToIcebergType(Oid pgType, int32 typemod);
 const char * createAppendRequestJson(IcebergCatalogFdwState* fdwState, IcebergCatalogOptions *option, IcebergVolumeOptions *volumeOpt, IcebergCatalogRequest req);
 const char * createUpdateRequestJson(IcebergCatalogFdwState* fdwState, IcebergCatalogOptions *option, IcebergVolumeOptions *volumeOpt, IcebergCatalogRequest req);
 const char * createDropTableRequestJson(IcebergCatalogFdwState* fdwState, IcebergCatalogOptions *option, IcebergVolumeOptions *volumeOpt, IcebergCatalogRequest req);
+const char * createTruncateRequestJson(IcebergCatalogFdwState* fdwState, IcebergCatalogOptions *option, IcebergVolumeOptions *volumeOpt, IcebergCatalogRequest req);
 const char * createListCatalogsRequestJson(IcebergCatalogFdwState* fdwState, IcebergCatalogOptions *option, IcebergVolumeOptions *volumeOpt, IcebergCatalogRequest req);
 const char * createListNamespacesRequestJson(IcebergCatalogFdwState* fdwState, IcebergCatalogOptions *option, IcebergVolumeOptions *volumeOpt, IcebergCatalogRequest req);
 const char * createPlanFileGroupsRequestJson(IcebergCatalogFdwState* fdwState, IcebergCatalogOptions *option, IcebergVolumeOptions *volumeOpt, IcebergCatalogRequest req);
@@ -457,6 +458,12 @@ executeModifyOperation(IcebergCatalogFdwState *fdwState,
                                                    catalogState->volumeOption, fdwState->request);
             agent_cli_wrapper_drop_table(catalogState->agentHandle,
                                         fdwState->request.tableName, jsonString);
+            break;
+        case ICEBERG_TRUNCATE:
+            jsonString = createTruncateRequestJson(fdwState, catalogState->catalogOption,
+                                                   catalogState->volumeOption, fdwState->request);
+            agent_cli_wrapper_truncate_table(catalogState->agentHandle,
+                                             fdwState->request.tableName, jsonString);
             break;
 		case ICEBERG_COMMIT_FILE_GROUPS:
 			jsonString = createCommitFileGroupsRequestJson(fdwState, catalogState->catalogOption,
@@ -802,6 +809,33 @@ createDropTableRequestJson(IcebergCatalogFdwState* fdwState, IcebergCatalogOptio
 
     // Add buildin properties
     agentcli_cJSON *buildInProp = createBuildInProperties(ICEBERG_DROPTABLE, option, req);
+    agentcli_cJSON_AddItemToObject(request, DATALAKEFDW_ICEBERG_KEY_PROPERTIES, buildInProp);
+
+    char *json_string = agentcli_cJSON_PrintUnformatted(request);
+    agentcli_cJSON_Delete(request);
+    return json_string;
+}
+
+const char *
+createTruncateRequestJson(IcebergCatalogFdwState* fdwState, IcebergCatalogOptions *option, IcebergVolumeOptions *volumeOpt, IcebergCatalogRequest req)
+{
+    // Only buildin catalog supports truncate (PG-pointer-authoritative metadata).
+    if (pg_strcasecmp(option->catalog_server.server_type, DATALAKEFDW_ICEBERG_SERVER_BUILTIN) != 0) {
+        elog(ERROR, "TRUNCATE is only supported for buildin catalog iceberg tables");
+    }
+
+    agentcli_cJSON *request = agentcli_cJSON_CreateObject();
+
+    // Add namespace
+    agentcli_cJSON_AddStringToObject(request, DATALAKEFDW_ICEBERG_KEY_NAMESPACE, req.nameSpace);
+
+    // Add IcebergConfig
+    agentcli_cJSON *icebergConfig = createIcebergConfig(option, volumeOpt);
+    agentcli_cJSON_AddItemToObject(request, DATALAKEFDW_ICEBERG_KEY_ICEBERGCONFIG, icebergConfig);
+
+    // Add buildin properties (carries metadataLocation so the agent can load
+    // the exact current table to truncate; no fragments needed).
+    agentcli_cJSON *buildInProp = createBuildInProperties(ICEBERG_TRUNCATE, option, req);
     agentcli_cJSON_AddItemToObject(request, DATALAKEFDW_ICEBERG_KEY_PROPERTIES, buildInProp);
 
     char *json_string = agentcli_cJSON_PrintUnformatted(request);
