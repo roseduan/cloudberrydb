@@ -29,6 +29,10 @@ import org.apache.iceberg.ManifestFile;
 import org.apache.iceberg.ManifestFiles;
 import org.apache.iceberg.DataFile;
 import org.apache.iceberg.DeleteFile;
+import org.apache.iceberg.ContentFile;
+import org.apache.iceberg.ManifestContent;
+import org.apache.iceberg.StatisticsFile;
+import org.apache.iceberg.exceptions.NotFoundException;
 import org.apache.iceberg.io.FileIO;
 import org.apache.iceberg.io.FileInfo;
 import org.apache.iceberg.io.SupportsPrefixOperations;
@@ -1199,103 +1203,100 @@ public class IcebergRestController {
         List<Map<String, String>> failed = new ArrayList<>();
         int deletedCount = 0;
 
-        // 2. Determine the table's managed storage root(s).
-        //
-        //    Cleanup must NOT depend on the snapshot graph being reachable: a
-        //    table that has had appends/updates/deletes/expiration -- or even a
-        //    plain multi-append table -- physically retains superseded
-        //    manifests, manifest lists, log-truncated metadata.json files and
-        //    version-hint.text that no metadata walk can enumerate.  Pre-commit
-        //    orphans (files written, then the commit failed/retried) are
-        //    likewise unreachable.  We therefore enumerate by LISTING the
-        //    table's storage location and delete every object found.
-        //
-        //    The primary root is derived purely from the metadata path so it is
-        //    robust even if metadata.json is corrupt or already gone:
-        //      s3a://bkt/db/t/metadata/v5.metadata.json -> s3a://bkt/db/t
+        // 2. Parse the metadata.json and collect the EXACT set of files it
+        //    references -- every retained snapshot's manifest list ->
+        //    manifests -> data/delete files, plus the metadata.json chain and
+        //    statistics files.  We delete only these authoritative paths and
+        //    never a blind prefix listing, so a shared or mis-derived prefix
+        //    can never take out files belonging to another table.
         String tableRoot = deriveTableRoot(metadataPath);
 
-        java.util.Set<String> listRoots    = new java.util.LinkedHashSet<>();
         java.util.Set<String> allowedRoots = new java.util.LinkedHashSet<>();
-        addManagedRoot(listRoots, allowedRoots, tableRoot);
+        addManagedRoot(allowedRoots, tableRoot);
 
-        //    Best-effort parse only widens the managed roots: location() as a
-        //    cross-check, plus any custom write paths (object-storage mode or
-        //    write.{data,metadata}.path) that may live outside the table dir.
-        //    A parse failure is non-fatal -- listing tableRoot still removes
-        //    every physical file under the table directory.
+        TableMetadata metadata;
         try {
             InputFile input = fileIO.newInputFile(metadataPath);
-            TableMetadata metadata = TableMetadataParser.read(fileIO, input);
-            addManagedRoot(listRoots, allowedRoots, metadata.location());
-            Map<String, String> props = metadata.properties();
-            addManagedRoot(listRoots, allowedRoots, props.get("write.data.path"));
-            addManagedRoot(listRoots, allowedRoots, props.get("write.metadata.path"));
-            addManagedRoot(listRoots, allowedRoots,
-                           props.get("write.object-storage.path"));
+            metadata = TableMetadataParser.read(fileIO, input);
         } catch (Exception e) {
-            log.warn("cleanup: metadata parse failed for {} ({}); proceeding "
-                     + "with path-derived root {}",
-                     metadataPath, e.getMessage(), tableRoot);
-        }
-
-        if (listRoots.isEmpty()) {
             return createErrorResponse(
-                "cannot determine table root from metadataPath: " + metadataPath,
+                "failed to parse metadata.json at " + metadataPath + ": "
+                    + e.getMessage(),
                 "BadRequestException", 400);
         }
+        addManagedRoot(allowedRoots, metadata.location());
 
-        // 3. Enumerate physical files by recursively LISTING each managed root.
-        //    Listing finds everything the metadata graph cannot.
-        if (!(fileIO instanceof SupportsPrefixOperations)) {
-            return createErrorResponse(
-                "FileIO " + fileIO.getClass().getName() + " does not support "
-                    + "prefix listing; cannot guarantee complete cleanup",
-                "UnsupportedOperationException", 400);
-        }
-        SupportsPrefixOperations sp = (SupportsPrefixOperations) fileIO;
+        Map<Integer, PartitionSpec> specsById = metadata.specsById();
 
+        // Insertion order: manifests/data files are queued before the
+        // metadata.json that references them; the root metadata.json is added
+        // last so a mid-flight crash leaves a resumable tree.
         java.util.Set<String> toDelete = new java.util.LinkedHashSet<>();
-        for (String root : listRoots) {
-            // Trailing slash so "/db/t/" never matches a sibling "/db/t_foo/".
-            String prefix = root.endsWith("/") ? root : root + "/";
+
+        // 2a. Walk every retained snapshot: manifest list -> manifests ->
+        //     data files / delete files.
+        for (Snapshot snapshot : metadata.snapshots()) {
+            String manifestList = snapshot.manifestListLocation();
+            if (manifestList != null) {
+                toDelete.add(manifestList);
+            }
+
+            List<ManifestFile> manifests;
             try {
-                for (FileInfo fi : sp.listPrefix(prefix)) {
-                    String path = fi.location();
-                    // location boundary check: never delete anything that does
-                    // not fall under a known managed root for THIS table.
-                    if (!underAnyRoot(path, allowedRoots)) {
-                        Map<String, String> err = new HashMap<>();
-                        err.put("path", path);
-                        err.put("error",
-                                "outside managed location; skipped for safety");
-                        failed.add(err);
-                        continue;
-                    }
-                    toDelete.add(path);
-                }
+                manifests = snapshot.allManifests(fileIO);
             } catch (Exception e) {
-                Map<String, String> err = new HashMap<>();
-                err.put("path", prefix);
-                err.put("error", "listPrefix: " + e.getClass().getSimpleName()
-                        + ": " + e.getMessage());
-                failed.add(err);
+                recordFailure(failed, "manifest-list:" + snapshot.snapshotId(), e);
+                continue;
+            }
+
+            for (ManifestFile manifest : manifests) {
+                toDelete.add(manifest.path());
+                try (CloseableIterable<? extends ContentFile<?>> entries =
+                        manifest.content() == ManifestContent.DELETES
+                            ? ManifestFiles.readDeleteManifest(manifest, fileIO,
+                                                               specsById)
+                            : ManifestFiles.read(manifest, fileIO, specsById)) {
+                    for (ContentFile<?> cf : entries) {
+                        toDelete.add(cf.path().toString());
+                    }
+                } catch (Exception e) {
+                    recordFailure(failed, manifest.path(), e);
+                }
             }
         }
 
-        // 4. Delete each listed object individually.  Per-file failures are
-        //    reported in failed[]; the consumer treats a non-empty failed[] as
-        //    ERROR, retries the queue entry, and after deletion_queue_max_retry
-        //    attempts moves it to the dead-letter queue.
-        for (String p : toDelete) {
+        // 2b. The metadata.json chain (previous metadata files) and any
+        //     statistics files referenced by the current metadata.
+        for (TableMetadata.MetadataLogEntry prev : metadata.previousFiles()) {
+            toDelete.add(prev.file());
+        }
+        for (StatisticsFile stat : metadata.statisticsFiles()) {
+            toDelete.add(stat.path());
+        }
+
+        // The root metadata.json itself is deleted last.
+        toDelete.add(metadataPath);
+
+        // 3. Delete each referenced file.  An already-gone file counts as
+        //    success (idempotent retry).  Anything resolving outside the
+        //    table's managed root is skipped for safety.  Real delete errors
+        //    land in failed[]; the consumer retries / dead-letters on a
+        //    non-empty failed[].
+        for (String pth : toDelete) {
+            if (!underAnyRoot(pth, allowedRoots)) {
+                Map<String, String> err = new HashMap<>();
+                err.put("path", pth);
+                err.put("error", "outside managed location; skipped for safety");
+                failed.add(err);
+                continue;
+            }
             try {
-                fileIO.deleteFile(p);
+                fileIO.deleteFile(pth);
+                deletedCount++;
+            } catch (NotFoundException nfe) {
                 deletedCount++;
             } catch (Exception e) {
-                Map<String, String> err = new HashMap<>();
-                err.put("path", p);
-                err.put("error", e.getClass().getSimpleName() + ": " + e.getMessage());
-                failed.add(err);
+                recordFailure(failed, pth, e);
             }
         }
 
@@ -1303,8 +1304,8 @@ public class IcebergRestController {
         resp.setDeletedCount(deletedCount);
         resp.setFailed(failed);
 
-        log.info("Cleanup of {} finished: roots={}, deleted={}, failed={}",
-                 metadataPath, listRoots, deletedCount, failed.size());
+        log.info("Cleanup of {} finished: parsed snapshot tree, deleted={}, "
+                 + "failed={}", metadataPath, deletedCount, failed.size());
 
         return ResponseEntity.ok(resp);
     }
@@ -1329,19 +1330,26 @@ public class IcebergRestController {
     }
 
     /**
-     * Register a managed root for both listing (where to enumerate files) and
-     * the boundary allow-list (what we are permitted to delete).  No-op for
-     * null/empty.  Trailing slash is normalized away.
+     * Register a managed root for the boundary allow-list (what we are
+     * permitted to delete).  No-op for null/empty.  Trailing slash is
+     * normalized away.
      */
-    private static void addManagedRoot(java.util.Set<String> listRoots,
-                                       java.util.Set<String> allowedRoots,
+    private static void addManagedRoot(java.util.Set<String> allowedRoots,
                                        String root) {
         if (root == null || root.isEmpty()) {
             return;
         }
         String r = root.endsWith("/") ? root.substring(0, root.length() - 1) : root;
-        listRoots.add(r);
         allowedRoots.add(r);
+    }
+
+    /** Record a per-file cleanup failure in the response failed[] array. */
+    private static void recordFailure(List<Map<String, String>> failed,
+                                      String path, Exception e) {
+        Map<String, String> err = new HashMap<>();
+        err.put("path", path);
+        err.put("error", e.getClass().getSimpleName() + ": " + e.getMessage());
+        failed.add(err);
     }
 
     /**
