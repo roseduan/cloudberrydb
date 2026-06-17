@@ -482,7 +482,18 @@ public class IcebergRestController {
 
         // OSS Iceberg convention: persist only user-facing TBLPROPERTIES into
         // TableMetadata.properties. Runtime/catalog config must not be persisted.
-        Map<String, String> userTableProperties = extractUserTableProperties(request);
+        Map<String, String> userTableProperties =
+            new HashMap<>(extractUserTableProperties(request));
+
+        // Eliminate log-truncation orphans at the source: have Iceberg
+        // physically delete superseded metadata.json files as the metadata-log
+        // is trimmed (default write.metadata.previous-versions-max = 100).
+        // Without this, a table with more than that many commits accumulates
+        // orphaned metadata.json files that DROP-time cleanup -- which deletes
+        // only the files reachable from the live metadata tree -- cannot reach.
+        // Set as a default only; an explicit user TBLPROPERTY still wins.
+        userTableProperties.putIfAbsent(
+            "write.metadata.delete-after-commit.enabled", "true");
 
         // Create the table using ServiceResult - pass null as location to use default warehouse
         Table icebergTable = icebergService.createTable(namespace, tableName, schema, context.getPath(), userTableProperties, context);
