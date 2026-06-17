@@ -96,52 +96,63 @@ iceberg_object_access_hook(ObjectAccessType access, Oid classId, Oid objectId,
 				 */
 				if (meta_info != NULL)
 				{
-					IcebergTableInfo   *table_info;
-					char               *owner_username;
-					char               *table_qname;
-					char               *nspname;
-					const char         *relname;
-
 					/*
-					 * Resolve the storage context while pg_lake_table is still
-					 * intact.  pg_iceberg_get_table_info goes pg_lake_table ->
-					 * pg_foreign_volume -> pg_foreign_server to fill in the
-					 * volume_name / volume_server_name we need to reconstruct
-					 * fileIOConfig on the consumer side.
+					 * Only builtin (internal-catalog) iceberg tables own their
+					 * files and must have them cleaned up on DROP.  External-
+					 * catalog tables (is_internal == false) are managed by an
+					 * external Iceberg catalog that owns the storage, so we never
+					 * enqueue file deletion for them -- only the local pg_iceberg
+					 * bookkeeping is dropped below.
 					 */
-					table_info = pg_iceberg_get_table_info(objectId);
+					if (meta_info->is_internal)
+					{
+						IcebergTableInfo   *table_info;
+						char               *owner_username;
+						char               *table_qname;
+						char               *nspname;
+						const char         *relname;
 
-					owner_username = GetUserNameFromId(GetUserId(), false);
+						/*
+						 * Resolve the storage context while pg_lake_table is still
+						 * intact.  pg_iceberg_get_table_info goes pg_lake_table ->
+						 * pg_foreign_volume -> pg_foreign_server to fill in the
+						 * volume_name / volume_server_name we need to reconstruct
+						 * fileIOConfig on the consumer side.
+						 */
+						table_info = pg_iceberg_get_table_info(objectId);
 
-					nspname = get_namespace_name(rel->rd_rel->relnamespace);
-					relname = NameStr(rel->rd_rel->relname);
-					table_qname = nspname ?
-						psprintf("%s.%s", nspname, relname) :
-						psprintf("%s", relname);
+						owner_username = GetUserNameFromId(GetUserId(), false);
 
-					/*
-					 * Enqueue the metadata path with full credential context.
-					 * The autovacuum-driven consumer (pg_iceberg_av_consumer.c)
-					 * will pick it up, reconstruct fileIOConfig, and call
-					 * dlagent's /v1/files/cleanup-from-metadata endpoint.
-					 */
-					pg_iceberg_deletion_queue_insert(
-						meta_info->metadata_location,
-						objectId,
-						table_info->volume_name,
-						table_info->volume_server_name,
-						owner_username,
-						table_qname,
-						GetCurrentTimestamp(),
-						DELETION_TYPE_METADATA);
+						nspname = get_namespace_name(rel->rd_rel->relnamespace);
+						relname = NameStr(rel->rd_rel->relname);
+						table_qname = nspname ?
+							psprintf("%s.%s", nspname, relname) :
+							psprintf("%s", relname);
 
-					pg_iceberg_free_table_info(table_info);
+						/*
+						 * Enqueue the metadata path with full credential context.
+						 * The autovacuum-driven consumer (pg_iceberg_av_consumer.c)
+						 * will pick it up, reconstruct fileIOConfig, and call
+						 * dlagent's /v1/files/cleanup-from-metadata endpoint.
+						 */
+						pg_iceberg_deletion_queue_insert(
+							meta_info->metadata_location,
+							objectId,
+							table_info->volume_name,
+							table_info->volume_server_name,
+							owner_username,
+							table_qname,
+							GetCurrentTimestamp(),
+							DELETION_TYPE_METADATA);
+
+						pg_iceberg_free_table_info(table_info);
+
+						if (nspname)
+							pfree(nspname);
+						pfree(table_qname);
+					}
+
 					pg_iceberg_free_metadata_info(meta_info);
-
-					if (nspname)
-						pfree(nspname);
-					pfree(table_qname);
-
 					pg_iceberg_remove_metadata(objectId);
 				}
 				else
