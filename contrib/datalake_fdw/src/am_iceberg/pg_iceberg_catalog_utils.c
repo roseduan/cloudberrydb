@@ -95,6 +95,68 @@ parse_metadata_location(char *json_response)
 }
 
 /*
+ * PathCollectState - collect every "path" string from a fragments JSON array.
+ */
+typedef struct
+{
+	JsonLexContext *lex;
+	bool			in_path;
+	List		   *paths;
+} PathCollectState;
+
+static void
+pathcollect_object_field_start(void *state, char *fname, bool isnull)
+{
+	PathCollectState *s = (PathCollectState *) state;
+
+	s->in_path = (pg_strcasecmp(fname, "path") == 0);
+}
+
+static void
+pathcollect_scalar(void *state, char *token, JsonTokenType tokentype)
+{
+	PathCollectState *s = (PathCollectState *) state;
+
+	if (s->in_path && tokentype == JSON_TOKEN_STRING &&
+		token != NULL && token[0] != '\0')
+		s->paths = lappend(s->paths, pstrdup(token));
+	s->in_path = false;
+}
+
+/*
+ * pg_iceberg_collect_fragment_paths
+ *		Collect every "path" string value from a fragments JSON array
+ *		(e.g. VACUUM's rewrittenFragments).  Returns a List of palloc'd cstrings.
+ */
+List *
+pg_iceberg_collect_fragment_paths(const char *json)
+{
+	JsonLexContext	   *lex;
+	JsonSemAction		sem;
+	PathCollectState	st;
+
+	if (json == NULL || json[0] == '\0')
+		return NIL;
+
+	memset(&st, 0, sizeof(st));
+	lex = makeJsonLexContextCstringLen((char *) json,
+									   strlen(json),
+									   GetDatabaseEncoding(),
+									   true);
+	st.lex = lex;
+
+	memset(&sem, 0, sizeof(sem));
+	sem.semstate = &st;
+	sem.object_field_start = pathcollect_object_field_start;
+	sem.scalar = pathcollect_scalar;
+
+	pg_parse_json_or_ereport(lex, &sem);
+	pfree(lex);
+
+	return st.paths;
+}
+
+/*
  * LoadTableParseState - state for parsing load-table response
  *
  * Tracks JSON nesting depth to only capture top-level fields:

@@ -33,6 +33,8 @@
 #include "include/pg_iceberg_catalog_utils.h"
 #include "include/pg_iceberg_metadata.h"
 #include "include/pg_iceberg_rewrite_plan.h"
+#include "include/pg_iceberg_deletion_queue.h"
+#include "utils/timestamp.h"
 
 /*
  * Three-tier iceberg namespace resolver.  See header for contract.
@@ -786,7 +788,49 @@ pg_iceberg_commit_rewrite(Relation rel, List *all_private_results)
 									  table_info->volume_name);
 
 	if (new_metadata_location != NULL)
+	{
 		pg_iceberg_update_metadata(RelationGetRelid(rel), new_metadata_location);
+
+		/*
+		 * VACUUM space reclamation: the compaction's rewritten OLD files are
+		 * now superseded by the new compacted files in the current snapshot.
+		 * Enqueue each for async deletion (DELETION_TYPE_FILE) so the
+		 * autovacuum consumer removes them from object storage.  Only for
+		 * internal (builtin-managed) tables -- external-catalog files are owned
+		 * by that catalog.  The enqueue is transactional, so an aborted VACUUM
+		 * keeps the old files.  The exact files to delete are known from the
+		 * rewrite inputs, so no snapshot diffing is needed.
+		 */
+		if (is_internal && has_rewritten_fragments)
+		{
+			List	   *old_paths =
+				pg_iceberg_collect_fragment_paths(rewritten_fragments.data);
+
+			if (old_paths != NIL)
+			{
+				char	   *owner_username = GetUserNameFromId(GetUserId(), false);
+				char	   *nspname = get_namespace_name(rel->rd_rel->relnamespace);
+				const char *relname = NameStr(rel->rd_rel->relname);
+				char	   *table_qname = nspname ?
+					psprintf("%s.%s", nspname, relname) : psprintf("%s", relname);
+				ListCell   *pc;
+
+				foreach(pc, old_paths)
+					pg_iceberg_deletion_queue_insert((char *) lfirst(pc),
+													 RelationGetRelid(rel),
+													 table_info->volume_name,
+													 table_info->volume_server_name,
+													 owner_username,
+													 table_qname,
+													 GetCurrentTimestamp(),
+													 DELETION_TYPE_FILE);
+
+				if (nspname)
+					pfree(nspname);
+				pfree(table_qname);
+			}
+		}
+	}
 
 	elog(DEBUG1,
 		 "pg_iceberg_commit_rewrite: relation=%u, committed_results=%d",

@@ -306,9 +306,19 @@ do_delete_for_entry(DeletionQueueEntry *e)
         agentcli_cJSON *failed_arr;
         const char     *resp_body;
 
-        agent_cli_wrapper_cleanup_metadata(h, e->path, fileio_config);
-        agent_cli_wrapper_check_exec_error_json(h,
-                                                "cleanup-from-metadata failed");
+        if (e->deletion_type == DELETION_TYPE_FILE)
+        {
+            /* Delete this single object directly (e.g. VACUUM's old files). */
+            agent_cli_wrapper_delete_file(h, e->path, fileio_config);
+            agent_cli_wrapper_check_exec_error_json(h, "files/delete failed");
+        }
+        else
+        {
+            /* Parse the path as a metadata.json tree and delete all of it. */
+            agent_cli_wrapper_cleanup_metadata(h, e->path, fileio_config);
+            agent_cli_wrapper_check_exec_error_json(h,
+                                                    "cleanup-from-metadata failed");
+        }
 
         /*
          * dlagent returns 200 even on partial failure (per-file errors are

@@ -1212,6 +1212,60 @@ public class IcebergRestController {
      * 200; the caller treats any non-empty failed array as ERROR so the
      * queue entry is retried or moved to the DLQ.
      */
+    /**
+     * Delete a set of individual files directly (DELETION_TYPE_FILE) -- e.g.
+     * VACUUM's rewritten old files.  Unlike cleanup-from-metadata this does NOT
+     * parse anything as metadata; it just deletes each given path via FileIO.
+     * A file that is already gone counts as success (idempotent retry).
+     * Body: { "paths": ["s3a://...", ...], "fileIOConfig": {...} }
+     */
+    @PostMapping({"/files/delete"})
+    public ResponseEntity<?> deleteFiles(@RequestBody Map<String, Object> request) {
+        Object pathsObj = request.get("paths");
+        @SuppressWarnings("unchecked")
+        Map<String, String> fileIOConfig =
+            (Map<String, String>) request.get("fileIOConfig");
+
+        if (!(pathsObj instanceof List) || ((List<?>) pathsObj).isEmpty()) {
+            return createErrorResponse("paths is required",
+                                       "BadRequestException", 400);
+        }
+        if (fileIOConfig == null || fileIOConfig.isEmpty()) {
+            return createErrorResponse("fileIOConfig is required",
+                                       "BadRequestException", 400);
+        }
+
+        FileIO fileIO;
+        try {
+            fileIO = buildFileIOForCleanup(fileIOConfig);
+        } catch (Exception e) {
+            return createErrorResponse(
+                "Failed to build FileIO from fileIOConfig: " + e.getMessage(),
+                "BadRequestException", 400);
+        }
+
+        List<Map<String, String>> failed = new ArrayList<>();
+        int deletedCount = 0;
+        for (Object o : (List<?>) pathsObj) {
+            String p = String.valueOf(o);
+            try {
+                fileIO.deleteFile(p);
+                deletedCount++;
+            } catch (NotFoundException nfe) {
+                deletedCount++;
+            } catch (Exception e) {
+                recordFailure(failed, p, e);
+            }
+        }
+
+        Map<String, Object> resp = new HashMap<>();
+        resp.put("deletedCount", deletedCount);
+        resp.put("failed", failed);
+        log.info("files/delete: requested={}, deleted={}, failed={}",
+                 ((List<?>) pathsObj).size(), deletedCount, failed.size());
+        return ResponseEntity.ok(resp);
+    }
+
     @PostMapping({"/files/cleanup-from-metadata"})
     public ResponseEntity<?> cleanupFromMetadata(
             @RequestBody CleanupFromMetadataRequest request) {

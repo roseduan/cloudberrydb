@@ -25,6 +25,7 @@ extern void free_schema_info(IcebergTableSchema *schema);
 extern char *parse_metadata_location(char *json_response);
 extern IcebergLoadTableResult *parse_load_table_response(char *json_response);
 extern IcebergTableStatistics *parse_statistics_response(char *json_response);
+extern List *pg_iceberg_collect_fragment_paths(const char *json);
 
 /* Error handling */
 extern void check_fdw_execution_error(IcebergCatalogFdwState *fdwState, const char *error_prefix);

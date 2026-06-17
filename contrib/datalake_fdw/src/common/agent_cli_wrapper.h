@@ -70,6 +70,14 @@ void agent_cli_wrapper_cleanup_metadata(AgentCliHandle* handle,
                                         const char* metadata_path,
                                         const char* fileio_config_json);
 
+/*
+ * Delete a single object by path (DELETION_TYPE_FILE).  POSTs
+ * {"paths":["<path>"], "fileIOConfig":...} to /api/v1/files/delete.
+ */
+void agent_cli_wrapper_delete_file(AgentCliHandle* handle,
+                                   const char* path,
+                                   const char* fileio_config_json);
+
 /* Catalog management operations */
 void agent_cli_wrapper_create_catalog(AgentCliHandle* handle, const char* json);
 void agent_cli_wrapper_list_catalogs(AgentCliHandle* handle, const char* json);
