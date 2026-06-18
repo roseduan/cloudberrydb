@@ -52,7 +52,7 @@ END;
 $$ LANGUAGE plpgsql;
 -- Log setup completion
 SELECT test_log('Common setup completed');
-psql:../../../lib/sql/common_setup.sql:43: NOTICE:  [TEST] Common setup completed
+NOTICE:  [TEST] Common setup completed
  test_log 
 ----------
  

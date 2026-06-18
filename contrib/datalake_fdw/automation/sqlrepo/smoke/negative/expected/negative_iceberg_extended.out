@@ -35,7 +35,7 @@ EXCEPTION WHEN OTHERS THEN
     RAISE NOTICE 'Expected error (no volume): %', SQLERRM;
 END;
 $$;
-NOTICE:  Expected error (no volume): foreign volume with OID 0 does not exist
+NOTICE:  Expected error (no volume): no foreign volume specified
 -- ============================================================
 -- Test 3: GUC boundary errors
 -- ============================================================
