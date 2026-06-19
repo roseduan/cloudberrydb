@@ -1438,9 +1438,12 @@ explain (verbose, costs off) select * from matest0 order by 1-id;
    ->  Vec Sort
          Output: matest0.id, matest0.name, ((1 - matest0.id))
          Sort Key: ((1 - matest0.id))
+         Vec Plan Merge:  1 child
          ->  Vec Result
                Output: matest0.id, matest0.name, (1 - matest0.id)
+               Vec Plan Merge:  1 child
                ->  Vec Append
+                     Vec Plan Merge:  4 children
                      ->  Vec Seq Scan on public.matest0 matest0_1
                            Output: matest0_1.id, matest0_1.name
                      ->  Vec Seq Scan on public.matest1 matest0_2
@@ -1473,7 +1476,9 @@ explain (verbose, costs off) select min(1-id) from matest0;
          Output: (PARTIAL min((1 - matest0.id)))
          ->  Vec Partial Vec Aggregate
                Output: PARTIAL min((1 - matest0.id))
+               Vec Plan Merge:  1 child
                ->  Vec Append
+                     Vec Plan Merge:  4 children
                      ->  Vec Seq Scan on public.matest0 matest0_1
                            Output: matest0_1.id
                      ->  Vec Seq Scan on public.matest1 matest0_2
