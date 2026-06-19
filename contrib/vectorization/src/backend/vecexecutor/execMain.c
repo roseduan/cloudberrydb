@@ -5114,6 +5114,67 @@ ExecVecSetTupleBound(int64 tuples_needed, PlanState *child_node, PlanState *limi
 	 */
 }
 
+/*
+ * is_cross_slice_share_input_scan
+ *    True if this PlanState is a cross-slice ShareInputScan.
+ *
+ * Cross-slice ShareInputScan coordinates its producer slice and consumer
+ * slices through GP's ConditionVariable mechanism, driven from
+ * ExecVecShareInputScan() (the node's ExecProcNode): the consumer waits on
+ * shareinput_reader_waitready_vec() and the producer signals
+ * shareinput_writer_notifyready_vec() after materializing.  See
+ * nodeShareInputScan.c.
+ */
+static bool
+is_cross_slice_share_input_scan(PlanState *ps)
+{
+	return ps != NULL &&
+		   IsA(ps, ShareInputScanState) &&
+		   ((ShareInputScan *) ps->plan)->cross_slice;
+}
+
+/*
+ * merge_child_is_xslice_sharescan
+ *    True if any of ps's MergeChildren-merge children is a cross-slice
+ *    ShareInputScan.  Mirrors the child-collection switch in
+ *    PostBuildVecPlan() so that the two stay in lockstep.
+ */
+static bool
+merge_child_is_xslice_sharescan(PlanState *ps)
+{
+	int i;
+
+	if (IsA(ps, SubqueryScanState))
+		return is_cross_slice_share_input_scan(((SubqueryScanState *) ps)->subplan);
+	else if (IsA(ps, SequenceState))
+	{
+		SequenceState *seqState = (SequenceState *) ps;
+
+		for (i = 0; i < seqState->numSubplans; i++)
+			if (is_cross_slice_share_input_scan(seqState->subplans[i]))
+				return true;
+		return false;
+	}
+	else if (IsA(ps, AppendState))
+	{
+		AppendState *appendState = (AppendState *) ps;
+
+		for (i = 0; i < appendState->as_nplans; i++)
+			if (is_cross_slice_share_input_scan(appendState->appendplans[i]))
+				return true;
+		return false;
+	}
+	else if (IsA(ps, HashJoinState))
+		return is_cross_slice_share_input_scan(ps->lefttree) ||
+			   (ps->righttree &&
+				is_cross_slice_share_input_scan(ps->righttree->lefttree));
+	else if (IsA(ps, NestLoopState))
+		return is_cross_slice_share_input_scan(ps->lefttree) ||
+			   is_cross_slice_share_input_scan(ps->righttree);
+	else
+		return is_cross_slice_share_input_scan(ps->lefttree);
+}
+
 static void
 MergeArrowNodeToPlanStateFromSource(List **arrow_node_to_planstate, VecExecuteState *source_estate, VecExecuteState *estate)
 {
@@ -5161,6 +5222,33 @@ PostBuildVecPlan(PlanState *ps, VecExecuteState *estate)
 	if (!target_state)
 		return;
 	target_plan = target_state->plan;
+
+	/*
+	 * Cross-slice ShareInputScan synchronizes its producer and consumer
+	 * slices through GP's ConditionVariable coordination performed in
+	 * ExecVecShareInputScan() (the node's ExecProcNode): the consumer waits
+	 * for the producer (shareinput_reader_waitready_vec) and the producer
+	 * notifies after materializing (shareinput_writer_notifyready_vec).
+	 *
+	 * MergeChildren splices a child's Arrow plan directly into this node's
+	 * plan; afterwards only this (parent) boundary runs ExecuteVecPlan and the
+	 * spliced child's ExecProcNode never fires.  For a cross-slice
+	 * ShareInputScan that skips the GP-level wait/notify, so the consumer's
+	 * Arrow SharedSourceNode::SyncReader() looks for the producer's ".ready"
+	 * file before the producer slice has created it and fails with
+	 * "ready file not found ... bug in cross-slice synchronization".
+	 *
+	 * Leave such a child un-merged: BuildVecPlan() above already built a bridge
+	 * source (BuildSource -> ExecProcNode) for it, so ExecVecShareInputScan
+	 * still runs and the coordination is preserved.  The whole merge for this
+	 * node is skipped because MergeChildren pairs children positionally with
+	 * the target's source nodes and cannot drop a single child.  Both the
+	 * consumer (e.g. under a Result) and the producer (e.g. under a Sequence)
+	 * must stay un-merged: a consumer boundary that waits would otherwise hang
+	 * on a producer whose notify was merged away.
+	 */
+	if (merge_child_is_xslice_sharescan(ps))
+		return;
 
 	/*
 	 * Collect child VecExecuteStates into a list based on node type.
