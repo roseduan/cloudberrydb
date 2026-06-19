@@ -1493,7 +1493,9 @@ EXPLAIN (VERBOSE, COSTS OFF) SELECT * FROM part p(x) ORDER BY x;
    ->  Vec Sort
          Output: p.x, p.b
          Sort Key: p.x
+         Vec Plan Merge:  1 child
          ->  Vec Append
+               Vec Plan Merge:  3 children
                ->  Vec Seq Scan on public.part_p1 p_1
                      Output: p_1.x, p_1.b
                ->  Vec Seq Scan on public.part_rev p_2

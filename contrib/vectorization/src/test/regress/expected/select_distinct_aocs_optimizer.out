@@ -138,6 +138,7 @@ SELECT count(*) FROM
    ->  Vec Gather Motion 3:1  (slice1; segments: 3)
          ->  Vec GroupAggregate
                Group Key: tenk1.two, tenk1.four, tenk1.two
+               Vec Plan Merge:  1 child
                ->  Vec Sort
                      Output: two, four
                      Sort Key: tenk1.two, tenk1.four, tenk1.two
@@ -148,11 +149,12 @@ SELECT count(*) FROM
                                  Output: two, four
                                  Group Key: tenk1.two, tenk1.four, tenk1.two
                                  Vec HashAgg Method:  Normal
+                                 Vec Plan Merge:  1 child
                                  ->  Vec Seq Scan on public.tenk1
                                        Output: two, four
  Settings: optimizer = 'on'
  Optimizer: Pivotal Optimizer (GPORCA)
-(19 rows)
+(21 rows)
 
 SELECT count(*) FROM
   (SELECT DISTINCT two, four, two FROM tenk1) ss;
