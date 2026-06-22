@@ -296,6 +296,9 @@ test: freeze_aux_tables
 # cbdb parallel test
 test: cbdb_parallel
 
+# per-worker EXPLAIN ANALYZE statistics (gp_enable_explain_allstat + parallel)
+test: explain_per_worker
+
 # window function parallel test
 test: window_parallel
 

@@ -146,6 +146,20 @@ typedef struct CdbExplain_NodeSummary
 	int			segindex0;		/* segment id of insts[0] */
 	int			ninst;			/* num of StatInst entries in inst array */
 
+	/*
+	 * Per-worker raw stats, kept only when gp_enable_explain_allstat is on and
+	 * this node's slice runs more than one parallel worker per segment. Unlike
+	 * insts[] (one slot per segment, overwritten by later workers), this keeps
+	 * one entry per QE message so a segment's parallel workers stay distinct.
+	 * The three arrays are parallel and separately palloc'd; workerinsts is
+	 * NULL otherwise.
+	 */
+	int			nworkerinst;	/* num of entries in the worker arrays */
+	CdbExplain_StatInst *workerinsts;	/* [0..nworkerinst-1] raw per-QE stat */
+	int		   *workerinst_segindex;	/* segindex of each worker entry */
+	int		   *workerinst_workidx;		/* worker index within its segment */
+	double	   *workerinst_peakmem;		/* worker QE's peak memory (bytes) */
+
 	/* Array [0..ninst-1] of StatInst entries is appended starting here */
 	CdbExplain_StatInst insts[1];	/* variable size - must be last */
 } CdbExplain_NodeSummary;
@@ -1182,6 +1196,24 @@ cdbexplain_depositStatsToNode(PlanState *planstate, CdbExplain_RecvStatCtx *ctx)
 	int			imsgptr;
 	int			nInst;
 
+	/*
+	 * Per-segment counter of how many of that segment's parallel workers have
+	 * been seen so far, used to assign each worker its index.  Allocated only
+	 * when per-worker stats are being kept (see per_worker below).
+	 */
+	int		   *seg_worker_count = NULL;
+
+	/*
+	 * Keep per-worker raw stats only when the user asked for the allstat dump
+	 * (gp_enable_explain_allstat) and this node's slice actually runs more than
+	 * one parallel worker per segment.  Without parallelism the per-worker view
+	 * would be identical to the per-segment allstat dump, so there is nothing
+	 * extra to keep.
+	 */
+	ExecSlice  *slice = getCurrentSlice(planstate->state, ctx->sliceIndex);
+	bool		per_worker = gp_enable_explain_allstat &&
+		slice != NULL && slice->parallel_workers > 1;
+
 	Assert(instr &&
 		   ctx->iStatInst < ctx->nStatInst);
 
@@ -1194,6 +1226,24 @@ cdbexplain_depositStatsToNode(PlanState *planstate, CdbExplain_RecvStatCtx *ctx)
 
 	/* Attach our new NodeSummary to the Instrumentation node. */
 	instr->cdbNodeSummary = ns;
+
+	/*
+	 * When per-worker stats are kept, also keep every QE's StatInst (not just
+	 * the last one per segment, the way insts[] does) so a segment's parallel
+	 * workers stay distinct.  A worker's index within its segment is the
+	 * arrival order of its messages, tracked by seg_worker_count (one slot per
+	 * segment).
+	 */
+	if (per_worker && ctx->nmsgptr > 0)
+	{
+		ns->nworkerinst = ctx->nmsgptr;
+		ns->workerinsts = (CdbExplain_StatInst *)
+			palloc0(ctx->nmsgptr * sizeof(CdbExplain_StatInst));
+		ns->workerinst_segindex = (int *) palloc0(ctx->nmsgptr * sizeof(int));
+		ns->workerinst_workidx = (int *) palloc0(ctx->nmsgptr * sizeof(int));
+		ns->workerinst_peakmem = (double *) palloc0(ctx->nmsgptr * sizeof(double));
+		seg_worker_count = (int *) palloc0(nInst * sizeof(int));
+	}
 
 	/* Initialize per-node accumulators. */
 	cdbexplain_depStatAcc_init0(&ntuples);
@@ -1230,6 +1280,20 @@ cdbexplain_depositStatsToNode(PlanState *planstate, CdbExplain_RecvStatCtx *ctx)
 
 		/* Copy the StatInst to NodeSummary from dispatch result buffer. */
 		*nsi = *rsi;
+
+		/*
+		 * Keep this worker's raw stat for per-worker reporting, assigning it
+		 * the next worker index within its segment.
+		 */
+		if (ns->workerinsts)
+		{
+			int			iseg = rsh->segindex - ns->segindex0;
+
+			ns->workerinsts[imsgptr] = *rsi;
+			ns->workerinst_segindex[imsgptr] = rsh->segindex;
+			ns->workerinst_workidx[imsgptr] = seg_worker_count[iseg]++;
+			ns->workerinst_peakmem[imsgptr] = rsh->worker.peakmemused;
+		}
 
 		/*
 		 * Drop qExec's extra text.  We rescue it below if qExec is a winner.
@@ -1884,6 +1948,7 @@ cdbexplain_showExecStats(struct PlanState *planstate, ExplainState *es)
 	CdbExplain_NodeSummary *ns = es->runtime? instr->rt_cdbNodeSummary: instr->cdbNodeSummary;
 	instr_time	timediff;
 	int			i;
+	bool		per_worker;
 
 	char		totalbuf[50];
 	char		avgbuf[50];
@@ -1896,6 +1961,17 @@ cdbexplain_showExecStats(struct PlanState *planstate, ExplainState *es)
 		return;
 
 	Assert(instr != NULL);
+
+	/*
+	 * Show the per-worker breakdown instead of the per-segment allstat dump
+	 * when the allstat GUC is on and this node's slice runs more than one
+	 * parallel worker per segment (the same condition under which the worker
+	 * arrays were populated at deposit time).
+	 */
+	per_worker = gp_enable_explain_allstat &&
+		es->currentSlice != NULL &&
+		es->currentSlice->parallel_workers > 1 &&
+		ns->workerinsts != NULL && ns->nworkerinst > 0;
 
 	/*
 	 * Executor memory used by this individual node, if it allocates from a
@@ -2123,9 +2199,11 @@ cdbexplain_showExecStats(struct PlanState *planstate, ExplainState *es)
 	pfree(extraData.data);
 
 	/*
-	 * Dump stats for all workers.
+	 * Dump stats for all workers.  When the slice runs multiple parallel
+	 * workers per segment we emit the richer per-worker block below instead.
 	 */
-	if (gp_enable_explain_allstat && ns->segindex0 >= 0 && ns->ninst > 0)
+	if (gp_enable_explain_allstat && !per_worker &&
+		ns->segindex0 >= 0 && ns->ninst > 0)
 	{
 		if (es->format == EXPLAIN_FORMAT_TEXT)
 		{
@@ -2184,6 +2262,84 @@ cdbexplain_showExecStats(struct PlanState *planstate, ExplainState *es)
 			appendStringInfoString(es->str, "//end\n");
 		else
 			ExplainCloseGroup("Allstat", "Allstat", true, es);
+	}
+
+	/*
+	 * Per-worker stats.  Like the allstat dump above, but one line per parallel
+	 * worker process (per segment) instead of per segment, so skew across a
+	 * segment's parallel workers is visible.  Shown in place of the allstat
+	 * dump when gp_enable_explain_allstat is on and the slice runs more than
+	 * one parallel worker per segment (see per_worker above).
+	 */
+	if (per_worker && ns->segindex0 >= 0)
+	{
+		if (es->format == EXPLAIN_FORMAT_TEXT)
+		{
+			appendStringInfoSpaces(es->str, es->indent * 2);
+			appendStringInfoString(es->str, "worker stats:\n");
+		}
+		else
+			ExplainOpenGroup("Worker Stats", "Worker Stats", true, es);
+
+		for (i = 0; i < ns->nworkerinst; i++)
+		{
+			CdbExplain_StatInst *wsi = &ns->workerinsts[i];
+
+			if (INSTR_TIME_IS_ZERO(wsi->firststart))
+				continue;
+
+			/* Time from start of query on qDisp to this worker's first row */
+			INSTR_TIME_SET_ZERO(timediff);
+			INSTR_TIME_ACCUM_DIFF(timediff, wsi->firststart, ctx->querystarttime);
+			cdbexplain_formatSeconds(startbuf, sizeof(startbuf),
+									 INSTR_TIME_GET_DOUBLE(timediff), true);
+			cdbexplain_formatSeconds(totalbuf, sizeof(totalbuf), wsi->total, true);
+			/*
+			 * Mirror the per-slice footer's two memory figures, per worker:
+			 *   exec = this worker QE's peak per-query executor memory for the
+			 *          slice (peakmemused) -- the footer's "Executor memory";
+			 *   work = work_mem actually used at this node (workmemused) -- the
+			 *          footer's "Work_mem"; non-zero only for
+			 *          sort/hash/agg/material nodes.
+			 * Note "exec" here is the per-slice-worker peakmemused, the same
+			 * quantity the footer labels "Executor memory" -- not the per-node
+			 * execmemused field (which is zero for almost every node).
+			 */
+			cdbexplain_formatMemory(segbuf, sizeof(segbuf),
+									ns->workerinst_peakmem[i]);
+			cdbexplain_formatMemory(maxbuf, sizeof(maxbuf), wsi->workmemused);
+
+			if (es->format == EXPLAIN_FORMAT_TEXT)
+			{
+				appendStringInfoSpaces(es->str, es->indent * 2 + 2);
+				appendStringInfo(es->str,
+								 "seg%d w%d: rows=%.0f first=%s total=%s exec=%s work=%s\n",
+								 ns->workerinst_segindex[i],
+								 ns->workerinst_workidx[i],
+								 wsi->ntuples,
+								 startbuf,
+								 totalbuf,
+								 segbuf,
+								 maxbuf);
+			}
+			else
+			{
+				ExplainOpenGroup("Worker", NULL, false, es);
+				ExplainPropertyInteger("Segment index", NULL,
+									   ns->workerinst_segindex[i], es);
+				ExplainPropertyInteger("Worker", NULL,
+									   ns->workerinst_workidx[i], es);
+				ExplainPropertyFloat("Rows", NULL, wsi->ntuples, 1, es);
+				ExplainPropertyText("Time To First Result", startbuf, es);
+				ExplainPropertyText("Time To Total Result", totalbuf, es);
+				ExplainPropertyText("Executor Memory", segbuf, es);
+				ExplainPropertyText("Work Memory", maxbuf, es);
+				ExplainCloseGroup("Worker", NULL, false, es);
+			}
+		}
+
+		if (es->format != EXPLAIN_FORMAT_TEXT)
+			ExplainCloseGroup("Worker Stats", "Worker Stats", true, es);
 	}
 }								/* cdbexplain_showExecStats */
 
