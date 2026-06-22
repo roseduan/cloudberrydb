@@ -399,65 +399,6 @@ check_cluster_versions(void)
 }
 
 
-/*
- * adjust_old_cluster
- *
- * Advance old cluster checkpoint counters to be at least as large as the
- * corresponding new cluster values.  This prevents the upgraded cluster from
- * reusing XIDs, OIDs, or multixact IDs that were already assigned by the new
- * cluster.
- */
-static void
-adjust_old_cluster(void)
-{
-	ControlData *old_ctrl = &old_cluster.controldata;
-	ControlData *new_ctrl = &new_cluster.controldata;
-
-	/* Advance next global transaction ID */
-	if (new_ctrl->chkpnt_nxtgxid > old_ctrl->chkpnt_nxtgxid)
-		old_ctrl->chkpnt_nxtgxid = new_ctrl->chkpnt_nxtgxid;
-
-	/*
-	 * Advance next XID.  Epoch and xid together form a 64-bit counter, so
-	 * compare them as a combined value.
-	 */
-	{
-		uint64		old_fullxid = ((uint64) old_ctrl->chkpnt_nxtepoch << 32) |
-								  old_ctrl->chkpnt_nxtxid;
-		uint64		new_fullxid = ((uint64) new_ctrl->chkpnt_nxtepoch << 32) |
-								  new_ctrl->chkpnt_nxtxid;
-
-		if (new_fullxid > old_fullxid)
-		{
-			old_ctrl->chkpnt_nxtepoch = new_ctrl->chkpnt_nxtepoch;
-			old_ctrl->chkpnt_nxtxid = new_ctrl->chkpnt_nxtxid;
-		}
-	}
-
-	/* Advance oldest still-running XID */
-	if (new_ctrl->chkpnt_oldstxid > old_ctrl->chkpnt_oldstxid)
-		old_ctrl->chkpnt_oldstxid = new_ctrl->chkpnt_oldstxid;
-
-	/* Advance next OID */
-	if (new_ctrl->chkpnt_nxtoid > old_ctrl->chkpnt_nxtoid)
-		old_ctrl->chkpnt_nxtoid = new_ctrl->chkpnt_nxtoid;
-
-	/* Advance next multixact ID */
-	if (new_ctrl->chkpnt_nxtmulti > old_ctrl->chkpnt_nxtmulti)
-		old_ctrl->chkpnt_nxtmulti = new_ctrl->chkpnt_nxtmulti;
-
-	/*
-	 * Advance next multixact member offset.  This is a peer counter to
-	 * chkpnt_nxtmulti that tracks allocation in pg_multixact/members/.
-	 * copy_xact_xlog_xid() passes it to pg_resetwal -O, so if we leave it
-	 * behind the new cluster's offset, the upgraded cluster would overwrite
-	 * already-used multixact member slots and corrupt row-level lock data.
-	 */
-	if (new_ctrl->chkpnt_nxtmxoff > old_ctrl->chkpnt_nxtmxoff)
-		old_ctrl->chkpnt_nxtmxoff = new_ctrl->chkpnt_nxtmxoff;
-}
-
-
 void
 check_cluster_compatibility(bool live_check)
 {
@@ -468,7 +409,6 @@ check_cluster_compatibility(bool live_check)
 	{
 		get_control_data(&new_cluster, false);
 		check_control_data(&old_cluster.controldata, &new_cluster.controldata);
-		adjust_old_cluster();
 	}
 
 	if(!is_skip_target_check())
