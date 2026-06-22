@@ -99,6 +99,16 @@ public class IcebergRestController {
     private static final Logger LOG = LoggerFactory.getLogger(IcebergRestController.class);
 
     /**
+     * Recognized {@code fileIOConfig.type} values posted by the datalake_fdw
+     * consumer.  Kept as named constants so the supported storage schemes are
+     * managed in one place rather than scattered as string literals.
+     */
+    private static final String FILEIO_CONFIG_TYPE_KEY = "type";
+    private static final String FILEIO_TYPE_S3 = "s3";
+    private static final String FILEIO_TYPE_HDFS = "hdfs";
+    private static final String FILEIO_TYPE_ABFSS = "abfss";
+
+    /**
      * Check if a table exists in the given namespace
      *
      * @param prefix Catalog prefix
@@ -1485,9 +1495,9 @@ public class IcebergRestController {
      */
     private FileIO buildFileIOForCleanup(Map<String, String> cfg) {
         Configuration conf = new Configuration();
-        String type = cfg.getOrDefault("type", "s3");
+        String type = cfg.getOrDefault(FILEIO_CONFIG_TYPE_KEY, FILEIO_TYPE_S3);
 
-        if ("s3".equals(type)) {
+        if (FILEIO_TYPE_S3.equals(type)) {
             // Hadoop S3A keys.  endpoint / region / path_style_access are
             // optional; access_key_id / secret_access_key are required for
             // private buckets.
@@ -1508,7 +1518,7 @@ public class IcebergRestController {
             putIfPresent(conf, cfg, "path_style_access", "fs.s3.path.style.access");
             putIfPresent(conf, cfg, "access_key_id",     "fs.s3.access.key");
             putIfPresent(conf, cfg, "secret_access_key", "fs.s3.secret.key");
-        } else if ("hdfs".equals(type)) {
+        } else if (FILEIO_TYPE_HDFS.equals(type)) {
             putIfPresent(conf, cfg, "namenodes",          "dfs.namenode.rpc-address");
             putIfPresent(conf, cfg, "auth_method",        "hadoop.security.authentication");
             putIfPresent(conf, cfg, "rpc_protection",     "hadoop.rpc.protection");
@@ -1518,7 +1528,7 @@ public class IcebergRestController {
                          "dfs.namenode.rpc-address");
             putIfPresent(conf, cfg, "failover_proxy_provider",
                          "dfs.client.failover.proxy.provider");
-        } else if ("abfss".equals(type)) {
+        } else if (FILEIO_TYPE_ABFSS.equals(type)) {
             // Minimal abfss support; expand if/when production paths hit it.
             putIfPresent(conf, cfg, "tenant_id", "fs.azure.account.oauth2.client.endpoint");
         } else {
