@@ -1113,18 +1113,6 @@ set_frozenxids(bool minmxid_only)
 		 */
 		PQclear(executeQueryOrDie(conn, "set allow_system_table_mods=true"));
 
-		/*
-		 * Instead of assuming template0 will be frozen by initdb, its worth
-		 * making sure we freeze it here before updating the relfrozenxid
-		 * directly for the tables in pg_class and datfrozenxid for the
-		 * database in pg_database. Its fast and safe worth than assuming for
-		 * template0.
-		 */
-		if (!minmxid_only && strcmp(datallowconn, "f") == 0)
-		{
-			PQclear(executeQueryOrDie(conn, "VACUUM FREEZE"));
-		}
-
 		if (!minmxid_only)
 			/* set pg_class.relfrozenxid */
 			PQclear(executeQueryOrDie(conn,
@@ -1152,6 +1140,20 @@ set_frozenxids(bool minmxid_only)
 								  CppAsString2(RELKIND_MATVIEW) ", "
 								  CppAsString2(RELKIND_TOASTVALUE) ")",
 								  old_cluster.controldata.chkpnt_nxtmulti));
+
+		/*
+		 * Freeze template0 after lowering relfrozenxid above.
+		 * prepare_new_cluster() may have pushed relfrozenxid high via
+		 * vacuumdb --freeze, and copy_xact_xlog_xid() then resets the
+		 * xid counter to the old cluster's value.  Any UPDATE executed
+		 * after the reset (e.g. UPDATE pg_database SET datfrozenxid
+		 * above) produces tuples whose xmin is below the stale
+		 * relfrozenxid, so we must lower relfrozenxid first.
+		 */
+		if (!minmxid_only && strcmp(datallowconn, "f") == 0)
+		{
+			PQclear(executeQueryOrDie(conn, "VACUUM FREEZE"));
+		}
 		PQfinish(conn);
 
 		/* Reset datallowconn flag */
