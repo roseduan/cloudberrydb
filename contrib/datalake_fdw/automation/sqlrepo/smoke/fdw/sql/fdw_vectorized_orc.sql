@@ -1,3 +1,10 @@
+-- Normalize the execMain.c source location appended to backend error
+-- messages so the test does not break when unrelated backend changes
+-- shift line numbers.
+-- start_matchsubs
+-- m/\(execMain\.c:\d+\)/
+-- s/\(execMain\.c:\d+\)/(execMain.c:XXX)/
+-- end_matchsubs
 -- FDW Vectorized ORC Read Test
 -- Purpose: Trigger orcReadRecordBatch.cpp via vectorization extension
 -- Target: provider/orc/read/orcReadRecordBatch.cpp (0%, 240 lines)
