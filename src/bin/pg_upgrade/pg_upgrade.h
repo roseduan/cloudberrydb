@@ -209,6 +209,7 @@ typedef struct
 	char	   *relname;		/* relation name */
 	Oid			reloid;			/* relation OID */
 	char		relstorage;
+	char		relpersistence;
 	Oid 		relfilenode;	/* relation file node */
 	Oid			indtable;		/* if index, OID of its table, else 0 */
 	Oid			toastheap;		/* if toast table, OID of base table, else 0 */

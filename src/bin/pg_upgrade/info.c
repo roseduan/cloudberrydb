@@ -234,8 +234,14 @@ create_rel_filename_map(const char *old_data, const char *new_data,
 	map->natts = old_rel->natts;
 	map->type = old_rel->reltype;
 
-	/* An AO table doesn't necessarily have segment 0 at all. */
-	map->missing_seg0_ok = is_appendonly(old_rel->relstorage);
+	/*
+	 * Allow missing segment-zero file for AO tables (which may not have
+	 * one) and for UNLOGGED tables on mirrors (whose main-fork relfiles
+	 * are not replicated; the new cluster recreates them from init forks
+	 * via ResetUnloggedRelations() on startup).
+	 */
+	map->missing_seg0_ok = is_appendonly(old_rel->relstorage) ||
+		old_rel->relpersistence == 'u';
 
 	/* used only for logging and error reporting, old/new are identical */
 	map->nspname = old_rel->nspname;
@@ -462,8 +468,10 @@ get_rel_infos(ClusterInfo *cluster, DbInfo *dbinfo)
 
 	char		relstorage;
 	char		relkind;
+	char		relpersistence;
 	int			i_relstorage = -1;
 	int			i_relkind = -1;
+	int			i_relpersistence = -1;
 
 	query[0] = '\0';			/* initialize query string to empty */
 
@@ -550,6 +558,7 @@ get_rel_infos(ClusterInfo *cluster, DbInfo *dbinfo)
 	snprintf(query + strlen(query), sizeof(query) - strlen(query),
 			 "SELECT all_rels.*, n.nspname, c.relname, "
 			 "  %s as relstorage, c.relkind, "
+			 "  c.relpersistence, "
 			 "  c.relfilenode, c.reltablespace, "
 			 "  pg_catalog.pg_tablespace_location(t.oid) AS spclocation "
 			 "FROM (SELECT * FROM regular_heap "
@@ -593,6 +602,7 @@ get_rel_infos(ClusterInfo *cluster, DbInfo *dbinfo)
 	i_relname = PQfnumber(res, "relname");
 	i_relstorage = PQfnumber(res, "relstorage");
 	i_relkind = PQfnumber(res, "relkind");
+	i_relpersistence = PQfnumber(res, "relpersistence");
 	i_relfilenode = PQfnumber(res, "relfilenode");
 	i_reltablespace = PQfnumber(res, "reltablespace");
 	i_spclocation = PQfnumber(res, "spclocation");
@@ -662,6 +672,9 @@ get_rel_infos(ClusterInfo *cluster, DbInfo *dbinfo)
 		/* Collect extra information about append-only tables */
 		relstorage = PQgetvalue(res, relnum, i_relstorage) [0];
 		curr->relstorage = relstorage;
+
+		relpersistence = PQgetvalue(res, relnum, i_relpersistence) [0];
+		curr->relpersistence = relpersistence;
 
 		relkind = PQgetvalue(res, relnum, i_relkind) [0];
 

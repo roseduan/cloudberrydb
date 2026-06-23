@@ -253,8 +253,8 @@ transfer_relfile_segment(int segno, FileNameMap *map,
 			type_suffix,
 			extent_suffix);
 
-	/* Is it an extent, fsm, or vm file? */
-	if (type_suffix[0] != '\0' || segno != 0)
+	/* Is it an extent, fsm, vm, or a seg0 that may legitimately be absent? */
+	if (type_suffix[0] != '\0' || segno != 0 || map->missing_seg0_ok)
 	{
 		/* Did file open fail? */
 		if (stat(old_file, &statbuf) != 0)
