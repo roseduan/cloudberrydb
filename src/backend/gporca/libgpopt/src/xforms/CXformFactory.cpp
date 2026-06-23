@@ -328,6 +328,14 @@ CXformFactory::Instantiate()
 	Add(GPOS_NEW(m_mp) CXformSplitWindowFunc(m_mp));
 	Add(GPOS_NEW(m_mp) CXformImplementParallelSequenceProject(m_mp));
 
+	// Right semi/anti hash join xforms (Mark Join) -- kept at the END of the
+	// Add list to match the enum-end positioning in CXform.h (preserves ABI
+	// vs. pre-existing IDs; same lesson as cloudberrydb a869ab338ad).
+	Add(GPOS_NEW(m_mp) CXformLeftSemiJoin2RightSemiHashJoin(m_mp));
+	Add(GPOS_NEW(m_mp) CXformLeftAntiSemiJoin2RightAntiSemiHashJoin(m_mp));
+	Add(GPOS_NEW(m_mp) CXformLeftSemiJoin2ParallelRightSemiHashJoin(m_mp));
+	Add(GPOS_NEW(m_mp) CXformLeftAntiSemiJoin2ParallelRightAntiSemiHashJoin(m_mp));
+
 	GPOS_ASSERT(nullptr != m_rgpxf[CXform::ExfSentinel - 1] &&
 				"Not all xforms have been instantiated");
 }

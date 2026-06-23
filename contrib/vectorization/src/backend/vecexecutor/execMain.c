@@ -1248,13 +1248,26 @@ expr_to_arrow_expression(Expr *node, PlanBuildContext *pcontext)
 				else if (pcontext->is_nestloopjoin || (pcontext->is_hashjoin && pcontext->is_hashjoin_after_node))
 				{
 					if (pcontext->inputschema)
-						attname = GetSchemaNameByVarNo(pcontext->inputschema, var->varattno, var->varno);
-					else 
 					{
+						/*
+						 * After the hashjoin node, resolve Var against the
+						 * join output schema.  OUTER_VAR -> LEFT_PREFIX,
+						 * INNER_VAR -> RIGHT_PREFIX (standard mapping).
+						 */
+						int effective_varno = var->varno;
+						attname = GetSchemaNameByVarNo(pcontext->inputschema, var->varattno, effective_varno);
+					}
+					else
+					{
+						/*
+						 * Before the hashjoin output schema is set,
+						 * resolve against per-side proj schemas.
+						 * OUTER_VAR -> left_proj, INNER_VAR -> right_proj.
+						 */
 						Assert(pcontext->left_proj_schema && pcontext->right_proj_schema);
 						if (var->varno == OUTER_VAR)
 							attname = GetSchemaName(pcontext->left_proj_schema, var->varattno, pcontext->map);
-						else 
+						else
 							attname = GetSchemaName(pcontext->right_proj_schema, var->varattno, pcontext->map);
 					}
 				}
@@ -1264,6 +1277,61 @@ expr_to_arrow_expression(Expr *node, PlanBuildContext *pcontext)
 				} 
 				else
 					attname = GetSchemaName(pcontext->inputschema, var->varattno, pcontext->map);
+				/*
+				 * RIGHT_SEMI / RIGHT_ANTI hash join: Arrow's Mark Join emits
+				 * only the build (Arrow right / PG inner) side, so the join
+				 * output schema has no LEFT_PREFIX columns.  A surviving
+				 * OUTER_VAR in the targetlist can therefore only be a hash key
+				 * whose value is, by the equijoin condition, identical to the
+				 * matching inner key.  Map it to the corresponding
+				 * right_joinqual_N column that the build-side projection
+				 * already carries.
+				 */
+				if (attname == NULL && var->varno == OUTER_VAR &&
+					pcontext->is_hashjoin && pcontext->is_hashjoin_after_node &&
+					pcontext->inputschema != NULL &&
+					IsA(pcontext->planstate, HashJoinState))
+				{
+					HashJoinState *hjs = (HashJoinState *) pcontext->planstate;
+
+					if (hjs->js.jointype == JOIN_RIGHT_SEMI ||
+						hjs->js.jointype == JOIN_RIGHT_ANTI)
+					{
+						ListCell   *lc;
+						int			idx = 0;
+
+						foreach(lc, hjs->hj_OuterHashKeys)
+						{
+							ExprState  *keystate = (ExprState *) lfirst(lc);
+
+							if (keystate != NULL && IsA(keystate->expr, Var) &&
+								((Var *) keystate->expr)->varattno == var->varattno)
+							{
+								/*
+								 * Build-side projection names the i-th hash key
+								 * "right_joinqual_i" (see build_join_project_
+								 * options).  The equijoin guarantees this column
+								 * equals the requested probe-side key, so it is
+								 * the correct substitute in the build-only output.
+								 */
+								char	   *jq = psprintf("%sjoinqual_%d",
+													  RIGHT_PREFIX, idx);
+								g_autoptr(GArrowField) f =
+									garrow_schema_get_field_by_name(pcontext->inputschema, jq);
+
+								if (f != NULL)
+									attname = garrow_field_get_name(f);
+								pfree(jq);
+								break;
+							}
+							idx++;
+						}
+					}
+				}
+				if (attname == NULL)
+					elog(ERROR, "failed to resolve Var (varno=%d varattno=%d) "
+						 "to an arrow field in the join output schema",
+						 var->varno, var->varattno);
 				expr = GARROW_EXPRESSION(garrow_field_expression_new(attname, &error));
 				if (error)
 					elog(ERROR, "convert PG Var(name: %s) to arrow expression failed: %s",
@@ -1755,6 +1823,18 @@ BuildVecPlan(PlanState *planstate, VecExecuteState *estate)
 		break;
 		case T_WindowHashAggState:
 		{
+			/*
+			 * Arrow's ParallelWindowGroupByNode maintains thread-local
+			 * sink state and invokes PG callbacks concurrently from its
+			 * internal executor.  Running it inside a parallel Arrow
+			 * pipeline (pool_threads>0) layers a second source of PG
+			 * callback concurrency on top, which races with the window
+			 * node's own thread pool and SIGSEGVs (reproducible on Q17-
+			 * shaped rewrites with pool_threads=8).  Force this plan to
+			 * run single-threaded to avoid the interaction.
+			 */
+			support_parallel = false;
+
 			if (!outerPlanState(planstate))
 				elog(ERROR, "WindowHashAgg node can't be leaf in vector plan");
 			pcontext.inputschema = GetSchemaFromSlot(
@@ -2030,7 +2110,7 @@ BuildJoinPlan(PlanBuildContext *pcontext, VecExecuteState *estate)
 		if (nlstate->js.joinqual)
 			joinqual = (List *) nlstate->js.joinqual->expr;
 	}
-	else 
+	else
 	{
 		HashJoinState *hjstate = (HashJoinState *) pcontext->planstate;
 		HashState *hstate = (HashState *) innerPlanState(pcontext->planstate);
@@ -2040,22 +2120,36 @@ BuildJoinPlan(PlanBuildContext *pcontext, VecExecuteState *estate)
 		innerHashKeys = hstate->hashkeys;
 	}
 
+	/*
+	 * Arrow Acero RIGHT_SEMI / RIGHT_ANTI: build hash table from inputs[1]
+	 * (right), probe from inputs[0] (left), emit from inputs[1].
+	 *
+	 * Both ORCA (DXL translator swaps children in CTranslatorDXLToPlStmt.cpp)
+	 * and the PG planner produce the same canonical layout: outer = probe
+	 * side, inner = Hash(build/emit side).  The standard mapping (outer->Arrow
+	 * left, inner->Arrow right) already puts the build side at inputs[1], so no
+	 * swap is needed in the vectorization layer.
+	 */
+	PlanState *arrow_left_plan  = outerPlanState(planstate);
+	PlanState *arrow_right_plan = innerPlanState(planstate);
+	List *arrow_left_keys  = outerHashKeys;
+	List *arrow_right_keys = innerHashKeys;
 
-	/* build left tree */
-	pcontext->inputschema = GetSchemaFromSlot(outerPlanState(planstate)->ps_ResultTupleSlot);
+	/* build left tree (= Arrow left input) */
+	pcontext->inputschema = GetSchemaFromSlot(arrow_left_plan->ps_ResultTupleSlot);
 	left_fields = garrow_schema_get_fields(pcontext->inputschema);
 	pcontext->left_in_schema = garrow_schema_new(left_fields);
 	pcontext->is_left_schema = true;
 	left_source_node = BuildSource(pcontext);
-	left_proj_node = BuildJoinProject(outerHashKeys, left_source_node, pcontext);
+	left_proj_node = BuildJoinProject(arrow_left_keys, left_source_node, pcontext);
 
-	/* build right tree */
-	pcontext->inputschema = GetSchemaFromSlot((innerPlanState(planstate))->ps_ResultTupleSlot);
+	/* build right tree (= Arrow right input; build side for RIGHT_SEMI/ANTI) */
+	pcontext->inputschema = GetSchemaFromSlot(arrow_right_plan->ps_ResultTupleSlot);
 	right_fields = garrow_schema_get_fields(pcontext->inputschema);
 	pcontext->right_in_schema = garrow_schema_new(right_fields);
 	pcontext->is_left_schema = false;
 	right_source_node = BuildSource(pcontext);
-	right_proj_node = BuildJoinProject(innerHashKeys, right_source_node, pcontext);
+	right_proj_node = BuildJoinProject(arrow_right_keys, right_source_node, pcontext);
 
 	/* build hashjoin tree */
 	pcontext->inputschema = NULL;
@@ -2083,6 +2177,27 @@ BuildJoinPlan(PlanBuildContext *pcontext, VecExecuteState *estate)
 
 	proj_node = BuildProject(targetList, mergeQual, join_node, pcontext);
 	BuildSink(proj_node, estate, pcontext);
+
+	/*
+	 * When targetList is NULL (semi/anti joins used only for count(*)),
+	 * the PG result slot TupleDesc has 0 attributes → TupDescToSchema
+	 * creates a "dummy" null-type schema.  Parent nodes (e.g. AggState)
+	 * that call GetSchemaFromSlot on our result slot then get the wrong
+	 * schema.  Propagate the actual join output schema to the slot so
+	 * the parent builds its Arrow plan against the real column types.
+	 */
+	if (!targetList)
+	{
+		GArrowSchema *join_out = garrow_execute_node_get_output_schema(join_node);
+		VecTupleTableSlot *vslot = (VecTupleTableSlot *)
+			planstate->ps_ResultTupleSlot;
+		if (TTS_IS_VECTOR(&vslot->base))
+		{
+			garrow_store_ptr(vslot->vec_schema.schema, join_out);
+			vslot->vec_schema.schema_rebuilt = true;
+		}
+		g_object_unref(join_out);
+	}
 
 	ARROW_FREE(GArrowSchema, &pcontext->left_in_schema);
 	ARROW_FREE(GArrowSchema, &pcontext->right_in_schema);
@@ -2544,7 +2659,14 @@ BuildSource(PlanBuildContext *pcontext)
 		case T_HashJoinState:
 		case T_NestLoopState:
 			callback = (GetNextCallback) get_current_next_batch;
-			if (pcontext->is_left_schema) 
+			/*
+			 * is_left_schema is in Arrow's frame (true = Arrow LEFT input).
+			 * Normally Arrow LEFT input ← PG outer subtree and Arrow RIGHT
+			 * input ← PG inner subtree. RIGHT_SEMI / RIGHT_ANTI swap (see
+			 * BuildJoinPlan) feeds PG inner to Arrow LEFT and PG outer to
+			 * Arrow RIGHT, so flip the lookup here too.
+			 */
+			if (pcontext->is_left_schema)
 				pstate = outerPlanState(pcontext->planstate);
 			else
 				pstate = innerPlanState(pcontext->planstate);
@@ -4423,6 +4545,33 @@ to_arrow_jointype(JoinType type, List *targetlist, List *joinqual)
 		}
 		case JOIN_LASJ_NOTIN:
 			return GARROW_LASJ_NOTIN_JOIN;
+
+		/*
+		 * Right-flipped semi/anti hash joins (PG18 JOIN_RIGHT_SEMI /
+		 * JOIN_RIGHT_ANTI). Physically: build = LHS (left subtree), probe =
+		 * RHS (right subtree). Arrow Acero's RIGHT_SEMI / RIGHT_ANTI
+		 * algorithm puts build on its `right input` and emits right-side
+		 * (build) rows after finalize -- so we map PG RIGHT_SEMI to Arrow
+		 * RIGHT_SEMI, and the caller is responsible for SWAPPING the left/
+		 * right plan subtrees + hash keys when feeding Arrow.
+		 *
+		 * The Mark Join algorithm itself (probe sets has_match visited bit,
+		 * finalize scans HT emitting visited (SEMI) or unvisited (ANTI)
+		 * build rows) is implemented upstream in
+		 * Apache Arrow 5.x (swiss_join.cc:2252 FilterRightSemiAnti +
+		 * :2942-3019 ScanTask). Zero changes needed inside Arrow itself.
+		 */
+		case JOIN_RIGHT_SEMI:
+			return GARROW_RIGHT_SEMI_JOIN;
+		case JOIN_RIGHT_ANTI:
+			return GARROW_RIGHT_ANTI_JOIN;
+		case JOIN_RIGHT_ANTI_NOTIN:
+			/* ORCA cost model (M3) returns ∞ for this op -- planner should
+			 * never produce it. Hard-fail if it does to catch regressions. */
+			elog(ERROR, "JOIN_RIGHT_ANTI_NOTIN not implemented in vec engine "
+						"(M3 cost should have suppressed it)");
+			break;	/* unreachable, silence -Werror=implicit-fallthrough */
+
 		default:
 			elog(ERROR, "join type not supported by arrow join %d", type);
 	}
@@ -4487,9 +4636,18 @@ BuildHashjoin(PlanBuildContext *pcontext, GArrowExecuteNode *left, GArrowExecute
 
 	node = (HashJoinState *) pcontext->planstate;
 	vnode = (VecHashJoinState *) node;
+	type = to_arrow_jointype(node->js.jointype, node->js.ps.plan->targetlist, joinqual);
+
+	/*
+	 * NOTE: for RIGHT_SEMI/ANTI, the inputs+hashkeys are already swapped at
+	 * the BuildJoinPlan top level (see swap_for_right_semi below) -- by the
+	 * time we reach BuildHashjoin, 'left' is the Arrow probe input and
+	 * 'right' is the Arrow build input (= PG LHS), with column naming
+	 * (LEFT_ / RIGHT_ prefixes) and hashkeys all consistent with the
+	 * post-swap layout. We must NOT swap again here.
+	 */
 	left_schema = garrow_execute_node_get_output_schema(left);
 	right_schema = garrow_execute_node_get_output_schema(right);
-	type = to_arrow_jointype(node->js.jointype, node->js.ps.plan->targetlist, joinqual);
 	lkeys = garrow_schema_get_fields(left_schema);
 	rkeys = garrow_schema_get_fields(right_schema);
 	pcontext->left_proj_schema = left_schema;
@@ -5352,6 +5510,14 @@ PostBuildVecPlan(PlanState *ps, VecExecuteState *estate)
 			list_free(child_estates);
 			return;
 		}
+
+		/*
+		 * No child-plan swap needed for RIGHT_SEMI/ANTI.  Both ORCA
+		 * (CTranslatorDXLToPlStmt swaps DXL children) and the PG planner
+		 * produce PG-canonical layout: outer=probe, inner=Hash(build/emit).
+		 * Standard merge order (left_plan=lefttree→inputs[0], right_plan=
+		 * righttree→inputs[1]) already puts build at Arrow right (inputs[1]).
+		 */
 
 		/* garrow_list_append_ptr steals the ref from each autoptr. */
 		child_plans = garrow_list_append_ptr(child_plans, left_plan);

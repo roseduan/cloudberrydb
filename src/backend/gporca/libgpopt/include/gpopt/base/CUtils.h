@@ -599,6 +599,9 @@ public:
 	// check if a given operator is an anti-semi hash join
 	static BOOL FAntiSemiHashJoin(COperator *pop);
 
+	// check if a given operator is a right-semi or right-anti-semi hash join
+	static BOOL FRightSemiHashJoin(COperator *pop);
+
 	// check if a given operator is a correlated nested loops join
 	static BOOL FCorrelatedNLJoin(COperator *pop);
 

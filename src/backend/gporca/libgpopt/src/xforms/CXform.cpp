@@ -217,6 +217,16 @@ CXform::PbsHashJoinXforms(CMemoryPool *mp)
 			ExfLeftJoin2RightJoin));  // Right joins are only used with hash joins, so disable this too
 	(void) pbs->ExchangeSet(
 		GPOPT_DISABLE_XFORM_TF(CXform::ExfInnerJoin2ParallelHashJoin));
+	// The build-side-flipped right semi/anti hash joins are hash joins too,
+	// so they must be disabled when optimizer_enable_hashjoin is off.
+	(void) pbs->ExchangeSet(
+		GPOPT_DISABLE_XFORM_TF(CXform::ExfLeftSemiJoin2RightSemiHashJoin));
+	(void) pbs->ExchangeSet(
+		GPOPT_DISABLE_XFORM_TF(CXform::ExfLeftAntiSemiJoin2RightAntiSemiHashJoin));
+	(void) pbs->ExchangeSet(GPOPT_DISABLE_XFORM_TF(
+		CXform::ExfLeftSemiJoin2ParallelRightSemiHashJoin));
+	(void) pbs->ExchangeSet(GPOPT_DISABLE_XFORM_TF(
+		CXform::ExfLeftAntiSemiJoin2ParallelRightAntiSemiHashJoin));
 	return pbs;
 }
 

@@ -92,6 +92,8 @@ OBJS        = CDecorrelator.o \
               CXformLeftSemiJoin2ParallelHashJoin.o \
               CXformLeftAntiSemiJoin2ParallelHashJoin.o \
               CXformLeftAntiSemiJoinNotIn2ParallelHashJoin.o \
+              CXformLeftSemiJoin2ParallelRightSemiHashJoin.o \
+              CXformLeftAntiSemiJoin2ParallelRightAntiSemiHashJoin.o \
               CXformRightOuterJoin2ParallelHashJoin.o \
               CXformFullOuterJoin2ParallelHashJoin.o \
               CXformInsert2DML.o \
@@ -123,6 +125,8 @@ OBJS        = CDecorrelator.o \
               CXformLeftSemiApplyWithExternalCorrs2InnerJoin.o \
               CXformLeftSemiJoin2CrossProduct.o \
               CXformLeftSemiJoin2HashJoin.o \
+              CXformLeftSemiJoin2RightSemiHashJoin.o \
+              CXformLeftAntiSemiJoin2RightAntiSemiHashJoin.o \
               CXformLeftSemiJoin2InnerJoin.o \
               CXformLeftSemiJoin2InnerJoinUnderGb.o \
               CXformLeftSemiJoin2NLJoin.o \

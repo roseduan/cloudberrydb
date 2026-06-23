@@ -262,6 +262,19 @@ public:
 		ExfFullJoinCommutativity,
 		ExfSplitWindowFunc,
 		ExfImplementParallelSequenceProject,
+
+		/*
+		 * Right semi/anti hash join xforms (Mark Join, PG18 backport).
+		 * Kept at the END of this enum to preserve the integer values of
+		 * pre-existing IDs -- inserting in the middle breaks ABI (CBitSet
+		 * / m_lastAddedOrSkippedXformId sequence checks in CXformFactory).
+		 * Same lesson as cloudberrydb commit a869ab338ad for PG JoinType.
+		 */
+		ExfLeftSemiJoin2RightSemiHashJoin,
+		ExfLeftAntiSemiJoin2RightAntiSemiHashJoin,
+		ExfLeftSemiJoin2ParallelRightSemiHashJoin,
+		ExfLeftAntiSemiJoin2ParallelRightAntiSemiHashJoin,
+
 		ExfInvalid,
 		ExfSentinel = ExfInvalid
 	};

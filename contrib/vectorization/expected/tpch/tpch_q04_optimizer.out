@@ -33,17 +33,15 @@ order by
                      Hash Key: orders.o_orderpriority
                      ->  Vec Streaming Vec Partial Vec HashAggregate
                            Group Key: orders.o_orderpriority
-                           ->  Vec Hash Join
-                                 Hash Cond: (lineitem.l_orderkey = orders.o_orderkey)
-                                 ->  Vec HashAggregate
-                                       Group Key: lineitem.l_orderkey
-                                       ->  Vec Seq Scan on lineitem
-                                             Filter: (l_commitdate < l_receiptdate)
+                           ->  Vec Hash Right Semi Join
+                                 Hash Cond: (orders.o_orderkey = lineitem.l_orderkey)
+                                 ->  Vec Seq Scan on lineitem
+                                       Filter: (l_commitdate < l_receiptdate)
                                  ->  Vec Hash
                                        ->  Vec Seq Scan on orders
                                              Filter: ((o_orderdate >= '07-01-1996'::date) AND (o_orderdate < 'Tue Oct 01 00:00:00 1996'::timestamp without time zone))
  Optimizer: GPORCA
-(20 rows)
+(18 rows)
 
 select
         o_orderpriority,

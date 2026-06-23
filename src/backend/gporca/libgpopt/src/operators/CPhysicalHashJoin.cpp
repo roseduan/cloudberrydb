@@ -1410,8 +1410,20 @@ CPhysicalHashJoin::PppsRequiredForJoins(CMemoryPool *mp,
 	// partitions: rows from partitions with no inner match should all
 	// appear in the result.  Applying DPE (partition selector) on the
 	// outer side would incorrectly prune those partitions away.
+	//
+	// Right-semi / right-anti hash joins flip the build/probe roles: the
+	// build side is the outer (left) child, executed BEFORE the probe (inner)
+	// child.  The DPE logic below assumes the standard orientation (the
+	// partitioned consumer on the outer/probe side, with the selector
+	// propagated from the inner/build side that runs first).  With the roles
+	// flipped the partition selector would run AFTER the partitioned table it
+	// is meant to prune, triggering the runtime warning "partition selector was
+	// not fully executed" and scanning every partition anyway.  Skip DPE for
+	// these joins; ORCA then prefers the (left) semi alternative which can
+	// prune correctly.
 	CPartitionPropagationSpec *pps_result;
-	if (ulOptReq == 0 && !CUtils::FAntiSemiHashJoin(exprhdl.Pop()))
+	if (ulOptReq == 0 && !CUtils::FAntiSemiHashJoin(exprhdl.Pop()) &&
+		!CUtils::FRightSemiHashJoin(exprhdl.Pop()))
 	{
 		// DPE: create a new request
 		pps_result = GPOS_NEW(mp) CPartitionPropagationSpec(mp);

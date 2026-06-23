@@ -61,6 +61,8 @@ CLogicalLeftSemiJoin::PxfsCandidates(CMemoryPool *mp) const
 	(void) xform_set->ExchangeSet(CXform::ExfLeftSemiJoin2NLJoin);
 	(void) xform_set->ExchangeSet(CXform::ExfLeftSemiJoin2HashJoin);
 	(void) xform_set->ExchangeSet(CXform::ExfLeftSemiJoin2ParallelHashJoin);
+	(void) xform_set->ExchangeSet(CXform::ExfLeftSemiJoin2RightSemiHashJoin);
+	(void) xform_set->ExchangeSet(CXform::ExfLeftSemiJoin2ParallelRightSemiHashJoin);
 
 	return xform_set;
 }

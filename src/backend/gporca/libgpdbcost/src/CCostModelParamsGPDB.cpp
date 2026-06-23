@@ -200,6 +200,7 @@ const CDouble CCostModelParamsGPDB::DScalarFuncCost(1.0e-04);
 // 'Initial cost' mapped to DInitScanFacorVal (431.0). It is not present in the
 // "Index scan costing".
 const CDouble CCostModelParamsGPDB::DIndexCostConversionFactor = 1.0e-04;
+
 #define GPOPT_COSTPARAM_NAME_MAX_LENGTH 80
 
 // parameter names in the same order of param enumeration

@@ -231,6 +231,22 @@ private:
 									   const CCostModelGPDB *pcmgpdb,
 									   const SCostingInfo *pci);
 
+	// cost of right semi hash join (build = outer/left, Mark Join algorithm).
+	// Reuses CostHashJoin with build/probe input roles swapped, plus a
+	// finalize-phase scan cost. Returns ∞ when vec=off (M5 deferred).
+	static CCost CostRightSemiHashJoin(CMemoryPool *mp,
+									   CExpressionHandle &exprhdl,
+									   const CCostModelGPDB *pcmgpdb,
+									   const SCostingInfo *pci);
+
+	// cost of right anti semi hash join (build = outer/left, emit unvisited).
+	// Same skeleton as CostRightSemiHashJoin, finalize accounts for unmatched
+	// rows ≈ build_rows - matched_rows.
+	static CCost CostRightAntiSemiHashJoin(CMemoryPool *mp,
+										   CExpressionHandle &exprhdl,
+										   const CCostModelGPDB *pcmgpdb,
+										   const SCostingInfo *pci);
+
 	// cost of merge join
 	static CCost CostMergeJoin(CMemoryPool *mp, CExpressionHandle &exprhdl,
 							   const CCostModelGPDB *pcmgpdb,

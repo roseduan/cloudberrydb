@@ -509,6 +509,8 @@ CTranslatorExprToDXL::CreateDXLNode(CExpression *pexpr,
 		case COperator::EopPhysicalLeftAntiSemiHashJoin:
 		case COperator::EopPhysicalLeftAntiSemiHashJoinNotIn:
 		case COperator::EopPhysicalRightOuterHashJoin:
+		case COperator::EopPhysicalRightSemiHashJoin:
+		case COperator::EopPhysicalRightAntiSemiHashJoin:
 		case COperator::EopPhysicalFullHashJoin:
 			dxlnode = CTranslatorExprToDXL::PdxlnHashJoin(
 				pexpr, colref_array, pdrgpdsBaseTables, pulNonGatherMotions,
@@ -520,6 +522,8 @@ CTranslatorExprToDXL::CreateDXLNode(CExpression *pexpr,
 		case COperator::EopPhysicalParallelLeftAntiSemiHashJoinNotIn:
 		case COperator::EopPhysicalParallelLeftAntiSemiHashJoin:
 		case COperator::EopPhysicalParallelRightOuterHashJoin:
+		case COperator::EopPhysicalParallelRightSemiHashJoin:
+		case COperator::EopPhysicalParallelRightAntiSemiHashJoin:
 		case COperator::EopPhysicalParallelFullHashJoin:
 			dxlnode = CTranslatorExprToDXL::PdxlnParallelHashJoin(
 				pexpr, colref_array, pdrgpdsBaseTables, pulNonGatherMotions,
@@ -6066,6 +6070,14 @@ CTranslatorExprToDXL::EdxljtHashJoin(CPhysicalHashJoin *popHJ)
 		case COperator::EopPhysicalParallelLeftAntiSemiHashJoinNotIn:
 		case COperator::EopPhysicalLeftAntiSemiHashJoinNotIn:
 			return EdxljtLeftAntiSemijoinNotIn;
+
+		case COperator::EopPhysicalParallelRightSemiHashJoin:
+		case COperator::EopPhysicalRightSemiHashJoin:
+			return EdxljtRightSemijoin;
+
+		case COperator::EopPhysicalParallelRightAntiSemiHashJoin:
+		case COperator::EopPhysicalRightAntiSemiHashJoin:
+			return EdxljtRightAntiSemijoin;
 
 		case COperator::EopPhysicalParallelFullHashJoin:
 		case COperator::EopPhysicalFullHashJoin:

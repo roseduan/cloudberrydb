@@ -174,6 +174,17 @@ ExecInitVecHashJoin(HashJoin *node, EState *estate, int eflags)
 			hjstate->hj_NullInnerTupleSlot =
 				ExecInitNullTupleSlot(estate, innerDesc, &TTSOpsVecTuple);
 			break;
+		case JOIN_RIGHT_SEMI:
+		case JOIN_RIGHT_ANTI:
+			/* Mark Join: physically build=outer/LHS, probe=inner/RHS, emit
+			 * outer rows in finalize. Arrow's RIGHT_SEMI/ANTI handles all
+			 * the bookkeeping; on PG side we don't need any null tuple slot
+			 * since the build side is non-nullable wrt. join (we only emit
+			 * existing build rows that have / don't have matches). The
+			 * canonical outer=probe/inner=build layout is produced by the ORCA
+			 * DXL translator (and the PG planner); the vectorization layer
+			 * consumes it directly without an extra child swap. */
+			break;
 		default:
 			elog(ERROR, "unrecognized join type: %d",
 				 (int) node->join.jointype);
@@ -257,7 +268,7 @@ ExecVecHashJoin(PlanState *pstate)
 
 		TupleTableSlot *slot = ExecuteVecPlan(&vnode->estate);
 		if (TupIsNull(slot))
-			return slot;	
+			return slot;
 
 		rows = GetNumRows(slot);
 		if (rows <= max_batch_size || vnode->skip)

@@ -1285,6 +1285,26 @@ CUtils::FAntiSemiHashJoin(COperator *pop)
 			eopid == COperator::EopPhysicalParallelLeftAntiSemiHashJoinNotIn);
 }
 
+// check if a given operator is a right-semi or right-anti-semi hash join
+// (including parallel variants).  These joins flip the build/probe roles
+// relative to the standard orientation: build = outer (left) child, probe =
+// inner (right) child.  Because the build side is executed first, a partition
+// selector placed on the probe (inner) side runs AFTER the partitioned table
+// on the build (outer) side, so dynamic partition elimination cannot prune it
+// ("partition selector was not fully executed").  Callers use this to skip DPE
+// for these joins, mirroring the anti-semi handling above.
+BOOL
+CUtils::FRightSemiHashJoin(COperator *pop)
+{
+	GPOS_ASSERT(nullptr != pop);
+
+	COperator::EOperatorId eopid = pop->Eopid();
+	return (eopid == COperator::EopPhysicalRightSemiHashJoin ||
+			eopid == COperator::EopPhysicalRightAntiSemiHashJoin ||
+			eopid == COperator::EopPhysicalParallelRightSemiHashJoin ||
+			eopid == COperator::EopPhysicalParallelRightAntiSemiHashJoin);
+}
+
 // check if a given operator is a correlated nested loops join
 BOOL
 CUtils::FCorrelatedNLJoin(COperator *pop)

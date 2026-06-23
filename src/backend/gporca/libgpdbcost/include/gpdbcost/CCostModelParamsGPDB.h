@@ -108,6 +108,7 @@ public:
 		EcpIndexOnlyScanTupCostUnit,  // index only scan cost per tuple retrieving
 
 		EcpIndexCostConversionFactor,  // Cost conversion factor for Index & Index only scans
+
 		EcpSentinel
 	};
 

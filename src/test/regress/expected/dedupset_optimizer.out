@@ -1,14 +1,25 @@
 SET optimizer_trace_fallback = on;
 -- start_ignore
 drop table if exists t1;
+NOTICE:  table "t1" does not exist, skipping
 drop table if exists t2;
+NOTICE:  table "t2" does not exist, skipping
 drop table if exists t3;
+NOTICE:  table "t3" does not exist, skipping
 drop table if exists pt1;
+NOTICE:  table "pt1" does not exist, skipping
 drop table if exists pt2;
+NOTICE:  table "pt2" does not exist, skipping
 -- end_ignore
 create table t1(v1 int, v2 int);
+NOTICE:  Table doesn't have 'DISTRIBUTED BY' clause -- Using column named 'v1' as the Apache Cloudberry data distribution key for this table.
+HINT:  The 'DISTRIBUTED BY' clause determines the distribution of data. Make sure column(s) chosen are the optimal data distribution key to minimize skew.
 create table t2(v3 int, v4 int);
+NOTICE:  Table doesn't have 'DISTRIBUTED BY' clause -- Using column named 'v3' as the Apache Cloudberry data distribution key for this table.
+HINT:  The 'DISTRIBUTED BY' clause determines the distribution of data. Make sure column(s) chosen are the optimal data distribution key to minimize skew.
 create table t3(v5 int, v6 int);
+NOTICE:  Table doesn't have 'DISTRIBUTED BY' clause -- Using column named 'v5' as the Apache Cloudberry data distribution key for this table.
+HINT:  The 'DISTRIBUTED BY' clause determines the distribution of data. Make sure column(s) chosen are the optimal data distribution key to minimize skew.
 insert into t1 values(generate_series(1, 100), generate_series(1, 100));
 insert into t2 values(generate_series(1, 100), generate_series(1, 100));
 insert into t3 values(generate_series(1, 100), generate_series(1, 100));
@@ -16,18 +27,30 @@ CREATE TABLE pt1 (
     v1 INT,
     v2 INT
 ) PARTITION BY RANGE (v1);
+NOTICE:  Table doesn't have 'DISTRIBUTED BY' clause -- Using column named 'v1' as the Apache Cloudberry data distribution key for this table.
+HINT:  The 'DISTRIBUTED BY' clause determines the distribution of data. Make sure column(s) chosen are the optimal data distribution key to minimize skew.
 CREATE TABLE pt1_p1 PARTITION OF pt1 FOR VALUES FROM (0) TO (20);
+NOTICE:  table has parent, setting distribution columns to match parent table
 CREATE TABLE pt1_p2 PARTITION OF pt1 FOR VALUES FROM (20) TO (40);
+NOTICE:  table has parent, setting distribution columns to match parent table
 CREATE TABLE pt1_p3 PARTITION OF pt1 FOR VALUES FROM (40) TO (60);
+NOTICE:  table has parent, setting distribution columns to match parent table
 CREATE TABLE pt1_p4 PARTITION OF pt1 FOR VALUES FROM (60) TO (400);
+NOTICE:  table has parent, setting distribution columns to match parent table
 CREATE TABLE pt2 (
     v3 INT,
     v4 INT
 ) PARTITION BY RANGE (v3);
+NOTICE:  Table doesn't have 'DISTRIBUTED BY' clause -- Using column named 'v3' as the Apache Cloudberry data distribution key for this table.
+HINT:  The 'DISTRIBUTED BY' clause determines the distribution of data. Make sure column(s) chosen are the optimal data distribution key to minimize skew.
 CREATE TABLE pt2_p1 PARTITION OF pt2 FOR VALUES FROM (0) TO (20);
+NOTICE:  table has parent, setting distribution columns to match parent table
 CREATE TABLE pt2_p2 PARTITION OF pt2 FOR VALUES FROM (20) TO (40);
+NOTICE:  table has parent, setting distribution columns to match parent table
 CREATE TABLE pt2_p3 PARTITION OF pt2 FOR VALUES FROM (40) TO (60);
+NOTICE:  table has parent, setting distribution columns to match parent table
 CREATE TABLE pt2_p4 PARTITION OF pt2 FOR VALUES FROM (60) TO (400);
+NOTICE:  table has parent, setting distribution columns to match parent table
 insert into pt1 values(generate_series(1, 100), generate_series(1, 100));
 insert into pt2 values(generate_series(1, 100), generate_series(1, 100));
 analyze t1;
@@ -51,7 +74,7 @@ explain verbose select * from t1 where v1 in (select v3 from t2) and v1 in (sele
                ->  Seq Scan on public.t2  (cost=0.00..431.00 rows=4 width=4)
                      Output: t2.v3
                      Filter: (t2.v3 < 10)
- Settings: enable_parallel = 'off', optimizer = 'on'
+ Settings: optimizer = 'on'
  Optimizer: GPORCA
 (14 rows)
 
@@ -70,7 +93,7 @@ explain verbose select * from t1 where v1 in (select v3 from t2 where v3 < 10) a
                ->  Seq Scan on public.t2  (cost=0.00..431.00 rows=4 width=4)
                      Output: t2.v3
                      Filter: (t2.v3 < 10)
- Settings: enable_parallel = 'off', optimizer = 'on'
+ Settings: optimizer = 'on'
  Optimizer: GPORCA
 (14 rows)
 
@@ -89,36 +112,36 @@ explain verbose select * from t1 where v1 in (select v3 from t2 where v3 < 10);
                ->  Seq Scan on public.t2  (cost=0.00..431.00 rows=4 width=4)
                      Output: t2.v3
                      Filter: (t2.v3 < 10)
- Settings: enable_parallel = 'off', optimizer = 'on'
+ Settings: optimizer = 'on'
  Optimizer: GPORCA
 (14 rows)
 
 select * from t1 where v1 in (select v3 from t2) and v1 in (select v3 from t2 where v3 < 10);
  v1 | v2 
 ----+----
+  1 |  1
+  5 |  5
+  6 |  6
+  9 |  9
   2 |  2
   3 |  3
   4 |  4
   7 |  7
   8 |  8
-  1 |  1
-  5 |  5
-  6 |  6
-  9 |  9
 (9 rows)
 
 select * from t1 where v1 in (select v3 from t2 where v3 < 10);
  v1 | v2 
 ----+----
-  1 |  1
-  5 |  5
-  6 |  6
-  9 |  9
   2 |  2
   3 |  3
   4 |  4
   7 |  7
   8 |  8
+  5 |  5
+  6 |  6
+  9 |  9
+  1 |  1
 (9 rows)
 
 explain verbose select * from pt1 where v1 in (select v3 from pt2) and v1 in (select v3 from pt2 where v3 < 10);
@@ -140,7 +163,7 @@ explain verbose select * from pt1 where v1 in (select v3 from pt2) and v1 in (se
                            Output: pt2.v3
                            Number of partitions to scan: 1 (out of 4)
                            Filter: (pt2.v3 < 10)
- Settings: enable_parallel = 'off', optimizer = 'on'
+ Settings: optimizer = 'on'
  Optimizer: GPORCA
 (18 rows)
 
@@ -163,22 +186,22 @@ explain verbose select * from pt1 where v1 in (select v3 from pt2 where v3 < 10)
                            Output: pt2.v3
                            Number of partitions to scan: 1 (out of 4)
                            Filter: (pt2.v3 < 10)
- Settings: enable_parallel = 'off', optimizer = 'on'
+ Settings: optimizer = 'on'
  Optimizer: GPORCA
 (18 rows)
 
 select * from pt1 where v1 in (select v3 from pt2) and v1 in (select v3 from pt2 where v3 < 10);
  v1 | v2 
 ----+----
-  1 |  1
-  5 |  5
-  6 |  6
-  9 |  9
   2 |  2
   3 |  3
   4 |  4
   7 |  7
   8 |  8
+  1 |  1
+  5 |  5
+  6 |  6
+  9 |  9
 (9 rows)
 
 select * from pt1 where v1 in (select v3 from pt2 where v3 < 10);
@@ -189,10 +212,10 @@ select * from pt1 where v1 in (select v3 from pt2 where v3 < 10);
   4 |  4
   7 |  7
   8 |  8
+  1 |  1
   5 |  5
   6 |  6
   9 |  9
-  1 |  1
 (9 rows)
 
 explain verbose with cte1 as (select v3 from t2) select count(*) from t1,t2 where t1.v1 in (select v3 from cte1) and t1.v1 in (select v3 from cte1 where v3 < 10);
@@ -219,7 +242,7 @@ explain verbose with cte1 as (select v3 from t2) select count(*) from t1,t2 wher
                            ->  Seq Scan on public.t2 t2_1  (cost=0.00..431.00 rows=4 width=4)
                                  Output: t2_1.v3
                                  Filter: (t2_1.v3 < 10)
- Settings: enable_parallel = 'off', optimizer = 'on'
+ Settings: optimizer = 'on'
  Optimizer: GPORCA
 (23 rows)
 
@@ -247,7 +270,7 @@ explain verbose with cte1 as (select v3 from t2) select count(*) from t1,t2 wher
                            ->  Seq Scan on public.t2 t2_1  (cost=0.00..431.00 rows=4 width=4)
                                  Output: t2_1.v3
                                  Filter: (t2_1.v3 < 10)
- Settings: enable_parallel = 'off', optimizer = 'on'
+ Settings: optimizer = 'on'
  Optimizer: GPORCA
 (23 rows)
 
@@ -272,9 +295,9 @@ explain verbose with cte1 as (select v3 from t2) select count(*) from t1,t2 wher
    Output: count(*)
    ->  Gather Motion 3:1  (slice1; segments: 3)  (cost=0.00..1324523.52 rows=1 width=8)
          Output: (PARTIAL count(*))
-         ->  Partial Aggregate  (cost=0.00..1324523.52 rows=1 width=8)
+         ->  Partial Aggregate  (cost=0.00..1324523.51 rows=1 width=8)
                Output: PARTIAL count(*)
-               ->  Hash Semi Join  (cost=0.00..1324523.52 rows=304 width=1)
+               ->  Hash Semi Join  (cost=0.00..1324523.51 rows=304 width=1)
                      Hash Cond: (t1.v1 = t2_1.v3)
                      ->  Nested Loop  (cost=0.00..1324091.93 rows=3334 width=4)
                            Output: t1.v1
@@ -289,7 +312,7 @@ explain verbose with cte1 as (select v3 from t2) select count(*) from t1,t2 wher
                            ->  Seq Scan on public.t2 t2_1  (cost=0.00..431.00 rows=4 width=4)
                                  Output: t2_1.v3
                                  Filter: (t2_1.v3 < 10)
- Settings: enable_parallel = 'off', optimizer = 'on', optimizer_cte_inlining_bound = '2'
+ Settings: optimizer = 'on', optimizer_cte_inlining_bound = '2'
  Optimizer: GPORCA
 (23 rows)
 
@@ -320,7 +343,7 @@ explain verbose select sum(v1) from t1 where v1 in (select v3 from t2) and v1 in
                            ->  Seq Scan on public.t2  (cost=0.00..431.00 rows=4 width=4)
                                  Output: t2.v3
                                  Filter: (t2.v3 < 10)
- Settings: enable_parallel = 'off', optimizer = 'on'
+ Settings: optimizer = 'on'
  Optimizer: GPORCA
 (18 rows)
 
@@ -343,7 +366,7 @@ explain verbose select sum(v1) from t1 where v1 in (select v3 from t2 where v3 <
                            ->  Seq Scan on public.t2  (cost=0.00..431.00 rows=4 width=4)
                                  Output: t2.v3
                                  Filter: (t2.v3 < 10)
- Settings: enable_parallel = 'off', optimizer = 'on'
+ Settings: optimizer = 'on'
  Optimizer: GPORCA
 (18 rows)
 
@@ -378,7 +401,7 @@ explain verbose select * from t1 where v1 in (select v3 from t2) and v1 in (sele
                      ->  Seq Scan on public.t2  (cost=0.00..431.00 rows=4 width=4)
                            Output: t2.v3
                            Filter: (t2.v3 < 10)
- Settings: enable_parallel = 'off', optimizer = 'on'
+ Settings: optimizer = 'on'
  Optimizer: GPORCA
 (18 rows)
 
@@ -401,7 +424,7 @@ explain verbose select * from t1 where v1 in (select v3 from t2 where v3 < 10) o
                      ->  Seq Scan on public.t2  (cost=0.00..431.00 rows=4 width=4)
                            Output: t2.v3
                            Filter: (t2.v3 < 10)
- Settings: enable_parallel = 'off', optimizer = 'on'
+ Settings: optimizer = 'on'
  Optimizer: GPORCA
 (18 rows)
 
@@ -457,7 +480,7 @@ explain verbose select sum(v1) from t1 where v1 in (select v3 from t2) and v1 in
                                  ->  Seq Scan on public.t2  (cost=0.00..431.00 rows=4 width=4)
                                        Output: t2.v3
                                        Filter: (t2.v3 < 10)
- Settings: enable_parallel = 'off', optimizer = 'on'
+ Settings: optimizer = 'on'
  Optimizer: GPORCA
 (23 rows)
 
@@ -485,7 +508,7 @@ explain verbose select sum(v1) from t1 where v1 in (select v3 from t2 where v3 <
                                  ->  Seq Scan on public.t2  (cost=0.00..431.00 rows=4 width=4)
                                        Output: t2.v3
                                        Filter: (t2.v3 < 10)
- Settings: enable_parallel = 'off', optimizer = 'on'
+ Settings: optimizer = 'on'
  Optimizer: GPORCA
 (23 rows)
 
@@ -493,14 +516,14 @@ select sum(v1) from t1 where v1 in (select v3 from t2) and v1 in (select v3 from
  sum 
 -----
    1
-   5
-   6
-   9
    2
    3
    4
    7
    8
+   5
+   6
+   9
 (9 rows)
 
 select sum(v1) from t1 where v1 in (select v3 from t2 where v3 < 10) group by v2;
@@ -532,7 +555,7 @@ explain verbose select * from t1 where v1 in (select v3 from t2) and v1 in (sele
                Output: t2.v3
                ->  Seq Scan on public.t2  (cost=0.00..431.00 rows=34 width=4)
                      Output: t2.v3
- Settings: enable_parallel = 'off', optimizer = 'on'
+ Settings: optimizer = 'on'
  Optimizer: GPORCA
 (13 rows)
 
@@ -550,7 +573,7 @@ explain verbose select * from t1 where v1 in (select v3 from t2);
                Output: t2.v3
                ->  Seq Scan on public.t2  (cost=0.00..431.00 rows=34 width=4)
                      Output: t2.v3
- Settings: enable_parallel = 'off', optimizer = 'on'
+ Settings: optimizer = 'on'
  Optimizer: GPORCA
 (13 rows)
 
@@ -584,7 +607,7 @@ explain verbose select * from pt1 where v1 in (select v3 from pt2) and v1 in (se
                      ->  Dynamic Seq Scan on public.pt2  (cost=0.00..431.00 rows=34 width=4)
                            Output: pt2.v3
                            Number of partitions to scan: 4 (out of 4)
- Settings: enable_parallel = 'off', optimizer = 'on'
+ Settings: optimizer = 'on'
  Optimizer: GPORCA
 (17 rows)
 
@@ -606,7 +629,7 @@ explain verbose select * from pt1 where v1 in (select v3 from pt2);
                      ->  Dynamic Seq Scan on public.pt2  (cost=0.00..431.00 rows=34 width=4)
                            Output: pt2.v3
                            Number of partitions to scan: 4 (out of 4)
- Settings: enable_parallel = 'off', optimizer = 'on'
+ Settings: optimizer = 'on'
  Optimizer: GPORCA
 (17 rows)
 
@@ -645,7 +668,7 @@ explain verbose with cte1 as (select v3 from t2) select count(*) from t1,t2 wher
                            Output: t2_1.v3
                            ->  Seq Scan on public.t2 t2_1  (cost=0.00..431.00 rows=34 width=4)
                                  Output: t2_1.v3
- Settings: enable_parallel = 'off', optimizer = 'on'
+ Settings: optimizer = 'on'
  Optimizer: GPORCA
 (22 rows)
 
@@ -672,7 +695,7 @@ explain verbose with cte1 as (select v3 from t2) select count(*) from t1,t2 wher
                            Output: t2_1.v3
                            ->  Seq Scan on public.t2 t2_1  (cost=0.00..431.00 rows=34 width=4)
                                  Output: t2_1.v3
- Settings: enable_parallel = 'off', optimizer = 'on'
+ Settings: optimizer = 'on'
  Optimizer: GPORCA
 (22 rows)
 
@@ -713,7 +736,7 @@ explain verbose with cte1 as (select v3 from t2) select count(*) from t1,t2 wher
                            Output: t2_1.v3
                            ->  Seq Scan on public.t2 t2_1  (cost=0.00..431.00 rows=34 width=4)
                                  Output: t2_1.v3
- Settings: enable_parallel = 'off', optimizer = 'on', optimizer_cte_inlining_bound = '2'
+ Settings: optimizer = 'on', optimizer_cte_inlining_bound = '2'
  Optimizer: GPORCA
 (22 rows)
 
@@ -756,7 +779,7 @@ explain verbose select * from t1 where v1 in (select v3 from t2) and v1 in (sele
                                        Hash Key: t3.v6
                                        ->  Seq Scan on public.t3  (cost=0.00..431.00 rows=34 width=4)
                                              Output: t3.v6
- Settings: enable_parallel = 'off', optimizer = 'on'
+ Settings: optimizer = 'on'
  Optimizer: GPORCA
 (29 rows)
 
@@ -790,7 +813,7 @@ explain verbose select * from t1 where v1 in (select v3 from t2) and v1 in (sele
                                        Hash Key: t3.v6
                                        ->  Seq Scan on public.t3  (cost=0.00..431.00 rows=34 width=4)
                                              Output: t3.v6
- Settings: enable_parallel = 'off', optimizer = 'on'
+ Settings: optimizer = 'on'
  Optimizer: GPORCA
 (29 rows)
 
@@ -824,7 +847,7 @@ explain verbose select * from t1 where v1 in (select v3 from t2,t3 where v4=v6);
                                        Hash Key: t3.v6
                                        ->  Seq Scan on public.t3  (cost=0.00..431.00 rows=34 width=4)
                                              Output: t3.v6
- Settings: enable_parallel = 'off', optimizer = 'on'
+ Settings: optimizer = 'on'
  Optimizer: GPORCA
 (29 rows)
 
@@ -860,35 +883,35 @@ explain verbose select * from t1 where v1 in (select v3 from t2) and v1 in (sele
                                        ->  Seq Scan on public.t3  (cost=0.00..431.00 rows=4 width=4)
                                              Output: t3.v6
                                              Filter: (t3.v6 < 10)
- Settings: enable_parallel = 'off', optimizer = 'on'
+ Settings: optimizer = 'on'
  Optimizer: GPORCA
 (31 rows)
 
 select * from t1 where v1 in (select v3 from t2) and v1 in (select v3 from t2,t3 where v4=v6 and v4 < 10);
  v1 | v2 
 ----+----
+  5 |  5
+  6 |  6
+  9 |  9
   2 |  2
   3 |  3
   4 |  4
-  9 |  9
-  8 |  8
-  6 |  6
   7 |  7
+  8 |  8
   1 |  1
-  5 |  5
 (9 rows)
 
 select * from t1 where v1 in (select v3 from t2,t3 where v4=v6 and v4 < 10);
  v1 | v2 
 ----+----
+  5 |  5
+  6 |  6
+  9 |  9
   2 |  2
   3 |  3
   4 |  4
   7 |  7
   8 |  8
-  5 |  5
-  6 |  6
-  9 |  9
   1 |  1
 (9 rows)
 
@@ -926,7 +949,7 @@ explain verbose select * from pt1 where v1 in (select v3 from pt2) and v1 in (se
                                              Hash Key: t3.v6
                                              ->  Seq Scan on public.t3  (cost=0.00..431.00 rows=34 width=4)
                                                    Output: t3.v6
- Settings: enable_parallel = 'off', optimizer = 'on'
+ Settings: optimizer = 'on'
  Optimizer: GPORCA
 (33 rows)
 
@@ -964,7 +987,7 @@ explain verbose select * from pt1 where v1 in (select v3 from pt2) and v1 in (se
                                              Hash Key: t3.v6
                                              ->  Seq Scan on public.t3  (cost=0.00..431.00 rows=34 width=4)
                                                    Output: t3.v6
- Settings: enable_parallel = 'off', optimizer = 'on'
+ Settings: optimizer = 'on'
  Optimizer: GPORCA
 (33 rows)
 
@@ -1002,7 +1025,7 @@ explain verbose select * from pt1 where v1 in (select v3 from pt2,t3 where v4=v6
                                              Hash Key: t3.v6
                                              ->  Seq Scan on public.t3  (cost=0.00..431.00 rows=34 width=4)
                                                    Output: t3.v6
- Settings: enable_parallel = 'off', optimizer = 'on'
+ Settings: optimizer = 'on'
  Optimizer: GPORCA
 (33 rows)
 
@@ -1042,22 +1065,22 @@ explain verbose select * from pt1 where v1 in (select v3 from pt2) and v1 in (se
                                              ->  Seq Scan on public.t3  (cost=0.00..431.00 rows=4 width=4)
                                                    Output: t3.v6
                                                    Filter: (t3.v6 < 10)
- Settings: enable_parallel = 'off', optimizer = 'on'
+ Settings: optimizer = 'on'
  Optimizer: GPORCA
 (35 rows)
 
 select * from pt1 where v1 in (select v3 from pt2) and v1 in (select v3 from pt2,t3 where v4=v6 and v4 < 10);
  v1 | v2 
 ----+----
+  5 |  5
+  6 |  6
+  9 |  9
+  1 |  1
   2 |  2
   3 |  3
   4 |  4
-  9 |  9
-  8 |  8
-  6 |  6
   7 |  7
-  1 |  1
-  5 |  5
+  8 |  8
 (9 rows)
 
 select * from pt1 where v1 in (select v3 from pt2,t3 where v4=v6 and v4 < 10);
@@ -1066,12 +1089,12 @@ select * from pt1 where v1 in (select v3 from pt2,t3 where v4=v6 and v4 < 10);
   5 |  5
   6 |  6
   9 |  9
+  1 |  1
   2 |  2
   3 |  3
   4 |  4
   7 |  7
   8 |  8
-  1 |  1
 (9 rows)
 
 explain verbose with cte1 as (select v3 from t2) select * from t1,t2 where t1.v1 in (select v3 from cte1) and t1.v1 in (select v3 from cte1,t3 where v4=v6);
@@ -1102,7 +1125,7 @@ explain verbose with cte1 as (select v3 from t2) select * from t1,t2 where t1.v1
                                  Output: t3.v6
                      ->  Seq Scan on public.t2 t2_1  (cost=0.00..431.00 rows=34 width=4)
                            Output: t2_1.v3
- Settings: enable_parallel = 'off', optimizer = 'on'
+ Settings: optimizer = 'on'
  Optimizer: GPORCA
 (27 rows)
 
@@ -1134,16 +1157,16 @@ explain verbose with cte1 as (select v3 from t2) select * from t1,t2 where t1.v1
                                  Output: t3.v6
                      ->  Seq Scan on public.t2 t2_1  (cost=0.00..431.00 rows=34 width=4)
                            Output: t2_1.v3
- Settings: enable_parallel = 'off', optimizer = 'on'
+ Settings: optimizer = 'on'
  Optimizer: GPORCA
 (27 rows)
 
 explain verbose with cte1 as (select v3 from t2) select * from t1,t2 where t1.v1 in (select v3 from cte1,t3 where v4=v6 and v4 < 10);
                                                    QUERY PLAN                                                    
 -----------------------------------------------------------------------------------------------------------------
- Gather Motion 3:1  (slice1; segments: 3)  (cost=0.00..2648354.45 rows=512 width=16)
+ Gather Motion 3:1  (slice1; segments: 3)  (cost=0.00..2648354.68 rows=512 width=16)
    Output: t1.v1, t1.v2, t2.v3, t2.v4
-   ->  Hash Semi Join  (cost=0.00..2648354.42 rows=171 width=16)
+   ->  Hash Semi Join  (cost=0.00..2648354.65 rows=171 width=16)
          Output: t1.v1, t1.v2, t2.v3, t2.v4
          Hash Cond: ((t2.v4 = t3.v6) AND (t1.v1 = t2_1.v3))
          ->  Redistribute Motion 3:3  (slice2; segments: 3)  (cost=0.00..1324306.84 rows=304 width=16)
@@ -1161,9 +1184,9 @@ explain verbose with cte1 as (select v3 from t2) select * from t1,t2 where t1.v1
                                        Output: t1.v1, t1.v2
                            ->  Seq Scan on public.t2  (cost=0.00..431.00 rows=34 width=8)
                                  Output: t2.v3, t2.v4
-         ->  Hash  (cost=1324047.35..1324047.35 rows=304 width=8)
+         ->  Hash  (cost=1324047.58..1324047.58 rows=304 width=8)
                Output: t2_1.v3, t3.v6
-               ->  Nested Loop  (cost=0.00..1324047.35 rows=304 width=8)
+               ->  Nested Loop  (cost=0.00..1324047.58 rows=304 width=8)
                      Output: t2_1.v3, t3.v6
                      Join Filter: true
                      ->  Broadcast Motion 3:3  (slice4; segments: 3)  (cost=0.00..431.00 rows=10 width=4)
@@ -1173,16 +1196,16 @@ explain verbose with cte1 as (select v3 from t2) select * from t1,t2 where t1.v1
                                  Filter: (t3.v6 < 10)
                      ->  Seq Scan on public.t2 t2_1  (cost=0.00..431.00 rows=34 width=4)
                            Output: t2_1.v3
- Settings: enable_parallel = 'off', optimizer = 'on'
+ Settings: optimizer = 'on'
  Optimizer: GPORCA
 (34 rows)
 
 explain verbose with cte1 as (select v3 from t2) select * from t1,t2 where t1.v1 in (select v3 from cte1) and t1.v1 in (select v3 from cte1,t3 where v4=v6 and v4 < 10);
                                                    QUERY PLAN                                                    
 -----------------------------------------------------------------------------------------------------------------
- Gather Motion 3:1  (slice1; segments: 3)  (cost=0.00..2648354.45 rows=512 width=16)
+ Gather Motion 3:1  (slice1; segments: 3)  (cost=0.00..2648354.68 rows=512 width=16)
    Output: t1.v1, t1.v2, t2.v3, t2.v4
-   ->  Hash Semi Join  (cost=0.00..2648354.42 rows=171 width=16)
+   ->  Hash Semi Join  (cost=0.00..2648354.65 rows=171 width=16)
          Output: t1.v1, t1.v2, t2.v3, t2.v4
          Hash Cond: ((t2.v4 = t3.v6) AND (t1.v1 = t2_1.v3))
          ->  Redistribute Motion 3:3  (slice2; segments: 3)  (cost=0.00..1324306.84 rows=304 width=16)
@@ -1200,9 +1223,9 @@ explain verbose with cte1 as (select v3 from t2) select * from t1,t2 where t1.v1
                                        Output: t1.v1, t1.v2
                            ->  Seq Scan on public.t2  (cost=0.00..431.00 rows=34 width=8)
                                  Output: t2.v3, t2.v4
-         ->  Hash  (cost=1324047.35..1324047.35 rows=304 width=8)
+         ->  Hash  (cost=1324047.58..1324047.58 rows=304 width=8)
                Output: t2_1.v3, t3.v6
-               ->  Nested Loop  (cost=0.00..1324047.35 rows=304 width=8)
+               ->  Nested Loop  (cost=0.00..1324047.58 rows=304 width=8)
                      Output: t2_1.v3, t3.v6
                      Join Filter: true
                      ->  Broadcast Motion 3:3  (slice4; segments: 3)  (cost=0.00..431.00 rows=10 width=4)
@@ -1212,7 +1235,7 @@ explain verbose with cte1 as (select v3 from t2) select * from t1,t2 where t1.v1
                                  Filter: (t3.v6 < 10)
                      ->  Seq Scan on public.t2 t2_1  (cost=0.00..431.00 rows=34 width=4)
                            Output: t2_1.v3
- Settings: enable_parallel = 'off', optimizer = 'on'
+ Settings: optimizer = 'on'
  Optimizer: GPORCA
 (34 rows)
 
@@ -1233,9 +1256,9 @@ set optimizer_cte_inlining_bound to 2;
 explain verbose with cte1 as (select v3 from t2) select * from t1,t2 where t1.v1 in (select v3 from cte1) and t1.v1 in (select v3 from cte1,t3 where v4=v6 and v4 < 10);
                                                    QUERY PLAN                                                    
 -----------------------------------------------------------------------------------------------------------------
- Gather Motion 3:1  (slice1; segments: 3)  (cost=0.00..2648354.45 rows=512 width=16)
+ Gather Motion 3:1  (slice1; segments: 3)  (cost=0.00..2648354.68 rows=512 width=16)
    Output: t1.v1, t1.v2, t2.v3, t2.v4
-   ->  Hash Semi Join  (cost=0.00..2648354.42 rows=171 width=16)
+   ->  Hash Semi Join  (cost=0.00..2648354.65 rows=171 width=16)
          Output: t1.v1, t1.v2, t2.v3, t2.v4
          Hash Cond: ((t2.v4 = t3.v6) AND (t1.v1 = t2_1.v3))
          ->  Redistribute Motion 3:3  (slice2; segments: 3)  (cost=0.00..1324306.84 rows=304 width=16)
@@ -1253,9 +1276,9 @@ explain verbose with cte1 as (select v3 from t2) select * from t1,t2 where t1.v1
                                        Output: t1.v1, t1.v2
                            ->  Seq Scan on public.t2  (cost=0.00..431.00 rows=34 width=8)
                                  Output: t2.v3, t2.v4
-         ->  Hash  (cost=1324047.35..1324047.35 rows=304 width=8)
+         ->  Hash  (cost=1324047.58..1324047.58 rows=304 width=8)
                Output: t2_1.v3, t3.v6
-               ->  Nested Loop  (cost=0.00..1324047.35 rows=304 width=8)
+               ->  Nested Loop  (cost=0.00..1324047.58 rows=304 width=8)
                      Output: t2_1.v3, t3.v6
                      Join Filter: true
                      ->  Broadcast Motion 3:3  (slice4; segments: 3)  (cost=0.00..431.00 rows=10 width=4)
@@ -1265,7 +1288,7 @@ explain verbose with cte1 as (select v3 from t2) select * from t1,t2 where t1.v1
                                  Filter: (t3.v6 < 10)
                      ->  Seq Scan on public.t2 t2_1  (cost=0.00..431.00 rows=34 width=4)
                            Output: t2_1.v3
- Settings: enable_parallel = 'off', optimizer = 'on', optimizer_cte_inlining_bound = '2'
+ Settings: optimizer = 'on', optimizer_cte_inlining_bound = '2'
  Optimizer: GPORCA
 (34 rows)
 
@@ -1300,7 +1323,7 @@ explain verbose select * from t1 where v1 in (select v3 from t2) and v1 in (sele
                            Output: (1), t3.v5
                            ->  Seq Scan on public.t3  (cost=0.00..431.00 rows=34 width=4)
                                  Output: 1, t3.v5
- Settings: enable_parallel = 'off', optimizer = 'on'
+ Settings: optimizer = 'on'
  Optimizer: GPORCA
 (21 rows)
 
@@ -1326,7 +1349,7 @@ explain verbose select * from t1 where v1 in (select v3 from t2 where exists (SE
                            Output: (1), t3.v5
                            ->  Seq Scan on public.t3  (cost=0.00..431.00 rows=34 width=4)
                                  Output: 1, t3.v5
- Settings: enable_parallel = 'off', optimizer = 'on'
+ Settings: optimizer = 'on'
  Optimizer: GPORCA
 (21 rows)
 
@@ -1364,7 +1387,7 @@ explain verbose select v1 from t1 where v1 in (select v3 from t2) and v1 in (sel
                            Output: t3.v5
                            ->  Seq Scan on public.t3  (cost=0.00..431.00 rows=34 width=4)
                                  Output: t3.v5
- Settings: enable_parallel = 'off', optimizer = 'on'
+ Settings: optimizer = 'on'
  Optimizer: GPORCA
 (20 rows)
 
@@ -1389,42 +1412,42 @@ explain verbose select v1 from t1 where v1 in (select v5 from t2,t3 where v5 = v
                            Output: t3.v5
                            ->  Seq Scan on public.t3  (cost=0.00..431.00 rows=34 width=4)
                                  Output: t3.v5
- Settings: enable_parallel = 'off', optimizer = 'on'
+ Settings: optimizer = 'on'
  Optimizer: GPORCA
 (20 rows)
 
 explain verbose select v1 from t1 where v1 in (select v3 from t2) and v1 in (select v6 from t2,t3 where v5 = v3); -- no dedup, because v6 is not the join key
-                                                 QUERY PLAN                                                  
--------------------------------------------------------------------------------------------------------------
+                                                    QUERY PLAN                                                     
+-------------------------------------------------------------------------------------------------------------------
  Gather Motion 3:1  (slice1; segments: 3)  (cost=0.00..1724.04 rows=100 width=4)
    Output: t1.v1
-   ->  Hash Semi Join  (cost=0.00..1724.04 rows=34 width=4)
+   ->  Hash Right Semi Join  (cost=0.00..1724.04 rows=34 width=4)
          Output: t1.v1
          Hash Cond: (t1.v1 = t2_1.v3)
-         ->  Hash Semi Join  (cost=0.00..1293.03 rows=34 width=4)
-               Output: t1.v1
-               Hash Cond: (t1.v1 = t3.v6)
-               ->  Seq Scan on public.t1  (cost=0.00..431.00 rows=34 width=4)
-                     Output: t1.v1
-               ->  Hash  (cost=862.02..862.02 rows=34 width=4)
-                     Output: t3.v6
-                     ->  Redistribute Motion 3:3  (slice2; segments: 3)  (cost=0.00..862.02 rows=34 width=4)
-                           Output: t3.v6
-                           Hash Key: t3.v6
-                           ->  Hash Join  (cost=0.00..862.02 rows=34 width=4)
-                                 Output: t3.v6
-                                 Hash Cond: (t3.v5 = t2.v3)
-                                 ->  Seq Scan on public.t3  (cost=0.00..431.00 rows=34 width=8)
-                                       Output: t3.v5, t3.v6
-                                 ->  Hash  (cost=431.00..431.00 rows=34 width=4)
-                                       Output: t2.v3
-                                       ->  Seq Scan on public.t2  (cost=0.00..431.00 rows=34 width=4)
-                                             Output: t2.v3
-         ->  Hash  (cost=431.00..431.00 rows=34 width=4)
+         ->  Seq Scan on public.t2 t2_1  (cost=0.00..431.00 rows=34 width=4)
                Output: t2_1.v3
-               ->  Seq Scan on public.t2 t2_1  (cost=0.00..431.00 rows=34 width=4)
-                     Output: t2_1.v3
- Settings: enable_parallel = 'off', optimizer = 'on'
+         ->  Hash  (cost=1293.03..1293.03 rows=34 width=4)
+               Output: t1.v1
+               ->  Hash Semi Join  (cost=0.00..1293.03 rows=34 width=4)
+                     Output: t1.v1
+                     Hash Cond: (t1.v1 = t3.v6)
+                     ->  Seq Scan on public.t1  (cost=0.00..431.00 rows=34 width=4)
+                           Output: t1.v1
+                     ->  Hash  (cost=862.02..862.02 rows=34 width=4)
+                           Output: t3.v6
+                           ->  Redistribute Motion 3:3  (slice2; segments: 3)  (cost=0.00..862.02 rows=34 width=4)
+                                 Output: t3.v6
+                                 Hash Key: t3.v6
+                                 ->  Hash Join  (cost=0.00..862.02 rows=34 width=4)
+                                       Output: t3.v6
+                                       Hash Cond: (t3.v5 = t2.v3)
+                                       ->  Seq Scan on public.t3  (cost=0.00..431.00 rows=34 width=8)
+                                             Output: t3.v5, t3.v6
+                                       ->  Hash  (cost=431.00..431.00 rows=34 width=4)
+                                             Output: t2.v3
+                                             ->  Seq Scan on public.t2  (cost=0.00..431.00 rows=34 width=4)
+                                                   Output: t2.v3
+ Settings: optimizer = 'on'
  Optimizer: GPORCA
 (30 rows)
 
@@ -1442,63 +1465,63 @@ select count(v1) from t1 where v1 in (select v5 from t2,t3 where v5 = v3);
 
 -- can't dedup
 explain verbose select * from t1 where v1 in (select v3 from t2) and v1 in (select v4 from t2 where v3 < 10); -- different outpt
-                                                 QUERY PLAN                                                 
-------------------------------------------------------------------------------------------------------------
+                                                    QUERY PLAN                                                    
+------------------------------------------------------------------------------------------------------------------
  Gather Motion 3:1  (slice1; segments: 3)  (cost=0.00..1293.02 rows=10 width=8)
    Output: t1.v1, t1.v2
-   ->  Hash Semi Join  (cost=0.00..1293.02 rows=4 width=8)
+   ->  Hash Right Semi Join  (cost=0.00..1293.02 rows=4 width=8)
          Output: t1.v1, t1.v2
          Hash Cond: (t1.v1 = t2_1.v3)
-         ->  Hash Semi Join  (cost=0.00..862.01 rows=4 width=8)
-               Output: t1.v1, t1.v2
-               Hash Cond: (t1.v1 = t2.v4)
-               ->  Seq Scan on public.t1  (cost=0.00..431.00 rows=34 width=8)
-                     Output: t1.v1, t1.v2
-               ->  Hash  (cost=431.00..431.00 rows=4 width=4)
-                     Output: t2.v4
-                     ->  Redistribute Motion 3:3  (slice2; segments: 3)  (cost=0.00..431.00 rows=4 width=4)
-                           Output: t2.v4
-                           Hash Key: t2.v4
-                           ->  Seq Scan on public.t2  (cost=0.00..431.00 rows=4 width=4)
-                                 Output: t2.v4
-                                 Filter: (t2.v3 < 10)
-         ->  Hash  (cost=431.00..431.00 rows=34 width=4)
+         ->  Seq Scan on public.t2 t2_1  (cost=0.00..431.00 rows=34 width=4)
                Output: t2_1.v3
-               ->  Seq Scan on public.t2 t2_1  (cost=0.00..431.00 rows=34 width=4)
-                     Output: t2_1.v3
- Settings: enable_parallel = 'off', optimizer = 'on'
+         ->  Hash  (cost=862.01..862.01 rows=4 width=8)
+               Output: t1.v1, t1.v2
+               ->  Hash Semi Join  (cost=0.00..862.01 rows=4 width=8)
+                     Output: t1.v1, t1.v2
+                     Hash Cond: (t1.v1 = t2.v4)
+                     ->  Seq Scan on public.t1  (cost=0.00..431.00 rows=34 width=8)
+                           Output: t1.v1, t1.v2
+                     ->  Hash  (cost=431.00..431.00 rows=4 width=4)
+                           Output: t2.v4
+                           ->  Redistribute Motion 3:3  (slice2; segments: 3)  (cost=0.00..431.00 rows=4 width=4)
+                                 Output: t2.v4
+                                 Hash Key: t2.v4
+                                 ->  Seq Scan on public.t2  (cost=0.00..431.00 rows=4 width=4)
+                                       Output: t2.v4
+                                       Filter: (t2.v3 < 10)
+ Settings: optimizer = 'on'
  Optimizer: GPORCA
 (24 rows)
 
 explain verbose select * from t1 where v1 in (select v3 from t2) and v2 in (select v3 from t2 where v3 < 10); -- different scalar ident
-                                                 QUERY PLAN                                                  
--------------------------------------------------------------------------------------------------------------
+                                                    QUERY PLAN                                                     
+-------------------------------------------------------------------------------------------------------------------
  Gather Motion 3:1  (slice1; segments: 3)  (cost=0.00..1293.02 rows=10 width=8)
    Output: t1.v1, t1.v2
-   ->  Hash Semi Join  (cost=0.00..1293.02 rows=4 width=8)
+   ->  Hash Right Semi Join  (cost=0.00..1293.02 rows=4 width=8)
          Output: t1.v1, t1.v2
          Hash Cond: (t1.v1 = t2_1.v3)
-         ->  Redistribute Motion 3:3  (slice2; segments: 3)  (cost=0.00..862.01 rows=4 width=8)
-               Output: t1.v1, t1.v2
-               Hash Key: t1.v1
-               ->  Hash Semi Join  (cost=0.00..862.01 rows=4 width=8)
-                     Output: t1.v1, t1.v2
-                     Hash Cond: (t1.v2 = t2.v3)
-                     ->  Redistribute Motion 3:3  (slice3; segments: 3)  (cost=0.00..431.00 rows=34 width=8)
-                           Output: t1.v1, t1.v2
-                           Hash Key: t1.v2
-                           ->  Seq Scan on public.t1  (cost=0.00..431.00 rows=34 width=8)
-                                 Output: t1.v1, t1.v2
-                     ->  Hash  (cost=431.00..431.00 rows=4 width=4)
-                           Output: t2.v3
-                           ->  Seq Scan on public.t2  (cost=0.00..431.00 rows=4 width=4)
-                                 Output: t2.v3
-                                 Filter: (t2.v3 < 10)
-         ->  Hash  (cost=431.00..431.00 rows=34 width=4)
+         ->  Seq Scan on public.t2 t2_1  (cost=0.00..431.00 rows=34 width=4)
                Output: t2_1.v3
-               ->  Seq Scan on public.t2 t2_1  (cost=0.00..431.00 rows=34 width=4)
-                     Output: t2_1.v3
- Settings: enable_parallel = 'off', optimizer = 'on'
+         ->  Hash  (cost=862.01..862.01 rows=4 width=8)
+               Output: t1.v1, t1.v2
+               ->  Redistribute Motion 3:3  (slice2; segments: 3)  (cost=0.00..862.01 rows=4 width=8)
+                     Output: t1.v1, t1.v2
+                     Hash Key: t1.v1
+                     ->  Hash Semi Join  (cost=0.00..862.01 rows=4 width=8)
+                           Output: t1.v1, t1.v2
+                           Hash Cond: (t1.v2 = t2.v3)
+                           ->  Redistribute Motion 3:3  (slice3; segments: 3)  (cost=0.00..431.00 rows=34 width=8)
+                                 Output: t1.v1, t1.v2
+                                 Hash Key: t1.v2
+                                 ->  Seq Scan on public.t1  (cost=0.00..431.00 rows=34 width=8)
+                                       Output: t1.v1, t1.v2
+                           ->  Hash  (cost=431.00..431.00 rows=4 width=4)
+                                 Output: t2.v3
+                                 ->  Seq Scan on public.t2  (cost=0.00..431.00 rows=4 width=4)
+                                       Output: t2.v3
+                                       Filter: (t2.v3 < 10)
+ Settings: optimizer = 'on'
  Optimizer: GPORCA
 (27 rows)
 
@@ -1532,7 +1555,7 @@ explain verbose select * from t1 where v1 in (select v3 from t2) and v2 in (sele
                            Sort Key: t2_1.v3
                            ->  Seq Scan on public.t2 t2_1  (cost=0.00..431.00 rows=34 width=4)
                                  Output: t2_1.v3
- Settings: enable_parallel = 'off', optimizer = 'on'
+ Settings: optimizer = 'on'
  Optimizer: GPORCA
 (29 rows)
 
@@ -1560,7 +1583,7 @@ explain verbose select * from t1 where v1 in (select v3 from t2) and v2 in (sele
                Output: t2_1.v3
                ->  Seq Scan on public.t2 t2_1  (cost=0.00..431.00 rows=34 width=4)
                      Output: t2_1.v3
- Settings: enable_parallel = 'off', optimizer = 'on'
+ Settings: optimizer = 'on'
  Optimizer: GPORCA
 (23 rows)
 

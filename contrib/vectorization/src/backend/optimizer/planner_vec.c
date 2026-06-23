@@ -76,6 +76,7 @@ static bool is_relation_vectorable(SeqScan* seqscan, List *rtable, bool isForeig
 static bool is_sort_collation_vectorable(Sort *sort);
 static bool fallback_distinct_junk(Plan *plan);
 static bool fallback_nested_loop_jointype(Plan *plan);
+static void demote_right_semi_anti_to_left(Plan *plan);
 static bool joinclauses_type_different(Expr *node, void *context);
 static bool processFunction(int pid, int queryid);
 static bool GloablprocessFunction(int pid);
@@ -355,6 +356,16 @@ planner_hook_wrapper(Query *parse, const char *query_string, int cursorOptions, 
 				sleep(0.1);
 		}
 	}
+
+	/*
+	 * Safety net for JOIN_RIGHT_ANTI_NOTIN only.  PG 14 base now executes
+	 * JOIN_RIGHT_SEMI / JOIN_RIGHT_ANTI natively (PG 16 16dc2703c54 +
+	 * PG 18 4c87ddfb62a backports).  JOIN_RIGHT_ANTI_NOTIN remains
+	 * vec-only (no PG upstream equivalent), so demote it when the plan
+	 * is going to PG executor.
+	 */
+	if (!try_vectorize_plan(result))
+		demote_right_semi_anti_to_left(result->planTree);
 
 	return result;
 }
@@ -1395,6 +1406,44 @@ is_hash_expr_vectorable(Expr *expr, void *context)
 
 	/* reaching here means current expression is vectorable, continue walker */
 	return !expression_tree_walker((Node *) expr, is_hash_expr_fallback, NULL);
+}
+
+/*
+ * Walk the plan tree and rewrite any HashJoin with jointype
+ * JOIN_RIGHT_SEMI / JOIN_RIGHT_ANTI back to JOIN_SEMI / JOIN_ANTI. ORCA's
+ * RIGHT_SEMI/ANTI xform left the plan tree's lefttree (= outer = LHS) and
+ * righttree (= Hash-wrapped inner = RHS) in their natural positions, with
+ * hashjoin->hashkeys = outer side keys and hash->hashkeys = inner side keys.
+ * That layout is identical to a standard LEFT_SEMI / LEFT_ANTI plan, so just
+ * flipping the jointype is sufficient for PG executor to run it correctly --
+ * we only lose the small-build memory advantage that vec engine's RIGHT_SEMI
+ * path provided.
+ */
+static void
+demote_right_semi_anti_to_left(Plan *plan)
+{
+	if (plan == NULL)
+		return;
+
+	if (IsA(plan, HashJoin))
+	{
+		HashJoin *hj = (HashJoin *) plan;
+		/* PG 14 now natively supports JOIN_RIGHT_SEMI / JOIN_RIGHT_ANTI
+		 * after PG 16/18 backports.  Only RIGHT_ANTI_NOTIN (GPDB-only,
+		 * no upstream equivalent) still needs demotion when the plan
+		 * goes to the PG executor. */
+		if (hj->join.jointype == JOIN_RIGHT_ANTI_NOTIN)
+			hj->join.jointype = JOIN_LASJ_NOTIN;
+	}
+
+	demote_right_semi_anti_to_left(plan->lefttree);
+	demote_right_semi_anti_to_left(plan->righttree);
+
+	/* SubPlans (e.g. CTEs) live on plan->initPlan / plan->subPlan, but those
+	 * are PG SubPlan nodes that already recurse into a Plan tree owned by
+	 * PlannedStmt->subplans -- we leave traversal of those to higher-level
+	 * walkers if needed. For simple queries the lefttree/righttree recursion
+	 * above is sufficient. */
 }
 
 static bool

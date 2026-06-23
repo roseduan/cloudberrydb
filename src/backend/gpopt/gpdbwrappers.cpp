@@ -42,6 +42,7 @@ extern "C" {
 #include "catalog/pg_aggregate.h"
 #include "catalog/pg_inherits.h"
 #include "cdb/cdbvars.h"
+#include "utils/guc.h"  // for GetConfigOption (vec engine GUC lookup)
 #include "foreign/fdwapi.h"
 #include "nodes/nodeFuncs.h"
 #include "optimizer/clauses.h"
@@ -2846,6 +2847,51 @@ gpdb::IsParallelModeOK(void)
 	}
 	GP_WRAP_END;
 	return false;  // default to disabled if no context
+}
+
+// Check whether the vectorization engine is enabled (via the vec extension
+// GUC `vector.enable_vectorization`). Returns false if the extension is not
+// loaded or the GUC is off.
+//
+// Used by ORCA cost model: if vec=off, RIGHT_SEMI/ANTI physical operators
+// return cost = ∞, so ORCA always picks LEFT_SEMI/ANTI (RIGHT plan shapes
+// are only executable in vec engine path; PG executor support is deferred
+// to PG16 upgrade -- see design doc M5).
+bool
+gpdb::IsVectorizationEnabled(void)
+{
+	GP_WRAP_START;
+	{
+		const char *val = GetConfigOption("vector.enable_vectorization",
+										  true /* missing_ok */,
+										  false /* restrict_privileged */);
+		if (NULL == val)
+			return false;  // extension not loaded -> treat as off
+		// GUC bool returns "on" / "off"
+		return (0 == strcmp(val, "on") || 0 == strcmp(val, "true"));
+	}
+	GP_WRAP_END;
+	return false;
+}
+
+// Kill-switch for RIGHT_SEMI / RIGHT_ANTI cost. Default on. When the vec
+// extension is not loaded, the GUC is absent -- treat that as the same
+// state as vectorization being off (cost = infinity) so RIGHT_SEMI is
+// never picked outside vec-engine builds.
+bool
+gpdb::IsRightJoinFlipEnabled(void)
+{
+	GP_WRAP_START;
+	{
+		const char *val = GetConfigOption("vector.enable_right_join_flip",
+										  true /* missing_ok */,
+										  false /* restrict_privileged */);
+		if (NULL == val)
+			return false;
+		return (0 == strcmp(val, "on") || 0 == strcmp(val, "true"));
+	}
+	GP_WRAP_END;
+	return false;
 }
 
 // EOF

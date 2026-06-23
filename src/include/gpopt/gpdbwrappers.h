@@ -737,6 +737,16 @@ Oid GetBaseType(Oid typid);
 // check if parallel mode is OK (comprehensive check)
 bool IsParallelModeOK(void);
 
+// Check whether the vectorization engine is enabled (vector.enable_vectorization).
+// Used by ORCA cost model for RIGHT_SEMI/ANTI gating: returns ∞ cost when off.
+bool IsVectorizationEnabled(void);
+
+// Kill-switch for RIGHT_SEMI / RIGHT_ANTI plan (vector.enable_right_join_flip).
+// Default on. Off forces CostRightSemi/AntiHashJoin to infinity so ORCA
+// always picks the LEFT_SEMI / LEFT_ANTI baseline. The two getters are AND'd
+// in cost code so vec=off OR flip=off both disable the new plan shape.
+bool IsRightJoinFlipEnabled(void);
+
 // returns the result of evaluating 'expr' as an Expr. Caller keeps ownership of 'expr'
 // and takes ownership of the result
 Expr *EvaluateExpr(Expr *expr, Oid result_type, int32 typmod);

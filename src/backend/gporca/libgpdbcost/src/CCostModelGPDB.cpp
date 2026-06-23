@@ -11,6 +11,16 @@
 
 #include "gpdbcost/CCostModelGPDB.h"
 
+// Forward-declared gpdb wrappers used by CostRightSemi/AntiHashJoin to gate
+// RIGHT_SEMI/ANTI on vec engine enabled and on the kill-switch GUC.
+// PG headers can't be included from ORCA C++ TUs (their macros conflict with
+// the C++ stdlib), so we use the same pattern as
+// CXformLeftSemiJoin2ParallelHashJoin.cpp.
+namespace gpdb {
+	bool IsVectorizationEnabled(void);
+	bool IsRightJoinFlipEnabled(void);
+}
+
 #include <filesystem>
 #include <limits>
 #include <cmath>
@@ -1369,6 +1379,8 @@ CCostModelGPDB::CostHashJoin(CMemoryPool *mp, CExpressionHandle &exprhdl,
 				COperator::EopPhysicalLeftAntiSemiHashJoinNotIn == op_id ||
 				COperator::EopPhysicalLeftOuterHashJoin == op_id ||
 				COperator::EopPhysicalRightOuterHashJoin == op_id ||
+				COperator::EopPhysicalRightSemiHashJoin == op_id ||
+				COperator::EopPhysicalRightAntiSemiHashJoin == op_id ||
 				COperator::EopPhysicalFullHashJoin == op_id ||
 				COperator::EopPhysicalParallelInnerHashJoin == op_id ||
 				COperator::EopPhysicalParallelLeftSemiHashJoin == op_id ||
@@ -1376,6 +1388,8 @@ CCostModelGPDB::CostHashJoin(CMemoryPool *mp, CExpressionHandle &exprhdl,
 				COperator::EopPhysicalParallelLeftOuterHashJoin == op_id ||
 				COperator::EopPhysicalParallelLeftAntiSemiHashJoinNotIn == op_id ||
 				COperator::EopPhysicalParallelRightOuterHashJoin == op_id ||
+				COperator::EopPhysicalParallelRightSemiHashJoin == op_id ||
+				COperator::EopPhysicalParallelRightAntiSemiHashJoin == op_id ||
 				COperator::EopPhysicalParallelFullHashJoin == op_id);
 #endif	// GPOS_DEBUG
 
@@ -1488,6 +1502,16 @@ CCostModelGPDB::CostHashJoin(CMemoryPool *mp, CExpressionHandle &exprhdl,
 
 		// hash join cost if spilling is the same as the non-spilling case, except that
 		// parameter values are different.
+		//
+		// Build-spill IO penalty: existing spilling cost units (1.17x-4x the
+		// in-memory units) significantly under-cost the real disk write+
+		// rebuild IO. Add a linear penalty proportional to how much the build
+		// exceeds the spill threshold so larger builds are reliably costed
+		// higher than smaller ones. This is the only signal that lets ORCA
+		// pick RIGHT_SEMI/ANTI (small-outer-as-build) over LEFT_SEMI/ANTI
+		// (large-inner-as-build) when both alternatives spill.
+		CDouble dBuildBytesOverThreshold(
+			std::max(0.0, dRowsInner * dWidthInner - dHJSpillingMemThreshold.Get()));
 		costLocal = CCost(
 			pci->NumRebinds() *
 			(dHJHashTableInitCostFactor +
@@ -1496,7 +1520,8 @@ CCostModelGPDB::CostHashJoin(CMemoryPool *mp, CExpressionHandle &exprhdl,
 			 ulColsUsed * num_rows_outer * dHJFeedingTupColumnSpillingCostUnit +
 			 dWidthOuter * num_rows_outer * dHJFeedingTupWidthSpillingCostUnit +
 			 dWidthInner * dRowsInner * dHJHashingTupWidthSpillingCostUnit +
-			 pci->Rows() * pci->Width() * dJoinOutputTupCostUnit));
+			 pci->Rows() * pci->Width() * dJoinOutputTupCostUnit +
+			 dBuildBytesOverThreshold * 2.0e-5));
 	}
 	CCost costChild =
 		CostChildren(mp, exprhdl, pci, pcmgpdb->GetCostModelParams());
@@ -1633,6 +1658,186 @@ CCostModelGPDB::CostHashJoin(CMemoryPool *mp, CExpressionHandle &exprhdl,
 
 	return costChild + CCost(costLocal.Get() * skew_ratio);
 }
+
+//---------------------------------------------------------------------------
+//	@function:
+//		CCostModelGPDB::CostRightSemiHashJoin
+//
+//	@doc:
+//		Cost of right semi hash join (PG-style: build = outer/left, probe =
+//		inner/right, finalize emits left rows that have at least one match).
+//		Reuses CostHashJoin formula with child[0]/child[1] roles swapped, then
+//		adds a finalize-phase scan term. Returns ∞ when vec=off (Mark Join
+//		execution only supported in vec engine path -- see design M5).
+//
+//---------------------------------------------------------------------------
+CCost
+CCostModelGPDB::CostRightSemiHashJoin(CMemoryPool *mp,
+									  CExpressionHandle &exprhdl,
+									  const CCostModelGPDB *pcmgpdb,
+									  const SCostingInfo *pci)
+{
+	GPOS_ASSERT(nullptr != pcmgpdb);
+	GPOS_ASSERT(nullptr != pci);
+	/*
+	 * CostRightAntiSemiHashJoin reuses this formula (shared build/probe/
+	 * finalize skeleton), so accept the RIGHT_ANTI operators here too --
+	 * otherwise the delegation from CostRightAntiSemiHashJoin trips the
+	 * assertion for a RIGHT_ANTI op.
+	 */
+	GPOS_ASSERT(COperator::EopPhysicalRightSemiHashJoin ==
+					exprhdl.Pop()->Eopid() ||
+				COperator::EopPhysicalParallelRightSemiHashJoin ==
+					exprhdl.Pop()->Eopid() ||
+				COperator::EopPhysicalRightAntiSemiHashJoin ==
+					exprhdl.Pop()->Eopid() ||
+				COperator::EopPhysicalParallelRightAntiSemiHashJoin ==
+					exprhdl.Pop()->Eopid());
+
+	// GUC kill-switch: when enable_right_join_flip=off, force ∞ so ORCA
+	// falls back to LEFT_SEMI/ANTI.  The translator now swaps DXL children
+	// to produce PG-canonical layout, so both PG executor and vec engine
+	// handle RIGHT_SEMI/ANTI correctly regardless of vectorization state.
+	if (!gpdb::IsRightJoinFlipEnabled())
+	{
+		return CCost(GPOS_FP_ABS_MAX);
+	}
+
+	//
+	// RIGHT_SEMI cost: DXL child 0 (LHS) = build, DXL child 1 (RHS) =
+	// probe.  The translator swaps these into PG-canonical layout
+	// (inner=Hash(build), outer=probe) but cost estimation sees the
+	// original DXL ordering.
+	//
+	const DOUBLE dRowsBuild = pci->PdRows()[0];	  // DXL child 0 = build
+	const DOUBLE dWidthBuild = pci->GetWidth()[0];
+	const DOUBLE dRowsProbe = pci->PdRows()[1];	  // DXL child 1 = probe
+	const DOUBLE dWidthProbe = pci->GetWidth()[1];
+
+	const CDouble dHJHashTableInitCostFactor =
+		pcmgpdb->GetCostModelParams()
+			->PcpLookup(CCostModelParamsGPDB::EcpHJHashTableInitCostFactor)
+			->Get();
+	const CDouble dHJHashTableColumnCostUnit =
+		pcmgpdb->GetCostModelParams()
+			->PcpLookup(CCostModelParamsGPDB::EcpHJHashTableColumnCostUnit)
+			->Get();
+	const CDouble dHJHashTableWidthCostUnit =
+		pcmgpdb->GetCostModelParams()
+			->PcpLookup(CCostModelParamsGPDB::EcpHJHashTableWidthCostUnit)
+			->Get();
+	const CDouble dJoinFeedingTupColumnCostUnit =
+		pcmgpdb->GetCostModelParams()
+			->PcpLookup(CCostModelParamsGPDB::EcpJoinFeedingTupColumnCostUnit)
+			->Get();
+	const CDouble dJoinFeedingTupWidthCostUnit =
+		pcmgpdb->GetCostModelParams()
+			->PcpLookup(CCostModelParamsGPDB::EcpJoinFeedingTupWidthCostUnit)
+			->Get();
+	const CDouble dHJHashingTupWidthCostUnit =
+		pcmgpdb->GetCostModelParams()
+			->PcpLookup(CCostModelParamsGPDB::EcpHJHashingTupWidthCostUnit)
+			->Get();
+	const CDouble dJoinOutputTupCostUnit =
+		pcmgpdb->GetCostModelParams()
+			->PcpLookup(CCostModelParamsGPDB::EcpJoinOutputTupCostUnit)
+			->Get();
+	const CDouble dHJSpillingMemThreshold =
+		pcmgpdb->GetCostModelParams()
+			->PcpLookup(CCostModelParamsGPDB::EcpHJSpillingMemThreshold)
+			->Get();
+	const CDouble dHJFeedingTupColumnSpillingCostUnit =
+		pcmgpdb->GetCostModelParams()
+			->PcpLookup(
+				CCostModelParamsGPDB::EcpHJFeedingTupColumnSpillingCostUnit)
+			->Get();
+	const CDouble dHJFeedingTupWidthSpillingCostUnit =
+		pcmgpdb->GetCostModelParams()
+			->PcpLookup(
+				CCostModelParamsGPDB::EcpHJFeedingTupWidthSpillingCostUnit)
+			->Get();
+	const CDouble dHJHashingTupWidthSpillingCostUnit =
+		pcmgpdb->GetCostModelParams()
+			->PcpLookup(
+				CCostModelParamsGPDB::EcpHJHashingTupWidthSpillingCostUnit)
+			->Get();
+
+	CExpression *pexprJoinCond = exprhdl.PexprScalarRepChild(2);
+	CColRefSet *pcrsUsed = pexprJoinCond->DeriveUsedColumns();
+	const ULONG ulColsUsed = pcrsUsed->Size();
+
+	CCost costLocal(0);
+
+	if (dRowsBuild * dWidthBuild <= dHJSpillingMemThreshold)
+	{
+		// build fits in memory
+		costLocal = CCost(
+			pci->NumRebinds() *
+			(dRowsBuild * (ulColsUsed * dHJHashTableColumnCostUnit +
+						   dWidthBuild * dHJHashTableWidthCostUnit) +
+			 ulColsUsed * dRowsProbe * dJoinFeedingTupColumnCostUnit +
+			 dWidthProbe * dRowsProbe * dJoinFeedingTupWidthCostUnit +
+			 dWidthBuild * dRowsBuild * dHJHashingTupWidthCostUnit +
+			 pci->Rows() * pci->Width() * dJoinOutputTupCostUnit));
+	}
+	else
+	{
+		// build spills -- mirror the build-spill IO penalty added in
+		// CostHashJoin's spill branch so LEFT_SEMI vs RIGHT_SEMI comparisons
+		// see the same "larger build pays more" signal.
+		CDouble dBuildBytesOverThreshold(
+			std::max(0.0, dRowsBuild * dWidthBuild - dHJSpillingMemThreshold.Get()));
+		costLocal = CCost(
+			pci->NumRebinds() *
+			(dHJHashTableInitCostFactor +
+			 dRowsBuild * (ulColsUsed * dHJHashTableColumnCostUnit +
+						   dWidthBuild * dHJHashTableWidthCostUnit) +
+			 ulColsUsed * dRowsProbe * dHJFeedingTupColumnSpillingCostUnit +
+			 dWidthProbe * dRowsProbe * dHJFeedingTupWidthSpillingCostUnit +
+			 dWidthBuild * dRowsBuild * dHJHashingTupWidthSpillingCostUnit +
+			 pci->Rows() * pci->Width() * dJoinOutputTupCostUnit +
+			 dBuildBytesOverThreshold * 2.0e-5));
+	}
+
+	CCost costChild =
+		CostChildren(mp, exprhdl, pci, pcmgpdb->GetCostModelParams());
+	(void) mp;
+	return costChild + costLocal;
+}
+
+
+//---------------------------------------------------------------------------
+//	@function:
+//		CCostModelGPDB::CostRightAntiSemiHashJoin
+//
+//	@doc:
+//		Cost of right anti semi hash join (build = outer/left, emit unvisited).
+//		Same skeleton as RightSemi; finalize accounts for build_rows minus
+//		matched_rows (estimated from pci->Rows() which is the relation-level
+//		semantic output i.e. matched count).
+//
+//---------------------------------------------------------------------------
+CCost
+CCostModelGPDB::CostRightAntiSemiHashJoin(CMemoryPool *mp,
+										  CExpressionHandle &exprhdl,
+										  const CCostModelGPDB *pcmgpdb,
+										  const SCostingInfo *pci)
+{
+	GPOS_ASSERT(nullptr != pcmgpdb);
+	GPOS_ASSERT(nullptr != pci);
+	GPOS_ASSERT(COperator::EopPhysicalRightAntiSemiHashJoin ==
+					exprhdl.Pop()->Eopid() ||
+				COperator::EopPhysicalParallelRightAntiSemiHashJoin ==
+					exprhdl.Pop()->Eopid());
+
+	// ANTI shares the build/probe shape of SEMI -- after probe marks
+	// matched build rows via visited bits, finalize emits the unvisited
+	// build rows. The finalize cost is proportional to build_rows and is
+	// dominated by the build hashing term already in CostRightSemiHashJoin,
+	// so reuse the same formula. (See design doc M3.3.)
+	return CostRightSemiHashJoin(mp, exprhdl, pcmgpdb, pci);
+}
+
 
 //---------------------------------------------------------------------------
 //	@function:
@@ -3775,6 +3980,18 @@ CCostModelGPDB::Cost(
 		case COperator::EopPhysicalFullHashJoin:
 		{
 			return CostHashJoin(m_mp, exprhdl, this, pci);
+		}
+
+		case COperator::EopPhysicalRightSemiHashJoin:
+		case COperator::EopPhysicalParallelRightSemiHashJoin:
+		{
+			return CostRightSemiHashJoin(m_mp, exprhdl, this, pci);
+		}
+
+		case COperator::EopPhysicalRightAntiSemiHashJoin:
+		case COperator::EopPhysicalParallelRightAntiSemiHashJoin:
+		{
+			return CostRightAntiSemiHashJoin(m_mp, exprhdl, this, pci);
 		}
 
 		case COperator::EopPhysicalParallelInnerHashJoin:

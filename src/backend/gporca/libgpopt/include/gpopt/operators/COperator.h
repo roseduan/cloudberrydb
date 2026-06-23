@@ -234,6 +234,8 @@ public:
 		EopPhysicalLeftAntiSemiHashJoin,
 		EopPhysicalLeftAntiSemiHashJoinNotIn,
 		EopPhysicalRightOuterHashJoin,
+		EopPhysicalRightSemiHashJoin,
+		EopPhysicalRightAntiSemiHashJoin,
 		EopPhysicalFullHashJoin,
 
 		// Parallel hash joins
@@ -243,6 +245,8 @@ public:
 		EopPhysicalParallelLeftAntiSemiHashJoin,
 		EopPhysicalParallelLeftAntiSemiHashJoinNotIn,
 		EopPhysicalParallelRightOuterHashJoin,
+		EopPhysicalParallelRightSemiHashJoin,
+		EopPhysicalParallelRightAntiSemiHashJoin,
 		EopPhysicalParallelFullHashJoin,
 
 		EopPhysicalMotionGather,

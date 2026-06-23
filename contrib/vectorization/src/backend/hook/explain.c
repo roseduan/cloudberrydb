@@ -1584,6 +1584,15 @@ VecExplainNode(PlanState *planstate, List *ancestors,
 					case JOIN_LASJ_NOTIN:
 						jointype = "Left Anti Semi (Not-In)";
 						break;
+					case JOIN_RIGHT_SEMI:
+						jointype = "Right Semi";
+						break;
+					case JOIN_RIGHT_ANTI:
+						jointype = "Right Anti";
+						break;
+					case JOIN_RIGHT_ANTI_NOTIN:
+						jointype = "Right Anti Semi (Not-In)";
+						break;
 					default:
 						jointype = "???";
 						break;
