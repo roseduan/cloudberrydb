@@ -21,7 +21,36 @@
     <hivesync.version>1.0.0</hivesync.version>
     <slf4j.version>1.7.25</slf4j.version>
     <log4j2.version>2.17.2</log4j2.version>
+    <!-- CVE fix: avro 1.11.4 (CVE-2024-47561 RCE, overrides hadoop 2.x's transitive 1.7.4) -->
+    <avro.version>1.11.4</avro.version>
+    <jetty.version>9.4.57.v20241219</jetty.version>
   </properties>
+
+  <!-- CVE fixes: converge old coordinates pulled transitively via hive/hadoop across submodules -->
+  <dependencyManagement>
+    <dependencies>
+      <!-- converge hivesync's transitive hadoop-common 2.6.0 (via metrics-reporter) to 2.10.2 (last hadoop 2.x) -->
+      <dependency>
+        <groupId>org.apache.hadoop</groupId>
+        <artifactId>hadoop-common</artifactId>
+        <version>${hadoop.version}</version>
+      </dependency>
+      <!-- avro 1.11.4: CVE-2024-47561 RCE (overrides hadoop 2.x's transitive 1.7.4) -->
+      <dependency>
+        <groupId>org.apache.avro</groupId>
+        <artifactId>avro</artifactId>
+        <version>${avro.version}</version>
+      </dependency>
+      <!-- jetty 9.4.57 (if any submodule pulls org.eclipse.jetty via hive, pin it to the patched version) -->
+      <dependency>
+        <groupId>org.eclipse.jetty</groupId>
+        <artifactId>jetty-bom</artifactId>
+        <version>${jetty.version}</version>
+        <type>pom</type>
+        <scope>import</scope>
+      </dependency>
+    </dependencies>
+  </dependencyManagement>
 
   <modules>
     <module>apiary-metastore-events</module>
