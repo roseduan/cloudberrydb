@@ -7,10 +7,14 @@ CREATE TABLE J1_TBL (
   j integer,
   t text
 );
+NOTICE:  Table doesn't have 'DISTRIBUTED BY' clause -- Using column named 'i' as the Apache Cloudberry data distribution key for this table.
+HINT:  The 'DISTRIBUTED BY' clause determines the distribution of data. Make sure column(s) chosen are the optimal data distribution key to minimize skew.
 CREATE TABLE J2_TBL (
   i integer,
   k integer
 );
+NOTICE:  Table doesn't have 'DISTRIBUTED BY' clause -- Using column named 'i' as the Apache Cloudberry data distribution key for this table.
+HINT:  The 'DISTRIBUTED BY' clause determines the distribution of data. Make sure column(s) chosen are the optimal data distribution key to minimize skew.
 INSERT INTO J1_TBL VALUES (1, 4, 'one');
 INSERT INTO J1_TBL VALUES (2, 3, 'two');
 INSERT INTO J1_TBL VALUES (3, 2, 'three');
@@ -33,6 +37,7 @@ INSERT INTO J2_TBL VALUES (NULL, NULL);
 INSERT INTO J2_TBL VALUES (NULL, 0);
 -- useful in some tests below
 create temp table onerow();
+NOTICE:  Table doesn't have 'DISTRIBUTED BY' clause, and no column type is suitable for a distribution key. Creating a NULL policy entry.
 insert into onerow default values;
 analyze onerow;
 --
@@ -45,14 +50,14 @@ SELECT *
  i | j |   t   
 ---+---+-------
  1 | 4 | one
+ 0 |   | zero
+ 5 | 0 | five
+ 6 | 6 | six
  2 | 3 | two
  3 | 2 | three
  4 | 1 | four
- 5 | 0 | five
- 6 | 6 | six
  7 | 7 | seven
  8 | 8 | eight
- 0 |   | zero
    |   | null
    | 0 | zero
 (11 rows)
@@ -62,33 +67,33 @@ SELECT *
  i | j |   t   
 ---+---+-------
  1 | 4 | one
+ 0 |   | zero
  2 | 3 | two
  3 | 2 | three
  4 | 1 | four
- 5 | 0 | five
- 6 | 6 | six
  7 | 7 | seven
  8 | 8 | eight
- 0 |   | zero
    |   | null
    | 0 | zero
+ 5 | 0 | five
+ 6 | 6 | six
 (11 rows)
 
 SELECT *
   FROM J1_TBL AS t1 (a, b, c);
  a | b |   c   
 ---+---+-------
- 1 | 4 | one
  2 | 3 | two
  3 | 2 | three
  4 | 1 | four
- 5 | 0 | five
- 6 | 6 | six
  7 | 7 | seven
  8 | 8 | eight
- 0 |   | zero
    |   | null
    | 0 | zero
+ 5 | 0 | five
+ 6 | 6 | six
+ 1 | 4 | one
+ 0 |   | zero
 (11 rows)
 
 SELECT *
@@ -96,121 +101,121 @@ SELECT *
  a | b |   c   
 ---+---+-------
  1 | 4 | one
+ 0 |   | zero
  2 | 3 | two
  3 | 2 | three
  4 | 1 | four
- 5 | 0 | five
- 6 | 6 | six
  7 | 7 | seven
  8 | 8 | eight
- 0 |   | zero
    |   | null
    | 0 | zero
+ 5 | 0 | five
+ 6 | 6 | six
 (11 rows)
 
 SELECT *
   FROM J1_TBL t1 (a, b, c), J2_TBL t2 (d, e);
  a | b |   c   | d | e  
 ---+---+-------+---+----
- 1 | 4 | one   | 1 | -1
- 2 | 3 | two   | 1 | -1
- 3 | 2 | three | 1 | -1
- 4 | 1 | four  | 1 | -1
- 5 | 0 | five  | 1 | -1
- 6 | 6 | six   | 1 | -1
- 7 | 7 | seven | 1 | -1
- 8 | 8 | eight | 1 | -1
- 0 |   | zero  | 1 | -1
-   |   | null  | 1 | -1
-   | 0 | zero  | 1 | -1
  1 | 4 | one   | 2 |  2
+ 0 |   | zero  | 2 |  2
+ 1 | 4 | one   | 3 | -3
+ 0 |   | zero  | 3 | -3
+ 1 | 4 | one   | 2 |  4
+ 0 |   | zero  | 2 |  4
+ 1 | 4 | one   |   |   
+ 0 |   | zero  |   |   
+ 1 | 4 | one   |   |  0
+ 0 |   | zero  |   |  0
+ 1 | 4 | one   | 1 | -1
+ 0 |   | zero  | 1 | -1
+ 1 | 4 | one   | 0 |   
+ 0 |   | zero  | 0 |   
+ 1 | 4 | one   | 5 | -5
+ 0 |   | zero  | 5 | -5
+ 1 | 4 | one   | 5 | -5
+ 0 |   | zero  | 5 | -5
  2 | 3 | two   | 2 |  2
  3 | 2 | three | 2 |  2
  4 | 1 | four  | 2 |  2
- 5 | 0 | five  | 2 |  2
- 6 | 6 | six   | 2 |  2
  7 | 7 | seven | 2 |  2
  8 | 8 | eight | 2 |  2
- 0 |   | zero  | 2 |  2
    |   | null  | 2 |  2
    | 0 | zero  | 2 |  2
- 1 | 4 | one   | 3 | -3
  2 | 3 | two   | 3 | -3
  3 | 2 | three | 3 | -3
  4 | 1 | four  | 3 | -3
- 5 | 0 | five  | 3 | -3
- 6 | 6 | six   | 3 | -3
  7 | 7 | seven | 3 | -3
  8 | 8 | eight | 3 | -3
- 0 |   | zero  | 3 | -3
    |   | null  | 3 | -3
    | 0 | zero  | 3 | -3
- 1 | 4 | one   | 2 |  4
  2 | 3 | two   | 2 |  4
  3 | 2 | three | 2 |  4
  4 | 1 | four  | 2 |  4
- 5 | 0 | five  | 2 |  4
- 6 | 6 | six   | 2 |  4
  7 | 7 | seven | 2 |  4
  8 | 8 | eight | 2 |  4
- 0 |   | zero  | 2 |  4
    |   | null  | 2 |  4
    | 0 | zero  | 2 |  4
- 1 | 4 | one   | 5 | -5
- 2 | 3 | two   | 5 | -5
- 3 | 2 | three | 5 | -5
- 4 | 1 | four  | 5 | -5
- 5 | 0 | five  | 5 | -5
- 6 | 6 | six   | 5 | -5
- 7 | 7 | seven | 5 | -5
- 8 | 8 | eight | 5 | -5
- 0 |   | zero  | 5 | -5
-   |   | null  | 5 | -5
-   | 0 | zero  | 5 | -5
- 1 | 4 | one   | 5 | -5
- 2 | 3 | two   | 5 | -5
- 3 | 2 | three | 5 | -5
- 4 | 1 | four  | 5 | -5
- 5 | 0 | five  | 5 | -5
- 6 | 6 | six   | 5 | -5
- 7 | 7 | seven | 5 | -5
- 8 | 8 | eight | 5 | -5
- 0 |   | zero  | 5 | -5
-   |   | null  | 5 | -5
-   | 0 | zero  | 5 | -5
- 1 | 4 | one   | 0 |   
- 2 | 3 | two   | 0 |   
- 3 | 2 | three | 0 |   
- 4 | 1 | four  | 0 |   
- 5 | 0 | five  | 0 |   
- 6 | 6 | six   | 0 |   
- 7 | 7 | seven | 0 |   
- 8 | 8 | eight | 0 |   
- 0 |   | zero  | 0 |   
-   |   | null  | 0 |   
-   | 0 | zero  | 0 |   
- 1 | 4 | one   |   |   
  2 | 3 | two   |   |   
  3 | 2 | three |   |   
  4 | 1 | four  |   |   
- 5 | 0 | five  |   |   
- 6 | 6 | six   |   |   
  7 | 7 | seven |   |   
  8 | 8 | eight |   |   
- 0 |   | zero  |   |   
    |   | null  |   |   
    | 0 | zero  |   |   
- 1 | 4 | one   |   |  0
  2 | 3 | two   |   |  0
  3 | 2 | three |   |  0
  4 | 1 | four  |   |  0
- 5 | 0 | five  |   |  0
- 6 | 6 | six   |   |  0
  7 | 7 | seven |   |  0
  8 | 8 | eight |   |  0
- 0 |   | zero  |   |  0
    |   | null  |   |  0
    | 0 | zero  |   |  0
+ 2 | 3 | two   | 1 | -1
+ 3 | 2 | three | 1 | -1
+ 4 | 1 | four  | 1 | -1
+ 7 | 7 | seven | 1 | -1
+ 8 | 8 | eight | 1 | -1
+   |   | null  | 1 | -1
+   | 0 | zero  | 1 | -1
+ 2 | 3 | two   | 0 |   
+ 3 | 2 | three | 0 |   
+ 4 | 1 | four  | 0 |   
+ 7 | 7 | seven | 0 |   
+ 8 | 8 | eight | 0 |   
+   |   | null  | 0 |   
+   | 0 | zero  | 0 |   
+ 2 | 3 | two   | 5 | -5
+ 3 | 2 | three | 5 | -5
+ 4 | 1 | four  | 5 | -5
+ 7 | 7 | seven | 5 | -5
+ 8 | 8 | eight | 5 | -5
+   |   | null  | 5 | -5
+   | 0 | zero  | 5 | -5
+ 2 | 3 | two   | 5 | -5
+ 3 | 2 | three | 5 | -5
+ 4 | 1 | four  | 5 | -5
+ 7 | 7 | seven | 5 | -5
+ 8 | 8 | eight | 5 | -5
+   |   | null  | 5 | -5
+   | 0 | zero  | 5 | -5
+ 5 | 0 | five  | 2 |  2
+ 6 | 6 | six   | 2 |  2
+ 5 | 0 | five  | 3 | -3
+ 6 | 6 | six   | 3 | -3
+ 5 | 0 | five  | 2 |  4
+ 6 | 6 | six   | 2 |  4
+ 5 | 0 | five  |   |   
+ 6 | 6 | six   |   |   
+ 5 | 0 | five  |   |  0
+ 6 | 6 | six   |   |  0
+ 5 | 0 | five  | 1 | -1
+ 6 | 6 | six   | 1 | -1
+ 5 | 0 | five  | 0 |   
+ 6 | 6 | six   | 0 |   
+ 5 | 0 | five  | 5 | -5
+ 6 | 6 | six   | 5 | -5
+ 5 | 0 | five  | 5 | -5
+ 6 | 6 | six   | 5 | -5
 (99 rows)
 
 SELECT t1.a, t2.e
@@ -218,13 +223,13 @@ SELECT t1.a, t2.e
   WHERE t1.a = t2.d;
  a | e  
 ---+----
- 0 |   
+ 5 | -5
+ 5 | -5
  1 | -1
+ 0 |   
  2 |  2
- 2 |  4
  3 | -3
- 5 | -5
- 5 | -5
+ 2 |  4
 (7 rows)
 
 --
@@ -236,103 +241,103 @@ SELECT *
   FROM J1_TBL CROSS JOIN J2_TBL;
  i | j |   t   | i | k  
 ---+---+-------+---+----
+ 5 | 0 | five  | 5 | -5
+ 6 | 6 | six   | 5 | -5
+ 5 | 0 | five  | 5 | -5
+ 6 | 6 | six   | 5 | -5
+ 5 | 0 | five  | 1 | -1
+ 6 | 6 | six   | 1 | -1
+ 5 | 0 | five  | 0 |   
+ 6 | 6 | six   | 0 |   
+ 5 | 0 | five  | 2 |  2
+ 6 | 6 | six   | 2 |  2
+ 5 | 0 | five  | 3 | -3
+ 6 | 6 | six   | 3 | -3
+ 5 | 0 | five  | 2 |  4
+ 6 | 6 | six   | 2 |  4
+ 5 | 0 | five  |   |   
+ 6 | 6 | six   |   |   
+ 5 | 0 | five  |   |  0
+ 6 | 6 | six   |   |  0
+ 1 | 4 | one   | 5 | -5
+ 0 |   | zero  | 5 | -5
+ 1 | 4 | one   | 5 | -5
+ 0 |   | zero  | 5 | -5
  1 | 4 | one   | 1 | -1
+ 0 |   | zero  | 1 | -1
+ 1 | 4 | one   | 0 |   
+ 0 |   | zero  | 0 |   
+ 1 | 4 | one   | 2 |  2
+ 0 |   | zero  | 2 |  2
+ 1 | 4 | one   | 3 | -3
+ 0 |   | zero  | 3 | -3
+ 1 | 4 | one   | 2 |  4
+ 0 |   | zero  | 2 |  4
+ 1 | 4 | one   |   |   
+ 0 |   | zero  |   |   
+ 1 | 4 | one   |   |  0
+ 0 |   | zero  |   |  0
  2 | 3 | two   | 1 | -1
  3 | 2 | three | 1 | -1
  4 | 1 | four  | 1 | -1
- 5 | 0 | five  | 1 | -1
- 6 | 6 | six   | 1 | -1
  7 | 7 | seven | 1 | -1
  8 | 8 | eight | 1 | -1
- 0 |   | zero  | 1 | -1
    |   | null  | 1 | -1
    | 0 | zero  | 1 | -1
- 1 | 4 | one   | 2 |  2
- 2 | 3 | two   | 2 |  2
- 3 | 2 | three | 2 |  2
- 4 | 1 | four  | 2 |  2
- 5 | 0 | five  | 2 |  2
- 6 | 6 | six   | 2 |  2
- 7 | 7 | seven | 2 |  2
- 8 | 8 | eight | 2 |  2
- 0 |   | zero  | 2 |  2
-   |   | null  | 2 |  2
-   | 0 | zero  | 2 |  2
- 1 | 4 | one   | 3 | -3
- 2 | 3 | two   | 3 | -3
- 3 | 2 | three | 3 | -3
- 4 | 1 | four  | 3 | -3
- 5 | 0 | five  | 3 | -3
- 6 | 6 | six   | 3 | -3
- 7 | 7 | seven | 3 | -3
- 8 | 8 | eight | 3 | -3
- 0 |   | zero  | 3 | -3
-   |   | null  | 3 | -3
-   | 0 | zero  | 3 | -3
- 1 | 4 | one   | 2 |  4
- 2 | 3 | two   | 2 |  4
- 3 | 2 | three | 2 |  4
- 4 | 1 | four  | 2 |  4
- 5 | 0 | five  | 2 |  4
- 6 | 6 | six   | 2 |  4
- 7 | 7 | seven | 2 |  4
- 8 | 8 | eight | 2 |  4
- 0 |   | zero  | 2 |  4
-   |   | null  | 2 |  4
-   | 0 | zero  | 2 |  4
- 1 | 4 | one   | 5 | -5
- 2 | 3 | two   | 5 | -5
- 3 | 2 | three | 5 | -5
- 4 | 1 | four  | 5 | -5
- 5 | 0 | five  | 5 | -5
- 6 | 6 | six   | 5 | -5
- 7 | 7 | seven | 5 | -5
- 8 | 8 | eight | 5 | -5
- 0 |   | zero  | 5 | -5
-   |   | null  | 5 | -5
-   | 0 | zero  | 5 | -5
- 1 | 4 | one   | 5 | -5
- 2 | 3 | two   | 5 | -5
- 3 | 2 | three | 5 | -5
- 4 | 1 | four  | 5 | -5
- 5 | 0 | five  | 5 | -5
- 6 | 6 | six   | 5 | -5
- 7 | 7 | seven | 5 | -5
- 8 | 8 | eight | 5 | -5
- 0 |   | zero  | 5 | -5
-   |   | null  | 5 | -5
-   | 0 | zero  | 5 | -5
- 1 | 4 | one   | 0 |   
  2 | 3 | two   | 0 |   
  3 | 2 | three | 0 |   
  4 | 1 | four  | 0 |   
- 5 | 0 | five  | 0 |   
- 6 | 6 | six   | 0 |   
  7 | 7 | seven | 0 |   
  8 | 8 | eight | 0 |   
- 0 |   | zero  | 0 |   
    |   | null  | 0 |   
    | 0 | zero  | 0 |   
- 1 | 4 | one   |   |   
+ 2 | 3 | two   | 5 | -5
+ 3 | 2 | three | 5 | -5
+ 4 | 1 | four  | 5 | -5
+ 7 | 7 | seven | 5 | -5
+ 8 | 8 | eight | 5 | -5
+   |   | null  | 5 | -5
+   | 0 | zero  | 5 | -5
+ 2 | 3 | two   | 5 | -5
+ 3 | 2 | three | 5 | -5
+ 4 | 1 | four  | 5 | -5
+ 7 | 7 | seven | 5 | -5
+ 8 | 8 | eight | 5 | -5
+   |   | null  | 5 | -5
+   | 0 | zero  | 5 | -5
+ 2 | 3 | two   | 2 |  2
+ 3 | 2 | three | 2 |  2
+ 4 | 1 | four  | 2 |  2
+ 7 | 7 | seven | 2 |  2
+ 8 | 8 | eight | 2 |  2
+   |   | null  | 2 |  2
+   | 0 | zero  | 2 |  2
+ 2 | 3 | two   | 3 | -3
+ 3 | 2 | three | 3 | -3
+ 4 | 1 | four  | 3 | -3
+ 7 | 7 | seven | 3 | -3
+ 8 | 8 | eight | 3 | -3
+   |   | null  | 3 | -3
+   | 0 | zero  | 3 | -3
+ 2 | 3 | two   | 2 |  4
+ 3 | 2 | three | 2 |  4
+ 4 | 1 | four  | 2 |  4
+ 7 | 7 | seven | 2 |  4
+ 8 | 8 | eight | 2 |  4
+   |   | null  | 2 |  4
+   | 0 | zero  | 2 |  4
  2 | 3 | two   |   |   
  3 | 2 | three |   |   
  4 | 1 | four  |   |   
- 5 | 0 | five  |   |   
- 6 | 6 | six   |   |   
  7 | 7 | seven |   |   
  8 | 8 | eight |   |   
- 0 |   | zero  |   |   
    |   | null  |   |   
    | 0 | zero  |   |   
- 1 | 4 | one   |   |  0
  2 | 3 | two   |   |  0
  3 | 2 | three |   |  0
  4 | 1 | four  |   |  0
- 5 | 0 | five  |   |  0
- 6 | 6 | six   |   |  0
  7 | 7 | seven |   |  0
  8 | 8 | eight |   |  0
- 0 |   | zero  |   |  0
    |   | null  |   |  0
    | 0 | zero  |   |  0
 (99 rows)
@@ -349,104 +354,104 @@ SELECT t1.i, k, t
  i | k  |   t   
 ---+----+-------
  1 | -1 | one
+ 0 | -1 | zero
+ 1 |    | one
+ 0 |    | zero
+ 1 |  2 | one
+ 0 |  2 | zero
+ 1 | -3 | one
+ 0 | -3 | zero
+ 1 |  4 | one
+ 0 |  4 | zero
+ 1 |    | one
+ 0 |    | zero
+ 1 |  0 | one
+ 0 |  0 | zero
+ 1 | -5 | one
+ 0 | -5 | zero
+ 1 | -5 | one
+ 0 | -5 | zero
  2 | -1 | two
  3 | -1 | three
  4 | -1 | four
- 5 | -1 | five
- 6 | -1 | six
  7 | -1 | seven
  8 | -1 | eight
- 0 | -1 | zero
    | -1 | null
    | -1 | zero
- 1 |  2 | one
+ 2 |    | two
+ 3 |    | three
+ 4 |    | four
+ 7 |    | seven
+ 8 |    | eight
+   |    | null
+   |    | zero
  2 |  2 | two
  3 |  2 | three
  4 |  2 | four
- 5 |  2 | five
- 6 |  2 | six
  7 |  2 | seven
  8 |  2 | eight
- 0 |  2 | zero
    |  2 | null
    |  2 | zero
- 1 | -3 | one
  2 | -3 | two
  3 | -3 | three
  4 | -3 | four
- 5 | -3 | five
- 6 | -3 | six
  7 | -3 | seven
  8 | -3 | eight
- 0 | -3 | zero
    | -3 | null
    | -3 | zero
- 1 |  4 | one
  2 |  4 | two
  3 |  4 | three
  4 |  4 | four
- 5 |  4 | five
- 6 |  4 | six
  7 |  4 | seven
  8 |  4 | eight
- 0 |  4 | zero
    |  4 | null
    |  4 | zero
- 1 | -5 | one
- 2 | -5 | two
- 3 | -5 | three
- 4 | -5 | four
- 5 | -5 | five
- 6 | -5 | six
- 7 | -5 | seven
- 8 | -5 | eight
- 0 | -5 | zero
-   | -5 | null
-   | -5 | zero
- 1 | -5 | one
- 2 | -5 | two
- 3 | -5 | three
- 4 | -5 | four
- 5 | -5 | five
- 6 | -5 | six
- 7 | -5 | seven
- 8 | -5 | eight
- 0 | -5 | zero
-   | -5 | null
-   | -5 | zero
- 1 |    | one
  2 |    | two
  3 |    | three
  4 |    | four
- 5 |    | five
- 6 |    | six
  7 |    | seven
  8 |    | eight
- 0 |    | zero
    |    | null
    |    | zero
- 1 |    | one
- 2 |    | two
- 3 |    | three
- 4 |    | four
- 5 |    | five
- 6 |    | six
- 7 |    | seven
- 8 |    | eight
- 0 |    | zero
-   |    | null
-   |    | zero
- 1 |  0 | one
  2 |  0 | two
  3 |  0 | three
  4 |  0 | four
- 5 |  0 | five
- 6 |  0 | six
  7 |  0 | seven
  8 |  0 | eight
- 0 |  0 | zero
    |  0 | null
    |  0 | zero
+ 2 | -5 | two
+ 3 | -5 | three
+ 4 | -5 | four
+ 7 | -5 | seven
+ 8 | -5 | eight
+   | -5 | null
+   | -5 | zero
+ 2 | -5 | two
+ 3 | -5 | three
+ 4 | -5 | four
+ 7 | -5 | seven
+ 8 | -5 | eight
+   | -5 | null
+   | -5 | zero
+ 5 |  2 | five
+ 6 |  2 | six
+ 5 | -3 | five
+ 6 | -3 | six
+ 5 |  4 | five
+ 6 |  4 | six
+ 5 |    | five
+ 6 |    | six
+ 5 |  0 | five
+ 6 |  0 | six
+ 5 | -1 | five
+ 6 | -1 | six
+ 5 |    | five
+ 6 |    | six
+ 5 | -5 | five
+ 6 | -5 | six
+ 5 | -5 | five
+ 6 | -5 | six
 (99 rows)
 
 SELECT ii, tt, kk
@@ -454,105 +459,105 @@ SELECT ii, tt, kk
     AS tx (ii, jj, tt, ii2, kk);
  ii |  tt   | kk 
 ----+-------+----
-  1 | one   | -1
-  2 | two   | -1
-  3 | three | -1
-  4 | four  | -1
-  5 | five  | -1
-  6 | six   | -1
-  7 | seven | -1
-  8 | eight | -1
-  0 | zero  | -1
-    | null  | -1
-    | zero  | -1
-  1 | one   |  2
+  2 | two   | -5
+  3 | three | -5
+  4 | four  | -5
+  7 | seven | -5
+  8 | eight | -5
+    | null  | -5
+    | zero  | -5
+  2 | two   | -5
+  3 | three | -5
+  4 | four  | -5
+  7 | seven | -5
+  8 | eight | -5
+    | null  | -5
+    | zero  | -5
   2 | two   |  2
   3 | three |  2
   4 | four  |  2
-  5 | five  |  2
-  6 | six   |  2
   7 | seven |  2
   8 | eight |  2
-  0 | zero  |  2
     | null  |  2
     | zero  |  2
-  1 | one   | -3
   2 | two   | -3
   3 | three | -3
   4 | four  | -3
-  5 | five  | -3
-  6 | six   | -3
   7 | seven | -3
   8 | eight | -3
-  0 | zero  | -3
     | null  | -3
     | zero  | -3
-  1 | one   |  4
   2 | two   |  4
   3 | three |  4
   4 | four  |  4
-  5 | five  |  4
-  6 | six   |  4
   7 | seven |  4
   8 | eight |  4
-  0 | zero  |  4
     | null  |  4
     | zero  |  4
-  1 | one   | -5
-  2 | two   | -5
-  3 | three | -5
-  4 | four  | -5
-  5 | five  | -5
-  6 | six   | -5
-  7 | seven | -5
-  8 | eight | -5
-  0 | zero  | -5
-    | null  | -5
-    | zero  | -5
-  1 | one   | -5
-  2 | two   | -5
-  3 | three | -5
-  4 | four  | -5
-  5 | five  | -5
-  6 | six   | -5
-  7 | seven | -5
-  8 | eight | -5
-  0 | zero  | -5
-    | null  | -5
-    | zero  | -5
-  1 | one   |   
   2 | two   |   
   3 | three |   
   4 | four  |   
-  5 | five  |   
-  6 | six   |   
   7 | seven |   
   8 | eight |   
-  0 | zero  |   
     | null  |   
     | zero  |   
-  1 | one   |   
-  2 | two   |   
-  3 | three |   
-  4 | four  |   
-  5 | five  |   
-  6 | six   |   
-  7 | seven |   
-  8 | eight |   
-  0 | zero  |   
-    | null  |   
-    | zero  |   
-  1 | one   |  0
   2 | two   |  0
   3 | three |  0
   4 | four  |  0
-  5 | five  |  0
-  6 | six   |  0
   7 | seven |  0
   8 | eight |  0
-  0 | zero  |  0
     | null  |  0
     | zero  |  0
+  2 | two   | -1
+  3 | three | -1
+  4 | four  | -1
+  7 | seven | -1
+  8 | eight | -1
+    | null  | -1
+    | zero  | -1
+  2 | two   |   
+  3 | three |   
+  4 | four  |   
+  7 | seven |   
+  8 | eight |   
+    | null  |   
+    | zero  |   
+  1 | one   | -5
+  0 | zero  | -5
+  1 | one   | -5
+  0 | zero  | -5
+  1 | one   |  2
+  0 | zero  |  2
+  1 | one   | -3
+  0 | zero  | -3
+  1 | one   |  4
+  0 | zero  |  4
+  1 | one   |   
+  0 | zero  |   
+  1 | one   |  0
+  0 | zero  |  0
+  1 | one   | -1
+  0 | zero  | -1
+  1 | one   |   
+  0 | zero  |   
+  5 | five  | -5
+  6 | six   | -5
+  5 | five  | -5
+  6 | six   | -5
+  5 | five  |  2
+  6 | six   |  2
+  5 | five  | -3
+  6 | six   | -3
+  5 | five  |  4
+  6 | six   |  4
+  5 | five  |   
+  6 | six   |   
+  5 | five  |  0
+  6 | six   |  0
+  5 | five  | -1
+  6 | six   | -1
+  5 | five  |   
+  6 | six   |   
 (99 rows)
 
 SELECT tx.ii, tx.jj, tx.kk
@@ -560,1002 +565,1002 @@ SELECT tx.ii, tx.jj, tx.kk
     AS tx (ii, jj, tt, ii2, kk);
  ii | jj | kk 
 ----+----+----
-  1 |  4 | -1
   2 |  3 | -1
   3 |  2 | -1
   4 |  1 | -1
-  5 |  0 | -1
-  6 |  6 | -1
   7 |  7 | -1
   8 |  8 | -1
-  0 |    | -1
     |    | -1
     |  0 | -1
-  1 |  4 |  2
+  2 |  3 |   
+  3 |  2 |   
+  4 |  1 |   
+  7 |  7 |   
+  8 |  8 |   
+    |    |   
+    |  0 |   
+  2 |  3 | -5
+  3 |  2 | -5
+  4 |  1 | -5
+  7 |  7 | -5
+  8 |  8 | -5
+    |    | -5
+    |  0 | -5
+  2 |  3 | -5
+  3 |  2 | -5
+  4 |  1 | -5
+  7 |  7 | -5
+  8 |  8 | -5
+    |    | -5
+    |  0 | -5
   2 |  3 |  2
   3 |  2 |  2
   4 |  1 |  2
-  5 |  0 |  2
-  6 |  6 |  2
   7 |  7 |  2
   8 |  8 |  2
-  0 |    |  2
     |    |  2
     |  0 |  2
-  1 |  4 | -3
   2 |  3 | -3
   3 |  2 | -3
   4 |  1 | -3
-  5 |  0 | -3
-  6 |  6 | -3
   7 |  7 | -3
   8 |  8 | -3
-  0 |    | -3
     |    | -3
     |  0 | -3
-  1 |  4 |  4
   2 |  3 |  4
   3 |  2 |  4
   4 |  1 |  4
-  5 |  0 |  4
-  6 |  6 |  4
   7 |  7 |  4
   8 |  8 |  4
-  0 |    |  4
     |    |  4
     |  0 |  4
-  1 |  4 | -5
-  2 |  3 | -5
-  3 |  2 | -5
-  4 |  1 | -5
-  5 |  0 | -5
-  6 |  6 | -5
-  7 |  7 | -5
-  8 |  8 | -5
-  0 |    | -5
-    |    | -5
-    |  0 | -5
-  1 |  4 | -5
-  2 |  3 | -5
-  3 |  2 | -5
-  4 |  1 | -5
-  5 |  0 | -5
-  6 |  6 | -5
-  7 |  7 | -5
-  8 |  8 | -5
-  0 |    | -5
-    |    | -5
-    |  0 | -5
-  1 |  4 |   
   2 |  3 |   
   3 |  2 |   
   4 |  1 |   
-  5 |  0 |   
-  6 |  6 |   
   7 |  7 |   
   8 |  8 |   
-  0 |    |   
     |    |   
     |  0 |   
-  1 |  4 |   
-  2 |  3 |   
-  3 |  2 |   
-  4 |  1 |   
-  5 |  0 |   
-  6 |  6 |   
-  7 |  7 |   
-  8 |  8 |   
-  0 |    |   
-    |    |   
-    |  0 |   
-  1 |  4 |  0
   2 |  3 |  0
   3 |  2 |  0
   4 |  1 |  0
-  5 |  0 |  0
-  6 |  6 |  0
   7 |  7 |  0
   8 |  8 |  0
-  0 |    |  0
     |    |  0
     |  0 |  0
+  5 |  0 | -1
+  6 |  6 | -1
+  5 |  0 |   
+  6 |  6 |   
+  5 |  0 | -5
+  6 |  6 | -5
+  5 |  0 | -5
+  6 |  6 | -5
+  5 |  0 |  2
+  6 |  6 |  2
+  5 |  0 | -3
+  6 |  6 | -3
+  5 |  0 |  4
+  6 |  6 |  4
+  5 |  0 |   
+  6 |  6 |   
+  5 |  0 |  0
+  6 |  6 |  0
+  1 |  4 | -1
+  0 |    | -1
+  1 |  4 |   
+  0 |    |   
+  1 |  4 | -5
+  0 |    | -5
+  1 |  4 | -5
+  0 |    | -5
+  1 |  4 |  2
+  0 |    |  2
+  1 |  4 | -3
+  0 |    | -3
+  1 |  4 |  4
+  0 |    |  4
+  1 |  4 |   
+  0 |    |   
+  1 |  4 |  0
+  0 |    |  0
 (99 rows)
 
 SELECT *
   FROM J1_TBL CROSS JOIN J2_TBL a CROSS JOIN J2_TBL b;
  i | j |   t   | i | k  | i | k  
 ---+---+-------+---+----+---+----
- 1 | 4 | one   | 1 | -1 | 1 | -1
- 1 | 4 | one   | 1 | -1 | 2 |  2
- 1 | 4 | one   | 1 | -1 | 3 | -3
- 1 | 4 | one   | 1 | -1 | 2 |  4
- 1 | 4 | one   | 1 | -1 | 5 | -5
- 1 | 4 | one   | 1 | -1 | 5 | -5
- 1 | 4 | one   | 1 | -1 | 0 |   
- 1 | 4 | one   | 1 | -1 |   |   
- 1 | 4 | one   | 1 | -1 |   |  0
- 2 | 3 | two   | 1 | -1 | 1 | -1
- 2 | 3 | two   | 1 | -1 | 2 |  2
- 2 | 3 | two   | 1 | -1 | 3 | -3
- 2 | 3 | two   | 1 | -1 | 2 |  4
- 2 | 3 | two   | 1 | -1 | 5 | -5
- 2 | 3 | two   | 1 | -1 | 5 | -5
- 2 | 3 | two   | 1 | -1 | 0 |   
- 2 | 3 | two   | 1 | -1 |   |   
- 2 | 3 | two   | 1 | -1 |   |  0
- 3 | 2 | three | 1 | -1 | 1 | -1
- 3 | 2 | three | 1 | -1 | 2 |  2
- 3 | 2 | three | 1 | -1 | 3 | -3
- 3 | 2 | three | 1 | -1 | 2 |  4
- 3 | 2 | three | 1 | -1 | 5 | -5
- 3 | 2 | three | 1 | -1 | 5 | -5
- 3 | 2 | three | 1 | -1 | 0 |   
- 3 | 2 | three | 1 | -1 |   |   
- 3 | 2 | three | 1 | -1 |   |  0
- 4 | 1 | four  | 1 | -1 | 1 | -1
- 4 | 1 | four  | 1 | -1 | 2 |  2
- 4 | 1 | four  | 1 | -1 | 3 | -3
- 4 | 1 | four  | 1 | -1 | 2 |  4
- 4 | 1 | four  | 1 | -1 | 5 | -5
- 4 | 1 | four  | 1 | -1 | 5 | -5
- 4 | 1 | four  | 1 | -1 | 0 |   
- 4 | 1 | four  | 1 | -1 |   |   
- 4 | 1 | four  | 1 | -1 |   |  0
- 5 | 0 | five  | 1 | -1 | 1 | -1
- 5 | 0 | five  | 1 | -1 | 2 |  2
- 5 | 0 | five  | 1 | -1 | 3 | -3
- 5 | 0 | five  | 1 | -1 | 2 |  4
- 5 | 0 | five  | 1 | -1 | 5 | -5
- 5 | 0 | five  | 1 | -1 | 5 | -5
- 5 | 0 | five  | 1 | -1 | 0 |   
- 5 | 0 | five  | 1 | -1 |   |   
- 5 | 0 | five  | 1 | -1 |   |  0
- 6 | 6 | six   | 1 | -1 | 1 | -1
- 6 | 6 | six   | 1 | -1 | 2 |  2
- 6 | 6 | six   | 1 | -1 | 3 | -3
- 6 | 6 | six   | 1 | -1 | 2 |  4
- 6 | 6 | six   | 1 | -1 | 5 | -5
- 6 | 6 | six   | 1 | -1 | 5 | -5
- 6 | 6 | six   | 1 | -1 | 0 |   
- 6 | 6 | six   | 1 | -1 |   |   
- 6 | 6 | six   | 1 | -1 |   |  0
- 7 | 7 | seven | 1 | -1 | 1 | -1
- 7 | 7 | seven | 1 | -1 | 2 |  2
- 7 | 7 | seven | 1 | -1 | 3 | -3
- 7 | 7 | seven | 1 | -1 | 2 |  4
- 7 | 7 | seven | 1 | -1 | 5 | -5
- 7 | 7 | seven | 1 | -1 | 5 | -5
- 7 | 7 | seven | 1 | -1 | 0 |   
- 7 | 7 | seven | 1 | -1 |   |   
- 7 | 7 | seven | 1 | -1 |   |  0
- 8 | 8 | eight | 1 | -1 | 1 | -1
- 8 | 8 | eight | 1 | -1 | 2 |  2
- 8 | 8 | eight | 1 | -1 | 3 | -3
- 8 | 8 | eight | 1 | -1 | 2 |  4
- 8 | 8 | eight | 1 | -1 | 5 | -5
- 8 | 8 | eight | 1 | -1 | 5 | -5
- 8 | 8 | eight | 1 | -1 | 0 |   
- 8 | 8 | eight | 1 | -1 |   |   
- 8 | 8 | eight | 1 | -1 |   |  0
- 0 |   | zero  | 1 | -1 | 1 | -1
- 0 |   | zero  | 1 | -1 | 2 |  2
- 0 |   | zero  | 1 | -1 | 3 | -3
- 0 |   | zero  | 1 | -1 | 2 |  4
- 0 |   | zero  | 1 | -1 | 5 | -5
- 0 |   | zero  | 1 | -1 | 5 | -5
- 0 |   | zero  | 1 | -1 | 0 |   
- 0 |   | zero  | 1 | -1 |   |   
- 0 |   | zero  | 1 | -1 |   |  0
-   |   | null  | 1 | -1 | 1 | -1
-   |   | null  | 1 | -1 | 2 |  2
-   |   | null  | 1 | -1 | 3 | -3
-   |   | null  | 1 | -1 | 2 |  4
-   |   | null  | 1 | -1 | 5 | -5
-   |   | null  | 1 | -1 | 5 | -5
-   |   | null  | 1 | -1 | 0 |   
-   |   | null  | 1 | -1 |   |   
-   |   | null  | 1 | -1 |   |  0
-   | 0 | zero  | 1 | -1 | 1 | -1
-   | 0 | zero  | 1 | -1 | 2 |  2
-   | 0 | zero  | 1 | -1 | 3 | -3
-   | 0 | zero  | 1 | -1 | 2 |  4
-   | 0 | zero  | 1 | -1 | 5 | -5
-   | 0 | zero  | 1 | -1 | 5 | -5
-   | 0 | zero  | 1 | -1 | 0 |   
-   | 0 | zero  | 1 | -1 |   |   
-   | 0 | zero  | 1 | -1 |   |  0
- 1 | 4 | one   | 2 |  2 | 1 | -1
- 1 | 4 | one   | 2 |  2 | 2 |  2
- 1 | 4 | one   | 2 |  2 | 3 | -3
- 1 | 4 | one   | 2 |  2 | 2 |  4
- 1 | 4 | one   | 2 |  2 | 5 | -5
- 1 | 4 | one   | 2 |  2 | 5 | -5
- 1 | 4 | one   | 2 |  2 | 0 |   
- 1 | 4 | one   | 2 |  2 |   |   
- 1 | 4 | one   | 2 |  2 |   |  0
- 2 | 3 | two   | 2 |  2 | 1 | -1
+ 2 | 3 | two   | 2 |  2 | 5 | -5
+ 2 | 3 | two   | 2 |  2 | 5 | -5
  2 | 3 | two   | 2 |  2 | 2 |  2
  2 | 3 | two   | 2 |  2 | 3 | -3
  2 | 3 | two   | 2 |  2 | 2 |  4
- 2 | 3 | two   | 2 |  2 | 5 | -5
- 2 | 3 | two   | 2 |  2 | 5 | -5
- 2 | 3 | two   | 2 |  2 | 0 |   
  2 | 3 | two   | 2 |  2 |   |   
  2 | 3 | two   | 2 |  2 |   |  0
- 3 | 2 | three | 2 |  2 | 1 | -1
- 3 | 2 | three | 2 |  2 | 2 |  2
- 3 | 2 | three | 2 |  2 | 3 | -3
- 3 | 2 | three | 2 |  2 | 2 |  4
- 3 | 2 | three | 2 |  2 | 5 | -5
- 3 | 2 | three | 2 |  2 | 5 | -5
- 3 | 2 | three | 2 |  2 | 0 |   
- 3 | 2 | three | 2 |  2 |   |   
- 3 | 2 | three | 2 |  2 |   |  0
- 4 | 1 | four  | 2 |  2 | 1 | -1
- 4 | 1 | four  | 2 |  2 | 2 |  2
- 4 | 1 | four  | 2 |  2 | 3 | -3
- 4 | 1 | four  | 2 |  2 | 2 |  4
- 4 | 1 | four  | 2 |  2 | 5 | -5
- 4 | 1 | four  | 2 |  2 | 5 | -5
- 4 | 1 | four  | 2 |  2 | 0 |   
- 4 | 1 | four  | 2 |  2 |   |   
- 4 | 1 | four  | 2 |  2 |   |  0
- 5 | 0 | five  | 2 |  2 | 1 | -1
- 5 | 0 | five  | 2 |  2 | 2 |  2
- 5 | 0 | five  | 2 |  2 | 3 | -3
- 5 | 0 | five  | 2 |  2 | 2 |  4
- 5 | 0 | five  | 2 |  2 | 5 | -5
- 5 | 0 | five  | 2 |  2 | 5 | -5
- 5 | 0 | five  | 2 |  2 | 0 |   
- 5 | 0 | five  | 2 |  2 |   |   
- 5 | 0 | five  | 2 |  2 |   |  0
- 6 | 6 | six   | 2 |  2 | 1 | -1
- 6 | 6 | six   | 2 |  2 | 2 |  2
- 6 | 6 | six   | 2 |  2 | 3 | -3
- 6 | 6 | six   | 2 |  2 | 2 |  4
- 6 | 6 | six   | 2 |  2 | 5 | -5
- 6 | 6 | six   | 2 |  2 | 5 | -5
- 6 | 6 | six   | 2 |  2 | 0 |   
- 6 | 6 | six   | 2 |  2 |   |   
- 6 | 6 | six   | 2 |  2 |   |  0
- 7 | 7 | seven | 2 |  2 | 1 | -1
- 7 | 7 | seven | 2 |  2 | 2 |  2
- 7 | 7 | seven | 2 |  2 | 3 | -3
- 7 | 7 | seven | 2 |  2 | 2 |  4
- 7 | 7 | seven | 2 |  2 | 5 | -5
- 7 | 7 | seven | 2 |  2 | 5 | -5
- 7 | 7 | seven | 2 |  2 | 0 |   
- 7 | 7 | seven | 2 |  2 |   |   
- 7 | 7 | seven | 2 |  2 |   |  0
- 8 | 8 | eight | 2 |  2 | 1 | -1
- 8 | 8 | eight | 2 |  2 | 2 |  2
- 8 | 8 | eight | 2 |  2 | 3 | -3
- 8 | 8 | eight | 2 |  2 | 2 |  4
- 8 | 8 | eight | 2 |  2 | 5 | -5
- 8 | 8 | eight | 2 |  2 | 5 | -5
- 8 | 8 | eight | 2 |  2 | 0 |   
- 8 | 8 | eight | 2 |  2 |   |   
- 8 | 8 | eight | 2 |  2 |   |  0
- 0 |   | zero  | 2 |  2 | 1 | -1
- 0 |   | zero  | 2 |  2 | 2 |  2
- 0 |   | zero  | 2 |  2 | 3 | -3
- 0 |   | zero  | 2 |  2 | 2 |  4
- 0 |   | zero  | 2 |  2 | 5 | -5
- 0 |   | zero  | 2 |  2 | 5 | -5
- 0 |   | zero  | 2 |  2 | 0 |   
- 0 |   | zero  | 2 |  2 |   |   
- 0 |   | zero  | 2 |  2 |   |  0
-   |   | null  | 2 |  2 | 1 | -1
-   |   | null  | 2 |  2 | 2 |  2
-   |   | null  | 2 |  2 | 3 | -3
-   |   | null  | 2 |  2 | 2 |  4
-   |   | null  | 2 |  2 | 5 | -5
-   |   | null  | 2 |  2 | 5 | -5
-   |   | null  | 2 |  2 | 0 |   
-   |   | null  | 2 |  2 |   |   
-   |   | null  | 2 |  2 |   |  0
-   | 0 | zero  | 2 |  2 | 1 | -1
-   | 0 | zero  | 2 |  2 | 2 |  2
-   | 0 | zero  | 2 |  2 | 3 | -3
-   | 0 | zero  | 2 |  2 | 2 |  4
-   | 0 | zero  | 2 |  2 | 5 | -5
-   | 0 | zero  | 2 |  2 | 5 | -5
-   | 0 | zero  | 2 |  2 | 0 |   
-   | 0 | zero  | 2 |  2 |   |   
-   | 0 | zero  | 2 |  2 |   |  0
- 1 | 4 | one   | 3 | -3 | 1 | -1
- 1 | 4 | one   | 3 | -3 | 2 |  2
- 1 | 4 | one   | 3 | -3 | 3 | -3
- 1 | 4 | one   | 3 | -3 | 2 |  4
- 1 | 4 | one   | 3 | -3 | 5 | -5
- 1 | 4 | one   | 3 | -3 | 5 | -5
- 1 | 4 | one   | 3 | -3 | 0 |   
- 1 | 4 | one   | 3 | -3 |   |   
- 1 | 4 | one   | 3 | -3 |   |  0
- 2 | 3 | two   | 3 | -3 | 1 | -1
+ 2 | 3 | two   | 2 |  2 | 1 | -1
+ 2 | 3 | two   | 2 |  2 | 0 |   
+ 2 | 3 | two   | 3 | -3 | 5 | -5
+ 2 | 3 | two   | 3 | -3 | 5 | -5
  2 | 3 | two   | 3 | -3 | 2 |  2
  2 | 3 | two   | 3 | -3 | 3 | -3
  2 | 3 | two   | 3 | -3 | 2 |  4
- 2 | 3 | two   | 3 | -3 | 5 | -5
- 2 | 3 | two   | 3 | -3 | 5 | -5
- 2 | 3 | two   | 3 | -3 | 0 |   
  2 | 3 | two   | 3 | -3 |   |   
  2 | 3 | two   | 3 | -3 |   |  0
- 3 | 2 | three | 3 | -3 | 1 | -1
- 3 | 2 | three | 3 | -3 | 2 |  2
- 3 | 2 | three | 3 | -3 | 3 | -3
- 3 | 2 | three | 3 | -3 | 2 |  4
- 3 | 2 | three | 3 | -3 | 5 | -5
- 3 | 2 | three | 3 | -3 | 5 | -5
- 3 | 2 | three | 3 | -3 | 0 |   
- 3 | 2 | three | 3 | -3 |   |   
- 3 | 2 | three | 3 | -3 |   |  0
- 4 | 1 | four  | 3 | -3 | 1 | -1
- 4 | 1 | four  | 3 | -3 | 2 |  2
- 4 | 1 | four  | 3 | -3 | 3 | -3
- 4 | 1 | four  | 3 | -3 | 2 |  4
- 4 | 1 | four  | 3 | -3 | 5 | -5
- 4 | 1 | four  | 3 | -3 | 5 | -5
- 4 | 1 | four  | 3 | -3 | 0 |   
- 4 | 1 | four  | 3 | -3 |   |   
- 4 | 1 | four  | 3 | -3 |   |  0
- 5 | 0 | five  | 3 | -3 | 1 | -1
- 5 | 0 | five  | 3 | -3 | 2 |  2
- 5 | 0 | five  | 3 | -3 | 3 | -3
- 5 | 0 | five  | 3 | -3 | 2 |  4
- 5 | 0 | five  | 3 | -3 | 5 | -5
- 5 | 0 | five  | 3 | -3 | 5 | -5
- 5 | 0 | five  | 3 | -3 | 0 |   
- 5 | 0 | five  | 3 | -3 |   |   
- 5 | 0 | five  | 3 | -3 |   |  0
- 6 | 6 | six   | 3 | -3 | 1 | -1
- 6 | 6 | six   | 3 | -3 | 2 |  2
- 6 | 6 | six   | 3 | -3 | 3 | -3
- 6 | 6 | six   | 3 | -3 | 2 |  4
- 6 | 6 | six   | 3 | -3 | 5 | -5
- 6 | 6 | six   | 3 | -3 | 5 | -5
- 6 | 6 | six   | 3 | -3 | 0 |   
- 6 | 6 | six   | 3 | -3 |   |   
- 6 | 6 | six   | 3 | -3 |   |  0
- 7 | 7 | seven | 3 | -3 | 1 | -1
- 7 | 7 | seven | 3 | -3 | 2 |  2
- 7 | 7 | seven | 3 | -3 | 3 | -3
- 7 | 7 | seven | 3 | -3 | 2 |  4
- 7 | 7 | seven | 3 | -3 | 5 | -5
- 7 | 7 | seven | 3 | -3 | 5 | -5
- 7 | 7 | seven | 3 | -3 | 0 |   
- 7 | 7 | seven | 3 | -3 |   |   
- 7 | 7 | seven | 3 | -3 |   |  0
- 8 | 8 | eight | 3 | -3 | 1 | -1
- 8 | 8 | eight | 3 | -3 | 2 |  2
- 8 | 8 | eight | 3 | -3 | 3 | -3
- 8 | 8 | eight | 3 | -3 | 2 |  4
- 8 | 8 | eight | 3 | -3 | 5 | -5
- 8 | 8 | eight | 3 | -3 | 5 | -5
- 8 | 8 | eight | 3 | -3 | 0 |   
- 8 | 8 | eight | 3 | -3 |   |   
- 8 | 8 | eight | 3 | -3 |   |  0
- 0 |   | zero  | 3 | -3 | 1 | -1
- 0 |   | zero  | 3 | -3 | 2 |  2
- 0 |   | zero  | 3 | -3 | 3 | -3
- 0 |   | zero  | 3 | -3 | 2 |  4
- 0 |   | zero  | 3 | -3 | 5 | -5
- 0 |   | zero  | 3 | -3 | 5 | -5
- 0 |   | zero  | 3 | -3 | 0 |   
- 0 |   | zero  | 3 | -3 |   |   
- 0 |   | zero  | 3 | -3 |   |  0
-   |   | null  | 3 | -3 | 1 | -1
-   |   | null  | 3 | -3 | 2 |  2
-   |   | null  | 3 | -3 | 3 | -3
-   |   | null  | 3 | -3 | 2 |  4
-   |   | null  | 3 | -3 | 5 | -5
-   |   | null  | 3 | -3 | 5 | -5
-   |   | null  | 3 | -3 | 0 |   
-   |   | null  | 3 | -3 |   |   
-   |   | null  | 3 | -3 |   |  0
-   | 0 | zero  | 3 | -3 | 1 | -1
-   | 0 | zero  | 3 | -3 | 2 |  2
-   | 0 | zero  | 3 | -3 | 3 | -3
-   | 0 | zero  | 3 | -3 | 2 |  4
-   | 0 | zero  | 3 | -3 | 5 | -5
-   | 0 | zero  | 3 | -3 | 5 | -5
-   | 0 | zero  | 3 | -3 | 0 |   
-   | 0 | zero  | 3 | -3 |   |   
-   | 0 | zero  | 3 | -3 |   |  0
- 1 | 4 | one   | 2 |  4 | 1 | -1
- 1 | 4 | one   | 2 |  4 | 2 |  2
- 1 | 4 | one   | 2 |  4 | 3 | -3
- 1 | 4 | one   | 2 |  4 | 2 |  4
- 1 | 4 | one   | 2 |  4 | 5 | -5
- 1 | 4 | one   | 2 |  4 | 5 | -5
- 1 | 4 | one   | 2 |  4 | 0 |   
- 1 | 4 | one   | 2 |  4 |   |   
- 1 | 4 | one   | 2 |  4 |   |  0
- 2 | 3 | two   | 2 |  4 | 1 | -1
+ 2 | 3 | two   | 3 | -3 | 1 | -1
+ 2 | 3 | two   | 3 | -3 | 0 |   
+ 2 | 3 | two   | 2 |  4 | 5 | -5
+ 2 | 3 | two   | 2 |  4 | 5 | -5
  2 | 3 | two   | 2 |  4 | 2 |  2
  2 | 3 | two   | 2 |  4 | 3 | -3
  2 | 3 | two   | 2 |  4 | 2 |  4
- 2 | 3 | two   | 2 |  4 | 5 | -5
- 2 | 3 | two   | 2 |  4 | 5 | -5
- 2 | 3 | two   | 2 |  4 | 0 |   
  2 | 3 | two   | 2 |  4 |   |   
  2 | 3 | two   | 2 |  4 |   |  0
- 3 | 2 | three | 2 |  4 | 1 | -1
- 3 | 2 | three | 2 |  4 | 2 |  2
- 3 | 2 | three | 2 |  4 | 3 | -3
- 3 | 2 | three | 2 |  4 | 2 |  4
- 3 | 2 | three | 2 |  4 | 5 | -5
- 3 | 2 | three | 2 |  4 | 5 | -5
- 3 | 2 | three | 2 |  4 | 0 |   
- 3 | 2 | three | 2 |  4 |   |   
- 3 | 2 | three | 2 |  4 |   |  0
- 4 | 1 | four  | 2 |  4 | 1 | -1
- 4 | 1 | four  | 2 |  4 | 2 |  2
- 4 | 1 | four  | 2 |  4 | 3 | -3
- 4 | 1 | four  | 2 |  4 | 2 |  4
- 4 | 1 | four  | 2 |  4 | 5 | -5
- 4 | 1 | four  | 2 |  4 | 5 | -5
- 4 | 1 | four  | 2 |  4 | 0 |   
- 4 | 1 | four  | 2 |  4 |   |   
- 4 | 1 | four  | 2 |  4 |   |  0
- 5 | 0 | five  | 2 |  4 | 1 | -1
- 5 | 0 | five  | 2 |  4 | 2 |  2
- 5 | 0 | five  | 2 |  4 | 3 | -3
- 5 | 0 | five  | 2 |  4 | 2 |  4
- 5 | 0 | five  | 2 |  4 | 5 | -5
- 5 | 0 | five  | 2 |  4 | 5 | -5
- 5 | 0 | five  | 2 |  4 | 0 |   
- 5 | 0 | five  | 2 |  4 |   |   
- 5 | 0 | five  | 2 |  4 |   |  0
- 6 | 6 | six   | 2 |  4 | 1 | -1
- 6 | 6 | six   | 2 |  4 | 2 |  2
- 6 | 6 | six   | 2 |  4 | 3 | -3
- 6 | 6 | six   | 2 |  4 | 2 |  4
- 6 | 6 | six   | 2 |  4 | 5 | -5
- 6 | 6 | six   | 2 |  4 | 5 | -5
- 6 | 6 | six   | 2 |  4 | 0 |   
- 6 | 6 | six   | 2 |  4 |   |   
- 6 | 6 | six   | 2 |  4 |   |  0
- 7 | 7 | seven | 2 |  4 | 1 | -1
- 7 | 7 | seven | 2 |  4 | 2 |  2
- 7 | 7 | seven | 2 |  4 | 3 | -3
- 7 | 7 | seven | 2 |  4 | 2 |  4
- 7 | 7 | seven | 2 |  4 | 5 | -5
- 7 | 7 | seven | 2 |  4 | 5 | -5
- 7 | 7 | seven | 2 |  4 | 0 |   
- 7 | 7 | seven | 2 |  4 |   |   
- 7 | 7 | seven | 2 |  4 |   |  0
- 8 | 8 | eight | 2 |  4 | 1 | -1
- 8 | 8 | eight | 2 |  4 | 2 |  2
- 8 | 8 | eight | 2 |  4 | 3 | -3
- 8 | 8 | eight | 2 |  4 | 2 |  4
- 8 | 8 | eight | 2 |  4 | 5 | -5
- 8 | 8 | eight | 2 |  4 | 5 | -5
- 8 | 8 | eight | 2 |  4 | 0 |   
- 8 | 8 | eight | 2 |  4 |   |   
- 8 | 8 | eight | 2 |  4 |   |  0
- 0 |   | zero  | 2 |  4 | 1 | -1
- 0 |   | zero  | 2 |  4 | 2 |  2
- 0 |   | zero  | 2 |  4 | 3 | -3
- 0 |   | zero  | 2 |  4 | 2 |  4
- 0 |   | zero  | 2 |  4 | 5 | -5
- 0 |   | zero  | 2 |  4 | 5 | -5
- 0 |   | zero  | 2 |  4 | 0 |   
- 0 |   | zero  | 2 |  4 |   |   
- 0 |   | zero  | 2 |  4 |   |  0
-   |   | null  | 2 |  4 | 1 | -1
-   |   | null  | 2 |  4 | 2 |  2
-   |   | null  | 2 |  4 | 3 | -3
-   |   | null  | 2 |  4 | 2 |  4
-   |   | null  | 2 |  4 | 5 | -5
-   |   | null  | 2 |  4 | 5 | -5
-   |   | null  | 2 |  4 | 0 |   
-   |   | null  | 2 |  4 |   |   
-   |   | null  | 2 |  4 |   |  0
-   | 0 | zero  | 2 |  4 | 1 | -1
-   | 0 | zero  | 2 |  4 | 2 |  2
-   | 0 | zero  | 2 |  4 | 3 | -3
-   | 0 | zero  | 2 |  4 | 2 |  4
-   | 0 | zero  | 2 |  4 | 5 | -5
-   | 0 | zero  | 2 |  4 | 5 | -5
-   | 0 | zero  | 2 |  4 | 0 |   
-   | 0 | zero  | 2 |  4 |   |   
-   | 0 | zero  | 2 |  4 |   |  0
- 1 | 4 | one   | 5 | -5 | 1 | -1
- 1 | 4 | one   | 5 | -5 | 2 |  2
- 1 | 4 | one   | 5 | -5 | 3 | -3
- 1 | 4 | one   | 5 | -5 | 2 |  4
- 1 | 4 | one   | 5 | -5 | 5 | -5
- 1 | 4 | one   | 5 | -5 | 5 | -5
- 1 | 4 | one   | 5 | -5 | 0 |   
- 1 | 4 | one   | 5 | -5 |   |   
- 1 | 4 | one   | 5 | -5 |   |  0
- 2 | 3 | two   | 5 | -5 | 1 | -1
- 2 | 3 | two   | 5 | -5 | 2 |  2
- 2 | 3 | two   | 5 | -5 | 3 | -3
- 2 | 3 | two   | 5 | -5 | 2 |  4
- 2 | 3 | two   | 5 | -5 | 5 | -5
- 2 | 3 | two   | 5 | -5 | 5 | -5
- 2 | 3 | two   | 5 | -5 | 0 |   
- 2 | 3 | two   | 5 | -5 |   |   
- 2 | 3 | two   | 5 | -5 |   |  0
- 3 | 2 | three | 5 | -5 | 1 | -1
- 3 | 2 | three | 5 | -5 | 2 |  2
- 3 | 2 | three | 5 | -5 | 3 | -3
- 3 | 2 | three | 5 | -5 | 2 |  4
- 3 | 2 | three | 5 | -5 | 5 | -5
- 3 | 2 | three | 5 | -5 | 5 | -5
- 3 | 2 | three | 5 | -5 | 0 |   
- 3 | 2 | three | 5 | -5 |   |   
- 3 | 2 | three | 5 | -5 |   |  0
- 4 | 1 | four  | 5 | -5 | 1 | -1
- 4 | 1 | four  | 5 | -5 | 2 |  2
- 4 | 1 | four  | 5 | -5 | 3 | -3
- 4 | 1 | four  | 5 | -5 | 2 |  4
- 4 | 1 | four  | 5 | -5 | 5 | -5
- 4 | 1 | four  | 5 | -5 | 5 | -5
- 4 | 1 | four  | 5 | -5 | 0 |   
- 4 | 1 | four  | 5 | -5 |   |   
- 4 | 1 | four  | 5 | -5 |   |  0
- 5 | 0 | five  | 5 | -5 | 1 | -1
- 5 | 0 | five  | 5 | -5 | 2 |  2
- 5 | 0 | five  | 5 | -5 | 3 | -3
- 5 | 0 | five  | 5 | -5 | 2 |  4
- 5 | 0 | five  | 5 | -5 | 5 | -5
- 5 | 0 | five  | 5 | -5 | 5 | -5
- 5 | 0 | five  | 5 | -5 | 0 |   
- 5 | 0 | five  | 5 | -5 |   |   
- 5 | 0 | five  | 5 | -5 |   |  0
- 6 | 6 | six   | 5 | -5 | 1 | -1
- 6 | 6 | six   | 5 | -5 | 2 |  2
- 6 | 6 | six   | 5 | -5 | 3 | -3
- 6 | 6 | six   | 5 | -5 | 2 |  4
- 6 | 6 | six   | 5 | -5 | 5 | -5
- 6 | 6 | six   | 5 | -5 | 5 | -5
- 6 | 6 | six   | 5 | -5 | 0 |   
- 6 | 6 | six   | 5 | -5 |   |   
- 6 | 6 | six   | 5 | -5 |   |  0
- 7 | 7 | seven | 5 | -5 | 1 | -1
- 7 | 7 | seven | 5 | -5 | 2 |  2
- 7 | 7 | seven | 5 | -5 | 3 | -3
- 7 | 7 | seven | 5 | -5 | 2 |  4
- 7 | 7 | seven | 5 | -5 | 5 | -5
- 7 | 7 | seven | 5 | -5 | 5 | -5
- 7 | 7 | seven | 5 | -5 | 0 |   
- 7 | 7 | seven | 5 | -5 |   |   
- 7 | 7 | seven | 5 | -5 |   |  0
- 8 | 8 | eight | 5 | -5 | 1 | -1
- 8 | 8 | eight | 5 | -5 | 2 |  2
- 8 | 8 | eight | 5 | -5 | 3 | -3
- 8 | 8 | eight | 5 | -5 | 2 |  4
- 8 | 8 | eight | 5 | -5 | 5 | -5
- 8 | 8 | eight | 5 | -5 | 5 | -5
- 8 | 8 | eight | 5 | -5 | 0 |   
- 8 | 8 | eight | 5 | -5 |   |   
- 8 | 8 | eight | 5 | -5 |   |  0
- 0 |   | zero  | 5 | -5 | 1 | -1
- 0 |   | zero  | 5 | -5 | 2 |  2
- 0 |   | zero  | 5 | -5 | 3 | -3
- 0 |   | zero  | 5 | -5 | 2 |  4
- 0 |   | zero  | 5 | -5 | 5 | -5
- 0 |   | zero  | 5 | -5 | 5 | -5
- 0 |   | zero  | 5 | -5 | 0 |   
- 0 |   | zero  | 5 | -5 |   |   
- 0 |   | zero  | 5 | -5 |   |  0
-   |   | null  | 5 | -5 | 1 | -1
-   |   | null  | 5 | -5 | 2 |  2
-   |   | null  | 5 | -5 | 3 | -3
-   |   | null  | 5 | -5 | 2 |  4
-   |   | null  | 5 | -5 | 5 | -5
-   |   | null  | 5 | -5 | 5 | -5
-   |   | null  | 5 | -5 | 0 |   
-   |   | null  | 5 | -5 |   |   
-   |   | null  | 5 | -5 |   |  0
-   | 0 | zero  | 5 | -5 | 1 | -1
-   | 0 | zero  | 5 | -5 | 2 |  2
-   | 0 | zero  | 5 | -5 | 3 | -3
-   | 0 | zero  | 5 | -5 | 2 |  4
-   | 0 | zero  | 5 | -5 | 5 | -5
-   | 0 | zero  | 5 | -5 | 5 | -5
-   | 0 | zero  | 5 | -5 | 0 |   
-   | 0 | zero  | 5 | -5 |   |   
-   | 0 | zero  | 5 | -5 |   |  0
- 1 | 4 | one   | 5 | -5 | 1 | -1
- 1 | 4 | one   | 5 | -5 | 2 |  2
- 1 | 4 | one   | 5 | -5 | 3 | -3
- 1 | 4 | one   | 5 | -5 | 2 |  4
- 1 | 4 | one   | 5 | -5 | 5 | -5
- 1 | 4 | one   | 5 | -5 | 5 | -5
- 1 | 4 | one   | 5 | -5 | 0 |   
- 1 | 4 | one   | 5 | -5 |   |   
- 1 | 4 | one   | 5 | -5 |   |  0
- 2 | 3 | two   | 5 | -5 | 1 | -1
- 2 | 3 | two   | 5 | -5 | 2 |  2
- 2 | 3 | two   | 5 | -5 | 3 | -3
- 2 | 3 | two   | 5 | -5 | 2 |  4
- 2 | 3 | two   | 5 | -5 | 5 | -5
- 2 | 3 | two   | 5 | -5 | 5 | -5
- 2 | 3 | two   | 5 | -5 | 0 |   
- 2 | 3 | two   | 5 | -5 |   |   
- 2 | 3 | two   | 5 | -5 |   |  0
- 3 | 2 | three | 5 | -5 | 1 | -1
- 3 | 2 | three | 5 | -5 | 2 |  2
- 3 | 2 | three | 5 | -5 | 3 | -3
- 3 | 2 | three | 5 | -5 | 2 |  4
- 3 | 2 | three | 5 | -5 | 5 | -5
- 3 | 2 | three | 5 | -5 | 5 | -5
- 3 | 2 | three | 5 | -5 | 0 |   
- 3 | 2 | three | 5 | -5 |   |   
- 3 | 2 | three | 5 | -5 |   |  0
- 4 | 1 | four  | 5 | -5 | 1 | -1
- 4 | 1 | four  | 5 | -5 | 2 |  2
- 4 | 1 | four  | 5 | -5 | 3 | -3
- 4 | 1 | four  | 5 | -5 | 2 |  4
- 4 | 1 | four  | 5 | -5 | 5 | -5
- 4 | 1 | four  | 5 | -5 | 5 | -5
- 4 | 1 | four  | 5 | -5 | 0 |   
- 4 | 1 | four  | 5 | -5 |   |   
- 4 | 1 | four  | 5 | -5 |   |  0
- 5 | 0 | five  | 5 | -5 | 1 | -1
- 5 | 0 | five  | 5 | -5 | 2 |  2
- 5 | 0 | five  | 5 | -5 | 3 | -3
- 5 | 0 | five  | 5 | -5 | 2 |  4
- 5 | 0 | five  | 5 | -5 | 5 | -5
- 5 | 0 | five  | 5 | -5 | 5 | -5
- 5 | 0 | five  | 5 | -5 | 0 |   
- 5 | 0 | five  | 5 | -5 |   |   
- 5 | 0 | five  | 5 | -5 |   |  0
- 6 | 6 | six   | 5 | -5 | 1 | -1
- 6 | 6 | six   | 5 | -5 | 2 |  2
- 6 | 6 | six   | 5 | -5 | 3 | -3
- 6 | 6 | six   | 5 | -5 | 2 |  4
- 6 | 6 | six   | 5 | -5 | 5 | -5
- 6 | 6 | six   | 5 | -5 | 5 | -5
- 6 | 6 | six   | 5 | -5 | 0 |   
- 6 | 6 | six   | 5 | -5 |   |   
- 6 | 6 | six   | 5 | -5 |   |  0
- 7 | 7 | seven | 5 | -5 | 1 | -1
- 7 | 7 | seven | 5 | -5 | 2 |  2
- 7 | 7 | seven | 5 | -5 | 3 | -3
- 7 | 7 | seven | 5 | -5 | 2 |  4
- 7 | 7 | seven | 5 | -5 | 5 | -5
- 7 | 7 | seven | 5 | -5 | 5 | -5
- 7 | 7 | seven | 5 | -5 | 0 |   
- 7 | 7 | seven | 5 | -5 |   |   
- 7 | 7 | seven | 5 | -5 |   |  0
- 8 | 8 | eight | 5 | -5 | 1 | -1
- 8 | 8 | eight | 5 | -5 | 2 |  2
- 8 | 8 | eight | 5 | -5 | 3 | -3
- 8 | 8 | eight | 5 | -5 | 2 |  4
- 8 | 8 | eight | 5 | -5 | 5 | -5
- 8 | 8 | eight | 5 | -5 | 5 | -5
- 8 | 8 | eight | 5 | -5 | 0 |   
- 8 | 8 | eight | 5 | -5 |   |   
- 8 | 8 | eight | 5 | -5 |   |  0
- 0 |   | zero  | 5 | -5 | 1 | -1
- 0 |   | zero  | 5 | -5 | 2 |  2
- 0 |   | zero  | 5 | -5 | 3 | -3
- 0 |   | zero  | 5 | -5 | 2 |  4
- 0 |   | zero  | 5 | -5 | 5 | -5
- 0 |   | zero  | 5 | -5 | 5 | -5
- 0 |   | zero  | 5 | -5 | 0 |   
- 0 |   | zero  | 5 | -5 |   |   
- 0 |   | zero  | 5 | -5 |   |  0
-   |   | null  | 5 | -5 | 1 | -1
-   |   | null  | 5 | -5 | 2 |  2
-   |   | null  | 5 | -5 | 3 | -3
-   |   | null  | 5 | -5 | 2 |  4
-   |   | null  | 5 | -5 | 5 | -5
-   |   | null  | 5 | -5 | 5 | -5
-   |   | null  | 5 | -5 | 0 |   
-   |   | null  | 5 | -5 |   |   
-   |   | null  | 5 | -5 |   |  0
-   | 0 | zero  | 5 | -5 | 1 | -1
-   | 0 | zero  | 5 | -5 | 2 |  2
-   | 0 | zero  | 5 | -5 | 3 | -3
-   | 0 | zero  | 5 | -5 | 2 |  4
-   | 0 | zero  | 5 | -5 | 5 | -5
-   | 0 | zero  | 5 | -5 | 5 | -5
-   | 0 | zero  | 5 | -5 | 0 |   
-   | 0 | zero  | 5 | -5 |   |   
-   | 0 | zero  | 5 | -5 |   |  0
- 1 | 4 | one   | 0 |    | 1 | -1
- 1 | 4 | one   | 0 |    | 2 |  2
- 1 | 4 | one   | 0 |    | 3 | -3
- 1 | 4 | one   | 0 |    | 2 |  4
- 1 | 4 | one   | 0 |    | 5 | -5
- 1 | 4 | one   | 0 |    | 5 | -5
- 1 | 4 | one   | 0 |    | 0 |   
- 1 | 4 | one   | 0 |    |   |   
- 1 | 4 | one   | 0 |    |   |  0
- 2 | 3 | two   | 0 |    | 1 | -1
- 2 | 3 | two   | 0 |    | 2 |  2
- 2 | 3 | two   | 0 |    | 3 | -3
- 2 | 3 | two   | 0 |    | 2 |  4
- 2 | 3 | two   | 0 |    | 5 | -5
- 2 | 3 | two   | 0 |    | 5 | -5
- 2 | 3 | two   | 0 |    | 0 |   
- 2 | 3 | two   | 0 |    |   |   
- 2 | 3 | two   | 0 |    |   |  0
- 3 | 2 | three | 0 |    | 1 | -1
- 3 | 2 | three | 0 |    | 2 |  2
- 3 | 2 | three | 0 |    | 3 | -3
- 3 | 2 | three | 0 |    | 2 |  4
- 3 | 2 | three | 0 |    | 5 | -5
- 3 | 2 | three | 0 |    | 5 | -5
- 3 | 2 | three | 0 |    | 0 |   
- 3 | 2 | three | 0 |    |   |   
- 3 | 2 | three | 0 |    |   |  0
- 4 | 1 | four  | 0 |    | 1 | -1
- 4 | 1 | four  | 0 |    | 2 |  2
- 4 | 1 | four  | 0 |    | 3 | -3
- 4 | 1 | four  | 0 |    | 2 |  4
- 4 | 1 | four  | 0 |    | 5 | -5
- 4 | 1 | four  | 0 |    | 5 | -5
- 4 | 1 | four  | 0 |    | 0 |   
- 4 | 1 | four  | 0 |    |   |   
- 4 | 1 | four  | 0 |    |   |  0
- 5 | 0 | five  | 0 |    | 1 | -1
- 5 | 0 | five  | 0 |    | 2 |  2
- 5 | 0 | five  | 0 |    | 3 | -3
- 5 | 0 | five  | 0 |    | 2 |  4
- 5 | 0 | five  | 0 |    | 5 | -5
- 5 | 0 | five  | 0 |    | 5 | -5
- 5 | 0 | five  | 0 |    | 0 |   
- 5 | 0 | five  | 0 |    |   |   
- 5 | 0 | five  | 0 |    |   |  0
- 6 | 6 | six   | 0 |    | 1 | -1
- 6 | 6 | six   | 0 |    | 2 |  2
- 6 | 6 | six   | 0 |    | 3 | -3
- 6 | 6 | six   | 0 |    | 2 |  4
- 6 | 6 | six   | 0 |    | 5 | -5
- 6 | 6 | six   | 0 |    | 5 | -5
- 6 | 6 | six   | 0 |    | 0 |   
- 6 | 6 | six   | 0 |    |   |   
- 6 | 6 | six   | 0 |    |   |  0
- 7 | 7 | seven | 0 |    | 1 | -1
- 7 | 7 | seven | 0 |    | 2 |  2
- 7 | 7 | seven | 0 |    | 3 | -3
- 7 | 7 | seven | 0 |    | 2 |  4
- 7 | 7 | seven | 0 |    | 5 | -5
- 7 | 7 | seven | 0 |    | 5 | -5
- 7 | 7 | seven | 0 |    | 0 |   
- 7 | 7 | seven | 0 |    |   |   
- 7 | 7 | seven | 0 |    |   |  0
- 8 | 8 | eight | 0 |    | 1 | -1
- 8 | 8 | eight | 0 |    | 2 |  2
- 8 | 8 | eight | 0 |    | 3 | -3
- 8 | 8 | eight | 0 |    | 2 |  4
- 8 | 8 | eight | 0 |    | 5 | -5
- 8 | 8 | eight | 0 |    | 5 | -5
- 8 | 8 | eight | 0 |    | 0 |   
- 8 | 8 | eight | 0 |    |   |   
- 8 | 8 | eight | 0 |    |   |  0
- 0 |   | zero  | 0 |    | 1 | -1
- 0 |   | zero  | 0 |    | 2 |  2
- 0 |   | zero  | 0 |    | 3 | -3
- 0 |   | zero  | 0 |    | 2 |  4
- 0 |   | zero  | 0 |    | 5 | -5
- 0 |   | zero  | 0 |    | 5 | -5
- 0 |   | zero  | 0 |    | 0 |   
- 0 |   | zero  | 0 |    |   |   
- 0 |   | zero  | 0 |    |   |  0
-   |   | null  | 0 |    | 1 | -1
-   |   | null  | 0 |    | 2 |  2
-   |   | null  | 0 |    | 3 | -3
-   |   | null  | 0 |    | 2 |  4
-   |   | null  | 0 |    | 5 | -5
-   |   | null  | 0 |    | 5 | -5
-   |   | null  | 0 |    | 0 |   
-   |   | null  | 0 |    |   |   
-   |   | null  | 0 |    |   |  0
-   | 0 | zero  | 0 |    | 1 | -1
-   | 0 | zero  | 0 |    | 2 |  2
-   | 0 | zero  | 0 |    | 3 | -3
-   | 0 | zero  | 0 |    | 2 |  4
-   | 0 | zero  | 0 |    | 5 | -5
-   | 0 | zero  | 0 |    | 5 | -5
-   | 0 | zero  | 0 |    | 0 |   
-   | 0 | zero  | 0 |    |   |   
-   | 0 | zero  | 0 |    |   |  0
- 1 | 4 | one   |   |    | 1 | -1
- 1 | 4 | one   |   |    | 2 |  2
- 1 | 4 | one   |   |    | 3 | -3
- 1 | 4 | one   |   |    | 2 |  4
- 1 | 4 | one   |   |    | 5 | -5
- 1 | 4 | one   |   |    | 5 | -5
- 1 | 4 | one   |   |    | 0 |   
- 1 | 4 | one   |   |    |   |   
- 1 | 4 | one   |   |    |   |  0
- 2 | 3 | two   |   |    | 1 | -1
+ 2 | 3 | two   | 2 |  4 | 1 | -1
+ 2 | 3 | two   | 2 |  4 | 0 |   
+ 2 | 3 | two   |   |    | 5 | -5
+ 2 | 3 | two   |   |    | 5 | -5
  2 | 3 | two   |   |    | 2 |  2
  2 | 3 | two   |   |    | 3 | -3
  2 | 3 | two   |   |    | 2 |  4
- 2 | 3 | two   |   |    | 5 | -5
- 2 | 3 | two   |   |    | 5 | -5
- 2 | 3 | two   |   |    | 0 |   
  2 | 3 | two   |   |    |   |   
  2 | 3 | two   |   |    |   |  0
- 3 | 2 | three |   |    | 1 | -1
- 3 | 2 | three |   |    | 2 |  2
- 3 | 2 | three |   |    | 3 | -3
- 3 | 2 | three |   |    | 2 |  4
- 3 | 2 | three |   |    | 5 | -5
- 3 | 2 | three |   |    | 5 | -5
- 3 | 2 | three |   |    | 0 |   
- 3 | 2 | three |   |    |   |   
- 3 | 2 | three |   |    |   |  0
- 4 | 1 | four  |   |    | 1 | -1
- 4 | 1 | four  |   |    | 2 |  2
- 4 | 1 | four  |   |    | 3 | -3
- 4 | 1 | four  |   |    | 2 |  4
- 4 | 1 | four  |   |    | 5 | -5
- 4 | 1 | four  |   |    | 5 | -5
- 4 | 1 | four  |   |    | 0 |   
- 4 | 1 | four  |   |    |   |   
- 4 | 1 | four  |   |    |   |  0
- 5 | 0 | five  |   |    | 1 | -1
- 5 | 0 | five  |   |    | 2 |  2
- 5 | 0 | five  |   |    | 3 | -3
- 5 | 0 | five  |   |    | 2 |  4
- 5 | 0 | five  |   |    | 5 | -5
- 5 | 0 | five  |   |    | 5 | -5
- 5 | 0 | five  |   |    | 0 |   
- 5 | 0 | five  |   |    |   |   
- 5 | 0 | five  |   |    |   |  0
- 6 | 6 | six   |   |    | 1 | -1
- 6 | 6 | six   |   |    | 2 |  2
- 6 | 6 | six   |   |    | 3 | -3
- 6 | 6 | six   |   |    | 2 |  4
- 6 | 6 | six   |   |    | 5 | -5
- 6 | 6 | six   |   |    | 5 | -5
- 6 | 6 | six   |   |    | 0 |   
- 6 | 6 | six   |   |    |   |   
- 6 | 6 | six   |   |    |   |  0
- 7 | 7 | seven |   |    | 1 | -1
- 7 | 7 | seven |   |    | 2 |  2
- 7 | 7 | seven |   |    | 3 | -3
- 7 | 7 | seven |   |    | 2 |  4
- 7 | 7 | seven |   |    | 5 | -5
- 7 | 7 | seven |   |    | 5 | -5
- 7 | 7 | seven |   |    | 0 |   
- 7 | 7 | seven |   |    |   |   
- 7 | 7 | seven |   |    |   |  0
- 8 | 8 | eight |   |    | 1 | -1
- 8 | 8 | eight |   |    | 2 |  2
- 8 | 8 | eight |   |    | 3 | -3
- 8 | 8 | eight |   |    | 2 |  4
- 8 | 8 | eight |   |    | 5 | -5
- 8 | 8 | eight |   |    | 5 | -5
- 8 | 8 | eight |   |    | 0 |   
- 8 | 8 | eight |   |    |   |   
- 8 | 8 | eight |   |    |   |  0
- 0 |   | zero  |   |    | 1 | -1
- 0 |   | zero  |   |    | 2 |  2
- 0 |   | zero  |   |    | 3 | -3
- 0 |   | zero  |   |    | 2 |  4
- 0 |   | zero  |   |    | 5 | -5
- 0 |   | zero  |   |    | 5 | -5
- 0 |   | zero  |   |    | 0 |   
- 0 |   | zero  |   |    |   |   
- 0 |   | zero  |   |    |   |  0
-   |   | null  |   |    | 1 | -1
-   |   | null  |   |    | 2 |  2
-   |   | null  |   |    | 3 | -3
-   |   | null  |   |    | 2 |  4
-   |   | null  |   |    | 5 | -5
-   |   | null  |   |    | 5 | -5
-   |   | null  |   |    | 0 |   
-   |   | null  |   |    |   |   
-   |   | null  |   |    |   |  0
-   | 0 | zero  |   |    | 1 | -1
-   | 0 | zero  |   |    | 2 |  2
-   | 0 | zero  |   |    | 3 | -3
-   | 0 | zero  |   |    | 2 |  4
-   | 0 | zero  |   |    | 5 | -5
-   | 0 | zero  |   |    | 5 | -5
-   | 0 | zero  |   |    | 0 |   
-   | 0 | zero  |   |    |   |   
-   | 0 | zero  |   |    |   |  0
- 1 | 4 | one   |   |  0 | 1 | -1
- 1 | 4 | one   |   |  0 | 2 |  2
- 1 | 4 | one   |   |  0 | 3 | -3
- 1 | 4 | one   |   |  0 | 2 |  4
- 1 | 4 | one   |   |  0 | 5 | -5
- 1 | 4 | one   |   |  0 | 5 | -5
- 1 | 4 | one   |   |  0 | 0 |   
- 1 | 4 | one   |   |  0 |   |   
- 1 | 4 | one   |   |  0 |   |  0
- 2 | 3 | two   |   |  0 | 1 | -1
+ 2 | 3 | two   |   |    | 1 | -1
+ 2 | 3 | two   |   |    | 0 |   
+ 2 | 3 | two   |   |  0 | 5 | -5
+ 2 | 3 | two   |   |  0 | 5 | -5
  2 | 3 | two   |   |  0 | 2 |  2
  2 | 3 | two   |   |  0 | 3 | -3
  2 | 3 | two   |   |  0 | 2 |  4
- 2 | 3 | two   |   |  0 | 5 | -5
- 2 | 3 | two   |   |  0 | 5 | -5
- 2 | 3 | two   |   |  0 | 0 |   
  2 | 3 | two   |   |  0 |   |   
  2 | 3 | two   |   |  0 |   |  0
- 3 | 2 | three |   |  0 | 1 | -1
+ 2 | 3 | two   |   |  0 | 1 | -1
+ 2 | 3 | two   |   |  0 | 0 |   
+ 3 | 2 | three | 2 |  2 | 5 | -5
+ 3 | 2 | three | 2 |  2 | 5 | -5
+ 3 | 2 | three | 2 |  2 | 2 |  2
+ 3 | 2 | three | 2 |  2 | 3 | -3
+ 3 | 2 | three | 2 |  2 | 2 |  4
+ 3 | 2 | three | 2 |  2 |   |   
+ 3 | 2 | three | 2 |  2 |   |  0
+ 3 | 2 | three | 2 |  2 | 1 | -1
+ 3 | 2 | three | 2 |  2 | 0 |   
+ 3 | 2 | three | 3 | -3 | 5 | -5
+ 3 | 2 | three | 3 | -3 | 5 | -5
+ 3 | 2 | three | 3 | -3 | 2 |  2
+ 3 | 2 | three | 3 | -3 | 3 | -3
+ 3 | 2 | three | 3 | -3 | 2 |  4
+ 3 | 2 | three | 3 | -3 |   |   
+ 3 | 2 | three | 3 | -3 |   |  0
+ 3 | 2 | three | 3 | -3 | 1 | -1
+ 3 | 2 | three | 3 | -3 | 0 |   
+ 3 | 2 | three | 2 |  4 | 5 | -5
+ 3 | 2 | three | 2 |  4 | 5 | -5
+ 3 | 2 | three | 2 |  4 | 2 |  2
+ 3 | 2 | three | 2 |  4 | 3 | -3
+ 3 | 2 | three | 2 |  4 | 2 |  4
+ 3 | 2 | three | 2 |  4 |   |   
+ 3 | 2 | three | 2 |  4 |   |  0
+ 3 | 2 | three | 2 |  4 | 1 | -1
+ 3 | 2 | three | 2 |  4 | 0 |   
+ 3 | 2 | three |   |    | 5 | -5
+ 3 | 2 | three |   |    | 5 | -5
+ 3 | 2 | three |   |    | 2 |  2
+ 3 | 2 | three |   |    | 3 | -3
+ 3 | 2 | three |   |    | 2 |  4
+ 3 | 2 | three |   |    |   |   
+ 3 | 2 | three |   |    |   |  0
+ 3 | 2 | three |   |    | 1 | -1
+ 3 | 2 | three |   |    | 0 |   
+ 3 | 2 | three |   |  0 | 5 | -5
+ 3 | 2 | three |   |  0 | 5 | -5
  3 | 2 | three |   |  0 | 2 |  2
  3 | 2 | three |   |  0 | 3 | -3
  3 | 2 | three |   |  0 | 2 |  4
- 3 | 2 | three |   |  0 | 5 | -5
- 3 | 2 | three |   |  0 | 5 | -5
- 3 | 2 | three |   |  0 | 0 |   
  3 | 2 | three |   |  0 |   |   
  3 | 2 | three |   |  0 |   |  0
- 4 | 1 | four  |   |  0 | 1 | -1
+ 3 | 2 | three |   |  0 | 1 | -1
+ 3 | 2 | three |   |  0 | 0 |   
+ 4 | 1 | four  | 2 |  2 | 5 | -5
+ 4 | 1 | four  | 2 |  2 | 5 | -5
+ 4 | 1 | four  | 2 |  2 | 2 |  2
+ 4 | 1 | four  | 2 |  2 | 3 | -3
+ 4 | 1 | four  | 2 |  2 | 2 |  4
+ 4 | 1 | four  | 2 |  2 |   |   
+ 4 | 1 | four  | 2 |  2 |   |  0
+ 4 | 1 | four  | 2 |  2 | 1 | -1
+ 4 | 1 | four  | 2 |  2 | 0 |   
+ 4 | 1 | four  | 3 | -3 | 5 | -5
+ 4 | 1 | four  | 3 | -3 | 5 | -5
+ 4 | 1 | four  | 3 | -3 | 2 |  2
+ 4 | 1 | four  | 3 | -3 | 3 | -3
+ 4 | 1 | four  | 3 | -3 | 2 |  4
+ 4 | 1 | four  | 3 | -3 |   |   
+ 4 | 1 | four  | 3 | -3 |   |  0
+ 4 | 1 | four  | 3 | -3 | 1 | -1
+ 4 | 1 | four  | 3 | -3 | 0 |   
+ 4 | 1 | four  | 2 |  4 | 5 | -5
+ 4 | 1 | four  | 2 |  4 | 5 | -5
+ 4 | 1 | four  | 2 |  4 | 2 |  2
+ 4 | 1 | four  | 2 |  4 | 3 | -3
+ 4 | 1 | four  | 2 |  4 | 2 |  4
+ 4 | 1 | four  | 2 |  4 |   |   
+ 4 | 1 | four  | 2 |  4 |   |  0
+ 4 | 1 | four  | 2 |  4 | 1 | -1
+ 4 | 1 | four  | 2 |  4 | 0 |   
+ 4 | 1 | four  |   |    | 5 | -5
+ 4 | 1 | four  |   |    | 5 | -5
+ 4 | 1 | four  |   |    | 2 |  2
+ 4 | 1 | four  |   |    | 3 | -3
+ 4 | 1 | four  |   |    | 2 |  4
+ 4 | 1 | four  |   |    |   |   
+ 4 | 1 | four  |   |    |   |  0
+ 4 | 1 | four  |   |    | 1 | -1
+ 4 | 1 | four  |   |    | 0 |   
+ 4 | 1 | four  |   |  0 | 5 | -5
+ 4 | 1 | four  |   |  0 | 5 | -5
  4 | 1 | four  |   |  0 | 2 |  2
  4 | 1 | four  |   |  0 | 3 | -3
  4 | 1 | four  |   |  0 | 2 |  4
- 4 | 1 | four  |   |  0 | 5 | -5
- 4 | 1 | four  |   |  0 | 5 | -5
- 4 | 1 | four  |   |  0 | 0 |   
  4 | 1 | four  |   |  0 |   |   
  4 | 1 | four  |   |  0 |   |  0
- 5 | 0 | five  |   |  0 | 1 | -1
- 5 | 0 | five  |   |  0 | 2 |  2
- 5 | 0 | five  |   |  0 | 3 | -3
- 5 | 0 | five  |   |  0 | 2 |  4
- 5 | 0 | five  |   |  0 | 5 | -5
- 5 | 0 | five  |   |  0 | 5 | -5
- 5 | 0 | five  |   |  0 | 0 |   
- 5 | 0 | five  |   |  0 |   |   
- 5 | 0 | five  |   |  0 |   |  0
- 6 | 6 | six   |   |  0 | 1 | -1
- 6 | 6 | six   |   |  0 | 2 |  2
- 6 | 6 | six   |   |  0 | 3 | -3
- 6 | 6 | six   |   |  0 | 2 |  4
- 6 | 6 | six   |   |  0 | 5 | -5
- 6 | 6 | six   |   |  0 | 5 | -5
- 6 | 6 | six   |   |  0 | 0 |   
- 6 | 6 | six   |   |  0 |   |   
- 6 | 6 | six   |   |  0 |   |  0
- 7 | 7 | seven |   |  0 | 1 | -1
+ 4 | 1 | four  |   |  0 | 1 | -1
+ 4 | 1 | four  |   |  0 | 0 |   
+ 7 | 7 | seven | 2 |  2 | 5 | -5
+ 7 | 7 | seven | 2 |  2 | 5 | -5
+ 7 | 7 | seven | 2 |  2 | 2 |  2
+ 7 | 7 | seven | 2 |  2 | 3 | -3
+ 7 | 7 | seven | 2 |  2 | 2 |  4
+ 7 | 7 | seven | 2 |  2 |   |   
+ 7 | 7 | seven | 2 |  2 |   |  0
+ 7 | 7 | seven | 2 |  2 | 1 | -1
+ 7 | 7 | seven | 2 |  2 | 0 |   
+ 7 | 7 | seven | 3 | -3 | 5 | -5
+ 7 | 7 | seven | 3 | -3 | 5 | -5
+ 7 | 7 | seven | 3 | -3 | 2 |  2
+ 7 | 7 | seven | 3 | -3 | 3 | -3
+ 7 | 7 | seven | 3 | -3 | 2 |  4
+ 7 | 7 | seven | 3 | -3 |   |   
+ 7 | 7 | seven | 3 | -3 |   |  0
+ 7 | 7 | seven | 3 | -3 | 1 | -1
+ 7 | 7 | seven | 3 | -3 | 0 |   
+ 7 | 7 | seven | 2 |  4 | 5 | -5
+ 7 | 7 | seven | 2 |  4 | 5 | -5
+ 7 | 7 | seven | 2 |  4 | 2 |  2
+ 7 | 7 | seven | 2 |  4 | 3 | -3
+ 7 | 7 | seven | 2 |  4 | 2 |  4
+ 7 | 7 | seven | 2 |  4 |   |   
+ 7 | 7 | seven | 2 |  4 |   |  0
+ 7 | 7 | seven | 2 |  4 | 1 | -1
+ 7 | 7 | seven | 2 |  4 | 0 |   
+ 7 | 7 | seven |   |    | 5 | -5
+ 7 | 7 | seven |   |    | 5 | -5
+ 7 | 7 | seven |   |    | 2 |  2
+ 7 | 7 | seven |   |    | 3 | -3
+ 7 | 7 | seven |   |    | 2 |  4
+ 7 | 7 | seven |   |    |   |   
+ 7 | 7 | seven |   |    |   |  0
+ 7 | 7 | seven |   |    | 1 | -1
+ 7 | 7 | seven |   |    | 0 |   
+ 7 | 7 | seven |   |  0 | 5 | -5
+ 7 | 7 | seven |   |  0 | 5 | -5
  7 | 7 | seven |   |  0 | 2 |  2
  7 | 7 | seven |   |  0 | 3 | -3
  7 | 7 | seven |   |  0 | 2 |  4
- 7 | 7 | seven |   |  0 | 5 | -5
- 7 | 7 | seven |   |  0 | 5 | -5
- 7 | 7 | seven |   |  0 | 0 |   
  7 | 7 | seven |   |  0 |   |   
  7 | 7 | seven |   |  0 |   |  0
- 8 | 8 | eight |   |  0 | 1 | -1
+ 7 | 7 | seven |   |  0 | 1 | -1
+ 7 | 7 | seven |   |  0 | 0 |   
+ 8 | 8 | eight | 2 |  2 | 5 | -5
+ 8 | 8 | eight | 2 |  2 | 5 | -5
+ 8 | 8 | eight | 2 |  2 | 2 |  2
+ 8 | 8 | eight | 2 |  2 | 3 | -3
+ 8 | 8 | eight | 2 |  2 | 2 |  4
+ 8 | 8 | eight | 2 |  2 |   |   
+ 8 | 8 | eight | 2 |  2 |   |  0
+ 8 | 8 | eight | 2 |  2 | 1 | -1
+ 8 | 8 | eight | 2 |  2 | 0 |   
+ 8 | 8 | eight | 3 | -3 | 5 | -5
+ 8 | 8 | eight | 3 | -3 | 5 | -5
+ 8 | 8 | eight | 3 | -3 | 2 |  2
+ 8 | 8 | eight | 3 | -3 | 3 | -3
+ 8 | 8 | eight | 3 | -3 | 2 |  4
+ 8 | 8 | eight | 3 | -3 |   |   
+ 8 | 8 | eight | 3 | -3 |   |  0
+ 8 | 8 | eight | 3 | -3 | 1 | -1
+ 8 | 8 | eight | 3 | -3 | 0 |   
+ 8 | 8 | eight | 2 |  4 | 5 | -5
+ 8 | 8 | eight | 2 |  4 | 5 | -5
+ 8 | 8 | eight | 2 |  4 | 2 |  2
+ 8 | 8 | eight | 2 |  4 | 3 | -3
+ 8 | 8 | eight | 2 |  4 | 2 |  4
+ 8 | 8 | eight | 2 |  4 |   |   
+ 8 | 8 | eight | 2 |  4 |   |  0
+ 8 | 8 | eight | 2 |  4 | 1 | -1
+ 8 | 8 | eight | 2 |  4 | 0 |   
+ 8 | 8 | eight |   |    | 5 | -5
+ 8 | 8 | eight |   |    | 5 | -5
+ 8 | 8 | eight |   |    | 2 |  2
+ 8 | 8 | eight |   |    | 3 | -3
+ 8 | 8 | eight |   |    | 2 |  4
+ 8 | 8 | eight |   |    |   |   
+ 8 | 8 | eight |   |    |   |  0
+ 8 | 8 | eight |   |    | 1 | -1
+ 8 | 8 | eight |   |    | 0 |   
+ 8 | 8 | eight |   |  0 | 5 | -5
+ 8 | 8 | eight |   |  0 | 5 | -5
  8 | 8 | eight |   |  0 | 2 |  2
  8 | 8 | eight |   |  0 | 3 | -3
  8 | 8 | eight |   |  0 | 2 |  4
- 8 | 8 | eight |   |  0 | 5 | -5
- 8 | 8 | eight |   |  0 | 5 | -5
- 8 | 8 | eight |   |  0 | 0 |   
  8 | 8 | eight |   |  0 |   |   
  8 | 8 | eight |   |  0 |   |  0
- 0 |   | zero  |   |  0 | 1 | -1
- 0 |   | zero  |   |  0 | 2 |  2
- 0 |   | zero  |   |  0 | 3 | -3
- 0 |   | zero  |   |  0 | 2 |  4
- 0 |   | zero  |   |  0 | 5 | -5
- 0 |   | zero  |   |  0 | 5 | -5
- 0 |   | zero  |   |  0 | 0 |   
- 0 |   | zero  |   |  0 |   |   
- 0 |   | zero  |   |  0 |   |  0
-   |   | null  |   |  0 | 1 | -1
+ 8 | 8 | eight |   |  0 | 1 | -1
+ 8 | 8 | eight |   |  0 | 0 |   
+   |   | null  | 2 |  2 | 5 | -5
+   |   | null  | 2 |  2 | 5 | -5
+   |   | null  | 2 |  2 | 2 |  2
+   |   | null  | 2 |  2 | 3 | -3
+   |   | null  | 2 |  2 | 2 |  4
+   |   | null  | 2 |  2 |   |   
+   |   | null  | 2 |  2 |   |  0
+   |   | null  | 2 |  2 | 1 | -1
+   |   | null  | 2 |  2 | 0 |   
+   |   | null  | 3 | -3 | 5 | -5
+   |   | null  | 3 | -3 | 5 | -5
+   |   | null  | 3 | -3 | 2 |  2
+   |   | null  | 3 | -3 | 3 | -3
+   |   | null  | 3 | -3 | 2 |  4
+   |   | null  | 3 | -3 |   |   
+   |   | null  | 3 | -3 |   |  0
+   |   | null  | 3 | -3 | 1 | -1
+   |   | null  | 3 | -3 | 0 |   
+   |   | null  | 2 |  4 | 5 | -5
+   |   | null  | 2 |  4 | 5 | -5
+   |   | null  | 2 |  4 | 2 |  2
+   |   | null  | 2 |  4 | 3 | -3
+   |   | null  | 2 |  4 | 2 |  4
+   |   | null  | 2 |  4 |   |   
+   |   | null  | 2 |  4 |   |  0
+   |   | null  | 2 |  4 | 1 | -1
+   |   | null  | 2 |  4 | 0 |   
+   |   | null  |   |    | 5 | -5
+   |   | null  |   |    | 5 | -5
+   |   | null  |   |    | 2 |  2
+   |   | null  |   |    | 3 | -3
+   |   | null  |   |    | 2 |  4
+   |   | null  |   |    |   |   
+   |   | null  |   |    |   |  0
+   |   | null  |   |    | 1 | -1
+   |   | null  |   |    | 0 |   
+   |   | null  |   |  0 | 5 | -5
+   |   | null  |   |  0 | 5 | -5
    |   | null  |   |  0 | 2 |  2
    |   | null  |   |  0 | 3 | -3
    |   | null  |   |  0 | 2 |  4
-   |   | null  |   |  0 | 5 | -5
-   |   | null  |   |  0 | 5 | -5
-   |   | null  |   |  0 | 0 |   
    |   | null  |   |  0 |   |   
    |   | null  |   |  0 |   |  0
-   | 0 | zero  |   |  0 | 1 | -1
+   |   | null  |   |  0 | 1 | -1
+   |   | null  |   |  0 | 0 |   
+   | 0 | zero  | 2 |  2 | 5 | -5
+   | 0 | zero  | 2 |  2 | 5 | -5
+   | 0 | zero  | 2 |  2 | 2 |  2
+   | 0 | zero  | 2 |  2 | 3 | -3
+   | 0 | zero  | 2 |  2 | 2 |  4
+   | 0 | zero  | 2 |  2 |   |   
+   | 0 | zero  | 2 |  2 |   |  0
+   | 0 | zero  | 2 |  2 | 1 | -1
+   | 0 | zero  | 2 |  2 | 0 |   
+   | 0 | zero  | 3 | -3 | 5 | -5
+   | 0 | zero  | 3 | -3 | 5 | -5
+   | 0 | zero  | 3 | -3 | 2 |  2
+   | 0 | zero  | 3 | -3 | 3 | -3
+   | 0 | zero  | 3 | -3 | 2 |  4
+   | 0 | zero  | 3 | -3 |   |   
+   | 0 | zero  | 3 | -3 |   |  0
+   | 0 | zero  | 3 | -3 | 1 | -1
+   | 0 | zero  | 3 | -3 | 0 |   
+   | 0 | zero  | 2 |  4 | 5 | -5
+   | 0 | zero  | 2 |  4 | 5 | -5
+   | 0 | zero  | 2 |  4 | 2 |  2
+   | 0 | zero  | 2 |  4 | 3 | -3
+   | 0 | zero  | 2 |  4 | 2 |  4
+   | 0 | zero  | 2 |  4 |   |   
+   | 0 | zero  | 2 |  4 |   |  0
+   | 0 | zero  | 2 |  4 | 1 | -1
+   | 0 | zero  | 2 |  4 | 0 |   
+   | 0 | zero  |   |    | 5 | -5
+   | 0 | zero  |   |    | 5 | -5
+   | 0 | zero  |   |    | 2 |  2
+   | 0 | zero  |   |    | 3 | -3
+   | 0 | zero  |   |    | 2 |  4
+   | 0 | zero  |   |    |   |   
+   | 0 | zero  |   |    |   |  0
+   | 0 | zero  |   |    | 1 | -1
+   | 0 | zero  |   |    | 0 |   
+   | 0 | zero  |   |  0 | 5 | -5
+   | 0 | zero  |   |  0 | 5 | -5
    | 0 | zero  |   |  0 | 2 |  2
    | 0 | zero  |   |  0 | 3 | -3
    | 0 | zero  |   |  0 | 2 |  4
-   | 0 | zero  |   |  0 | 5 | -5
-   | 0 | zero  |   |  0 | 5 | -5
-   | 0 | zero  |   |  0 | 0 |   
    | 0 | zero  |   |  0 |   |   
    | 0 | zero  |   |  0 |   |  0
+   | 0 | zero  |   |  0 | 1 | -1
+   | 0 | zero  |   |  0 | 0 |   
+ 1 | 4 | one   | 2 |  2 | 5 | -5
+ 1 | 4 | one   | 2 |  2 | 5 | -5
+ 1 | 4 | one   | 2 |  2 | 2 |  2
+ 1 | 4 | one   | 2 |  2 | 3 | -3
+ 1 | 4 | one   | 2 |  2 | 2 |  4
+ 1 | 4 | one   | 2 |  2 |   |   
+ 1 | 4 | one   | 2 |  2 |   |  0
+ 1 | 4 | one   | 2 |  2 | 1 | -1
+ 1 | 4 | one   | 2 |  2 | 0 |   
+ 1 | 4 | one   | 3 | -3 | 5 | -5
+ 1 | 4 | one   | 3 | -3 | 5 | -5
+ 1 | 4 | one   | 3 | -3 | 2 |  2
+ 1 | 4 | one   | 3 | -3 | 3 | -3
+ 1 | 4 | one   | 3 | -3 | 2 |  4
+ 1 | 4 | one   | 3 | -3 |   |   
+ 1 | 4 | one   | 3 | -3 |   |  0
+ 1 | 4 | one   | 3 | -3 | 1 | -1
+ 1 | 4 | one   | 3 | -3 | 0 |   
+ 1 | 4 | one   | 2 |  4 | 5 | -5
+ 1 | 4 | one   | 2 |  4 | 5 | -5
+ 1 | 4 | one   | 2 |  4 | 2 |  2
+ 1 | 4 | one   | 2 |  4 | 3 | -3
+ 1 | 4 | one   | 2 |  4 | 2 |  4
+ 1 | 4 | one   | 2 |  4 |   |   
+ 1 | 4 | one   | 2 |  4 |   |  0
+ 1 | 4 | one   | 2 |  4 | 1 | -1
+ 1 | 4 | one   | 2 |  4 | 0 |   
+ 1 | 4 | one   |   |    | 5 | -5
+ 1 | 4 | one   |   |    | 5 | -5
+ 1 | 4 | one   |   |    | 2 |  2
+ 1 | 4 | one   |   |    | 3 | -3
+ 1 | 4 | one   |   |    | 2 |  4
+ 1 | 4 | one   |   |    |   |   
+ 1 | 4 | one   |   |    |   |  0
+ 1 | 4 | one   |   |    | 1 | -1
+ 1 | 4 | one   |   |    | 0 |   
+ 1 | 4 | one   |   |  0 | 5 | -5
+ 1 | 4 | one   |   |  0 | 5 | -5
+ 1 | 4 | one   |   |  0 | 2 |  2
+ 1 | 4 | one   |   |  0 | 3 | -3
+ 1 | 4 | one   |   |  0 | 2 |  4
+ 1 | 4 | one   |   |  0 |   |   
+ 1 | 4 | one   |   |  0 |   |  0
+ 1 | 4 | one   |   |  0 | 1 | -1
+ 1 | 4 | one   |   |  0 | 0 |   
+ 0 |   | zero  | 2 |  2 | 5 | -5
+ 0 |   | zero  | 2 |  2 | 5 | -5
+ 0 |   | zero  | 2 |  2 | 2 |  2
+ 0 |   | zero  | 2 |  2 | 3 | -3
+ 0 |   | zero  | 2 |  2 | 2 |  4
+ 0 |   | zero  | 2 |  2 |   |   
+ 0 |   | zero  | 2 |  2 |   |  0
+ 0 |   | zero  | 2 |  2 | 1 | -1
+ 0 |   | zero  | 2 |  2 | 0 |   
+ 0 |   | zero  | 3 | -3 | 5 | -5
+ 0 |   | zero  | 3 | -3 | 5 | -5
+ 0 |   | zero  | 3 | -3 | 2 |  2
+ 0 |   | zero  | 3 | -3 | 3 | -3
+ 0 |   | zero  | 3 | -3 | 2 |  4
+ 0 |   | zero  | 3 | -3 |   |   
+ 0 |   | zero  | 3 | -3 |   |  0
+ 0 |   | zero  | 3 | -3 | 1 | -1
+ 0 |   | zero  | 3 | -3 | 0 |   
+ 0 |   | zero  | 2 |  4 | 5 | -5
+ 0 |   | zero  | 2 |  4 | 5 | -5
+ 0 |   | zero  | 2 |  4 | 2 |  2
+ 0 |   | zero  | 2 |  4 | 3 | -3
+ 0 |   | zero  | 2 |  4 | 2 |  4
+ 0 |   | zero  | 2 |  4 |   |   
+ 0 |   | zero  | 2 |  4 |   |  0
+ 0 |   | zero  | 2 |  4 | 1 | -1
+ 0 |   | zero  | 2 |  4 | 0 |   
+ 0 |   | zero  |   |    | 5 | -5
+ 0 |   | zero  |   |    | 5 | -5
+ 0 |   | zero  |   |    | 2 |  2
+ 0 |   | zero  |   |    | 3 | -3
+ 0 |   | zero  |   |    | 2 |  4
+ 0 |   | zero  |   |    |   |   
+ 0 |   | zero  |   |    |   |  0
+ 0 |   | zero  |   |    | 1 | -1
+ 0 |   | zero  |   |    | 0 |   
+ 0 |   | zero  |   |  0 | 5 | -5
+ 0 |   | zero  |   |  0 | 5 | -5
+ 0 |   | zero  |   |  0 | 2 |  2
+ 0 |   | zero  |   |  0 | 3 | -3
+ 0 |   | zero  |   |  0 | 2 |  4
+ 0 |   | zero  |   |  0 |   |   
+ 0 |   | zero  |   |  0 |   |  0
+ 0 |   | zero  |   |  0 | 1 | -1
+ 0 |   | zero  |   |  0 | 0 |   
+ 5 | 0 | five  | 2 |  2 | 5 | -5
+ 5 | 0 | five  | 2 |  2 | 5 | -5
+ 5 | 0 | five  | 2 |  2 | 2 |  2
+ 5 | 0 | five  | 2 |  2 | 3 | -3
+ 5 | 0 | five  | 2 |  2 | 2 |  4
+ 5 | 0 | five  | 2 |  2 |   |   
+ 5 | 0 | five  | 2 |  2 |   |  0
+ 5 | 0 | five  | 2 |  2 | 1 | -1
+ 5 | 0 | five  | 2 |  2 | 0 |   
+ 5 | 0 | five  | 3 | -3 | 5 | -5
+ 5 | 0 | five  | 3 | -3 | 5 | -5
+ 5 | 0 | five  | 3 | -3 | 2 |  2
+ 5 | 0 | five  | 3 | -3 | 3 | -3
+ 5 | 0 | five  | 3 | -3 | 2 |  4
+ 5 | 0 | five  | 3 | -3 |   |   
+ 5 | 0 | five  | 3 | -3 |   |  0
+ 5 | 0 | five  | 3 | -3 | 1 | -1
+ 5 | 0 | five  | 3 | -3 | 0 |   
+ 5 | 0 | five  | 2 |  4 | 5 | -5
+ 5 | 0 | five  | 2 |  4 | 5 | -5
+ 5 | 0 | five  | 2 |  4 | 2 |  2
+ 5 | 0 | five  | 2 |  4 | 3 | -3
+ 5 | 0 | five  | 2 |  4 | 2 |  4
+ 5 | 0 | five  | 2 |  4 |   |   
+ 5 | 0 | five  | 2 |  4 |   |  0
+ 5 | 0 | five  | 2 |  4 | 1 | -1
+ 5 | 0 | five  | 2 |  4 | 0 |   
+ 5 | 0 | five  |   |    | 5 | -5
+ 5 | 0 | five  |   |    | 5 | -5
+ 5 | 0 | five  |   |    | 2 |  2
+ 5 | 0 | five  |   |    | 3 | -3
+ 5 | 0 | five  |   |    | 2 |  4
+ 5 | 0 | five  |   |    |   |   
+ 5 | 0 | five  |   |    |   |  0
+ 5 | 0 | five  |   |    | 1 | -1
+ 5 | 0 | five  |   |    | 0 |   
+ 5 | 0 | five  |   |  0 | 5 | -5
+ 5 | 0 | five  |   |  0 | 5 | -5
+ 5 | 0 | five  |   |  0 | 2 |  2
+ 5 | 0 | five  |   |  0 | 3 | -3
+ 5 | 0 | five  |   |  0 | 2 |  4
+ 5 | 0 | five  |   |  0 |   |   
+ 5 | 0 | five  |   |  0 |   |  0
+ 5 | 0 | five  |   |  0 | 1 | -1
+ 5 | 0 | five  |   |  0 | 0 |   
+ 6 | 6 | six   | 2 |  2 | 5 | -5
+ 6 | 6 | six   | 2 |  2 | 5 | -5
+ 6 | 6 | six   | 2 |  2 | 2 |  2
+ 6 | 6 | six   | 2 |  2 | 3 | -3
+ 6 | 6 | six   | 2 |  2 | 2 |  4
+ 6 | 6 | six   | 2 |  2 |   |   
+ 6 | 6 | six   | 2 |  2 |   |  0
+ 6 | 6 | six   | 2 |  2 | 1 | -1
+ 6 | 6 | six   | 2 |  2 | 0 |   
+ 6 | 6 | six   | 3 | -3 | 5 | -5
+ 6 | 6 | six   | 3 | -3 | 5 | -5
+ 6 | 6 | six   | 3 | -3 | 2 |  2
+ 6 | 6 | six   | 3 | -3 | 3 | -3
+ 6 | 6 | six   | 3 | -3 | 2 |  4
+ 6 | 6 | six   | 3 | -3 |   |   
+ 6 | 6 | six   | 3 | -3 |   |  0
+ 6 | 6 | six   | 3 | -3 | 1 | -1
+ 6 | 6 | six   | 3 | -3 | 0 |   
+ 6 | 6 | six   | 2 |  4 | 5 | -5
+ 6 | 6 | six   | 2 |  4 | 5 | -5
+ 6 | 6 | six   | 2 |  4 | 2 |  2
+ 6 | 6 | six   | 2 |  4 | 3 | -3
+ 6 | 6 | six   | 2 |  4 | 2 |  4
+ 6 | 6 | six   | 2 |  4 |   |   
+ 6 | 6 | six   | 2 |  4 |   |  0
+ 6 | 6 | six   | 2 |  4 | 1 | -1
+ 6 | 6 | six   | 2 |  4 | 0 |   
+ 6 | 6 | six   |   |    | 5 | -5
+ 6 | 6 | six   |   |    | 5 | -5
+ 6 | 6 | six   |   |    | 2 |  2
+ 6 | 6 | six   |   |    | 3 | -3
+ 6 | 6 | six   |   |    | 2 |  4
+ 6 | 6 | six   |   |    |   |   
+ 6 | 6 | six   |   |    |   |  0
+ 6 | 6 | six   |   |    | 1 | -1
+ 6 | 6 | six   |   |    | 0 |   
+ 6 | 6 | six   |   |  0 | 5 | -5
+ 6 | 6 | six   |   |  0 | 5 | -5
+ 6 | 6 | six   |   |  0 | 2 |  2
+ 6 | 6 | six   |   |  0 | 3 | -3
+ 6 | 6 | six   |   |  0 | 2 |  4
+ 6 | 6 | six   |   |  0 |   |   
+ 6 | 6 | six   |   |  0 |   |  0
+ 6 | 6 | six   |   |  0 | 1 | -1
+ 6 | 6 | six   |   |  0 | 0 |   
+ 2 | 3 | two   | 5 | -5 | 5 | -5
+ 2 | 3 | two   | 5 | -5 | 5 | -5
+ 2 | 3 | two   | 5 | -5 | 2 |  2
+ 2 | 3 | two   | 5 | -5 | 3 | -3
+ 2 | 3 | two   | 5 | -5 | 2 |  4
+ 2 | 3 | two   | 5 | -5 |   |   
+ 2 | 3 | two   | 5 | -5 |   |  0
+ 2 | 3 | two   | 5 | -5 | 1 | -1
+ 2 | 3 | two   | 5 | -5 | 0 |   
+ 2 | 3 | two   | 5 | -5 | 5 | -5
+ 2 | 3 | two   | 5 | -5 | 5 | -5
+ 2 | 3 | two   | 5 | -5 | 2 |  2
+ 2 | 3 | two   | 5 | -5 | 3 | -3
+ 2 | 3 | two   | 5 | -5 | 2 |  4
+ 2 | 3 | two   | 5 | -5 |   |   
+ 2 | 3 | two   | 5 | -5 |   |  0
+ 2 | 3 | two   | 5 | -5 | 1 | -1
+ 2 | 3 | two   | 5 | -5 | 0 |   
+ 3 | 2 | three | 5 | -5 | 5 | -5
+ 3 | 2 | three | 5 | -5 | 5 | -5
+ 3 | 2 | three | 5 | -5 | 2 |  2
+ 3 | 2 | three | 5 | -5 | 3 | -3
+ 3 | 2 | three | 5 | -5 | 2 |  4
+ 3 | 2 | three | 5 | -5 |   |   
+ 3 | 2 | three | 5 | -5 |   |  0
+ 3 | 2 | three | 5 | -5 | 1 | -1
+ 3 | 2 | three | 5 | -5 | 0 |   
+ 3 | 2 | three | 5 | -5 | 5 | -5
+ 3 | 2 | three | 5 | -5 | 5 | -5
+ 3 | 2 | three | 5 | -5 | 2 |  2
+ 3 | 2 | three | 5 | -5 | 3 | -3
+ 3 | 2 | three | 5 | -5 | 2 |  4
+ 3 | 2 | three | 5 | -5 |   |   
+ 3 | 2 | three | 5 | -5 |   |  0
+ 3 | 2 | three | 5 | -5 | 1 | -1
+ 3 | 2 | three | 5 | -5 | 0 |   
+ 4 | 1 | four  | 5 | -5 | 5 | -5
+ 4 | 1 | four  | 5 | -5 | 5 | -5
+ 4 | 1 | four  | 5 | -5 | 2 |  2
+ 4 | 1 | four  | 5 | -5 | 3 | -3
+ 4 | 1 | four  | 5 | -5 | 2 |  4
+ 4 | 1 | four  | 5 | -5 |   |   
+ 4 | 1 | four  | 5 | -5 |   |  0
+ 4 | 1 | four  | 5 | -5 | 1 | -1
+ 4 | 1 | four  | 5 | -5 | 0 |   
+ 4 | 1 | four  | 5 | -5 | 5 | -5
+ 4 | 1 | four  | 5 | -5 | 5 | -5
+ 4 | 1 | four  | 5 | -5 | 2 |  2
+ 4 | 1 | four  | 5 | -5 | 3 | -3
+ 4 | 1 | four  | 5 | -5 | 2 |  4
+ 4 | 1 | four  | 5 | -5 |   |   
+ 4 | 1 | four  | 5 | -5 |   |  0
+ 4 | 1 | four  | 5 | -5 | 1 | -1
+ 4 | 1 | four  | 5 | -5 | 0 |   
+ 7 | 7 | seven | 5 | -5 | 5 | -5
+ 7 | 7 | seven | 5 | -5 | 5 | -5
+ 7 | 7 | seven | 5 | -5 | 2 |  2
+ 7 | 7 | seven | 5 | -5 | 3 | -3
+ 7 | 7 | seven | 5 | -5 | 2 |  4
+ 7 | 7 | seven | 5 | -5 |   |   
+ 7 | 7 | seven | 5 | -5 |   |  0
+ 7 | 7 | seven | 5 | -5 | 1 | -1
+ 7 | 7 | seven | 5 | -5 | 0 |   
+ 7 | 7 | seven | 5 | -5 | 5 | -5
+ 7 | 7 | seven | 5 | -5 | 5 | -5
+ 7 | 7 | seven | 5 | -5 | 2 |  2
+ 7 | 7 | seven | 5 | -5 | 3 | -3
+ 7 | 7 | seven | 5 | -5 | 2 |  4
+ 7 | 7 | seven | 5 | -5 |   |   
+ 7 | 7 | seven | 5 | -5 |   |  0
+ 7 | 7 | seven | 5 | -5 | 1 | -1
+ 7 | 7 | seven | 5 | -5 | 0 |   
+ 8 | 8 | eight | 5 | -5 | 5 | -5
+ 8 | 8 | eight | 5 | -5 | 5 | -5
+ 8 | 8 | eight | 5 | -5 | 2 |  2
+ 8 | 8 | eight | 5 | -5 | 3 | -3
+ 8 | 8 | eight | 5 | -5 | 2 |  4
+ 8 | 8 | eight | 5 | -5 |   |   
+ 8 | 8 | eight | 5 | -5 |   |  0
+ 8 | 8 | eight | 5 | -5 | 1 | -1
+ 8 | 8 | eight | 5 | -5 | 0 |   
+ 8 | 8 | eight | 5 | -5 | 5 | -5
+ 8 | 8 | eight | 5 | -5 | 5 | -5
+ 8 | 8 | eight | 5 | -5 | 2 |  2
+ 8 | 8 | eight | 5 | -5 | 3 | -3
+ 8 | 8 | eight | 5 | -5 | 2 |  4
+ 8 | 8 | eight | 5 | -5 |   |   
+ 8 | 8 | eight | 5 | -5 |   |  0
+ 8 | 8 | eight | 5 | -5 | 1 | -1
+ 8 | 8 | eight | 5 | -5 | 0 |   
+   |   | null  | 5 | -5 | 5 | -5
+   |   | null  | 5 | -5 | 5 | -5
+   |   | null  | 5 | -5 | 2 |  2
+   |   | null  | 5 | -5 | 3 | -3
+   |   | null  | 5 | -5 | 2 |  4
+   |   | null  | 5 | -5 |   |   
+   |   | null  | 5 | -5 |   |  0
+   |   | null  | 5 | -5 | 1 | -1
+   |   | null  | 5 | -5 | 0 |   
+   |   | null  | 5 | -5 | 5 | -5
+   |   | null  | 5 | -5 | 5 | -5
+   |   | null  | 5 | -5 | 2 |  2
+   |   | null  | 5 | -5 | 3 | -3
+   |   | null  | 5 | -5 | 2 |  4
+   |   | null  | 5 | -5 |   |   
+   |   | null  | 5 | -5 |   |  0
+   |   | null  | 5 | -5 | 1 | -1
+   |   | null  | 5 | -5 | 0 |   
+   | 0 | zero  | 5 | -5 | 5 | -5
+   | 0 | zero  | 5 | -5 | 5 | -5
+   | 0 | zero  | 5 | -5 | 2 |  2
+   | 0 | zero  | 5 | -5 | 3 | -3
+   | 0 | zero  | 5 | -5 | 2 |  4
+   | 0 | zero  | 5 | -5 |   |   
+   | 0 | zero  | 5 | -5 |   |  0
+   | 0 | zero  | 5 | -5 | 1 | -1
+   | 0 | zero  | 5 | -5 | 0 |   
+   | 0 | zero  | 5 | -5 | 5 | -5
+   | 0 | zero  | 5 | -5 | 5 | -5
+   | 0 | zero  | 5 | -5 | 2 |  2
+   | 0 | zero  | 5 | -5 | 3 | -3
+   | 0 | zero  | 5 | -5 | 2 |  4
+   | 0 | zero  | 5 | -5 |   |   
+   | 0 | zero  | 5 | -5 |   |  0
+   | 0 | zero  | 5 | -5 | 1 | -1
+   | 0 | zero  | 5 | -5 | 0 |   
+ 5 | 0 | five  | 5 | -5 | 5 | -5
+ 5 | 0 | five  | 5 | -5 | 5 | -5
+ 5 | 0 | five  | 5 | -5 | 2 |  2
+ 5 | 0 | five  | 5 | -5 | 3 | -3
+ 5 | 0 | five  | 5 | -5 | 2 |  4
+ 5 | 0 | five  | 5 | -5 |   |   
+ 5 | 0 | five  | 5 | -5 |   |  0
+ 5 | 0 | five  | 5 | -5 | 1 | -1
+ 5 | 0 | five  | 5 | -5 | 0 |   
+ 5 | 0 | five  | 5 | -5 | 5 | -5
+ 5 | 0 | five  | 5 | -5 | 5 | -5
+ 5 | 0 | five  | 5 | -5 | 2 |  2
+ 5 | 0 | five  | 5 | -5 | 3 | -3
+ 5 | 0 | five  | 5 | -5 | 2 |  4
+ 5 | 0 | five  | 5 | -5 |   |   
+ 5 | 0 | five  | 5 | -5 |   |  0
+ 5 | 0 | five  | 5 | -5 | 1 | -1
+ 5 | 0 | five  | 5 | -5 | 0 |   
+ 6 | 6 | six   | 5 | -5 | 5 | -5
+ 6 | 6 | six   | 5 | -5 | 5 | -5
+ 6 | 6 | six   | 5 | -5 | 2 |  2
+ 6 | 6 | six   | 5 | -5 | 3 | -3
+ 6 | 6 | six   | 5 | -5 | 2 |  4
+ 6 | 6 | six   | 5 | -5 |   |   
+ 6 | 6 | six   | 5 | -5 |   |  0
+ 6 | 6 | six   | 5 | -5 | 1 | -1
+ 6 | 6 | six   | 5 | -5 | 0 |   
+ 6 | 6 | six   | 5 | -5 | 5 | -5
+ 6 | 6 | six   | 5 | -5 | 5 | -5
+ 6 | 6 | six   | 5 | -5 | 2 |  2
+ 6 | 6 | six   | 5 | -5 | 3 | -3
+ 6 | 6 | six   | 5 | -5 | 2 |  4
+ 6 | 6 | six   | 5 | -5 |   |   
+ 6 | 6 | six   | 5 | -5 |   |  0
+ 6 | 6 | six   | 5 | -5 | 1 | -1
+ 6 | 6 | six   | 5 | -5 | 0 |   
+ 1 | 4 | one   | 5 | -5 | 5 | -5
+ 1 | 4 | one   | 5 | -5 | 5 | -5
+ 1 | 4 | one   | 5 | -5 | 2 |  2
+ 1 | 4 | one   | 5 | -5 | 3 | -3
+ 1 | 4 | one   | 5 | -5 | 2 |  4
+ 1 | 4 | one   | 5 | -5 |   |   
+ 1 | 4 | one   | 5 | -5 |   |  0
+ 1 | 4 | one   | 5 | -5 | 1 | -1
+ 1 | 4 | one   | 5 | -5 | 0 |   
+ 1 | 4 | one   | 5 | -5 | 5 | -5
+ 1 | 4 | one   | 5 | -5 | 5 | -5
+ 1 | 4 | one   | 5 | -5 | 2 |  2
+ 1 | 4 | one   | 5 | -5 | 3 | -3
+ 1 | 4 | one   | 5 | -5 | 2 |  4
+ 1 | 4 | one   | 5 | -5 |   |   
+ 1 | 4 | one   | 5 | -5 |   |  0
+ 1 | 4 | one   | 5 | -5 | 1 | -1
+ 1 | 4 | one   | 5 | -5 | 0 |   
+ 0 |   | zero  | 5 | -5 | 5 | -5
+ 0 |   | zero  | 5 | -5 | 5 | -5
+ 0 |   | zero  | 5 | -5 | 2 |  2
+ 0 |   | zero  | 5 | -5 | 3 | -3
+ 0 |   | zero  | 5 | -5 | 2 |  4
+ 0 |   | zero  | 5 | -5 |   |   
+ 0 |   | zero  | 5 | -5 |   |  0
+ 0 |   | zero  | 5 | -5 | 1 | -1
+ 0 |   | zero  | 5 | -5 | 0 |   
+ 0 |   | zero  | 5 | -5 | 5 | -5
+ 0 |   | zero  | 5 | -5 | 5 | -5
+ 0 |   | zero  | 5 | -5 | 2 |  2
+ 0 |   | zero  | 5 | -5 | 3 | -3
+ 0 |   | zero  | 5 | -5 | 2 |  4
+ 0 |   | zero  | 5 | -5 |   |   
+ 0 |   | zero  | 5 | -5 |   |  0
+ 0 |   | zero  | 5 | -5 | 1 | -1
+ 0 |   | zero  | 5 | -5 | 0 |   
+ 2 | 3 | two   | 1 | -1 | 5 | -5
+ 2 | 3 | two   | 1 | -1 | 5 | -5
+ 2 | 3 | two   | 1 | -1 | 2 |  2
+ 2 | 3 | two   | 1 | -1 | 3 | -3
+ 2 | 3 | two   | 1 | -1 | 2 |  4
+ 2 | 3 | two   | 1 | -1 |   |   
+ 2 | 3 | two   | 1 | -1 |   |  0
+ 2 | 3 | two   | 1 | -1 | 1 | -1
+ 2 | 3 | two   | 1 | -1 | 0 |   
+ 2 | 3 | two   | 0 |    | 5 | -5
+ 2 | 3 | two   | 0 |    | 5 | -5
+ 2 | 3 | two   | 0 |    | 2 |  2
+ 2 | 3 | two   | 0 |    | 3 | -3
+ 2 | 3 | two   | 0 |    | 2 |  4
+ 2 | 3 | two   | 0 |    |   |   
+ 2 | 3 | two   | 0 |    |   |  0
+ 2 | 3 | two   | 0 |    | 1 | -1
+ 2 | 3 | two   | 0 |    | 0 |   
+ 3 | 2 | three | 1 | -1 | 5 | -5
+ 3 | 2 | three | 1 | -1 | 5 | -5
+ 3 | 2 | three | 1 | -1 | 2 |  2
+ 3 | 2 | three | 1 | -1 | 3 | -3
+ 3 | 2 | three | 1 | -1 | 2 |  4
+ 3 | 2 | three | 1 | -1 |   |   
+ 3 | 2 | three | 1 | -1 |   |  0
+ 3 | 2 | three | 1 | -1 | 1 | -1
+ 3 | 2 | three | 1 | -1 | 0 |   
+ 3 | 2 | three | 0 |    | 5 | -5
+ 3 | 2 | three | 0 |    | 5 | -5
+ 3 | 2 | three | 0 |    | 2 |  2
+ 3 | 2 | three | 0 |    | 3 | -3
+ 3 | 2 | three | 0 |    | 2 |  4
+ 3 | 2 | three | 0 |    |   |   
+ 3 | 2 | three | 0 |    |   |  0
+ 3 | 2 | three | 0 |    | 1 | -1
+ 3 | 2 | three | 0 |    | 0 |   
+ 4 | 1 | four  | 1 | -1 | 5 | -5
+ 4 | 1 | four  | 1 | -1 | 5 | -5
+ 4 | 1 | four  | 1 | -1 | 2 |  2
+ 4 | 1 | four  | 1 | -1 | 3 | -3
+ 4 | 1 | four  | 1 | -1 | 2 |  4
+ 4 | 1 | four  | 1 | -1 |   |   
+ 4 | 1 | four  | 1 | -1 |   |  0
+ 4 | 1 | four  | 1 | -1 | 1 | -1
+ 4 | 1 | four  | 1 | -1 | 0 |   
+ 4 | 1 | four  | 0 |    | 5 | -5
+ 4 | 1 | four  | 0 |    | 5 | -5
+ 4 | 1 | four  | 0 |    | 2 |  2
+ 4 | 1 | four  | 0 |    | 3 | -3
+ 4 | 1 | four  | 0 |    | 2 |  4
+ 4 | 1 | four  | 0 |    |   |   
+ 4 | 1 | four  | 0 |    |   |  0
+ 4 | 1 | four  | 0 |    | 1 | -1
+ 4 | 1 | four  | 0 |    | 0 |   
+ 7 | 7 | seven | 1 | -1 | 5 | -5
+ 7 | 7 | seven | 1 | -1 | 5 | -5
+ 7 | 7 | seven | 1 | -1 | 2 |  2
+ 7 | 7 | seven | 1 | -1 | 3 | -3
+ 7 | 7 | seven | 1 | -1 | 2 |  4
+ 7 | 7 | seven | 1 | -1 |   |   
+ 7 | 7 | seven | 1 | -1 |   |  0
+ 7 | 7 | seven | 1 | -1 | 1 | -1
+ 7 | 7 | seven | 1 | -1 | 0 |   
+ 7 | 7 | seven | 0 |    | 5 | -5
+ 7 | 7 | seven | 0 |    | 5 | -5
+ 7 | 7 | seven | 0 |    | 2 |  2
+ 7 | 7 | seven | 0 |    | 3 | -3
+ 7 | 7 | seven | 0 |    | 2 |  4
+ 7 | 7 | seven | 0 |    |   |   
+ 7 | 7 | seven | 0 |    |   |  0
+ 7 | 7 | seven | 0 |    | 1 | -1
+ 7 | 7 | seven | 0 |    | 0 |   
+ 8 | 8 | eight | 1 | -1 | 5 | -5
+ 8 | 8 | eight | 1 | -1 | 5 | -5
+ 8 | 8 | eight | 1 | -1 | 2 |  2
+ 8 | 8 | eight | 1 | -1 | 3 | -3
+ 8 | 8 | eight | 1 | -1 | 2 |  4
+ 8 | 8 | eight | 1 | -1 |   |   
+ 8 | 8 | eight | 1 | -1 |   |  0
+ 8 | 8 | eight | 1 | -1 | 1 | -1
+ 8 | 8 | eight | 1 | -1 | 0 |   
+ 8 | 8 | eight | 0 |    | 5 | -5
+ 8 | 8 | eight | 0 |    | 5 | -5
+ 8 | 8 | eight | 0 |    | 2 |  2
+ 8 | 8 | eight | 0 |    | 3 | -3
+ 8 | 8 | eight | 0 |    | 2 |  4
+ 8 | 8 | eight | 0 |    |   |   
+ 8 | 8 | eight | 0 |    |   |  0
+ 8 | 8 | eight | 0 |    | 1 | -1
+ 8 | 8 | eight | 0 |    | 0 |   
+   |   | null  | 1 | -1 | 5 | -5
+   |   | null  | 1 | -1 | 5 | -5
+   |   | null  | 1 | -1 | 2 |  2
+   |   | null  | 1 | -1 | 3 | -3
+   |   | null  | 1 | -1 | 2 |  4
+   |   | null  | 1 | -1 |   |   
+   |   | null  | 1 | -1 |   |  0
+   |   | null  | 1 | -1 | 1 | -1
+   |   | null  | 1 | -1 | 0 |   
+   |   | null  | 0 |    | 5 | -5
+   |   | null  | 0 |    | 5 | -5
+   |   | null  | 0 |    | 2 |  2
+   |   | null  | 0 |    | 3 | -3
+   |   | null  | 0 |    | 2 |  4
+   |   | null  | 0 |    |   |   
+   |   | null  | 0 |    |   |  0
+   |   | null  | 0 |    | 1 | -1
+   |   | null  | 0 |    | 0 |   
+   | 0 | zero  | 1 | -1 | 5 | -5
+   | 0 | zero  | 1 | -1 | 5 | -5
+   | 0 | zero  | 1 | -1 | 2 |  2
+   | 0 | zero  | 1 | -1 | 3 | -3
+   | 0 | zero  | 1 | -1 | 2 |  4
+   | 0 | zero  | 1 | -1 |   |   
+   | 0 | zero  | 1 | -1 |   |  0
+   | 0 | zero  | 1 | -1 | 1 | -1
+   | 0 | zero  | 1 | -1 | 0 |   
+   | 0 | zero  | 0 |    | 5 | -5
+   | 0 | zero  | 0 |    | 5 | -5
+   | 0 | zero  | 0 |    | 2 |  2
+   | 0 | zero  | 0 |    | 3 | -3
+   | 0 | zero  | 0 |    | 2 |  4
+   | 0 | zero  | 0 |    |   |   
+   | 0 | zero  | 0 |    |   |  0
+   | 0 | zero  | 0 |    | 1 | -1
+   | 0 | zero  | 0 |    | 0 |   
+ 5 | 0 | five  | 1 | -1 | 5 | -5
+ 5 | 0 | five  | 1 | -1 | 5 | -5
+ 5 | 0 | five  | 1 | -1 | 2 |  2
+ 5 | 0 | five  | 1 | -1 | 3 | -3
+ 5 | 0 | five  | 1 | -1 | 2 |  4
+ 5 | 0 | five  | 1 | -1 |   |   
+ 5 | 0 | five  | 1 | -1 |   |  0
+ 5 | 0 | five  | 1 | -1 | 1 | -1
+ 5 | 0 | five  | 1 | -1 | 0 |   
+ 5 | 0 | five  | 0 |    | 5 | -5
+ 5 | 0 | five  | 0 |    | 5 | -5
+ 5 | 0 | five  | 0 |    | 2 |  2
+ 5 | 0 | five  | 0 |    | 3 | -3
+ 5 | 0 | five  | 0 |    | 2 |  4
+ 5 | 0 | five  | 0 |    |   |   
+ 5 | 0 | five  | 0 |    |   |  0
+ 5 | 0 | five  | 0 |    | 1 | -1
+ 5 | 0 | five  | 0 |    | 0 |   
+ 6 | 6 | six   | 1 | -1 | 5 | -5
+ 6 | 6 | six   | 1 | -1 | 5 | -5
+ 6 | 6 | six   | 1 | -1 | 2 |  2
+ 6 | 6 | six   | 1 | -1 | 3 | -3
+ 6 | 6 | six   | 1 | -1 | 2 |  4
+ 6 | 6 | six   | 1 | -1 |   |   
+ 6 | 6 | six   | 1 | -1 |   |  0
+ 6 | 6 | six   | 1 | -1 | 1 | -1
+ 6 | 6 | six   | 1 | -1 | 0 |   
+ 6 | 6 | six   | 0 |    | 5 | -5
+ 6 | 6 | six   | 0 |    | 5 | -5
+ 6 | 6 | six   | 0 |    | 2 |  2
+ 6 | 6 | six   | 0 |    | 3 | -3
+ 6 | 6 | six   | 0 |    | 2 |  4
+ 6 | 6 | six   | 0 |    |   |   
+ 6 | 6 | six   | 0 |    |   |  0
+ 6 | 6 | six   | 0 |    | 1 | -1
+ 6 | 6 | six   | 0 |    | 0 |   
+ 1 | 4 | one   | 1 | -1 | 5 | -5
+ 1 | 4 | one   | 1 | -1 | 5 | -5
+ 1 | 4 | one   | 1 | -1 | 2 |  2
+ 1 | 4 | one   | 1 | -1 | 3 | -3
+ 1 | 4 | one   | 1 | -1 | 2 |  4
+ 1 | 4 | one   | 1 | -1 |   |   
+ 1 | 4 | one   | 1 | -1 |   |  0
+ 1 | 4 | one   | 1 | -1 | 1 | -1
+ 1 | 4 | one   | 1 | -1 | 0 |   
+ 1 | 4 | one   | 0 |    | 5 | -5
+ 1 | 4 | one   | 0 |    | 5 | -5
+ 1 | 4 | one   | 0 |    | 2 |  2
+ 1 | 4 | one   | 0 |    | 3 | -3
+ 1 | 4 | one   | 0 |    | 2 |  4
+ 1 | 4 | one   | 0 |    |   |   
+ 1 | 4 | one   | 0 |    |   |  0
+ 1 | 4 | one   | 0 |    | 1 | -1
+ 1 | 4 | one   | 0 |    | 0 |   
+ 0 |   | zero  | 1 | -1 | 5 | -5
+ 0 |   | zero  | 1 | -1 | 5 | -5
+ 0 |   | zero  | 1 | -1 | 2 |  2
+ 0 |   | zero  | 1 | -1 | 3 | -3
+ 0 |   | zero  | 1 | -1 | 2 |  4
+ 0 |   | zero  | 1 | -1 |   |   
+ 0 |   | zero  | 1 | -1 |   |  0
+ 0 |   | zero  | 1 | -1 | 1 | -1
+ 0 |   | zero  | 1 | -1 | 0 |   
+ 0 |   | zero  | 0 |    | 5 | -5
+ 0 |   | zero  | 0 |    | 5 | -5
+ 0 |   | zero  | 0 |    | 2 |  2
+ 0 |   | zero  | 0 |    | 3 | -3
+ 0 |   | zero  | 0 |    | 2 |  4
+ 0 |   | zero  | 0 |    |   |   
+ 0 |   | zero  | 0 |    |   |  0
+ 0 |   | zero  | 0 |    | 1 | -1
+ 0 |   | zero  | 0 |    | 0 |   
 (891 rows)
 
 --
@@ -1573,11 +1578,11 @@ SELECT *
   FROM J1_TBL INNER JOIN J2_TBL USING (i);
  i | j |   t   | k  
 ---+---+-------+----
- 0 |   | zero  |   
  1 | 4 | one   | -1
+ 0 |   | zero  |   
  2 | 3 | two   |  2
- 2 | 3 | two   |  4
  3 | 2 | three | -3
+ 2 | 3 | two   |  4
  5 | 0 | five  | -5
  5 | 0 | five  | -5
 (7 rows)
@@ -1587,11 +1592,11 @@ SELECT *
   FROM J1_TBL JOIN J2_TBL USING (i);
  i | j |   t   | k  
 ---+---+-------+----
- 0 |   | zero  |   
- 1 | 4 | one   | -1
  2 | 3 | two   |  2
- 2 | 3 | two   |  4
  3 | 2 | three | -3
+ 2 | 3 | two   |  4
+ 1 | 4 | one   | -1
+ 0 |   | zero  |   
  5 | 0 | five  | -5
  5 | 0 | five  | -5
 (7 rows)
@@ -1681,24 +1686,24 @@ SELECT *
   FROM J1_TBL NATURAL JOIN J2_TBL;
  i | j |   t   | k  
 ---+---+-------+----
- 0 |   | zero  |   
- 1 | 4 | one   | -1
+ 5 | 0 | five  | -5
+ 5 | 0 | five  | -5
  2 | 3 | two   |  2
- 2 | 3 | two   |  4
  3 | 2 | three | -3
- 5 | 0 | five  | -5
- 5 | 0 | five  | -5
+ 2 | 3 | two   |  4
+ 1 | 4 | one   | -1
+ 0 |   | zero  |   
 (7 rows)
 
 SELECT *
   FROM J1_TBL t1 (a, b, c) NATURAL JOIN J2_TBL t2 (a, d);
  a | b |   c   | d  
 ---+---+-------+----
- 0 |   | zero  |   
  1 | 4 | one   | -1
+ 0 |   | zero  |   
  2 | 3 | two   |  2
- 2 | 3 | two   |  4
  3 | 2 | three | -3
+ 2 | 3 | two   |  4
  5 | 0 | five  | -5
  5 | 0 | five  | -5
 (7 rows)
@@ -1707,9 +1712,9 @@ SELECT *
   FROM J1_TBL t1 (a, b, c) NATURAL JOIN J2_TBL t2 (d, a);
  a | b |  c   | d 
 ---+---+------+---
- 0 |   | zero |  
  2 | 3 | two  | 2
  4 | 1 | four | 2
+ 0 |   | zero |  
 (3 rows)
 
 -- mismatch number of columns
@@ -1718,11 +1723,11 @@ SELECT *
   FROM J1_TBL t1 (a, b) NATURAL JOIN J2_TBL t2 (a);
  a | b |   t   | k  
 ---+---+-------+----
- 0 |   | zero  |   
- 1 | 4 | one   | -1
  2 | 3 | two   |  2
- 2 | 3 | two   |  4
  3 | 2 | three | -3
+ 2 | 3 | two   |  4
+ 1 | 4 | one   | -1
+ 0 |   | zero  |   
  5 | 0 | five  | -5
  5 | 0 | five  | -5
 (7 rows)
@@ -1734,22 +1739,22 @@ SELECT *
   FROM J1_TBL JOIN J2_TBL ON (J1_TBL.i = J2_TBL.i);
  i | j |   t   | i | k  
 ---+---+-------+---+----
- 0 |   | zero  | 0 |   
- 1 | 4 | one   | 1 | -1
  2 | 3 | two   | 2 |  2
- 2 | 3 | two   | 2 |  4
  3 | 2 | three | 3 | -3
+ 2 | 3 | two   | 2 |  4
  5 | 0 | five  | 5 | -5
  5 | 0 | five  | 5 | -5
+ 1 | 4 | one   | 1 | -1
+ 0 |   | zero  | 0 |   
 (7 rows)
 
 SELECT *
   FROM J1_TBL JOIN J2_TBL ON (J1_TBL.i = J2_TBL.k);
  i | j |  t   | i | k 
 ---+---+------+---+---
- 0 |   | zero |   | 0
  2 | 3 | two  | 2 | 2
  4 | 1 | four | 2 | 4
+ 0 |   | zero |   | 0
 (3 rows)
 
 --
@@ -1759,13 +1764,13 @@ SELECT *
   FROM J1_TBL JOIN J2_TBL ON (J1_TBL.i <= J2_TBL.k);
  i | j |   t   | i | k 
 ---+---+-------+---+---
- 1 | 4 | one   | 2 | 2
  2 | 3 | two   | 2 | 2
- 0 |   | zero  | 2 | 2
- 1 | 4 | one   | 2 | 4
  2 | 3 | two   | 2 | 4
  3 | 2 | three | 2 | 4
  4 | 1 | four  | 2 | 4
+ 1 | 4 | one   | 2 | 2
+ 0 |   | zero  | 2 | 2
+ 1 | 4 | one   | 2 | 4
  0 |   | zero  | 2 | 4
  0 |   | zero  |   | 0
 (9 rows)
@@ -1818,13 +1823,13 @@ SELECT *
   FROM J1_TBL RIGHT OUTER JOIN J2_TBL USING (i);
  i | j |   t   | k  
 ---+---+-------+----
- 0 |   | zero  |   
+ 5 | 0 | five  | -5
+ 5 | 0 | five  | -5
  1 | 4 | one   | -1
+ 0 |   | zero  |   
  2 | 3 | two   |  2
- 2 | 3 | two   |  4
  3 | 2 | three | -3
- 5 | 0 | five  | -5
- 5 | 0 | five  | -5
+ 2 | 3 | two   |  4
    |   |       |   
    |   |       |  0
 (9 rows)
@@ -1833,15 +1838,15 @@ SELECT *
   FROM J1_TBL RIGHT JOIN J2_TBL USING (i);
  i | j |   t   | k  
 ---+---+-------+----
- 0 |   | zero  |   
- 1 | 4 | one   | -1
  2 | 3 | two   |  2
- 2 | 3 | two   |  4
  3 | 2 | three | -3
- 5 | 0 | five  | -5
- 5 | 0 | five  | -5
+ 2 | 3 | two   |  4
    |   |       |   
    |   |       |  0
+ 1 | 4 | one   | -1
+ 0 |   | zero  |   
+ 5 | 0 | five  | -5
+ 5 | 0 | five  | -5
 (9 rows)
 
 SELECT *
@@ -1905,31 +1910,35 @@ SELECT *
 -- semijoin selectivity for <>
 --
 explain (costs off)
-select * from int4_tbl i4, tenk1 a
-where exists(select * from tenk1 b
-             where a.twothousand = b.twothousand and a.fivethous <> b.fivethous)
-      and i4.f1 = a.tenthous;
-                                         QUERY PLAN                                          
----------------------------------------------------------------------------------------------
+select * from tenk1 a, tenk1 b
+where exists(select * from tenk1 c
+             where b.twothousand = c.twothousand and b.fivethous <> c.fivethous)
+      and a.tenthous = b.tenthous and a.tenthous < 5000;
+                                     QUERY PLAN                                     
+------------------------------------------------------------------------------------
  Gather Motion 3:1  (slice1; segments: 3)
-   ->  HashAggregate
-         Group Key: (RowIdExpr)
+   ->  Hash Right Semi Join
+         Hash Cond: (c.twothousand = b.twothousand)
+         Join Filter: (b.fivethous <> c.fivethous)
          ->  Redistribute Motion 3:3  (slice2; segments: 3)
-               Hash Key: (RowIdExpr)
-               ->  Hash Join
-                     Hash Cond: (b.twothousand = a.twothousand)
-                     Join Filter: (a.fivethous <> b.fivethous)
-                     ->  Seq Scan on tenk1 b
-                     ->  Hash
-                           ->  Broadcast Motion 3:3  (slice3; segments: 3)
-                                 ->  Hash Join
-                                       Hash Cond: (a.tenthous = i4.f1)
-                                       ->  Seq Scan on tenk1 a
-                                       ->  Hash
-                                             ->  Broadcast Motion 3:3  (slice4; segments: 3)
-                                                   ->  Seq Scan on int4_tbl i4
+               Hash Key: c.twothousand
+               ->  Seq Scan on tenk1 c
+         ->  Hash
+               ->  Redistribute Motion 3:3  (slice3; segments: 3)
+                     Hash Key: b.twothousand
+                     ->  Hash Join
+                           Hash Cond: (a.tenthous = b.tenthous)
+                           ->  Redistribute Motion 3:3  (slice4; segments: 3)
+                                 Hash Key: a.tenthous
+                                 ->  Seq Scan on tenk1 a
+                                       Filter: (tenthous < 5000)
+                           ->  Hash
+                                 ->  Redistribute Motion 3:3  (slice5; segments: 3)
+                                       Hash Key: b.tenthous
+                                       ->  Seq Scan on tenk1 b
+                                             Filter: (tenthous < 5000)
  Optimizer: Postgres query optimizer
-(18 rows)
+(22 rows)
 
 --
 -- More complicated constructs
@@ -1938,8 +1947,14 @@ where exists(select * from tenk1 b
 -- Multiway full join
 --
 CREATE TABLE t1 (name TEXT, n INTEGER);
+NOTICE:  Table doesn't have 'DISTRIBUTED BY' clause -- Using column named 'name' as the Apache Cloudberry data distribution key for this table.
+HINT:  The 'DISTRIBUTED BY' clause determines the distribution of data. Make sure column(s) chosen are the optimal data distribution key to minimize skew.
 CREATE TABLE t2 (name TEXT, n INTEGER);
+NOTICE:  Table doesn't have 'DISTRIBUTED BY' clause -- Using column named 'name' as the Apache Cloudberry data distribution key for this table.
+HINT:  The 'DISTRIBUTED BY' clause determines the distribution of data. Make sure column(s) chosen are the optimal data distribution key to minimize skew.
 CREATE TABLE t3 (name TEXT, n INTEGER);
+NOTICE:  Table doesn't have 'DISTRIBUTED BY' clause -- Using column named 'name' as the Apache Cloudberry data distribution key for this table.
+HINT:  The 'DISTRIBUTED BY' clause determines the distribution of data. Make sure column(s) chosen are the optimal data distribution key to minimize skew.
 INSERT INTO t1 VALUES ( 'bb', 11 );
 INSERT INTO t2 VALUES ( 'bb', 12 );
 INSERT INTO t2 VALUES ( 'cc', 22 );
@@ -1950,10 +1965,10 @@ INSERT INTO t3 VALUES ( 'dd', 33 );
 SELECT * FROM t1 FULL JOIN t2 USING (name) FULL JOIN t3 USING (name);
  name | n  | n  | n  
 ------+----+----+----
- bb   | 11 | 12 | 13
  cc   |    | 22 | 23
- dd   |    |    | 33
  ee   |    | 42 |   
+ bb   | 11 | 12 | 13
+ dd   |    |    | 33
 (4 rows)
 
 --
@@ -1967,8 +1982,8 @@ INNER JOIN
 USING (name);
  name | n  | n  
 ------+----+----
- bb   | 12 | 13
  cc   | 22 | 23
+ bb   | 12 | 13
 (2 rows)
 
 SELECT * FROM
@@ -1978,9 +1993,9 @@ LEFT JOIN
 USING (name);
  name | n  | n  
 ------+----+----
- bb   | 12 | 13
- cc   | 22 | 23
  ee   | 42 |   
+ cc   | 22 | 23
+ bb   | 12 | 13
 (3 rows)
 
 SELECT * FROM
@@ -1991,8 +2006,8 @@ USING (name);
  name | n  | n  
 ------+----+----
  bb   | 12 | 13
- cc   | 22 | 23
  dd   |    | 33
+ cc   | 22 | 23
  ee   | 42 |   
 (4 rows)
 
@@ -2025,10 +2040,10 @@ NATURAL FULL JOIN
 (SELECT name, n as s3_n, 3 as s3_2 FROM t3) s3;
  name | s2_n | s2_2 | s3_n | s3_2 
 ------+------+------+------+------
- bb   |   12 |    2 |   13 |    3
- cc   |   22 |    2 |   23 |    3
- dd   |      |      |   33 |    3
  ee   |   42 |    2 |      |     
+ cc   |   22 |    2 |   23 |    3
+ bb   |   12 |    2 |   13 |    3
+ dd   |      |      |   33 |    3
 (4 rows)
 
 SELECT * FROM
@@ -2051,8 +2066,8 @@ NATURAL FULL JOIN
  name | s1_n | s1_1 | s2_n | s2_2 | s3_n | s3_2 
 ------+------+------+------+------+------+------
  bb   |   11 |    1 |   12 |    2 |   13 |    3
- cc   |      |      |   22 |    2 |   23 |    3
  dd   |      |      |      |      |   33 |    3
+ cc   |      |      |   22 |    2 |   23 |    3
  ee   |      |      |   42 |    2 |      |     
 (4 rows)
 
@@ -2067,8 +2082,8 @@ NATURAL FULL JOIN
  name | s1_n | s2_n | s3_n 
 ------+------+------+------
  bb   |   11 |   12 |   13
- cc   |      |   22 |   23
  dd   |      |      |   33
+ cc   |      |   22 |   23
  ee   |      |   42 |     
 (4 rows)
 
@@ -2083,9 +2098,9 @@ NATURAL FULL JOIN
  name | s1_n | s2_n | s2_2 | s3_n 
 ------+------+------+------+------
  bb   |   11 |   12 |    2 |   13
- cc   |      |   22 |    2 |   23
  dd   |      |      |      |   33
  ee   |      |   42 |    2 |     
+ cc   |      |   22 |    2 |   23
 (4 rows)
 
 -- Constants as join keys can also be problematic
@@ -2096,20 +2111,24 @@ FULL JOIN
 ON (s1_n = s2_n);
  name | s1_n | name | s2_n 
 ------+------+------+------
-      |      | bb   |    2
       |      | cc   |    2
+      |      | bb   |    2
       |      | ee   |    2
  bb   |   11 |      |     
 (4 rows)
 
 -- Test for propagation of nullability constraints into sub-joins
 create temp table x (x1 int, x2 int);
+NOTICE:  Table doesn't have 'DISTRIBUTED BY' clause -- Using column named 'x1' as the Apache Cloudberry data distribution key for this table.
+HINT:  The 'DISTRIBUTED BY' clause determines the distribution of data. Make sure column(s) chosen are the optimal data distribution key to minimize skew.
 insert into x values (1,11);
 insert into x values (2,22);
 insert into x values (3,null);
 insert into x values (4,44);
 insert into x values (5,null);
 create temp table y (y1 int, y2 int);
+NOTICE:  Table doesn't have 'DISTRIBUTED BY' clause -- Using column named 'y1' as the Apache Cloudberry data distribution key for this table.
+HINT:  The 'DISTRIBUTED BY' clause determines the distribution of data. Make sure column(s) chosen are the optimal data distribution key to minimize skew.
 insert into y values (1,111);
 insert into y values (2,222);
 insert into y values (3,333);
@@ -2117,20 +2136,20 @@ insert into y values (4,null);
 select * from x;
  x1 | x2 
 ----+----
-  1 | 11
+  5 |   
   2 | 22
   3 |   
   4 | 44
-  5 |   
+  1 | 11
 (5 rows)
 
 select * from y;
  y1 | y2  
 ----+-----
-  1 | 111
   2 | 222
   3 | 333
   4 |    
+  1 | 111
 (4 rows)
 
 select * from x left join y on (x1 = y1 and x2 is not null);
@@ -2146,21 +2165,21 @@ select * from x left join y on (x1 = y1 and x2 is not null);
 select * from x left join y on (x1 = y1 and y2 is not null);
  x1 | x2 | y1 | y2  
 ----+----+----+-----
+  5 |    |    |    
   1 | 11 |  1 | 111
   2 | 22 |  2 | 222
   3 |    |  3 | 333
   4 | 44 |    |    
-  5 |    |    |    
 (5 rows)
 
 select * from (x left join y on (x1 = y1)) left join x xx(xx1,xx2)
 on (x1 = xx1);
  x1 | x2 | y1 | y2  | xx1 | xx2 
 ----+----+----+-----+-----+-----
-  1 | 11 |  1 | 111 |   1 |  11
   2 | 22 |  2 | 222 |   2 |  22
   3 |    |  3 | 333 |   3 |    
   4 | 44 |  4 |     |   4 |  44
+  1 | 11 |  1 | 111 |   1 |  11
   5 |    |    |     |   5 |    
 (5 rows)
 
@@ -2168,10 +2187,10 @@ select * from (x left join y on (x1 = y1)) left join x xx(xx1,xx2)
 on (x1 = xx1 and x2 is not null);
  x1 | x2 | y1 | y2  | xx1 | xx2 
 ----+----+----+-----+-----+-----
-  1 | 11 |  1 | 111 |   1 |  11
   2 | 22 |  2 | 222 |   2 |  22
   3 |    |  3 | 333 |     |    
   4 | 44 |  4 |     |   4 |  44
+  1 | 11 |  1 | 111 |   1 |  11
   5 |    |    |     |     |    
 (5 rows)
 
@@ -2180,10 +2199,10 @@ on (x1 = xx1 and y2 is not null);
  x1 | x2 | y1 | y2  | xx1 | xx2 
 ----+----+----+-----+-----+-----
   1 | 11 |  1 | 111 |   1 |  11
+  5 |    |    |     |     |    
   2 | 22 |  2 | 222 |   2 |  22
   3 |    |  3 | 333 |   3 |    
   4 | 44 |  4 |     |     |    
-  5 |    |    |     |     |    
 (5 rows)
 
 select * from (x left join y on (x1 = y1)) left join x xx(xx1,xx2)
@@ -2220,9 +2239,9 @@ select * from (x left join y on (x1 = y1)) left join x xx(xx1,xx2)
 on (x1 = xx1) where (xx2 is not null);
  x1 | x2 | y1 | y2  | xx1 | xx2 
 ----+----+----+-----+-----+-----
-  1 | 11 |  1 | 111 |   1 |  11
   2 | 22 |  2 | 222 |   2 |  22
   4 | 44 |  4 |     |   4 |  44
+  1 | 11 |  1 | 111 |   1 |  11
 (3 rows)
 
 --
@@ -2273,11 +2292,12 @@ explain (costs off)
 select aa, bb, unique1, unique1
   from tenk1 right join b on aa = unique1
   where bb < bb and bb is null;
-        QUERY PLAN        
---------------------------
+             QUERY PLAN              
+-------------------------------------
  Result
    One-Time Filter: false
-(2 rows)
+ Optimizer: Postgres query optimizer
+(3 rows)
 
 select aa, bb, unique1, unique1
   from tenk1 right join b on aa = unique1
@@ -2419,16 +2439,16 @@ select * from
   on j1_tbl.i = j2_tbl.i and j1_tbl.i = j2_tbl.k; --order none
  i | j |   t   | i | k  
 ---+---+-------+---+----
+ 6 | 6 | six   |   |   
+   |   |       | 5 | -5
+   |   |       | 5 | -5
+ 5 | 0 | five  |   |   
    |   |       |   |  0
    |   |       |   |   
    | 0 | zero  |   |   
    |   | null  |   |   
  8 | 8 | eight |   |   
  7 | 7 | seven |   |   
- 6 | 6 | six   |   |   
-   |   |       | 5 | -5
-   |   |       | 5 | -5
- 5 | 0 | five  |   |   
  4 | 1 | four  |   |   
    |   |       | 3 | -3
  3 | 2 | three |   |   
@@ -2471,7 +2491,7 @@ select count(*) from
                      ->  Subquery Scan on y
                            ->  Index Scan using tenk1_unique2 on tenk1 y_1
  Optimizer: Postgres query optimizer
-(18 rows)
+(16 rows)
 
 select count(*) from
   (select * from tenk1 x order by x.thousand, x.twothousand, x.fivethous) x
@@ -2496,9 +2516,17 @@ DROP TABLE J2_TBL;
 -- Both DELETE and UPDATE allow the specification of additional tables
 -- to "join" against to determine which rows should be modified.
 CREATE TEMP TABLE t1 (a int, b int);
+NOTICE:  Table doesn't have 'DISTRIBUTED BY' clause -- Using column named 'a' as the Apache Cloudberry data distribution key for this table.
+HINT:  The 'DISTRIBUTED BY' clause determines the distribution of data. Make sure column(s) chosen are the optimal data distribution key to minimize skew.
 CREATE TEMP TABLE t2 (a int, b int);
+NOTICE:  Table doesn't have 'DISTRIBUTED BY' clause -- Using column named 'a' as the Apache Cloudberry data distribution key for this table.
+HINT:  The 'DISTRIBUTED BY' clause determines the distribution of data. Make sure column(s) chosen are the optimal data distribution key to minimize skew.
 CREATE TEMP TABLE t3 (x int, y int);
+NOTICE:  Table doesn't have 'DISTRIBUTED BY' clause -- Using column named 'x' as the Apache Cloudberry data distribution key for this table.
+HINT:  The 'DISTRIBUTED BY' clause determines the distribution of data. Make sure column(s) chosen are the optimal data distribution key to minimize skew.
 CREATE TEMP TABLE t4 (x int, y int);
+NOTICE:  Table doesn't have 'DISTRIBUTED BY' clause -- Using column named 'x' as the Apache Cloudberry data distribution key for this table.
+HINT:  The 'DISTRIBUTED BY' clause determines the distribution of data. Make sure column(s) chosen are the optimal data distribution key to minimize skew.
 INSERT INTO t1 VALUES (5, 10);
 INSERT INTO t1 VALUES (15, 20);
 INSERT INTO t1 VALUES (100, 100);
@@ -2513,18 +2541,18 @@ DELETE FROM t3 USING t1 table1 WHERE t3.x = table1.a;
 SELECT * FROM t3;
   x  |  y  
 -----+-----
-   6 |   7
    7 |   8
  500 | 100
+   6 |   7
 (3 rows)
 
 DELETE FROM t4 USING t1 JOIN t2 USING (a) WHERE t4.x > t1.a;
 SELECT * FROM t4;
  x | y  
 ---+----
+ 7 |  8
  5 | 20
  6 |  7
- 7 |  8
 (3 rows)
 
 DELETE FROM t3 USING t3 t3_other WHERE t3.x = t3_other.x AND t3.y = t3_other.y;
@@ -2535,15 +2563,16 @@ SELECT * FROM t3;
 
 -- Test join against inheritance tree
 create temp table t2a () inherits (t2);
+NOTICE:  table has parent, setting distribution columns to match parent table
 insert into t2a values (200, 2001);
 select * from t1 left join t2 on (t1.a = t2.a);
   a  |  b   |  a  |  b   
 -----+------+-----+------
-   5 |   10 |     |     
-  15 |   20 |     |     
- 100 |  100 |     |     
  200 | 1000 | 200 | 2000
  200 | 1000 | 200 | 2001
+ 100 |  100 |     |     
+   5 |   10 |     |     
+  15 |   20 |     |     
 (5 rows)
 
 -- Test matching of column name with wrong alias
@@ -2564,9 +2593,13 @@ select t1.*, t2.*, unnamed_join.* from
 -- regression test for 8.1 merge right join bug
 --
 CREATE TEMP TABLE tt1 ( tt1_id int4, joincol int4 );
+NOTICE:  Table doesn't have 'DISTRIBUTED BY' clause -- Using column named 'tt1_id' as the Apache Cloudberry data distribution key for this table.
+HINT:  The 'DISTRIBUTED BY' clause determines the distribution of data. Make sure column(s) chosen are the optimal data distribution key to minimize skew.
 INSERT INTO tt1 VALUES (1, 11);
 INSERT INTO tt1 VALUES (2, NULL);
 CREATE TEMP TABLE tt2 ( tt2_id int4, joincol int4 );
+NOTICE:  Table doesn't have 'DISTRIBUTED BY' clause -- Using column named 'tt2_id' as the Apache Cloudberry data distribution key for this table.
+HINT:  The 'DISTRIBUTED BY' clause determines the distribution of data. Make sure column(s) chosen are the optimal data distribution key to minimize skew.
 INSERT INTO tt2 VALUES (21, 11);
 INSERT INTO tt2 VALUES (22, 11);
 set enable_hashjoin to off;
@@ -2575,17 +2608,17 @@ set enable_nestloop to off;
 select tt1.*, tt2.* from tt1 left join tt2 on tt1.joincol = tt2.joincol;
  tt1_id | joincol | tt2_id | joincol 
 --------+---------+--------+---------
-      1 |      11 |     21 |      11
-      1 |      11 |     22 |      11
       2 |         |        |        
+      1 |      11 |     22 |      11
+      1 |      11 |     21 |      11
 (3 rows)
 
 select tt1.*, tt2.* from tt2 right join tt1 on tt1.joincol = tt2.joincol;
  tt1_id | joincol | tt2_id | joincol 
 --------+---------+--------+---------
+      2 |         |        |        
       1 |      11 |     21 |      11
       1 |      11 |     22 |      11
-      2 |         |        |        
 (3 rows)
 
 reset enable_hashjoin;
@@ -2603,22 +2636,27 @@ set enable_nestloop to off;
 explain (costs off)
 select * from tbl_ra t1
 where not exists (select 1 from tbl_ra t2 where t2.b = t1.a) and t1.b < 2;
-                      QUERY PLAN                       
--------------------------------------------------------
- Merge Right Anti Join
-   Merge Cond: (t2.b = t1.a)
-   ->  Index Only Scan using tbl_ra_b_idx on tbl_ra t2
-   ->  Sort
-         Sort Key: t1.a
-         ->  Bitmap Heap Scan on tbl_ra t1
-               Recheck Cond: (b < 2)
-               ->  Bitmap Index Scan on tbl_ra_b_idx
-                     Index Cond: (b < 2)
-(9 rows)
+                            QUERY PLAN                            
+------------------------------------------------------------------
+ Gather Motion 3:1  (slice1; segments: 3)
+   ->  Merge Anti Join
+         Merge Cond: (t1.a = t2.b)
+         ->  Sort
+               Sort Key: t1.a
+               ->  Seq Scan on tbl_ra t1
+                     Filter: (b < 2)
+         ->  Sort
+               Sort Key: t2.b
+               ->  Redistribute Motion 3:3  (slice2; segments: 3)
+                     Hash Key: t2.b
+                     ->  Seq Scan on tbl_ra t2
+ Optimizer: Postgres query optimizer
+(13 rows)
 
 -- and check we get the expected results
 select * from tbl_ra t1
-where not exists (select 1 from tbl_ra t2 where t2.b = t1.a) and t1.b < 2;
+where not exists (select 1 from tbl_ra t2 where t2.b = t1.a) and t1.b < 2
+order by a;
   a   | b 
 ------+---
   100 | 0
@@ -2648,6 +2686,8 @@ reset enable_nestloop;
 -- regression test for bug with hash-right-semi join
 --
 create temp table tbl_rs(a int, b int);
+NOTICE:  Table doesn't have 'DISTRIBUTED BY' clause -- Using column named 'a' as the Apache Cloudberry data distribution key for this table.
+HINT:  The 'DISTRIBUTED BY' clause determines the distribution of data. Make sure column(s) chosen are the optimal data distribution key to minimize skew.
 insert into tbl_rs select i, i from generate_series(1,10)i;
 analyze tbl_rs;
 set enable_nestloop to off;
@@ -2660,60 +2700,21 @@ where (select a from tbl_rs t2
                      (select (b in (select b from tbl_rs t3)) as c from tbl_rs t4 where t4.a = 1) s
                      where c in (select t1.a = 1 from tbl_rs t5 union all select true))
        order by a limit 1) >= 0;
-                                      QUERY PLAN                                      
---------------------------------------------------------------------------------------
- Seq Scan on tbl_rs t1
-   Filter: ((SubPlan 3) >= 0)
-   SubPlan 3
-     ->  Limit
-           InitPlan 2
-             ->  Hash Right Semi Join
-                   Hash Cond: (((t1.a = 1)) = (ANY (t4.b = (hashed SubPlan 1).col1)))
-                   ->  Append
-                         ->  Seq Scan on tbl_rs t5
-                         ->  Result
-                   ->  Hash
-                         ->  Seq Scan on tbl_rs t4
-                               Filter: (a = 1)
-                         SubPlan 1
-                           ->  Seq Scan on tbl_rs t3
-           ->  Sort
-                 Sort Key: t2.a
-                 ->  Result
-                       One-Time Filter: (InitPlan 2).col1
-                       ->  Seq Scan on tbl_rs t2
-(20 rows)
-
+ERROR:  correlated subquery with skip-level correlations is not supported
 -- and check we get the expected results
 select * from tbl_rs t1
 where (select a from tbl_rs t2
        where exists (select 1 from
                      (select (b in (select b from tbl_rs t3)) as c from tbl_rs t4 where t4.a = 1) s
                      where c in (select t1.a = 1 from tbl_rs t5 union all select true))
-       order by a limit 1) >= 0;
- a  | b  
-----+----
-  1 |  1
-  2 |  2
-  3 |  3
-  4 |  4
-  5 |  5
-  6 |  6
-  7 |  7
-  8 |  8
-  9 |  9
- 10 | 10
-(10 rows)
-
+       order by a limit 1) >= 0
+order by a;
+ERROR:  correlated subquery with skip-level correlations is not supported
 reset enable_nestloop;
 reset enable_hashagg;
 --
 -- regression test for bug #13908 (hash join with skew tuples & nbatch increase)
 --
--- start_ignore
--- GPDB_96_MERGE_FIXME: does the plan exercise the nbatch increase in GPDB
--- like it does on PostgreSQL?
--- end_ignore
 set work_mem to '64kB';
 set enable_mergejoin to off;
 set enable_memoize to off;
@@ -2749,10 +2750,14 @@ reset enable_memoize;
 -- regression test for 8.2 bug with improper re-ordering of left joins
 --
 create temp table tt3(f1 int, f2 text);
+NOTICE:  Table doesn't have 'DISTRIBUTED BY' clause -- Using column named 'f1' as the Apache Cloudberry data distribution key for this table.
+HINT:  The 'DISTRIBUTED BY' clause determines the distribution of data. Make sure column(s) chosen are the optimal data distribution key to minimize skew.
 insert into tt3 select x, repeat('xyzzy', 100) from generate_series(1,10000) x;
 create index tt3i on tt3(f1);
 analyze tt3;
 create temp table tt4(f1 int);
+NOTICE:  Table doesn't have 'DISTRIBUTED BY' clause -- Using column named 'f1' as the Apache Cloudberry data distribution key for this table.
+HINT:  The 'DISTRIBUTED BY' clause determines the distribution of data. Make sure column(s) chosen are the optimal data distribution key to minimize skew.
 insert into tt4 values (0),(1),(9999);
 analyze tt4;
 SELECT a.f1
@@ -2765,15 +2770,17 @@ LEFT JOIN (
 WHERE d.f1 IS NULL;
   f1  
 ------
-    0
-    1
  9999
+    1
+    0
 (3 rows)
 
 --
 -- regression test for proper handling of outer joins within antijoins
 --
 create temp table tt4x(c1 int, c2 int, c3 int);
+NOTICE:  Table doesn't have 'DISTRIBUTED BY' clause -- Using column named 'c1' as the Apache Cloudberry data distribution key for this table.
+HINT:  The 'DISTRIBUTED BY' clause determines the distribution of data. Make sure column(s) chosen are the optimal data distribution key to minimize skew.
 explain (costs off)
 select * from tt4x t1
 where not exists (
@@ -2819,7 +2826,11 @@ where not exists (
 -- regression test for problems of the sort depicted in bug #3494
 --
 create temp table tt5(f1 int, f2 int);
+NOTICE:  Table doesn't have 'DISTRIBUTED BY' clause -- Using column named 'f1' as the Apache Cloudberry data distribution key for this table.
+HINT:  The 'DISTRIBUTED BY' clause determines the distribution of data. Make sure column(s) chosen are the optimal data distribution key to minimize skew.
 create temp table tt6(f1 int, f2 int);
+NOTICE:  Table doesn't have 'DISTRIBUTED BY' clause -- Using column named 'f1' as the Apache Cloudberry data distribution key for this table.
+HINT:  The 'DISTRIBUTED BY' clause determines the distribution of data. Make sure column(s) chosen are the optimal data distribution key to minimize skew.
 insert into tt5 values(1, 10);
 insert into tt5 values(1, 11);
 insert into tt6 values(1, 9);
@@ -2835,7 +2846,11 @@ select * from tt5,tt6 where tt5.f1 = tt6.f1 and tt5.f1 = tt5.f2 - tt6.f2;
 -- regression test for problems of the sort depicted in bug #3588
 --
 create temp table xx (pkxx int);
+NOTICE:  Table doesn't have 'DISTRIBUTED BY' clause -- Using column named 'pkxx' as the Apache Cloudberry data distribution key for this table.
+HINT:  The 'DISTRIBUTED BY' clause determines the distribution of data. Make sure column(s) chosen are the optimal data distribution key to minimize skew.
 create temp table yy (pkyy int, pkxx int);
+NOTICE:  Table doesn't have 'DISTRIBUTED BY' clause -- Using column named 'pkyy' as the Apache Cloudberry data distribution key for this table.
+HINT:  The 'DISTRIBUTED BY' clause determines the distribution of data. Make sure column(s) chosen are the optimal data distribution key to minimize skew.
 insert into xx values (1);
 insert into xx values (2);
 insert into xx values (3);
@@ -2850,8 +2865,8 @@ from yy
      left join xx xxb on coalesce (xxa.pkxx, 1) = xxb.pkxx;
  yy_pkyy | yy_pkxx | yya_pkyy | xxa_pkxx | xxb_pkxx 
 ---------+---------+----------+----------+----------
-     101 |       1 |      101 |        1 |        1
      201 |       2 |          |          |        1
+     101 |       1 |      101 |        1 |        1
      301 |         |          |          |        1
 (3 rows)
 
@@ -2922,7 +2937,11 @@ set enable_mergejoin = 1;
 set enable_hashjoin = 0;
 set enable_nestloop = 0;
 create temp table a (i integer);
+NOTICE:  Table doesn't have 'DISTRIBUTED BY' clause -- Using column named 'i' as the Apache Cloudberry data distribution key for this table.
+HINT:  The 'DISTRIBUTED BY' clause determines the distribution of data. Make sure column(s) chosen are the optimal data distribution key to minimize skew.
 create temp table b (x integer, y integer);
+NOTICE:  Table doesn't have 'DISTRIBUTED BY' clause -- Using column named 'x' as the Apache Cloudberry data distribution key for this table.
+HINT:  The 'DISTRIBUTED BY' clause determines the distribution of data. Make sure column(s) chosen are the optimal data distribution key to minimize skew.
 select * from a left join b on i = x and i = y and x = i;
  i | x | y 
 ---+---+---
@@ -2935,6 +2954,8 @@ rollback;
 begin;
 create type mycomptype as (id int, v bigint);
 create temp table tidv (idv mycomptype);
+NOTICE:  Table doesn't have 'DISTRIBUTED BY' clause -- Using column named 'idv' as the Apache Cloudberry data distribution key for this table.
+HINT:  The 'DISTRIBUTED BY' clause determines the distribution of data. Make sure column(s) chosen are the optimal data distribution key to minimize skew.
 create index on tidv (idv);
 analyze tidv;
 explain (costs off)
@@ -3142,9 +3163,9 @@ SELECT qq, unique1
   INNER JOIN tenk1 c ON qq = unique2;
  qq  | unique1 
 -----+---------
- 123 |    4596
- 123 |    4596
  456 |    7318
+ 123 |    4596
+ 123 |    4596
 (3 rows)
 
 --
@@ -3162,12 +3183,14 @@ create temp table nt2 (
   b2 boolean,
   foreign key (nt1_id) references nt1(id)
 );
+WARNING:  referential integrity (FOREIGN KEY) constraints are not supported in Apache Cloudberry, will not be enforced
 create temp table nt3 (
   id int primary key,
   nt2_id int,
   c1 boolean,
   foreign key (nt2_id) references nt2(id)
 );
+WARNING:  referential integrity (FOREIGN KEY) constraints are not supported in Apache Cloudberry, will not be enforced
 insert into nt1 values (1,true,true);
 ANALYZE nt1;
 insert into nt1 values (2,true,false);
@@ -3300,26 +3323,7 @@ select * from
       right join int4_tbl as i43 on (i43.f1 > 1)
       where ss1.loc = ss1.lat) as ss2
 where i41.f1 > 0;
-ERROR:  could not devise a query plan for the given query (pathnode.c:277)
---start_ignore
---GPDB_14_MERGE_FIXME: We need to make plan work. One idea is generate a gather
---motion for relations. Even it is not efficient, but better than error out here.
-                    QUERY PLAN                    
---------------------------------------------------
- Nested Loop
-   ->  Nested Loop
-         ->  Seq Scan on int4_tbl i41
-               Filter: (f1 > 0)
-         ->  Nested Loop
-               Join Filter: (i41.f1 = i42.f1)
-               ->  Seq Scan on int8_tbl i81
-               ->  Materialize
-                     ->  Seq Scan on int4_tbl i42
-   ->  Materialize
-         ->  Seq Scan on int4_tbl i43
-               Filter: (f1 > 1)
-(12 rows)
---end_ignore
+ERROR:  could not devise a query plan for the given query (pathnode.c:283)
 select * from
   int4_tbl as i41,
   lateral
@@ -3330,34 +3334,7 @@ select * from
       right join int4_tbl as i43 on (i43.f1 > 1)
       where ss1.loc = ss1.lat) as ss2
 where i41.f1 > 0;
-ERROR:  could not devise a query plan for the given query (pathnode.c:277)
---start_ignore
---GPDB_14_MERGE_FIXME: We need to make plan work. One idea is generate a gather
---motion for relations. Even it is not efficient, but better than error out here.
-     f1     | x 
-------------+---
-     123456 | 1
-     123456 | 1
-     123456 | 1
-     123456 | 1
-     123456 | 1
-     123456 | 1
-     123456 | 1
-     123456 | 1
-     123456 | 1
-     123456 | 1
- 2147483647 | 1
- 2147483647 | 1
- 2147483647 | 1
- 2147483647 | 1
- 2147483647 | 1
- 2147483647 | 1
- 2147483647 | 1
- 2147483647 | 1
- 2147483647 | 1
- 2147483647 | 1
-(20 rows)
---end_ignore
+ERROR:  could not devise a query plan for the given query (pathnode.c:283)
 --
 -- test the corner cases FULL JOIN ON TRUE and FULL JOIN ON FALSE
 --
@@ -3395,13 +3372,13 @@ select * from int4_tbl a full join int4_tbl b on false; --order none
      f1      |     f1      
 -------------+-------------
              |           0
-             |      123456
-             |     -123456
              |  2147483647
              | -2147483647
-           0 |            
+             |      123456
+             |     -123456
       123456 |            
      -123456 |            
+           0 |            
   2147483647 |            
  -2147483647 |            
 (10 rows)
@@ -3410,7 +3387,11 @@ select * from int4_tbl a full join int4_tbl b on false; --order none
 -- test for ability to use a cartesian join when necessary
 --
 create temp table q1 as select 1 as q1;
+NOTICE:  Table doesn't have 'DISTRIBUTED BY' clause -- Using column(s) named 'q1' as the Apache Cloudberry data distribution key for this table.
+HINT:  The 'DISTRIBUTED BY' clause determines the distribution of data. Make sure column(s) chosen are the optimal data distribution key to minimize skew.
 create temp table q2 as select 0 as q2;
+NOTICE:  Table doesn't have 'DISTRIBUTED BY' clause -- Using column(s) named 'q2' as the Apache Cloudberry data distribution key for this table.
+HINT:  The 'DISTRIBUTED BY' clause determines the distribution of data. Make sure column(s) chosen are the optimal data distribution key to minimize skew.
 analyze q1;
 analyze q2;
 explain (costs off)
@@ -3418,8 +3399,8 @@ select * from
   tenk1 join int4_tbl on f1 = twothousand,
   q1, q2
 where q1 = thousand or q2 = thousand;
-                                     QUERY PLAN                                     
-------------------------------------------------------------------------------------
+                                        QUERY PLAN                                        
+------------------------------------------------------------------------------------------
  Gather Motion 3:1  (slice1; segments: 3)
    ->  Hash Join
          Hash Cond: (tenk1.twothousand = int4_tbl.f1)
@@ -3449,8 +3430,8 @@ select * from
   tenk1 join int4_tbl on f1 = twothousand,
   q1, q2
 where thousand = (q1 + q2);
-                             QUERY PLAN                              
----------------------------------------------------------------------
+                                   QUERY PLAN                                    
+---------------------------------------------------------------------------------
  Gather Motion 3:1  (slice1; segments: 3)
    ->  Hash Join
          Hash Cond: (tenk1.thousand = (q1.q1 + q2.q2))
@@ -3516,22 +3497,36 @@ select t1.unique2, t1.stringu1, t2.unique1, t2.stringu2 from
   left join tenk1 t2
   on (subq1.y1 = t2.unique1)
 where t1.unique2 < 42 and t1.stringu1 > t2.stringu2;
-                                  QUERY PLAN                                  
-------------------------------------------------------------------------------
- Nested Loop
+                                              QUERY PLAN                                              
+------------------------------------------------------------------------------------------------------
+ Gather Motion 3:1  (slice1; segments: 3)
    ->  Nested Loop
-         Join Filter: ("*VALUES*".column2 = i1.f1)
-         ->  Nested Loop
-               ->  Nested Loop
-                     Join Filter: ("*VALUES*".column1 = "*VALUES*_1".column2)
-                     ->  Values Scan on "*VALUES*"
-                     ->  Values Scan on "*VALUES*_1"
-               ->  Index Scan using tenk1_unique2 on tenk1 t1
-                     Index Cond: ((unique2 = (11)) AND (unique2 < 42))
-         ->  Seq Scan on int4_tbl i1
-   ->  Index Scan using tenk1_unique1 on tenk1 t2
-         Index Cond: (unique1 = "*VALUES*_1".column1)
-(14 rows)
+         ->  Broadcast Motion 1:3  (slice2; segments: 1)
+               ->  Seq Scan on int4_tbl i1
+                     Filter: (f1 = 0)
+         ->  Materialize
+               ->  Hash Join
+                     Hash Cond: ((11) = t1.unique2)
+                     Join Filter: (t1.stringu1 > t2.stringu2)
+                     ->  Broadcast Motion 3:3  (slice3; segments: 3)
+                           ->  Nested Loop
+                                 Join Filter: (11 < 42)
+                                 ->  Broadcast Motion 3:3  (slice4; segments: 3)
+                                       ->  Seq Scan on onerow
+                                 ->  Materialize
+                                       ->  Hash Join
+                                             Hash Cond: (t2.unique1 = (3))
+                                             ->  Seq Scan on tenk1 t2
+                                             ->  Hash
+                                                   ->  Redistribute Motion 3:3  (slice5; segments: 3)
+                                                         Hash Key: (3)
+                                                         ->  Seq Scan on onerow onerow_1
+                     ->  Hash
+                           ->  Index Scan using tenk1_unique2 on tenk1 t1
+                                 Index Cond: (unique2 < 42)
+ Optimizer: Postgres query optimizer
+(26 rows)
+
 --end_ignore
 select t1.unique2, t1.stringu1, t2.unique1, t2.stringu2 from
   tenk1 t1
@@ -3628,8 +3623,8 @@ explain (verbose, costs off)
 select * from
   (select 1 as x) ss1 left join (select 2 as y) ss2 on (true),
   lateral (select ss2.y as z limit 1) ss3;
-        QUERY PLAN         
----------------------------
+             QUERY PLAN              
+-------------------------------------
  Nested Loop
    Output: 1, (2), ((2))
    ->  Result
@@ -3640,8 +3635,9 @@ select * from
                Output: ((2))
                ->  Result
                      Output: (2)
+ Settings: optimizer = 'off'
  Optimizer: Postgres query optimizer
-(11 rows)
+(12 rows)
 
 select * from
   (select 1 as x) ss1 left join (select 2 as y) ss2 on (true),
@@ -3670,7 +3666,8 @@ where b;
          ->  Result
          ->  Result
                One-Time Filter: (true)
-(6 rows)
+ Optimizer: Postgres query optimizer
+(7 rows)
 
 select * from
   (select 0 as z) as t1
@@ -3710,8 +3707,8 @@ explain (verbose, costs off)
 select unique1, x.*
 from tenk1, (select *, random() from f_immutable_int4(1) x) x
 where x = unique1;
-                        QUERY PLAN                         
------------------------------------------------------------
+                           QUERY PLAN                            
+-----------------------------------------------------------------
  Gather Motion 3:1  (slice1; segments: 3)
    Output: tenk1.unique1, (1), (random())
    ->  Nested Loop
@@ -3724,8 +3721,8 @@ where x = unique1;
          ->  Index Only Scan using tenk1_unique1 on public.tenk1
                Output: tenk1.unique1
                Index Cond: (tenk1.unique1 = (1))
+ Settings: enable_nestloop = 'on', optimizer = 'off'
  Optimizer: Postgres query optimizer
- Settings: enable_nestloop = 'on'
 (14 rows)
 
 explain (costs off)
@@ -3750,11 +3747,12 @@ select unique1 from tenk1, lateral f_immutable_int4(1) x where x = unique1;
 
 explain (costs off)
 select unique1 from tenk1, lateral f_immutable_int4(1) x where x in (select 17);
-        QUERY PLAN        
---------------------------
+             QUERY PLAN              
+-------------------------------------
  Result
    One-Time Filter: false
-(2 rows)
+ Optimizer: Postgres query optimizer
+(3 rows)
 
 explain (costs off)
 select unique1, x from tenk1 join f_immutable_int4(1) x on unique1 = x;
@@ -3794,8 +3792,8 @@ select unique1, x from tenk1 right join f_immutable_int4(1) x on unique1 = x;
 
 explain (costs off)
 select unique1, x from tenk1 full join f_immutable_int4(1) x on unique1 = x;
-                     QUERY PLAN                     
-----------------------------------------------------
+                            QUERY PLAN                            
+------------------------------------------------------------------
  Gather Motion 3:1  (slice1; segments: 3)
    ->  Hash Full Join
          Hash Cond: (tenk1.unique1 = (1))
@@ -3810,8 +3808,8 @@ select unique1, x from tenk1 full join f_immutable_int4(1) x on unique1 = x;
 -- check that pullup of a const function allows further const-folding
 explain (costs off)
 select unique1 from tenk1, f_immutable_int4(1) x where x = 42;
-        QUERY PLAN        
---------------------------
+             QUERY PLAN              
+-------------------------------------
  Result
    One-Time Filter: false
  Optimizer: Postgres query optimizer
@@ -3831,8 +3829,8 @@ from nt3 as nt3
     ) as ss2
     on ss2.id = nt3.nt2_id
 where nt3.id = 1 and ss2.b3;
-                  QUERY PLAN                  
-----------------------------------------------
+                         QUERY PLAN                         
+------------------------------------------------------------
  Gather Motion 3:1  (slice1; segments: 3)
    ->  Hash Right Join
          Hash Cond: (nt2.id = nt3.nt2_id)
@@ -3847,7 +3845,7 @@ where nt3.id = 1 and ss2.b3;
                ->  Seq Scan on nt3
                      Filter: (id = 1)
  Optimizer: Postgres query optimizer
-(15 rows)
+(14 rows)
 
 drop function f_immutable_int4(int);
 -- test inlining when function returns composite
@@ -3857,8 +3855,8 @@ create function mki4(int) returns int4_tbl as
 $$select row($1)::int4_tbl$$ language sql;
 explain (verbose, costs off)
 select * from mki8(1,2);
-             QUERY PLAN             
-------------------------------------
+                    QUERY PLAN                    
+--------------------------------------------------
  Subquery Scan on sirvf_sq
    Output: (sirvf_sq.mki8).q1, (sirvf_sq.mki8).q2
    ->  Result
@@ -3866,8 +3864,9 @@ select * from mki8(1,2);
          InitPlan 1 (returns $0)
            ->  Result
                  Output: '(1,2)'::int8_tbl
+ Settings: optimizer = 'off'
  Optimizer: Postgres query optimizer
-(8 rows)
+(9 rows)
 
 select * from mki8(1,2);
  q1 | q2 
@@ -3877,8 +3876,8 @@ select * from mki8(1,2);
 
 explain (verbose, costs off)
 select * from mki4(42);
-            QUERY PLAN             
------------------------------------
+                QUERY PLAN                
+------------------------------------------
  Subquery Scan on sirvf_sq
    Output: (sirvf_sq.mki4).f1
    ->  Result
@@ -3886,8 +3885,9 @@ select * from mki4(42);
          InitPlan 1 (returns $0)
            ->  Result
                  Output: '(42)'::int4_tbl
+ Settings: optimizer = 'off'
  Optimizer: Postgres query optimizer
-(8 rows)
+(9 rows)
 
 select * from mki4(42);
  f1 
@@ -4147,8 +4147,8 @@ select * from
 ) ss
 where fault = 122
 order by fault;
-                              QUERY PLAN                               
------------------------------------------------------------------------
+                                   QUERY PLAN                                   
+--------------------------------------------------------------------------------
  Gather Motion 3:1  (slice1; segments: 3)
    ->  Hash Right Join
          Hash Cond: (tenk1.unique2 = int8_tbl.q2)
@@ -4334,8 +4334,9 @@ using (join_key);
                      Hash Key: "*VALUES*".column1
                      ->  Values Scan on "*VALUES*"
                            Output: "*VALUES*".column1
+ Settings: optimizer = 'off'
  Optimizer: Postgres query optimizer
-(25 rows)
+(26 rows)
 
 select foo1.join_key as foo1_id, foo3.join_key AS foo3_id, bug_field from
   (values (0),(1)) foo1(join_key)
@@ -4413,8 +4414,9 @@ select t1.* from
                      Output: i4.f1
                      ->  Seq Scan on public.int4_tbl i4
                            Output: i4.f1
+ Settings: optimizer = 'off'
  Optimizer: Postgres query optimizer
-(43 rows)
+(44 rows)
 
 select t1.* from
   text_tbl t1
@@ -4492,8 +4494,8 @@ select t1.* from
                      Output: i4.f1
                      ->  Seq Scan on public.int4_tbl i4
                            Output: i4.f1
+ Settings: optimizer = 'off'
  Optimizer: Postgres query optimizer
- Settings: optimizer=off
 (49 rows)
 
 select t1.* from
@@ -4508,8 +4510,8 @@ select t1.* from
   on (i8.q2 = i4.f1);
         f1         
 -------------------
- doh!
  hi de ho neighbor
+ doh!
 (2 rows)
 
 explain (verbose, costs off)
@@ -4524,8 +4526,8 @@ select t1.* from
   on (t1.f1 = b1.d1)
   left join int4_tbl i4
   on (i8.q2 = i4.f1);
-                                             QUERY PLAN                                             
-----------------------------------------------------------------------------------------------------
+                                          QUERY PLAN                                          
+----------------------------------------------------------------------------------------------
  Gather Motion 3:1  (slice1; segments: 3)
    Output: t1.f1
    ->  Hash Left Join
@@ -4575,8 +4577,9 @@ select t1.* from
                      Output: i4.f1
                      ->  Seq Scan on public.int4_tbl i4
                            Output: i4.f1
+ Settings: optimizer = 'off'
  Optimizer: Postgres query optimizer
-(50 rows)
+(51 rows)
 
 select t1.* from
   text_tbl t1
@@ -4635,8 +4638,9 @@ select * from
                                        ->  Seq Scan on public.text_tbl t1
                                              Output: t1.f1
                                              Filter: (t1.f1 = 'doh!'::text)
+ Settings: optimizer = 'off'
  Optimizer: Postgres query optimizer
-(30 rows)
+(31 rows)
 
 select * from
   text_tbl t1
@@ -4648,14 +4652,18 @@ select * from
   on i8.q1 = i4.f1;
   f1  | q1  | q2  |        f1         | f1 
 ------+-----+-----+-------------------+----
- doh! | 123 | 456 | doh!              |   
  doh! | 123 | 456 | hi de ho neighbor |   
+ doh! | 123 | 456 | doh!              |   
 (2 rows)
 
 --
 -- test for appropriate join order in the presence of lateral references
 --
 -- start_ignore
+-- GPDB_94_STABLE_MERGE_FIXME: Currently LATERAL is not fully supported in GPDB
+-- and the queries below are failing at the moment (The first one fails with
+-- error and the other two fail with panic). Comment them off temporarily.
+/*
 explain (verbose, costs off)
 select * from
   text_tbl t1
@@ -4663,29 +4671,6 @@ select * from
   on i8.q2 = 123,
   lateral (select i8.q1, t2.f1 from text_tbl t2 limit 1) as ss
 where t1.f1 = ss.f1;
-                    QUERY PLAN                    
---------------------------------------------------
- Nested Loop
-   Output: t1.f1, i8.q1, i8.q2, (i8.q1), t2.f1
-   Join Filter: (t1.f1 = t2.f1)
-   ->  Nested Loop Left Join
-         Output: t1.f1, i8.q1, i8.q2
-         ->  Seq Scan on public.text_tbl t1
-               Output: t1.f1
-         ->  Materialize
-               Output: i8.q1, i8.q2
-               ->  Seq Scan on public.int8_tbl i8
-                     Output: i8.q1, i8.q2
-                     Filter: (i8.q2 = 123)
-   ->  Memoize
-         Output: (i8.q1), t2.f1
-         Cache Key: i8.q1
-         Cache Mode: binary
-         ->  Limit
-               Output: (i8.q1), t2.f1
-               ->  Seq Scan on public.text_tbl t2
-                     Output: i8.q1, t2.f1
-(20 rows)
 
 select * from
   text_tbl t1
@@ -4693,10 +4678,6 @@ select * from
   on i8.q2 = 123,
   lateral (select i8.q1, t2.f1 from text_tbl t2 limit 1) as ss
 where t1.f1 = ss.f1;
-  f1  |        q1        | q2  |        q1        |  f1  
-------+------------------+-----+------------------+------
- doh! | 4567890123456789 | 123 | 4567890123456789 | doh!
-(1 row)
 
 explain (verbose, costs off)
 select * from
@@ -4706,39 +4687,6 @@ select * from
   lateral (select i8.q1, t2.f1 from text_tbl t2 limit 1) as ss1,
   lateral (select ss1.* from text_tbl t3 limit 1) as ss2
 where t1.f1 = ss2.f1;
-                            QUERY PLAN                             
--------------------------------------------------------------------
- Nested Loop
-   Output: t1.f1, i8.q1, i8.q2, (i8.q1), t2.f1, ((i8.q1)), (t2.f1)
-   Join Filter: (t1.f1 = (t2.f1))
-   ->  Nested Loop
-         Output: t1.f1, i8.q1, i8.q2, (i8.q1), t2.f1
-         ->  Nested Loop Left Join
-               Output: t1.f1, i8.q1, i8.q2
-               ->  Seq Scan on public.text_tbl t1
-                     Output: t1.f1
-               ->  Materialize
-                     Output: i8.q1, i8.q2
-                     ->  Seq Scan on public.int8_tbl i8
-                           Output: i8.q1, i8.q2
-                           Filter: (i8.q2 = 123)
-         ->  Memoize
-               Output: (i8.q1), t2.f1
-               Cache Key: i8.q1
-               Cache Mode: binary
-               ->  Limit
-                     Output: (i8.q1), t2.f1
-                     ->  Seq Scan on public.text_tbl t2
-                           Output: i8.q1, t2.f1
-   ->  Memoize
-         Output: ((i8.q1)), (t2.f1)
-         Cache Key: (i8.q1), t2.f1
-         Cache Mode: binary
-         ->  Limit
-               Output: ((i8.q1)), (t2.f1)
-               ->  Seq Scan on public.text_tbl t3
-                     Output: (i8.q1), t2.f1
-(30 rows)
 
 select * from
   text_tbl t1
@@ -4747,10 +4695,6 @@ select * from
   lateral (select i8.q1, t2.f1 from text_tbl t2 limit 1) as ss1,
   lateral (select ss1.* from text_tbl t3 limit 1) as ss2
 where t1.f1 = ss2.f1;
-  f1  |        q1        | q2  |        q1        |  f1  |        q1        |  f1  
-------+------------------+-----+------------------+------+------------------+------
- doh! | 4567890123456789 | 123 | 4567890123456789 | doh! | 4567890123456789 | doh!
-(1 row)
 
 explain (verbose, costs off)
 select 1 from
@@ -4760,42 +4704,6 @@ select 1 from
   left join text_tbl as tt4 on (tt3.f1 = tt4.f1),
   lateral (select tt4.f1 as c0 from text_tbl as tt5 limit 1) as ss1
 where tt1.f1 = ss1.c0;
-                        QUERY PLAN                        
-----------------------------------------------------------
- Nested Loop
-   Output: 1
-   ->  Nested Loop Left Join
-         Output: tt1.f1, tt4.f1
-         ->  Nested Loop
-               Output: tt1.f1
-               ->  Seq Scan on public.text_tbl tt1
-                     Output: tt1.f1
-                     Filter: (tt1.f1 = 'foo'::text)
-               ->  Seq Scan on public.text_tbl tt2
-                     Output: tt2.f1
-         ->  Materialize
-               Output: tt4.f1
-               ->  Nested Loop Left Join
-                     Output: tt4.f1
-                     Join Filter: (tt3.f1 = tt4.f1)
-                     ->  Seq Scan on public.text_tbl tt3
-                           Output: tt3.f1
-                           Filter: (tt3.f1 = 'foo'::text)
-                     ->  Seq Scan on public.text_tbl tt4
-                           Output: tt4.f1
-                           Filter: (tt4.f1 = 'foo'::text)
-   ->  Memoize
-         Output: ss1.c0
-         Cache Key: tt4.f1
-         Cache Mode: binary
-         ->  Subquery Scan on ss1
-               Output: ss1.c0
-               Filter: (ss1.c0 = 'foo'::text)
-               ->  Limit
-                     Output: (tt4.f1)
-                     ->  Seq Scan on public.text_tbl tt5
-                           Output: tt4.f1
-(33 rows)
 
 select 1 from
   text_tbl as tt1
@@ -4804,10 +4712,7 @@ select 1 from
   left join text_tbl as tt4 on (tt3.f1 = tt4.f1),
   lateral (select tt4.f1 as c0 from text_tbl as tt5 limit 1) as ss1
 where tt1.f1 = ss1.c0;
- ?column? 
-----------
-(0 rows)
-
+*/
 --end_ignore
 --
 -- check a case in which a PlaceHolderVar forces join order
@@ -4826,34 +4731,46 @@ select ss2.* from
   on i41.f1 = ss1.c1,
   lateral (select i41.*, i8.*, ss1.* from text_tbl limit 1) ss2
 where ss1.c2 = 0;
-                               QUERY PLAN                               
-------------------------------------------------------------------------
+                                  QUERY PLAN                                  
+------------------------------------------------------------------------------
  Nested Loop
    Output: (i41.f1), (i8.q1), (i8.q2), (i42.f1), (i43.f1), ((42))
-   ->  Hash Join
-         Output: i41.f1, i42.f1, i8.q1, i8.q2, i43.f1, 42
-         Hash Cond: (i41.f1 = i42.f1)
+   ->  Gather Motion 3:1  (slice1; segments: 3)
+         Output: i41.f1, i42.f1, i8.q1, i8.q2, i43.f1, (42)
          ->  Nested Loop
-               Output: i8.q1, i8.q2, i43.f1, i41.f1
+               Output: i41.f1, i42.f1, i8.q1, i8.q2, i43.f1, 42
                ->  Nested Loop
-                     Output: i8.q1, i8.q2, i43.f1
+                     Output: i41.f1, i42.f1, i8.q1, i8.q2
+                     ->  Redistribute Motion 3:3  (slice2; segments: 3)
+                           Output: i41.f1, i42.f1
+                           Hash Key: 0
+                           ->  Hash Join
+                                 Output: i41.f1, i42.f1
+                                 Hash Cond: (i41.f1 = i42.f1)
+                                 ->  Seq Scan on public.int4_tbl i41
+                                       Output: i41.f1
+                                 ->  Hash
+                                       Output: i42.f1
+                                       ->  Seq Scan on public.int4_tbl i42
+                                             Output: i42.f1
                      ->  Seq Scan on public.int8_tbl i8
                            Output: i8.q1, i8.q2
                            Filter: (i8.q1 = 0)
-                     ->  Seq Scan on public.int4_tbl i43
-                           Output: i43.f1
-                           Filter: (i43.f1 = 0)
-               ->  Seq Scan on public.int4_tbl i41
-                     Output: i41.f1
-         ->  Hash
-               Output: i42.f1
-               ->  Seq Scan on public.int4_tbl i42
-                     Output: i42.f1
-   ->  Limit
+               ->  Seq Scan on public.int4_tbl i43
+                     Output: i43.f1
+                     Filter: (i43.f1 = 0)
+   ->  Materialize
          Output: (i41.f1), (i8.q1), (i8.q2), (i42.f1), (i43.f1), ((42))
-         ->  Seq Scan on public.text_tbl
-               Output: i41.f1, i8.q1, i8.q2, i42.f1, i43.f1, (42)
-(25 rows)
+         ->  Limit
+               Output: (i41.f1), (i8.q1), (i8.q2), (i42.f1), (i43.f1), ((42))
+               ->  Result
+                     Output: i41.f1, i8.q1, i8.q2, i42.f1, i43.f1, (42)
+                     ->  Materialize
+                           ->  Gather Motion 3:1  (slice3; segments: 3)
+                                 ->  Seq Scan on public.text_tbl
+ Settings: optimizer = 'off'
+ Optimizer: Postgres query optimizer
+(37 rows)
 
 --end_ignore
 select ss2.* from
@@ -4956,8 +4873,8 @@ explain (verbose, costs off)
   select a.q2, b.q1
     from int8_tbl a left join int8_tbl b on a.q2 = coalesce(b.q1, 1)
     where coalesce(b.q1, 1) > 0;
-                               QUERY PLAN                                
--------------------------------------------------------------------------
+                                               QUERY PLAN                                               
+--------------------------------------------------------------------------------------------------------
  Gather Motion 3:1  (slice1; segments: 3)
    Output: a.q2, b.q1
    ->  Merge Left Join
@@ -4982,8 +4899,8 @@ explain (verbose, costs off)
                            Hash Key: COALESCE(b.q1, '1'::bigint)
                            ->  Seq Scan on public.int8_tbl b
                                  Output: b.q1
+ Settings: enable_hashjoin = 'off', enable_mergejoin = 'on', enable_nestloop = 'off', optimizer = 'off'
  Optimizer: Postgres query optimizer
- Settings: enable_hashjoin=off, enable_mergejoin=on, enable_nestloop=off
 (26 rows)
 
 select a.q2, b.q1
@@ -4992,8 +4909,6 @@ select a.q2, b.q1
         q2         |        q1        
 -------------------+------------------
  -4567890123456789 |                 
-               123 |              123
-               123 |              123
                456 |                 
   4567890123456789 | 4567890123456789
   4567890123456789 | 4567890123456789
@@ -5001,6 +4916,8 @@ select a.q2, b.q1
   4567890123456789 | 4567890123456789
   4567890123456789 | 4567890123456789
   4567890123456789 | 4567890123456789
+               123 |              123
+               123 |              123
 (10 rows)
 
 reset enable_hashjoin;
@@ -5014,6 +4931,8 @@ CREATE TEMP TABLE a (id int PRIMARY KEY, b_id int);
 CREATE TEMP TABLE b (id int PRIMARY KEY, c_id int);
 CREATE TEMP TABLE c (id int PRIMARY KEY);
 CREATE TEMP TABLE d (a int, b int);
+NOTICE:  Table doesn't have 'DISTRIBUTED BY' clause -- Using column named 'a' as the Apache Cloudberry data distribution key for this table.
+HINT:  The 'DISTRIBUTED BY' clause determines the distribution of data. Make sure column(s) chosen are the optimal data distribution key to minimize skew.
 INSERT INTO a VALUES (0, 0), (1, NULL);
 INSERT INTO b VALUES (0, 0), (1, NULL);
 INSERT INTO c VALUES (0), (1);
@@ -5175,9 +5094,9 @@ insert into child values (1, 100), (4, 400);
 select p.* from parent p left join child c on (p.k = c.k);
  k | pd 
 ---+----
- 1 | 10
  2 | 20
  3 | 30
+ 1 | 10
 (3 rows)
 
 explain (costs off)
@@ -5195,9 +5114,9 @@ select p.*, linked from parent p
   on (p.k = ss.k);
  k | pd | linked 
 ---+----+--------
- 1 | 10 | t
  2 | 20 | 
  3 | 30 | 
+ 1 | 10 | t
 (3 rows)
 
 explain (costs off)
@@ -5227,8 +5146,8 @@ explain (costs off)
 select p.* from
   parent p left join child c on (p.k = c.k)
   where p.k = 1 and p.k = 2;
-            QUERY PLAN             
------------------------------------
+             QUERY PLAN              
+-------------------------------------
  Result
    One-Time Filter: false
  Optimizer: Postgres query optimizer
@@ -5245,8 +5164,8 @@ explain (costs off)
 select p.* from
   (parent p left join child c on (p.k = c.k)) join parent x on p.k = x.k
   where p.k = 1 and p.k = 2;
-            QUERY PLAN             
------------------------------------
+             QUERY PLAN              
+-------------------------------------
  Result
    One-Time Filter: false
  Optimizer: Postgres query optimizer
@@ -5283,9 +5202,9 @@ SELECT * FROM
   ON true;
  x |        q1        |        q2         |        y         
 ---+------------------+-------------------+------------------
+ 1 | 4567890123456789 |               123 |               42
  1 |              123 |               456 |              123
  1 |              123 |  4567890123456789 |              123
- 1 | 4567890123456789 |               123 |               42
  1 | 4567890123456789 |  4567890123456789 | 4567890123456789
  1 | 4567890123456789 | -4567890123456789 | 4567890123456789
 (5 rows)
@@ -5392,8 +5311,9 @@ where q2 = 456;
                                        ->  Seq Scan on public.int4_tbl i4
                                              Output: i4.f1
                                              Filter: (i4.f1 = 1)
+ Settings: optimizer = 'off'
  Optimizer: Postgres query optimizer
-(28 rows)
+(29 rows)
 
 select i8.*, ss.v, t.unique2
   from int8_tbl i8
@@ -5410,6 +5330,7 @@ where q2 = 456;
 -- a PHV that's been translated to a child rel
 create temp table parttbl (a integer primary key) partition by range (a);
 create temp table parttbl1 partition of parttbl for values from (1) to (100);
+NOTICE:  table has parent, setting distribution columns to match parent table
 insert into parttbl values (11), (12);
 set optimizer_enable_dynamicindexonlyscan=off;
 explain (costs off)
@@ -5417,8 +5338,8 @@ select * from
   (select *, 12 as phv from parttbl) as ss
   right join int4_tbl on true
 where ss.a = ss.phv and f1 = 0;
-             QUERY PLAN             
-------------------------------------
+                       QUERY PLAN                        
+---------------------------------------------------------
  Gather Motion 3:1  (slice1; segments: 3)
    ->  Nested Loop
          ->  Broadcast Motion 1:3  (slice2; segments: 1)
@@ -5523,7 +5444,7 @@ from int4_tbl x, lateral (select unique2 from tenk1 where f1 = unique1) ss;
 explain (costs off)
   select unique2, x.*
   from int4_tbl x, lateral (select unique2 from tenk1 where f1 = unique1) ss;
-                 QUERY PLAN                
+                QUERY PLAN                 
 -------------------------------------------
  Gather Motion 3:1  (slice1; segments: 3)
    ->  Hash Join
@@ -5552,17 +5473,17 @@ select unique2, x.*
 from int4_tbl x left join lateral (select unique1, unique2 from tenk1 where f1 = unique1) ss on true;
  unique2 |     f1      
 ---------+-------------
-    9998 |           0
-         |      123456
          |     -123456
-         |  2147483647
+         |      123456
+    9998 |           0
          | -2147483647
+         |  2147483647
 (5 rows)
 
 explain (costs off)
   select unique2, x.*
   from int4_tbl x left join lateral (select unique1, unique2 from tenk1 where f1 = unique1) ss on true;
-                QUERY PLAN                
+                QUERY PLAN                 
 -------------------------------------------
  Gather Motion 3:1  (slice1; segments: 3)
    ->  Hash Right Join
@@ -5578,21 +5499,21 @@ explain (costs off)
 select *, (select r from (select q1 as q2) x, (select q2 as r) y) from int8_tbl;
         q1        |        q2         |         r         
 ------------------+-------------------+-------------------
-              123 |               456 |               456
-              123 |  4567890123456789 |  4567890123456789
  4567890123456789 |               123 |               123
  4567890123456789 |  4567890123456789 |  4567890123456789
  4567890123456789 | -4567890123456789 | -4567890123456789
+              123 |               456 |               456
+              123 |  4567890123456789 |  4567890123456789
 (5 rows)
 
 select *, (select r from (select q1 as q2) x, lateral (select q2 as r) y) from int8_tbl;
         q1        |        q2         |        r         
 ------------------+-------------------+------------------
-              123 |               456 |              123
-              123 |  4567890123456789 |              123
  4567890123456789 |               123 | 4567890123456789
  4567890123456789 |  4567890123456789 | 4567890123456789
  4567890123456789 | -4567890123456789 | 4567890123456789
+              123 |               456 |              123
+              123 |  4567890123456789 |              123
 (5 rows)
 
 -- lateral with function in FROM
@@ -5604,8 +5525,8 @@ select count(*) from tenk1 a, lateral generate_series(1,two) g;
 
 explain (costs off)
   select count(*) from tenk1 a, lateral generate_series(1,two) g;
-                         QUERY PLAN                         
-------------------------------------------------------------
+                            QUERY PLAN                            
+------------------------------------------------------------------
  Finalize Aggregate
    ->  Gather Motion 3:1  (slice1; segments: 3)
          ->  Partial Aggregate
@@ -5616,12 +5537,12 @@ explain (costs off)
                            Cache Mode: binary
                            ->  Function Scan on generate_series g
  Optimizer: Postgres query optimizer
-(11 rows)
+(10 rows)
 
 explain (costs off)
   select count(*) from tenk1 a cross join lateral generate_series(1,two) g;
-                         QUERY PLAN                         
-------------------------------------------------------------
+                            QUERY PLAN                            
+------------------------------------------------------------------
  Finalize Aggregate
    ->  Gather Motion 3:1  (slice1; segments: 3)
          ->  Partial Aggregate
@@ -5632,13 +5553,13 @@ explain (costs off)
                            Cache Mode: binary
                            ->  Function Scan on generate_series g
  Optimizer: Postgres query optimizer
-(11 rows)
+(10 rows)
 
 -- don't need the explicit LATERAL keyword for functions
 explain (costs off)
   select count(*) from tenk1 a, generate_series(1,two) g;
-                         QUERY PLAN                         
-------------------------------------------------------------
+                            QUERY PLAN                            
+------------------------------------------------------------------
  Finalize Aggregate
    ->  Gather Motion 3:1  (slice1; segments: 3)
          ->  Partial Aggregate
@@ -5649,14 +5570,9 @@ explain (costs off)
                            Cache Mode: binary
                            ->  Function Scan on generate_series g
  Optimizer: Postgres query optimizer
-(11 rows)
+(10 rows)
 
 -- lateral with UNION ALL subselect
--- start_ignore
--- GPDB_96_MERGE_FIXME: we used to get a better plan here, with
--- the Nested Loop join being done on segments, and just a single
--- Gather Motion at the top. Can we improve?
--- end_ignore
 explain (costs off)
   select * from generate_series(100,200) g,
     lateral (select * from int8_tbl a where g = q1 union all
@@ -5753,89 +5669,18 @@ select count(*) from tenk1 a,
 -- these will get fixed once we catch up to those. Or if not, at least it will be
 -- nicer to work on the code, knowing that there aren't going to be a dozen commits
 -- coming up, touching the same area.
+-- FAIL with ERROR:  could not devise a query plan for the given query (pathnode.c:416)
 explain (costs off)
   select * from int8_tbl a,
     int8_tbl x left join lateral (select a.q1 from int4_tbl y) ss(z)
       on x.q2 = ss.z
   order by a.q1, a.q2, x.q1, x.q2, ss.z;
-                   QUERY PLAN                   
-------------------------------------------------
- Sort
-   Sort Key: a.q1, a.q2, x.q1, x.q2, (a.q1)
-   ->  Nested Loop
-         ->  Seq Scan on int8_tbl a
-         ->  Hash Right Join
-               Hash Cond: ((a.q1) = x.q2)
-               ->  Seq Scan on int4_tbl y
-               ->  Hash
-                     ->  Seq Scan on int8_tbl x
-(9 rows)
-
+ERROR:  could not devise a query plan for the given query (pathnode.c:283)
 select * from int8_tbl a,
   int8_tbl x left join lateral (select a.q1 from int4_tbl y) ss(z)
     on x.q2 = ss.z
   order by a.q1, a.q2, x.q1, x.q2, ss.z;
-        q1        |        q2         |        q1        |        q2         |        z         
-------------------+-------------------+------------------+-------------------+------------------
-              123 |               456 |              123 |               456 |                 
-              123 |               456 |              123 |  4567890123456789 |                 
-              123 |               456 | 4567890123456789 | -4567890123456789 |                 
-              123 |               456 | 4567890123456789 |               123 |              123
-              123 |               456 | 4567890123456789 |               123 |              123
-              123 |               456 | 4567890123456789 |               123 |              123
-              123 |               456 | 4567890123456789 |               123 |              123
-              123 |               456 | 4567890123456789 |               123 |              123
-              123 |               456 | 4567890123456789 |  4567890123456789 |                 
-              123 |  4567890123456789 |              123 |               456 |                 
-              123 |  4567890123456789 |              123 |  4567890123456789 |                 
-              123 |  4567890123456789 | 4567890123456789 | -4567890123456789 |                 
-              123 |  4567890123456789 | 4567890123456789 |               123 |              123
-              123 |  4567890123456789 | 4567890123456789 |               123 |              123
-              123 |  4567890123456789 | 4567890123456789 |               123 |              123
-              123 |  4567890123456789 | 4567890123456789 |               123 |              123
-              123 |  4567890123456789 | 4567890123456789 |               123 |              123
-              123 |  4567890123456789 | 4567890123456789 |  4567890123456789 |                 
- 4567890123456789 | -4567890123456789 |              123 |               456 |                 
- 4567890123456789 | -4567890123456789 |              123 |  4567890123456789 | 4567890123456789
- 4567890123456789 | -4567890123456789 |              123 |  4567890123456789 | 4567890123456789
- 4567890123456789 | -4567890123456789 |              123 |  4567890123456789 | 4567890123456789
- 4567890123456789 | -4567890123456789 |              123 |  4567890123456789 | 4567890123456789
- 4567890123456789 | -4567890123456789 |              123 |  4567890123456789 | 4567890123456789
- 4567890123456789 | -4567890123456789 | 4567890123456789 | -4567890123456789 |                 
- 4567890123456789 | -4567890123456789 | 4567890123456789 |               123 |                 
- 4567890123456789 | -4567890123456789 | 4567890123456789 |  4567890123456789 | 4567890123456789
- 4567890123456789 | -4567890123456789 | 4567890123456789 |  4567890123456789 | 4567890123456789
- 4567890123456789 | -4567890123456789 | 4567890123456789 |  4567890123456789 | 4567890123456789
- 4567890123456789 | -4567890123456789 | 4567890123456789 |  4567890123456789 | 4567890123456789
- 4567890123456789 | -4567890123456789 | 4567890123456789 |  4567890123456789 | 4567890123456789
- 4567890123456789 |               123 |              123 |               456 |                 
- 4567890123456789 |               123 |              123 |  4567890123456789 | 4567890123456789
- 4567890123456789 |               123 |              123 |  4567890123456789 | 4567890123456789
- 4567890123456789 |               123 |              123 |  4567890123456789 | 4567890123456789
- 4567890123456789 |               123 |              123 |  4567890123456789 | 4567890123456789
- 4567890123456789 |               123 |              123 |  4567890123456789 | 4567890123456789
- 4567890123456789 |               123 | 4567890123456789 | -4567890123456789 |                 
- 4567890123456789 |               123 | 4567890123456789 |               123 |                 
- 4567890123456789 |               123 | 4567890123456789 |  4567890123456789 | 4567890123456789
- 4567890123456789 |               123 | 4567890123456789 |  4567890123456789 | 4567890123456789
- 4567890123456789 |               123 | 4567890123456789 |  4567890123456789 | 4567890123456789
- 4567890123456789 |               123 | 4567890123456789 |  4567890123456789 | 4567890123456789
- 4567890123456789 |               123 | 4567890123456789 |  4567890123456789 | 4567890123456789
- 4567890123456789 |  4567890123456789 |              123 |               456 |                 
- 4567890123456789 |  4567890123456789 |              123 |  4567890123456789 | 4567890123456789
- 4567890123456789 |  4567890123456789 |              123 |  4567890123456789 | 4567890123456789
- 4567890123456789 |  4567890123456789 |              123 |  4567890123456789 | 4567890123456789
- 4567890123456789 |  4567890123456789 |              123 |  4567890123456789 | 4567890123456789
- 4567890123456789 |  4567890123456789 |              123 |  4567890123456789 | 4567890123456789
- 4567890123456789 |  4567890123456789 | 4567890123456789 | -4567890123456789 |                 
- 4567890123456789 |  4567890123456789 | 4567890123456789 |               123 |                 
- 4567890123456789 |  4567890123456789 | 4567890123456789 |  4567890123456789 | 4567890123456789
- 4567890123456789 |  4567890123456789 | 4567890123456789 |  4567890123456789 | 4567890123456789
- 4567890123456789 |  4567890123456789 | 4567890123456789 |  4567890123456789 | 4567890123456789
- 4567890123456789 |  4567890123456789 | 4567890123456789 |  4567890123456789 | 4567890123456789
- 4567890123456789 |  4567890123456789 | 4567890123456789 |  4567890123456789 | 4567890123456789
-(57 rows)
-
+ERROR:  could not devise a query plan for the given query (pathnode.c:283)
 --end_ignore
 -- lateral reference to a join alias variable
 select * from (select f1/2 as x from int4_tbl) ss1 join int4_tbl i4 on x = f1,
@@ -5849,9 +5694,9 @@ select * from (select f1 as x from int4_tbl) ss1 join int4_tbl i4 on x = f1,
   lateral (values(x)) ss2(y);
       x      |     f1      |      y      
 -------------+-------------+-------------
-           0 |           0 |           0
       123456 |      123456 |      123456
      -123456 |     -123456 |     -123456
+           0 |           0 |           0
   2147483647 |  2147483647 |  2147483647
  -2147483647 | -2147483647 | -2147483647
 (5 rows)
@@ -5928,16 +5773,16 @@ select * from
   lateral (values(x.q1,y.q1,y.q2)) v(xq1,yq1,yq2);
         q1        |        q2         |        q1        |        q2         |       xq1        |       yq1        |        yq2        
 ------------------+-------------------+------------------+-------------------+------------------+------------------+-------------------
-              123 |               456 |                  |                   |              123 |                  |                  
-              123 |  4567890123456789 | 4567890123456789 | -4567890123456789 |              123 | 4567890123456789 | -4567890123456789
-              123 |  4567890123456789 | 4567890123456789 |  4567890123456789 |              123 | 4567890123456789 |  4567890123456789
-              123 |  4567890123456789 | 4567890123456789 |               123 |              123 | 4567890123456789 |               123
  4567890123456789 |               123 |              123 |  4567890123456789 | 4567890123456789 |              123 |  4567890123456789
  4567890123456789 |               123 |              123 |               456 | 4567890123456789 |              123 |               456
  4567890123456789 |  4567890123456789 | 4567890123456789 | -4567890123456789 | 4567890123456789 | 4567890123456789 | -4567890123456789
  4567890123456789 |  4567890123456789 | 4567890123456789 |  4567890123456789 | 4567890123456789 | 4567890123456789 |  4567890123456789
  4567890123456789 |  4567890123456789 | 4567890123456789 |               123 | 4567890123456789 | 4567890123456789 |               123
  4567890123456789 | -4567890123456789 |                  |                   | 4567890123456789 |                  |                  
+              123 |               456 |                  |                   |              123 |                  |                  
+              123 |  4567890123456789 | 4567890123456789 | -4567890123456789 |              123 | 4567890123456789 | -4567890123456789
+              123 |  4567890123456789 | 4567890123456789 |  4567890123456789 |              123 | 4567890123456789 |  4567890123456789
+              123 |  4567890123456789 | 4567890123456789 |               123 |              123 | 4567890123456789 |               123
 (10 rows)
 
 select * from
@@ -5945,12 +5790,12 @@ select * from
   lateral (select x.q1,y.q1,y.q2) v(xq1,yq1,yq2);
         q1        |        q2         |        q1        |        q2         |       xq1        |       yq1        |        yq2        
 ------------------+-------------------+------------------+-------------------+------------------+------------------+-------------------
+ 4567890123456789 |               123 |              123 |  4567890123456789 | 4567890123456789 |              123 |  4567890123456789
+ 4567890123456789 |               123 |              123 |               456 | 4567890123456789 |              123 |               456
               123 |               456 |                  |                   |              123 |                  |                  
               123 |  4567890123456789 | 4567890123456789 | -4567890123456789 |              123 | 4567890123456789 | -4567890123456789
               123 |  4567890123456789 | 4567890123456789 |  4567890123456789 |              123 | 4567890123456789 |  4567890123456789
               123 |  4567890123456789 | 4567890123456789 |               123 |              123 | 4567890123456789 |               123
- 4567890123456789 |               123 |              123 |  4567890123456789 | 4567890123456789 |              123 |  4567890123456789
- 4567890123456789 |               123 |              123 |               456 | 4567890123456789 |              123 |               456
  4567890123456789 |  4567890123456789 | 4567890123456789 | -4567890123456789 | 4567890123456789 | 4567890123456789 | -4567890123456789
  4567890123456789 |  4567890123456789 | 4567890123456789 |  4567890123456789 | 4567890123456789 | 4567890123456789 |  4567890123456789
  4567890123456789 |  4567890123456789 | 4567890123456789 |               123 | 4567890123456789 | 4567890123456789 |               123
@@ -5966,12 +5811,12 @@ select x.* from
               123 |  4567890123456789
               123 |  4567890123456789
               123 |  4567890123456789
- 4567890123456789 |               123
- 4567890123456789 |               123
  4567890123456789 |  4567890123456789
  4567890123456789 |  4567890123456789
  4567890123456789 |  4567890123456789
  4567890123456789 | -4567890123456789
+ 4567890123456789 |               123
+ 4567890123456789 |               123
 (10 rows)
 
 select v.* from
@@ -5988,10 +5833,6 @@ select v.* from
   4567890123456789 |  4567890123456789
                123 |  4567890123456789
   4567890123456789 |               123
-  4567890123456789 |               123
-               123 |  4567890123456789
-  4567890123456789 |               123
-               123 |               456
   4567890123456789 |  4567890123456789
   4567890123456789 | -4567890123456789
   4567890123456789 |  4567890123456789
@@ -6000,6 +5841,10 @@ select v.* from
   4567890123456789 |               123
   4567890123456789 |                  
  -4567890123456789 |                  
+  4567890123456789 |               123
+               123 |  4567890123456789
+  4567890123456789 |               123
+               123 |               456
 (20 rows)
 
 select v.* from
@@ -6008,26 +5853,26 @@ select v.* from
   lateral (select x.q1,y.q1 union all select x.q2,y.q2) v(vx,vy);
         vx         |        vy         
 -------------------+-------------------
-  4567890123456789 |               123
-               123 |               456
-  4567890123456789 |               123
-               123 |  4567890123456789
-  4567890123456789 |  4567890123456789
-  4567890123456789 |               123
-               123 |  4567890123456789
-  4567890123456789 |               123
-  4567890123456789 |  4567890123456789
-  4567890123456789 |  4567890123456789
-               123 |  4567890123456789
-  4567890123456789 |  4567890123456789
   4567890123456789 |  4567890123456789
   4567890123456789 | -4567890123456789
-               123 |  4567890123456789
-  4567890123456789 | -4567890123456789
-               123 |                  
-               456 |                  
+  4567890123456789 |  4567890123456789
+  4567890123456789 |  4567890123456789
+  4567890123456789 |  4567890123456789
+  4567890123456789 |               123
   4567890123456789 |                  
  -4567890123456789 |                  
+               123 |                  
+               456 |                  
+               123 |  4567890123456789
+  4567890123456789 | -4567890123456789
+               123 |  4567890123456789
+  4567890123456789 |  4567890123456789
+               123 |  4567890123456789
+  4567890123456789 |               123
+  4567890123456789 |               123
+               123 |  4567890123456789
+  4567890123456789 |               123
+               123 |               456
 (20 rows)
 
 select v.* from
@@ -6036,26 +5881,26 @@ select v.* from
   lateral (select x.q1,y.q1 from onerow union all select x.q2,y.q2 from onerow) v(vx,vy);
         vx         |        vy         
 -------------------+-------------------
-  4567890123456789 |               123
-               123 |               456
-  4567890123456789 |               123
-               123 |  4567890123456789
-  4567890123456789 |  4567890123456789
-  4567890123456789 |               123
-               123 |  4567890123456789
-  4567890123456789 |               123
-  4567890123456789 |  4567890123456789
-  4567890123456789 |  4567890123456789
-               123 |  4567890123456789
-  4567890123456789 |  4567890123456789
   4567890123456789 |  4567890123456789
   4567890123456789 | -4567890123456789
-               123 |  4567890123456789
-  4567890123456789 | -4567890123456789
-               123 |                  
-               456 |                  
+  4567890123456789 |  4567890123456789
+  4567890123456789 |  4567890123456789
+  4567890123456789 |  4567890123456789
+  4567890123456789 |               123
   4567890123456789 |                  
  -4567890123456789 |                  
+               123 |                  
+               456 |                  
+               123 |  4567890123456789
+  4567890123456789 | -4567890123456789
+               123 |  4567890123456789
+  4567890123456789 |  4567890123456789
+               123 |  4567890123456789
+  4567890123456789 |               123
+  4567890123456789 |               123
+               123 |  4567890123456789
+  4567890123456789 |               123
+               123 |               456
 (20 rows)
 
 explain (verbose, costs off)
@@ -6076,8 +5921,8 @@ select * from
          ->  Seq Scan on public.int8_tbl b
                Output: b.q1, b.q2, a.q2
                Filter: (a.q2 = b.q1)
+ Settings: optimizer = 'off'
  Optimizer: Postgres query optimizer
- Settings: optimizer=off
 (14 rows)
 
 select * from
@@ -6089,20 +5934,20 @@ select * from
               123 |  4567890123456789 | 4567890123456789 |               123 | 4567890123456789
               123 |  4567890123456789 | 4567890123456789 |  4567890123456789 | 4567890123456789
               123 |  4567890123456789 | 4567890123456789 | -4567890123456789 | 4567890123456789
- 4567890123456789 |               123 |              123 |               456 |              123
- 4567890123456789 |               123 |              123 |  4567890123456789 |              123
  4567890123456789 |  4567890123456789 | 4567890123456789 |               123 | 4567890123456789
  4567890123456789 |  4567890123456789 | 4567890123456789 |  4567890123456789 | 4567890123456789
  4567890123456789 |  4567890123456789 | 4567890123456789 | -4567890123456789 | 4567890123456789
  4567890123456789 | -4567890123456789 |                  |                   |                 
+ 4567890123456789 |               123 |              123 |               456 |              123
+ 4567890123456789 |               123 |              123 |  4567890123456789 |              123
 (10 rows)
 
 explain (verbose, costs off)
 select * from
   int8_tbl a left join
   lateral (select *, coalesce(a.q2, 42) as x from int8_tbl b) ss on a.q2 = ss.q1;
-                              QUERY PLAN                              
-----------------------------------------------------------------------
+                               QUERY PLAN                               
+------------------------------------------------------------------------
  Gather Motion 3:1  (slice1; segments: 3)
    Output: a.q1, a.q2, b.q1, b.q2, (COALESCE(a.q2, '42'::bigint))
    ->  Nested Loop Left Join
@@ -6115,8 +5960,8 @@ select * from
          ->  Seq Scan on public.int8_tbl b
                Output: b.q1, b.q2, COALESCE(a.q2, '42'::bigint)
                Filter: (a.q2 = b.q1)
+ Settings: optimizer = 'off'
  Optimizer: Postgres query optimizer
- Settings: optimizer=off
 (14 rows)
 
 select * from
@@ -6128,12 +5973,12 @@ select * from
               123 |  4567890123456789 | 4567890123456789 |               123 | 4567890123456789
               123 |  4567890123456789 | 4567890123456789 |  4567890123456789 | 4567890123456789
               123 |  4567890123456789 | 4567890123456789 | -4567890123456789 | 4567890123456789
- 4567890123456789 |               123 |              123 |               456 |              123
- 4567890123456789 |               123 |              123 |  4567890123456789 |              123
  4567890123456789 |  4567890123456789 | 4567890123456789 |               123 | 4567890123456789
  4567890123456789 |  4567890123456789 | 4567890123456789 |  4567890123456789 | 4567890123456789
  4567890123456789 |  4567890123456789 | 4567890123456789 | -4567890123456789 | 4567890123456789
  4567890123456789 | -4567890123456789 |                  |                   |                 
+ 4567890123456789 |               123 |              123 |               456 |              123
+ 4567890123456789 |               123 |              123 |  4567890123456789 |              123
 (10 rows)
 
 -- lateral can result in join conditions appearing below their
@@ -6154,17 +5999,17 @@ select * from int4_tbl i left join
                Output: j.f1
                ->  Seq Scan on public.int2_tbl j
                      Output: j.f1
+ Settings: optimizer = 'off'
  Optimizer: Postgres query optimizer
- Settings: optimizer=off
 (13 rows)
 
 select * from int4_tbl i left join
   lateral (select * from int2_tbl j where i.f1 = j.f1) k on true;
      f1      | f1 
 -------------+----
-           0 |  0
       123456 |   
      -123456 |   
+           0 |  0
   2147483647 |   
  -2147483647 |   
 (5 rows)
@@ -6183,17 +6028,17 @@ select * from int4_tbl i left join
          ->  Seq Scan on public.int2_tbl j
                Output: j.f1, COALESCE(i.*)
                Filter: (i.f1 = j.f1)
+ Settings: optimizer = 'off'
  Optimizer: Postgres query optimizer
- Settings: optimizer=off
 (11 rows)
 
 select * from int4_tbl i left join
   lateral (select coalesce(i) from int2_tbl j where i.f1 = j.f1) k on true;
      f1      | coalesce 
 -------------+----------
-           0 | (0)
       123456 | 
      -123456 | 
+           0 | (0)
   2147483647 | 
  -2147483647 | 
 (5 rows)
@@ -6233,8 +6078,9 @@ select * from int4_tbl a,
                                  Output: b.f1
                                  ->  Seq Scan on public.int4_tbl b
                                        Output: b.f1
+ Settings: optimizer = 'off'
  Optimizer: Postgres query optimizer
-(29 rows)
+(30 rows)
 
 select * from int4_tbl a,
   lateral (
@@ -6242,31 +6088,31 @@ select * from int4_tbl a,
   ) ss;
      f1      |     f1      | q1 | q2 
 -------------+-------------+----+----
-           0 |           0 |    |   
-           0 |      123456 |    |   
            0 |     -123456 |    |   
-           0 |  2147483647 |    |   
+           0 |      123456 |    |   
            0 | -2147483647 |    |   
-      123456 |           0 |    |   
-      123456 |      123456 |    |   
-      123456 |     -123456 |    |   
-      123456 |  2147483647 |    |   
-      123456 | -2147483647 |    |   
-     -123456 |           0 |    |   
-     -123456 |      123456 |    |   
-     -123456 |     -123456 |    |   
-     -123456 |  2147483647 |    |   
-     -123456 | -2147483647 |    |   
-  2147483647 |           0 |    |   
-  2147483647 |      123456 |    |   
+           0 |           0 |    |   
+           0 |  2147483647 |    |   
   2147483647 |     -123456 |    |   
-  2147483647 |  2147483647 |    |   
+  2147483647 |      123456 |    |   
   2147483647 | -2147483647 |    |   
- -2147483647 |           0 |    |   
- -2147483647 |      123456 |    |   
+  2147483647 |           0 |    |   
+  2147483647 |  2147483647 |    |   
  -2147483647 |     -123456 |    |   
- -2147483647 |  2147483647 |    |   
+ -2147483647 |      123456 |    |   
  -2147483647 | -2147483647 |    |   
+ -2147483647 |           0 |    |   
+ -2147483647 |  2147483647 |    |   
+      123456 |     -123456 |    |   
+      123456 |      123456 |    |   
+      123456 | -2147483647 |    |   
+      123456 |           0 |    |   
+      123456 |  2147483647 |    |   
+     -123456 |     -123456 |    |   
+     -123456 |      123456 |    |   
+     -123456 | -2147483647 |    |   
+     -123456 |           0 |    |   
+     -123456 |  2147483647 |    |   
 (25 rows)
 
 -- lateral reference in a PlaceHolderVar evaluated at join level
@@ -6279,13 +6125,13 @@ select * from
   (select b.q1 as bq1, c.q1 as cq1, least(a.q1,b.q1,c.q1) from
    int8_tbl b cross join int8_tbl c) ss
   on a.q2 = ss.bq1;
-ERROR:  could not devise a query plan for the given query (pathnode.c:485)
+ERROR:  could not devise a query plan for the given query (pathnode.c:283)
 select * from
   int8_tbl a left join lateral
   (select b.q1 as bq1, c.q1 as cq1, least(a.q1,b.q1,c.q1) from
    int8_tbl b cross join int8_tbl c) ss
   on a.q2 = ss.bq1;
-ERROR:  could not devise a query plan for the given query (pathnode.c:485)
+ERROR:  could not devise a query plan for the given query (pathnode.c:283)
 -- case requiring nested PlaceHolderVars
 explain (verbose, costs off)
 select * from
@@ -6334,8 +6180,8 @@ select * from
                Output: ((COALESCE((COALESCE(b.q2, '42'::bigint)), d.q2)))
                ->  Result
                      Output: (COALESCE((COALESCE(b.q2, '42'::bigint)), d.q2))
+ Settings: optimizer = 'off'
  Optimizer: Postgres query optimizer
- Settings: optimizer=off
 (38 rows)
 
 -- case that breaks the old ph_may_need optimization
@@ -6400,8 +6246,8 @@ select c.*,a.*,ss1.q1,ss2.q1,ss3.* from
                                  Hash Key: c.q2
                                  ->  Seq Scan on public.int8_tbl c
                                        Output: c.q1, c.q2
+ Settings: optimizer = 'off'
  Optimizer: Postgres query optimizer
- Settings: optimizer=off
 (50 rows)
 
 -- check processing of postponed quals (bug #9041)
@@ -6428,8 +6274,8 @@ select * from
          Output: (3)
          ->  Result
                Output: 3
+ Settings: optimizer = 'off'
  Optimizer: Postgres query optimizer
- Settings: optimizer=off
 (17 rows)
 
 -- check dummy rels with lateral references (bug #15694)
@@ -6447,8 +6293,8 @@ select * from int8_tbl i8 left join lateral
          ->  Result
                Output: f1, i8.q2
                One-Time Filter: false
+ Settings: optimizer = 'off'
  Optimizer: Postgres query optimizer
- Settings: optimizer=off
 (11 rows)
 
 explain (verbose, costs off)
@@ -6465,8 +6311,8 @@ select * from int8_tbl i8 left join lateral
          ->  Result
                Output: f1, f1, i8.q2
                One-Time Filter: false
+ Settings: optimizer = 'off'
  Optimizer: Postgres query optimizer
- Settings: optimizer=off
 (11 rows)
 
 -- check handling of nested appendrels inside LATERAL
@@ -6519,8 +6365,8 @@ select * from
                                    Output: tenk1.unique1, tenk1.unique2
                                    ->  Seq Scan on public.tenk1
                                          Output: tenk1.unique1, tenk1.unique2
+ Settings: optimizer = 'off'
  Optimizer: Postgres query optimizer
- Settings: optimizer=off
 (21 rows)
 
 select * from
@@ -6599,6 +6445,8 @@ LINE 1: select 1 from tenk1 a, lateral (select max(a.unique1) from i...
                                                ^
 -- check behavior of LATERAL in UPDATE/DELETE
 create temp table xx1 as select f1 as x1, -f1 as x2 from int4_tbl;
+NOTICE:  Table doesn't have 'DISTRIBUTED BY' clause -- Using column(s) named 'x1' as the Apache Cloudberry data distribution key for this table.
+HINT:  The 'DISTRIBUTED BY' clause determines the distribution of data. Make sure column(s) chosen are the optimal data distribution key to minimize skew.
 -- error, can't do this:
 update xx1 set x2 = f1 from (select * from int4_tbl where f1 = x1) ss;
 ERROR:  column "x1" does not exist
@@ -6640,11 +6488,18 @@ HINT:  There is an entry for table "xx1", but it cannot be referenced from this 
 -- produced for a multi-level partitioned table hierarchy.
 --
 create table join_pt1 (a int, b int, c varchar) partition by range(a);
+NOTICE:  Table doesn't have 'DISTRIBUTED BY' clause -- Using column named 'a' as the Apache Cloudberry data distribution key for this table.
+HINT:  The 'DISTRIBUTED BY' clause determines the distribution of data. Make sure column(s) chosen are the optimal data distribution key to minimize skew.
 create table join_pt1p1 partition of join_pt1 for values from (0) to (100) partition by range(b);
+NOTICE:  table has parent, setting distribution columns to match parent table
 create table join_pt1p2 partition of join_pt1 for values from (100) to (200);
+NOTICE:  table has parent, setting distribution columns to match parent table
 create table join_pt1p1p1 partition of join_pt1p1 for values from (0) to (100);
+NOTICE:  table has parent, setting distribution columns to match parent table
 insert into join_pt1 values (1, 1, 'x'), (101, 101, 'y');
 create table join_ut1 (a int, b int, c varchar);
+NOTICE:  Table doesn't have 'DISTRIBUTED BY' clause -- Using column named 'a' as the Apache Cloudberry data distribution key for this table.
+HINT:  The 'DISTRIBUTED BY' clause determines the distribution of data. Make sure column(s) chosen are the optimal data distribution key to minimize skew.
 insert into join_ut1 values (101, 101, 'y'), (2, 2, 'z');
 -- GPDB_12_MERGE_FIXME: The query fails. This test query is new with v12,
 -- but a corresponding query fails on GPDB master, too. I think this is
@@ -6657,41 +6512,12 @@ select t1.b, ss.phv from join_ut1 t1 left join lateral
               (select t2.a as t2a, t3.a t3a, least(t1.a, t2.a, t3.a) phv
 					  from join_pt1 t2 join join_ut1 t3 on t2.a = t3.b) ss
               on t1.a = ss.t2a order by t1.a;
-                             QUERY PLAN                             
---------------------------------------------------------------------
- Sort
-   Output: t1.b, (LEAST(t1.a, t2.a, t3.a)), t1.a
-   Sort Key: t1.a
-   ->  Nested Loop Left Join
-         Output: t1.b, (LEAST(t1.a, t2.a, t3.a)), t1.a
-         ->  Seq Scan on public.join_ut1 t1
-               Output: t1.a, t1.b, t1.c
-         ->  Hash Join
-               Output: t2.a, LEAST(t1.a, t2.a, t3.a)
-               Hash Cond: (t3.b = t2.a)
-               ->  Seq Scan on public.join_ut1 t3
-                     Output: t3.a, t3.b, t3.c
-               ->  Hash
-                     Output: t2.a
-                     ->  Append
-                           ->  Seq Scan on public.join_pt1p1p1 t2_1
-                                 Output: t2_1.a
-                                 Filter: (t1.a = t2_1.a)
-                           ->  Seq Scan on public.join_pt1p2 t2_2
-                                 Output: t2_2.a
-                                 Filter: (t1.a = t2_2.a)
-(21 rows)
-
+ERROR:  could not devise a query plan for the given query (pathnode.c:283)
 select t1.b, ss.phv from join_ut1 t1 left join lateral
               (select t2.a as t2a, t3.a t3a, least(t1.a, t2.a, t3.a) phv
 					  from join_pt1 t2 join join_ut1 t3 on t2.a = t3.b) ss
               on t1.a = ss.t2a order by t1.a;
-  b  | phv 
------+-----
-   2 |    
- 101 | 101
-(2 rows)
-
+ERROR:  could not devise a query plan for the given query (pathnode.c:283)
 -- end_ignore
 drop table join_pt1;
 drop table join_ut1;
@@ -6700,6 +6526,8 @@ drop table join_ut1;
 --
 begin;
 create table fkest (x integer, x10 integer, x10b integer, x100 integer);
+NOTICE:  Table doesn't have 'DISTRIBUTED BY' clause -- Using column named 'x' as the Apache Cloudberry data distribution key for this table.
+HINT:  The 'DISTRIBUTED BY' clause determines the distribution of data. Make sure column(s) chosen are the optimal data distribution key to minimize skew.
 insert into fkest select x, x/10, x/10, x/100 from generate_series(1,1000) x;
 create unique index on fkest(x, x10, x100);
 analyze fkest;
@@ -6708,8 +6536,8 @@ select * from fkest f1
   join fkest f2 on (f1.x = f2.x and f1.x10 = f2.x10b and f1.x100 = f2.x100)
   join fkest f3 on f1.x = f3.x
   where f1.x100 = 2;
-                        QUERY PLAN                         
------------------------------------------------------------
+                              QUERY PLAN                               
+-----------------------------------------------------------------------
  Gather Motion 3:1  (slice1; segments: 3)
    ->  Hash Join
          Hash Cond: (f3.x = f1.x)
@@ -6727,13 +6555,14 @@ select * from fkest f1
 
 alter table fkest add constraint fk
   foreign key (x, x10b, x100) references fkest (x, x10, x100);
+WARNING:  referential integrity (FOREIGN KEY) constraints are not supported in Apache Cloudberry, will not be enforced
 explain (costs off)
 select * from fkest f1
   join fkest f2 on (f1.x = f2.x and f1.x10 = f2.x10b and f1.x100 = f2.x100)
   join fkest f3 on f1.x = f3.x
   where f1.x100 = 2;
-                     QUERY PLAN                      
------------------------------------------------------
+                        QUERY PLAN                         
+-----------------------------------------------------------
  Gather Motion 3:1  (slice1; segments: 3)
    ->  Hash Join
          Hash Cond: ((f1.x = f2.x) AND (f1.x10 = f2.x10b))
@@ -6769,6 +6598,7 @@ insert into fkest select x/10, x%10, x from generate_series(1,1000*10) x;
 insert into fkest1 select x/10, x%10 from generate_series(1,1000*10) x;
 alter table fkest1
   add constraint fkest1_a_b_fkey foreign key (a,b) references fkest;
+WARNING:  referential integrity (FOREIGN KEY) constraints are not supported in Apache Cloudberry, will not be enforced
 analyze fkest;
 analyze fkest1;
 explain (costs off)
@@ -6799,7 +6629,7 @@ where f.c = 1;
                ->  Index Only Scan using fkest1_pkey on fkest1 f3
                      Index Cond: ((a = f.a) AND (b = f.b))
  Optimizer: Postgres query optimizer
-(13 rows)
+(19 rows)
 
 rollback;
 --
@@ -6808,6 +6638,8 @@ rollback;
 create table j1 (id int primary key);
 create table j2 (id int primary key);
 create table j3 (id int);
+NOTICE:  Table doesn't have 'DISTRIBUTED BY' clause -- Using column named 'id' as the Apache Cloudberry data distribution key for this table.
+HINT:  The 'DISTRIBUTED BY' clause determines the distribution of data. Make sure column(s) chosen are the optimal data distribution key to minimize skew.
 insert into j1 values(1),(2),(3);
 insert into j2 values(1),(2),(3);
 insert into j3 values(1),(1);
@@ -6841,8 +6673,8 @@ select * from j1 inner join j2 on j1.id = j2.id;
                Output: j2.id
                ->  Seq Scan on public.j2
                      Output: j2.id
+ Settings: optimizer = 'off'
  Optimizer: Postgres query optimizer
- Settings: optimizer=off
 (14 rows)
 
 -- ensure join is not unique when not an equi-join
@@ -6861,8 +6693,8 @@ select * from j1 inner join j2 on j1.id > j2.id;
          ->  Index Only Scan using j2_pkey on public.j2
                Output: j2.id
                Index Cond: (j2.id < j1.id)
+ Settings: optimizer = 'off'
  Optimizer: Postgres query optimizer
- Settings: optimizer=off
 (13 rows)
 
 -- ensure non-unique rel is not chosen as inner
@@ -6882,8 +6714,8 @@ select * from j1 inner join j3 on j1.id = j3.id;
                Output: j1.id
                ->  Seq Scan on public.j1
                      Output: j1.id
+ Settings: optimizer = 'off'
  Optimizer: Postgres query optimizer
- Settings: optimizer=off
 (14 rows)
 
 -- ensure left join is marked as unique
@@ -6903,8 +6735,8 @@ select * from j1 left join j2 on j1.id = j2.id;
                Output: j2.id
                ->  Seq Scan on public.j2
                      Output: j2.id
+ Settings: optimizer = 'off'
  Optimizer: Postgres query optimizer
- Settings: optimizer=off
 (14 rows)
 
 -- ensure right join is marked as unique
@@ -6924,8 +6756,8 @@ select * from j1 right join j2 on j1.id = j2.id;
                Output: j1.id
                ->  Seq Scan on public.j1
                      Output: j1.id
+ Settings: optimizer = 'off'
  Optimizer: Postgres query optimizer
- Settings: optimizer=off
 (14 rows)
 
 -- ensure full join is marked as unique
@@ -6945,8 +6777,8 @@ select * from j1 full join j2 on j1.id = j2.id;
                Output: j2.id
                ->  Seq Scan on public.j2
                      Output: j2.id
+ Settings: optimizer = 'off'
  Optimizer: Postgres query optimizer
- Settings: optimizer=off
 (14 rows)
 
 -- a clauseless (cross) join can't be unique
@@ -6966,8 +6798,8 @@ select * from j1 cross join j2;
                      Output: j2.id
                      ->  Seq Scan on public.j2
                            Output: j2.id
+ Settings: optimizer = 'off'
  Optimizer: Postgres query optimizer
- Settings: optimizer=off
 (14 rows)
 
 -- ensure a natural join is marked as unique
@@ -6987,8 +6819,8 @@ select * from j1 natural join j2;
                Output: j2.id
                ->  Seq Scan on public.j2
                      Output: j2.id
+ Settings: optimizer = 'off'
  Optimizer: Postgres query optimizer
- Settings: optimizer=off
 (14 rows)
 
 -- ensure a distinct clause allows the inner to become unique
@@ -7012,8 +6844,8 @@ inner join (select distinct id from j3) j3 on j1.id = j3.id;
                      Group Key: j3.id
                      ->  Seq Scan on public.j3
                            Output: j3.id
+ Settings: optimizer = 'off'
  Optimizer: Postgres query optimizer
- Settings: optimizer=off
 (17 rows)
 
 -- ensure group by clause allows the inner to become unique
@@ -7037,8 +6869,8 @@ inner join (select id from j3 group by id) j3 on j1.id = j3.id;
                      Group Key: j3.id
                      ->  Seq Scan on public.j3
                            Output: j3.id
+ Settings: optimizer = 'off'
  Optimizer: Postgres query optimizer
- Settings: optimizer=off
 (17 rows)
 
 drop table j1;
@@ -7078,8 +6910,8 @@ inner join j2 on j1.id1 = j2.id1;
                      Hash Key: j2.id1
                      ->  Seq Scan on public.j2
                            Output: j2.id1, j2.id2
+ Settings: optimizer = 'off'
  Optimizer: Postgres query optimizer
- Settings: optimizer=off
 (19 rows)
 
 -- ensure proper unique detection with multiple join quals
@@ -7100,8 +6932,8 @@ inner join j2 on j1.id1 = j2.id1 and j1.id2 = j2.id2;
                Output: j2.id1, j2.id2
                ->  Seq Scan on public.j2
                      Output: j2.id1, j2.id2
+ Settings: optimizer = 'off'
  Optimizer: Postgres query optimizer
- Settings: optimizer=off
 (14 rows)
 
 -- ensure we don't detect the join to be unique when quals are not part of the
@@ -7127,8 +6959,8 @@ inner join j2 on j1.id1 = j2.id1 where j1.id2 = 1;
                      Hash Key: j2.id1, 1
                      ->  Seq Scan on public.j2
                            Output: j2.id1, j2.id2
+ Settings: enable_nestloop = 'on', optimizer = 'off'
  Optimizer: Postgres query optimizer
- Settings: enable_nestloop=on, optimizer=off
 (17 rows)
 
 -- as above, but for left joins.
@@ -7152,8 +6984,8 @@ left join j2 on j1.id1 = j2.id1 where j1.id2 = 1;
                      Hash Key: j2.id1, 1
                      ->  Seq Scan on public.j2
                            Output: j2.id1, j2.id2
+ Settings: enable_nestloop = 'on', optimizer = 'off'
  Optimizer: Postgres query optimizer
- Settings: enable_nestloop=on, optimizer=off
 (17 rows)
 
 -- validate logic in merge joins which skips mark and restore.
@@ -7264,8 +7096,8 @@ from onek t1, tenk1 t2
 where exists (select 1 from tenk1 t3
               where t3.thousand = t1.unique1 and t3.tenthous = t2.hundred)
       and t1.unique1 < 1;
-                                                      QUERY PLAN                                                      
-----------------------------------------------------------------------------------------------------------------------
+                                                                        QUERY PLAN                                                                        
+----------------------------------------------------------------------------------------------------------------------------------------------------------
  Gather Motion 3:1  (slice1; segments: 3)
    Output: t1.unique1, t2.hundred
    ->  Nested Loop
@@ -7294,12 +7126,14 @@ where exists (select 1 from tenk1 t3
          ->  Index Only Scan using tenk1_hundred on public.tenk1 t2
                Output: t2.hundred
                Index Cond: (t2.hundred = t3.tenthous)
+ Settings: enable_bitmapscan = 'off', enable_hashjoin = 'off', enable_mergejoin = 'on', enable_nestloop = 'on', enable_seqscan = 'off', optimizer = 'off'
  Optimizer: Postgres query optimizer
- Settings: enable_bitmapscan=off, enable_mergejoin=on, enable_nestloop=on, enable_seqscan=off, jit=off, optimizer=off
 (30 rows)
 
 -- ... unless it actually is unique
 create table j3 as select unique1, tenthous from onek;
+NOTICE:  Table doesn't have 'DISTRIBUTED BY' clause -- Using column(s) named 'unique1' as the Apache Cloudberry data distribution key for this table.
+HINT:  The 'DISTRIBUTED BY' clause determines the distribution of data. Make sure column(s) chosen are the optimal data distribution key to minimize skew.
 vacuum analyze j3;
 create unique index on j3(unique1, tenthous);
 explain (verbose, costs off)
@@ -7308,8 +7142,8 @@ from onek t1, tenk1 t2
 where exists (select 1 from j3
               where j3.unique1 = t1.unique1 and j3.tenthous = t2.hundred)
       and t1.unique1 < 1;
-                                                      QUERY PLAN                                                      
-----------------------------------------------------------------------------------------------------------------------
+                                                                        QUERY PLAN                                                                        
+----------------------------------------------------------------------------------------------------------------------------------------------------------
  Gather Motion 3:1  (slice1; segments: 3)
    Output: t1.unique1, t2.hundred
    ->  Nested Loop
@@ -7332,8 +7166,8 @@ where exists (select 1 from j3
                      ->  Index Only Scan using tenk1_hundred on public.tenk1 t2
                            Output: t2.hundred
                            Index Cond: (t2.hundred = j3.tenthous)
+ Settings: enable_bitmapscan = 'off', enable_hashjoin = 'off', enable_mergejoin = 'on', enable_nestloop = 'on', enable_seqscan = 'off', optimizer = 'off'
  Optimizer: Postgres query optimizer
- Settings: enable_bitmapscan=off, enable_mergejoin=on, enable_nestloop=on, enable_seqscan=off, jit=off, optimizer=off
 (24 rows)
 
 drop table j3;

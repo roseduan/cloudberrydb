@@ -583,7 +583,8 @@ where not exists (select 1 from tbl_ra t2 where t2.b = t1.a) and t1.b < 2;
 
 -- and check we get the expected results
 select * from tbl_ra t1
-where not exists (select 1 from tbl_ra t2 where t2.b = t1.a) and t1.b < 2;
+where not exists (select 1 from tbl_ra t2 where t2.b = t1.a) and t1.b < 2
+order by a;
 
 reset enable_hashjoin;
 reset enable_nestloop;
@@ -613,7 +614,8 @@ where (select a from tbl_rs t2
        where exists (select 1 from
                      (select (b in (select b from tbl_rs t3)) as c from tbl_rs t4 where t4.a = 1) s
                      where c in (select t1.a = 1 from tbl_rs t5 union all select true))
-       order by a limit 1) >= 0;
+       order by a limit 1) >= 0
+order by a;
 
 reset enable_nestloop;
 reset enable_hashagg;

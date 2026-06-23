@@ -933,8 +933,12 @@ typedef enum JoinType
 	 */
 	JOIN_RIGHT_SEMI,			/* 1 copy of each LHS row that has match(es),
 								   build side = LHS */
-	JOIN_RIGHT_ANTI				/* 1 copy of each LHS row that has no match,
+	JOIN_RIGHT_ANTI,			/* 1 copy of each LHS row that has no match,
 								   build side = LHS */
+	JOIN_RIGHT_ANTI_NOTIN		/* Right-flipped variant of JOIN_LASJ_NOTIN
+								   (currently unused -- cost model returns
+								   infinity since Arrow has no NOT IN
+								   three-valued logic for the flip path) */
 
 	/*
 	 * We might need additional join types someday.
@@ -962,7 +966,8 @@ typedef enum JoinType
 	   (1 << JOIN_RIGHT) | \
 	   (1 << JOIN_ANTI) | \
 	   (1 << JOIN_LASJ_NOTIN) | \
-	   (1 << JOIN_RIGHT_ANTI))) != 0)
+	   (1 << JOIN_RIGHT_ANTI) | \
+	   (1 << JOIN_RIGHT_ANTI_NOTIN))) != 0)
 
 /*
  * AggStrategy -

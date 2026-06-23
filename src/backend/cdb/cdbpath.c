@@ -1468,6 +1468,23 @@ cdbpath_motion_for_join(PlannerInfo *root,
 		case JOIN_RIGHT:
 			inner.ok_to_replicate = false;
 			break;
+		case JOIN_RIGHT_SEMI:
+		case JOIN_RIGHT_ANTI:
+		case JOIN_RIGHT_ANTI_NOTIN:
+			/*
+			 * Right-flipped semi/anti joins emit build-side rows.  At cdbpath
+			 * time (before the DXL->PG child swap) outer = child-0 = LHS =
+			 * build side, inner = child-1 = RHS = probe side.  Neither side may
+			 * be broadcast: if the outer (build) relation is replicated, two
+			 * probe rows that match the same build row on different segments
+			 * would each independently mark+emit it, producing duplicate
+			 * output; if the inner (probe) is replicated every segment marks
+			 * visited independently and finalize emits dupes.  This mirrors the
+			 * handling in cdbpath_motion_for_parallel_join().
+			 */
+			outer.ok_to_replicate = false;
+			inner.ok_to_replicate = false;
+			break;
 		case JOIN_FULL:
 			outer.ok_to_replicate = false;
 			inner.ok_to_replicate = false;
@@ -3112,6 +3129,9 @@ cdbpath_motion_for_parallel_join(PlannerInfo *root,
 		case JOIN_UNIQUE_INNER:
 		case JOIN_RIGHT:
 		case JOIN_FULL:
+		case JOIN_RIGHT_SEMI:
+		case JOIN_RIGHT_ANTI:
+		case JOIN_RIGHT_ANTI_NOTIN:
 			outer.ok_to_replicate = false;
 			inner.ok_to_replicate = false;
 			break;

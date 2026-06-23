@@ -974,6 +974,12 @@ ExecInitHashJoin(HashJoin *node, EState *estate, int eflags)
 			hjstate->hj_NullInnerTupleSlot =
 				ExecInitNullTupleSlot(estate, innerDesc, &TTSOpsVirtual);
 			break;
+		case JOIN_RIGHT_ANTI_NOTIN:
+			ereport(ERROR,
+					(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+					 errmsg("JOIN_RIGHT_ANTI_NOTIN is only supported via the "
+							"vec engine path")));
+			break;
 		default:
 			elog(ERROR, "unrecognized join type: %d",
 				 (int) node->join.jointype);
