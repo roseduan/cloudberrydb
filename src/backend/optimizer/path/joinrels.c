@@ -1008,6 +1008,14 @@ populate_joinrel_with_paths(PlannerInfo *root, RelOptInfo *rel1,
 				add_paths_to_joinrel(root, joinrel, rel1, rel2,
 									 JOIN_SEMI, sjinfo,
 									 restrictlist);
+				/*
+				 * PG18 aa86129e1: also try a right-semi variant (build
+				 * hashtable on outer/LHS, emit inner/RHS rows that match).
+				 * Useful when LHS is small.
+				 */
+				add_paths_to_joinrel(root, joinrel, rel2, rel1,
+									 JOIN_RIGHT_SEMI, sjinfo,
+									 restrictlist);
 
 				if (root->upd_del_replicated_table > 0 &&
 					(bms_is_member(root->upd_del_replicated_table, rel1->relids) ||
