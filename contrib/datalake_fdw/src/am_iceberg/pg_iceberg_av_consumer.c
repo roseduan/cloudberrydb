@@ -80,6 +80,7 @@ extern char *datalake_agent_server_url;
 
 /* Forward declarations */
 static void datalake_av_consume(Oid datid);
+static void process_deletion_batch(void);
 static void do_delete_for_entry(DeletionQueueEntry *e);
 static char *build_fileio_config_json(ForeignServer *server,
                                       Oid volume_oid,
@@ -126,7 +127,9 @@ pg_iceberg_av_consumer_init(void)
         NULL,
         &deletion_queue_max_retry,
         5,
-        0, 100,
+        /* min 1: max_retry=0 makes get_batch's "retry_count < 0" match no
+         * rows, silently stalling the consumer. */
+        1, 100,
         PGC_SIGHUP,
         0,
         NULL, NULL, NULL);
@@ -155,9 +158,8 @@ pg_iceberg_av_consumer_init(void)
 static void
 datalake_av_consume(Oid datid)
 {
-    TimestampTz now;
-    List       *batch = NIL;
-    ListCell   *lc;
+    TimestampTz   now;
+    MemoryContext oldcontext = CurrentMemoryContext;
 
     /* Cheap gates first (avoid any catalog work when disabled). */
     if (!deletion_queue_enabled)
@@ -175,15 +177,58 @@ datalake_av_consume(Oid datid)
     StartTransactionCommand();
     PushActiveSnapshot(GetTransactionSnapshot());
 
-    /* If datalake_fdw is not installed in this DB, there is nothing to do. */
-    if (get_extension_oid("datalake_fdw", /*missing_ok*/ true) == InvalidOid)
+    /*
+     * Wrap the cycle in PG_TRY: a raise from the batch fetch (or any other
+     * non-per-entry step) must not escape the hook, which would break the
+     * AutoVacWorkerPostHook chain and log a scary ERROR.  On failure we
+     * abort and downgrade to WARNING; the next autovacuum cycle retries.
+     * Per-entry failures are isolated by subtransactions inside
+     * process_deletion_batch(), not here.
+     */
+    PG_TRY();
     {
+        /* Only act if datalake_fdw is installed here (missing_ok lookup). */
+        if (get_extension_oid("datalake_fdw", true) != InvalidOid)
+            process_deletion_batch();
+
         PopActiveSnapshot();
         CommitTransactionCommand();
-        goto chain;
     }
+    PG_CATCH();
+    {
+        ErrorData *edata;
 
-    /* SPI-backed batch fetch.  May raise; let it propagate. */
+        MemoryContextSwitchTo(oldcontext);
+        edata = CopyErrorData();
+        FlushErrorState();
+        AbortCurrentTransaction();
+        ereport(WARNING,
+                (errmsg("datalake_fdw deletion-queue consumer cycle "
+                        "aborted; retrying next autovacuum cycle: %s",
+                        edata->message)));
+        FreeErrorData(edata);
+    }
+    PG_END_TRY();
+
+chain:
+    if (prev_av_hook)
+        prev_av_hook(datid);
+}
+
+
+/* ================================================================
+ * process_deletion_batch: fetch one bounded batch and process each entry in
+ * its own subtransaction.  Runs inside the caller's transaction, active
+ * snapshot and PG_TRY (see datalake_av_consume).
+ * ================================================================
+ */
+static void
+process_deletion_batch(void)
+{
+    List       *batch;
+    ListCell   *lc;
+
+    /* SPI-backed batch fetch. */
     batch = pg_iceberg_deletion_queue_get_batch(deletion_queue_batch_size,
                                                 deletion_queue_max_retry);
 
@@ -272,13 +317,6 @@ datalake_av_consume(Oid datid)
         }
         PG_END_TRY();
     }
-
-    PopActiveSnapshot();
-    CommitTransactionCommand();
-
-chain:
-    if (prev_av_hook)
-        prev_av_hook(datid);
 }
 
 
