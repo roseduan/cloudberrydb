@@ -34,8 +34,6 @@ import org.apache.iceberg.ManifestContent;
 import org.apache.iceberg.StatisticsFile;
 import org.apache.iceberg.exceptions.NotFoundException;
 import org.apache.iceberg.io.FileIO;
-import org.apache.iceberg.io.FileInfo;
-import org.apache.iceberg.io.SupportsPrefixOperations;
 import org.apache.iceberg.io.InputFile;
 import org.apache.iceberg.io.CloseableIterable;
 import org.apache.iceberg.hadoop.HadoopFileIO;
