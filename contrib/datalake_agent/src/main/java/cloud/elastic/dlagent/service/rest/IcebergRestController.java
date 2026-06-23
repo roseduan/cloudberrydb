@@ -1254,26 +1254,33 @@ public class IcebergRestController {
                 "BadRequestException", 400);
         }
 
-        List<Map<String, String>> failed = new ArrayList<>();
-        int deletedCount = 0;
-        for (Object o : (List<?>) pathsObj) {
-            String p = String.valueOf(o);
-            try {
-                fileIO.deleteFile(p);
-                deletedCount++;
-            } catch (NotFoundException nfe) {
-                deletedCount++;
-            } catch (Exception e) {
-                recordFailure(failed, p, e);
+        // Close the FileIO in a finally that swallows teardown errors, so a
+        // failing HadoopFileIO.close() can never mask an otherwise-successful
+        // response (the consumer treats a non-2xx reply as a delete failure).
+        try {
+            List<Map<String, String>> failed = new ArrayList<>();
+            int deletedCount = 0;
+            for (Object o : (List<?>) pathsObj) {
+                String p = String.valueOf(o);
+                try {
+                    fileIO.deleteFile(p);
+                    deletedCount++;
+                } catch (NotFoundException nfe) {
+                    deletedCount++;
+                } catch (Exception e) {
+                    recordFailure(failed, p, e);
+                }
             }
-        }
 
-        Map<String, Object> resp = new HashMap<>();
-        resp.put("deletedCount", deletedCount);
-        resp.put("failed", failed);
-        log.info("files/delete: requested={}, deleted={}, failed={}",
-                 ((List<?>) pathsObj).size(), deletedCount, failed.size());
-        return ResponseEntity.ok(resp);
+            Map<String, Object> resp = new HashMap<>();
+            resp.put("deletedCount", deletedCount);
+            resp.put("failed", failed);
+            log.info("files/delete: requested={}, deleted={}, failed={}",
+                     ((List<?>) pathsObj).size(), deletedCount, failed.size());
+            return ResponseEntity.ok(resp);
+        } finally {
+            closeFileIOQuietly(fileIO);
+        }
     }
 
     @PostMapping({"/files/cleanup-from-metadata"})
@@ -1294,8 +1301,8 @@ public class IcebergRestController {
 
         log.info("Cleaning up metadata tree rooted at {}", metadataPath);
 
-        // 1. Build a HadoopFileIO from the supplied config.  s3/hdfs/abfss
-        //    all funnel through Hadoop FS impls (s3a://, hdfs://, abfss://).
+        // 1. Build a HadoopFileIO from the supplied config (s3/hdfs/abfss all
+        //    funnel through Hadoop FS impls).
         FileIO fileIO;
         try {
             fileIO = buildFileIOForCleanup(fileIOConfig);
@@ -1305,6 +1312,25 @@ public class IcebergRestController {
                 "BadRequestException", 400);
         }
 
+        // Close in a finally that swallows teardown errors so a failing
+        // HadoopFileIO.close() cannot mask a successful cleanup (the consumer
+        // treats a non-2xx reply as a delete failure and would re-queue / DLQ
+        // an entry whose files were in fact already deleted).
+        try {
+            return cleanupMetadataTree(fileIO, metadataPath);
+        } finally {
+            closeFileIOQuietly(fileIO);
+        }
+    }
+
+    /**
+     * Walk the Iceberg metadata tree rooted at {@code metadataPath} and delete
+     * every file it references (manifest lists, manifests, data/delete files,
+     * the metadata.json chain, and statistics files).  The caller owns the
+     * {@link FileIO} lifecycle.
+     */
+    private ResponseEntity<?> cleanupMetadataTree(FileIO fileIO,
+                                                  String metadataPath) {
         // 2. Parse the metadata.json so we can walk the snapshot tree.
         List<Map<String, String>> failed = new ArrayList<>();
         int deletedCount = 0;
@@ -1449,6 +1475,20 @@ public class IcebergRestController {
         allowedRoots.add(r);
     }
 
+    /**
+     * Close a {@link FileIO}, logging and swallowing any teardown failure.
+     * A close() error must never propagate out of a request handler: doing so
+     * would discard an already-built success response and make the datalake_fdw
+     * consumer treat an entry whose files were actually deleted as a failure.
+     */
+    private static void closeFileIOQuietly(FileIO fileIO) {
+        try {
+            fileIO.close();
+        } catch (Exception e) {
+            log.warn("Failed to close FileIO after cleanup; ignoring", e);
+        }
+    }
+
     /** Record a per-file cleanup failure in the response failed[] array. */
     private static void recordFailure(List<Map<String, String>> failed,
                                       String path, Exception e) {
@@ -1547,13 +1587,6 @@ public class IcebergRestController {
         if (v != null && !v.isEmpty()) {
             conf.set(confKey, v);
         }
-    }
-
-    private static boolean isNotDeleteManifest(Exception e) {
-        // Iceberg throws IllegalArgumentException for "not a delete
-        // manifest" on plain data manifests; treat that as a non-error.
-        String msg = e.getMessage();
-        return msg != null && msg.toLowerCase().contains("delete manifest");
     }
 
     /**

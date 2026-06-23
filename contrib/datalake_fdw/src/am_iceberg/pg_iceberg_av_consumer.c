@@ -50,6 +50,7 @@
 #include "utils/guc.h"
 #include "utils/lsyscache.h"
 #include "utils/memutils.h"
+#include "utils/resowner.h"
 #include "utils/snapmgr.h"
 #include "utils/syscache.h"
 #include "utils/timestamp.h"
@@ -190,32 +191,82 @@ datalake_av_consume(Oid datid)
     {
         DeletionQueueEntry *e = (DeletionQueueEntry *) lfirst(lc);
         volatile int32 attempt_after = e->retry_count + 1;
+        MemoryContext  oldcontext = CurrentMemoryContext;
+        ResourceOwner  oldowner = CurrentResourceOwner;
 
         /*
-         * Isolate each entry in its own PG_TRY so one malformed row cannot
-         * abort the whole batch.  On success, remove from the queue; on
-         * failure, either bump retry_count or push to the DLQ depending on
-         * whether attempt_after has reached max_retry.
+         * Process each entry in its own subtransaction.  Two reasons:
+         *
+         *  1. One malformed row cannot abort the whole batch -- on error we
+         *     roll the subtransaction back, which (unlike a bare PG_CATCH)
+         *     releases any locks, buffer pins and resource-owner state the
+         *     failed attempt held, leaving the outer transaction clean.
+         *
+         *  2. The failure recorders (_record_failure / _move_to_failed) can
+         *     themselves raise -- e.g. a concurrent worker already removed
+         *     the row ("entry not found").  Recording the failure in a fresh
+         *     subtransaction, contained by its own PG_TRY, keeps such an
+         *     error from escaping to abort the batch and undo the _remove()s
+         *     of entries that already succeeded earlier in this batch.
          */
+        BeginInternalSubTransaction(NULL);
+        MemoryContextSwitchTo(oldcontext);
+
         PG_TRY();
         {
             do_delete_for_entry(e);
             pg_iceberg_deletion_queue_remove(e->path);
+
+            ReleaseCurrentSubTransaction();
+            MemoryContextSwitchTo(oldcontext);
+            CurrentResourceOwner = oldowner;
         }
         PG_CATCH();
         {
             ErrorData *edata;
 
-            MemoryContextSwitchTo(TopTransactionContext);
+            /* Recover to a clean state, then copy out the error. */
+            MemoryContextSwitchTo(oldcontext);
+            CurrentResourceOwner = oldowner;
             edata = CopyErrorData();
             FlushErrorState();
+            RollbackAndReleaseCurrentSubTransaction();
+            MemoryContextSwitchTo(oldcontext);
+            CurrentResourceOwner = oldowner;
 
-            if (attempt_after >= deletion_queue_max_retry)
-                pg_iceberg_deletion_queue_move_to_failed(e->path,
-                                                         edata->message);
-            else
-                pg_iceberg_deletion_queue_record_failure(e->path,
-                                                         edata->message);
+            /* Record the failure in its own subtransaction. */
+            BeginInternalSubTransaction(NULL);
+            MemoryContextSwitchTo(oldcontext);
+
+            PG_TRY();
+            {
+                if (attempt_after >= deletion_queue_max_retry)
+                    pg_iceberg_deletion_queue_move_to_failed(e->path,
+                                                             edata->message);
+                else
+                    pg_iceberg_deletion_queue_record_failure(e->path,
+                                                             edata->message);
+
+                ReleaseCurrentSubTransaction();
+                MemoryContextSwitchTo(oldcontext);
+                CurrentResourceOwner = oldowner;
+            }
+            PG_CATCH();
+            {
+                /* Contain it: never poison the batch transaction. */
+                MemoryContextSwitchTo(oldcontext);
+                CurrentResourceOwner = oldowner;
+                FlushErrorState();
+                RollbackAndReleaseCurrentSubTransaction();
+                MemoryContextSwitchTo(oldcontext);
+                CurrentResourceOwner = oldowner;
+
+                elog(WARNING,
+                     "iceberg deletion queue: could not record failure for "
+                     "\"%s\"; will retry next cycle",
+                     e->path ? e->path : "(null)");
+            }
+            PG_END_TRY();
 
             FreeErrorData(edata);
         }
@@ -358,10 +409,9 @@ do_delete_for_entry(DeletionQueueEntry *e)
     PG_FINALLY();
     {
         agent_cli_wrapper_destroy(h);
+        pfree(fileio_config);
     }
     PG_END_TRY();
-
-    pfree(fileio_config);
 }
 
 
