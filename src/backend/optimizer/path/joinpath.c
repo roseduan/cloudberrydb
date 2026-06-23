@@ -333,8 +333,9 @@ add_paths_to_join_relation(PlannerInfo *root,
 	 * 2. Consider paths where the outer relation need not be explicitly
 	 * sorted. This includes both nestloops and mergejoins where the outer
 	 * path is already ordered.  Again, skip this if we can't mergejoin.
-	 * (That's okay because we know that nestloop can't handle right/full
-	 * joins at all, so it wouldn't work in the prohibited cases either.)
+	 * (That's okay because we know that nestloop can't handle
+	 * right/right-anti/full joins at all, so it wouldn't work in the
+	 * prohibited cases either.)
 	 */
 	if (mergejoin_allowed)
 		match_unsorted_outer(root, joinrel, outerrel, innerrel,
@@ -1336,14 +1337,15 @@ sort_inner_and_outer(PlannerInfo *root,
 	 * If the joinrel is parallel-safe, we may be able to consider a partial
 	 * merge join.  However, we can't handle JOIN_UNIQUE_OUTER, because the
 	 * outer path will be partial, and therefore we won't be able to properly
-	 * guarantee uniqueness.  Similarly, we can't handle JOIN_FULL and
-	 * JOIN_RIGHT, because they can produce false null extended rows.  Also,
-	 * the resulting path must not be parameterized.
+	 * guarantee uniqueness.  Similarly, we can't handle JOIN_FULL, JOIN_RIGHT
+	 * and JOIN_RIGHT_ANTI, because they can produce false null extended rows.
+	 * Also, the resulting path must not be parameterized.
 	 */
 	if (joinrel->consider_parallel &&
 		save_jointype != JOIN_UNIQUE_OUTER &&
 		save_jointype != JOIN_FULL &&
 		save_jointype != JOIN_RIGHT &&
+		save_jointype != JOIN_RIGHT_ANTI &&
 		outerrel->partial_pathlist != NIL &&
 		bms_is_empty(joinrel->lateral_relids))
 	{
@@ -1753,10 +1755,10 @@ match_unsorted_outer(PlannerInfo *root,
 
 	/*
 	 * Nestloop only supports inner, left, semi, and anti joins.  Also, if we
-	 * are doing a right or full mergejoin, we must use *all* the mergeclauses
-	 * as join clauses, else we will not have a valid plan.  (Although these
-	 * two flags are currently inverses, keep them separate for clarity and
-	 * possible future changes.)
+	 * are doing a right, right-anti or full mergejoin, we must use *all* the
+	 * mergeclauses as join clauses, else we will not have a valid plan.
+	 * (Although these two flags are currently inverses, keep them separate
+	 * for clarity and possible future changes.)
 	 */
 	switch (jointype)
 	{
@@ -1769,6 +1771,7 @@ match_unsorted_outer(PlannerInfo *root,
 			useallclauses = false;
 			break;
 		case JOIN_RIGHT:
+		case JOIN_RIGHT_ANTI:
 		case JOIN_FULL:
 			nestjoinOK = false;
 			useallclauses = true;
@@ -1944,13 +1947,14 @@ match_unsorted_outer(PlannerInfo *root,
 	 * handle JOIN_UNIQUE_OUTER, because the outer path will be partial, and
 	 * therefore we won't be able to properly guarantee uniqueness.  Nor can
 	 * we handle joins needing lateral rels, since partial paths must not be
-	 * parameterized. Similarly, we can't handle JOIN_FULL and JOIN_RIGHT,
-	 * because they can produce false null extended rows.
+	 * parameterized. Similarly, we can't handle JOIN_FULL, JOIN_RIGHT and
+	 * JOIN_RIGHT_ANTI, because they can produce false null extended rows.
 	 */
 	if (joinrel->consider_parallel &&
 		save_jointype != JOIN_UNIQUE_OUTER &&
 		save_jointype != JOIN_FULL &&
 		save_jointype != JOIN_RIGHT &&
+		save_jointype != JOIN_RIGHT_ANTI &&
 		outerrel->partial_pathlist != NIL &&
 		bms_is_empty(joinrel->lateral_relids))
 	{
@@ -2354,11 +2358,13 @@ hash_inner_and_outer(PlannerInfo *root,
 			 * total inner path will also be parallel-safe, but if not, we'll
 			 * have to search for the cheapest safe, unparameterized inner
 			 * path.  If doing JOIN_UNIQUE_INNER, we can't use any alternative
-			 * inner path.  If full or right join, we can't use parallelism
-			 * (building the hash table in each backend) because no one
-			 * process has all the match bits.
+			 * inner path.  If full, right, or right-anti join, we can't use
+			 * parallelism (building the hash table in each backend) because
+			 * no one process has all the match bits.
 			 */
-			if (save_jointype == JOIN_FULL || save_jointype == JOIN_RIGHT)
+			if (save_jointype == JOIN_FULL ||
+				save_jointype == JOIN_RIGHT ||
+				save_jointype == JOIN_RIGHT_ANTI)
 				cheapest_safe_inner = NULL;
 			else if (cheapest_total_inner->parallel_safe)
 				cheapest_safe_inner = cheapest_total_inner;
@@ -2384,10 +2390,10 @@ hash_inner_and_outer(PlannerInfo *root,
  *	  Returns a list of RestrictInfo nodes for those clauses.
  *
  * *mergejoin_allowed is normally set to true, but it is set to false if
- * this is a right/full join and there are nonmergejoinable join clauses.
- * The executor's mergejoin machinery cannot handle such cases, so we have
- * to avoid generating a mergejoin plan.  (Note that this flag does NOT
- * consider whether there are actually any mergejoinable clauses.  This is
+ * this is a right/right-anti/full join and there are nonmergejoinable join
+ * clauses.  The executor's mergejoin machinery cannot handle such cases, so
+ * we have to avoid generating a mergejoin plan.  (Note that this flag does
+ * NOT consider whether there are actually any mergejoinable clauses.  This is
  * correct because in some cases we need to build a clauseless mergejoin.
  * Simply returning NIL is therefore not enough to distinguish safe from
  * unsafe cases.)
@@ -2433,8 +2439,8 @@ select_mergejoin_clauses(PlannerInfo *root,
 		{
 			/*
 			 * The executor can handle extra joinquals that are constants, but
-			 * not anything else, when doing right/full merge join.  (The
-			 * reason to support constants is so we can do FULL JOIN ON
+			 * not anything else, when doing right/right-anti/full merge join.
+			 * (The reason to support constants is so we can do FULL JOIN ON
 			 * FALSE.)
 			 */
 			if (!restrictinfo->clause || !IsA(restrictinfo->clause, Const))
@@ -2492,6 +2498,7 @@ select_mergejoin_clauses(PlannerInfo *root,
 	switch (jointype)
 	{
 		case JOIN_RIGHT:
+		case JOIN_RIGHT_ANTI:
 		case JOIN_FULL:
 			*mergejoin_allowed = !have_nonmergeable_joinclause;
 			break;

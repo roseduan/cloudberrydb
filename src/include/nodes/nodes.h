@@ -924,7 +924,14 @@ typedef enum JoinType
 	 * moving the larger of the two relations.
 	 */
 	JOIN_DEDUP_SEMI,			/* inner join, LHS path must be made unique afterwards */
-	JOIN_DEDUP_SEMI_REVERSE		/* inner join, RHS path must be made unique afterwards */
+	JOIN_DEDUP_SEMI_REVERSE,	/* inner join, RHS path must be made unique afterwards */
+
+	/*
+	 * Right-flipped anti-semijoin. Cherry-picked from PG16 (commit 49c47e68).
+	 * Appended at the end to preserve existing GPDB-only enum values.
+	 */
+	JOIN_RIGHT_ANTI				/* 1 copy of each LHS row that has no match,
+								   build side = LHS */
 
 	/*
 	 * We might need additional join types someday.
@@ -951,7 +958,8 @@ typedef enum JoinType
 	   (1 << JOIN_FULL) | \
 	   (1 << JOIN_RIGHT) | \
 	   (1 << JOIN_ANTI) | \
-	   (1 << JOIN_LASJ_NOTIN))) != 0)
+	   (1 << JOIN_LASJ_NOTIN) | \
+	   (1 << JOIN_RIGHT_ANTI))) != 0)
 
 /*
  * AggStrategy -
