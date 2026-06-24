@@ -11,6 +11,7 @@
 #include <parquet/api/reader.h>
 #include <string>
 #include <cstring>
+#include <cmath>
 
 #include "rowgroup_filter.h"
 #include "base_reader.h"		/* TIMEUNIT_* enum */
@@ -182,6 +183,100 @@ datumToColInt64(Datum d, Oid colType, int64_t &out)
 	}
 }
 
+/* Row group [min,max] as double (parquet FLOAT/DOUBLE physical types). */
+static bool
+pqStatMinMaxFloat(parquet::ColumnChunkMetaData *cc, double &mn, double &mx)
+{
+	auto stats = cc->statistics();
+	if (!stats || !stats->HasMinMax())
+		return false;
+	switch (cc->type())
+	{
+		case parquet::Type::FLOAT:
+		{
+			auto s = std::static_pointer_cast<parquet::FloatStatistics>(stats);
+			mn = (double) s->min(); mx = (double) s->max(); break;
+		}
+		case parquet::Type::DOUBLE:
+		{
+			auto s = std::static_pointer_cast<parquet::DoubleStatistics>(stats);
+			mn = s->min(); mx = s->max(); break;
+		}
+		default:
+			return false;
+	}
+	/* NaN in the bounds means the order is undefined for zone-map purposes. */
+	if (std::isnan(mn) || std::isnan(mx))
+		return false;
+	return true;
+}
+
+/* Const value as double; accepts float4/float8 consts (cross-type compares
+ * between float4 and float8 share a btree opfamily). */
+static bool
+pgConstFloat(Const *c, double &out)
+{
+	if (c->constisnull)
+		return false;
+	switch (c->consttype)
+	{
+		case FLOAT4OID: out = (double) DatumGetFloat4(c->constvalue); return true;
+		case FLOAT8OID: out = DatumGetFloat8(c->constvalue); return true;
+		default: return false;
+	}
+}
+
+/* true iff double range [mn,mx] provably has NO value v with (v strat c). */
+static bool
+doubleRangeExcluded(int strat, double mn, double mx, double c)
+{
+	if (std::isnan(c))			/* NaN comparisons: keep (don't prune) */
+		return false;
+	switch (strat)
+	{
+		case BTLessStrategyNumber:			return mn >= c;
+		case BTLessEqualStrategyNumber:		return mn >  c;
+		case BTEqualStrategyNumber:			return c < mn || c > mx;
+		case BTGreaterEqualStrategyNumber:	return mx <  c;
+		case BTGreaterStrategyNumber:		return mx <= c;
+		default:							return false;
+	}
+}
+
+/* A single array element Datum as double; false if not a float type. */
+static bool
+datumToColFloat(Datum d, Oid elmtype, double &out)
+{
+	switch (elmtype)
+	{
+		case FLOAT4OID: out = (double) DatumGetFloat4(d); return true;
+		case FLOAT8OID: out = DatumGetFloat8(d); return true;
+		default: return false;
+	}
+}
+
+/* Strip trailing ASCII spaces (bpchar compares ignore them; the writer also
+ * stores CHAR(N) trimmed, so the stats bytes are already space-free). */
+static void
+rtrimSpaces(std::string &s)
+{
+	size_t n = s.size();
+	while (n > 0 && s[n - 1] == ' ')
+		n--;
+	s.resize(n);
+}
+
+/* A single array element Datum as a string; false if not a text-family type. */
+static bool
+datumToStr(Datum d, Oid elmtype, std::string &out)
+{
+	if (elmtype != TEXTOID && elmtype != VARCHAROID && elmtype != BPCHAROID)
+		return false;
+	text *t = DatumGetTextPP(d);
+	out.assign(VARDATA_ANY(t), VARSIZE_ANY_EXHDR(t));
+	return true;
+}
+
 /* BYTE_ARRAY [min,max] (UNSIGNED byte order, truncation widens -> safe for '='). */
 static bool
 pqStatMinMaxStr(parquet::ColumnChunkMetaData *cc, std::string &mn, std::string &mx)
@@ -204,9 +299,9 @@ pgConstStr(Const *c, Oid colType, std::string &out)
 {
 	if (c->constisnull)
 		return false;
-	if (colType != TEXTOID && colType != VARCHAROID)
+	if (colType != TEXTOID && colType != VARCHAROID && colType != BPCHAROID)
 		return false;
-	if (c->consttype != TEXTOID && c->consttype != VARCHAROID)
+	if (c->consttype != TEXTOID && c->consttype != VARCHAROID && c->consttype != BPCHAROID)
 		return false;
 	text *t = DatumGetTextPP(c->constvalue);
 	out.assign(VARDATA_ANY(t), VARSIZE_ANY_EXHDR(t));
@@ -348,8 +443,11 @@ opExprExcludes(OpExpr *op, parquet::RowGroupMetaData *rg,
 		return false;
 	auto cc = rg->ColumnChunk(ci->colIdx);
 
-	/* Text: equality only (byte-order vs collation). */
-	if (ci->pgType == TEXTOID || ci->pgType == VARCHAROID)
+	/* Text/varchar/bpchar: equality only (byte-order vs collation).  For
+	 * bpchar, trailing spaces are insignificant; the writer stores CHAR(N)
+	 * already trimmed, so right-trimming the constant (and defensively the
+	 * stats) makes byte-equality match bpchar semantics. */
+	if (ci->pgType == TEXTOID || ci->pgType == VARCHAROID || ci->pgType == BPCHAROID)
 	{
 		if (strat != BTEqualStrategyNumber)
 			return false;
@@ -358,7 +456,25 @@ opExprExcludes(OpExpr *op, parquet::RowGroupMetaData *rg,
 			return false;
 		if (!pqStatMinMaxStr(cc.get(), mns, mxs))
 			return false;
+		if (ci->pgType == BPCHAROID)
+		{
+			rtrimSpaces(cs);
+			rtrimSpaces(mns);
+			rtrimSpaces(mxs);
+		}
 		return byteLess(cs, mns) || byteLess(mxs, cs);
+	}
+
+	/* float4/float8. */
+	if (ci->pgType == FLOAT4OID || ci->pgType == FLOAT8OID)
+	{
+		double c;
+		if (!pgConstFloat(con, c))
+			return false;
+		double mn, mx;
+		if (!pqStatMinMaxFloat(cc.get(), mn, mx))
+			return false;
+		return doubleRangeExcluded(strat, mn, mx, c);
 	}
 
 	/* Numeric/decimal. */
@@ -422,9 +538,44 @@ saoExprExcludes(ScalarArrayOpExpr *sao, parquet::RowGroupMetaData *rg,
 	const RowGroupColMeta *ci = colFor((Var *) larg, cols);
 	if (!ci)
 		return false;
-	int64_t mn, mx;
 	auto cc = rg->ColumnChunk(ci->colIdx);
-	if (!pqStatMinMaxInt64(cc.get(), ci->pgType, ci->timeUnit, mn, mx))
+
+	/* Fetch the row-group zone for this column's type family up front; bail
+	 * (keep) if stats are missing or the type is not handled. */
+	bool		isText = (ci->pgType == TEXTOID || ci->pgType == VARCHAROID || ci->pgType == BPCHAROID);
+	bool		isNumeric = (ci->pgType == NUMERICOID);
+	bool		isFloat = (ci->pgType == FLOAT4OID || ci->pgType == FLOAT8OID);
+	int64_t		mn = 0, mx = 0;
+	double		fmn = 0, fmx = 0;
+	std::string smn, smx;
+	Datum		nMin = 0, nMax = 0;
+
+	if (isText)
+	{
+		if (!pqStatMinMaxStr(cc.get(), smn, smx))
+			return false;
+		if (ci->pgType == BPCHAROID)
+		{
+			rtrimSpaces(smn);
+			rtrimSpaces(smx);
+		}
+	}
+	else if (isNumeric)
+	{
+		std::string mns, mxs;
+		if (!pqStatMinMaxDecimalStr(cc.get(), ci->scale, ci->precision, ci->typeLength, mns, mxs))
+			return false;
+		nMin = gpdbDirectFunctionCall3(numeric_in, CStringGetDatum(mns.c_str()),
+									   ObjectIdGetDatum(InvalidOid), Int32GetDatum(-1));
+		nMax = gpdbDirectFunctionCall3(numeric_in, CStringGetDatum(mxs.c_str()),
+									   ObjectIdGetDatum(InvalidOid), Int32GetDatum(-1));
+	}
+	else if (isFloat)
+	{
+		if (!pqStatMinMaxFloat(cc.get(), fmn, fmx))
+			return false;
+	}
+	else if (!pqStatMinMaxInt64(cc.get(), ci->pgType, ci->timeUnit, mn, mx))
 		return false;
 
 	Const *arr = (Const *) rarg;
@@ -442,19 +593,58 @@ saoExprExcludes(ScalarArrayOpExpr *sao, parquet::RowGroupMetaData *rg,
 	int nelems;
 	deconstruct_array(at, elmtype, elmlen, elmbyval, elmalign, &elems, &nulls, &nelems);
 
+	/* Prune iff EVERY array element is provably outside the zone (so the IN
+	 * can match no row).  Any element we cannot interpret -> assume in range. */
 	bool anyInRange = false;
 	for (int i = 0; i < nelems && !anyInRange; i++)
 	{
-		int64_t v;
 		if (nulls[i])
 			continue;
-		if (!datumToColInt64(elems[i], ci->pgType, v))
+		if (isText)
 		{
-			anyInRange = true;
-			break;
+			std::string es;
+			if (!datumToStr(elems[i], elmtype, es))
+			{
+				anyInRange = true;
+				break;
+			}
+			if (ci->pgType == BPCHAROID)
+				rtrimSpaces(es);
+			if (!(byteLess(es, smn) || byteLess(smx, es)))
+				anyInRange = true;
 		}
-		if (!intRangeExcluded(BTEqualStrategyNumber, mn, mx, v))
-			anyInRange = true;
+		else if (isNumeric)
+		{
+			if (elmtype != NUMERICOID)
+			{
+				anyInRange = true;
+				break;
+			}
+			if (!numericRangeExcluded(BTEqualStrategyNumber, nMin, nMax, elems[i]))
+				anyInRange = true;
+		}
+		else if (isFloat)
+		{
+			double v;
+			if (!datumToColFloat(elems[i], elmtype, v))
+			{
+				anyInRange = true;
+				break;
+			}
+			if (!doubleRangeExcluded(BTEqualStrategyNumber, fmn, fmx, v))
+				anyInRange = true;
+		}
+		else
+		{
+			int64_t v;
+			if (!datumToColInt64(elems[i], ci->pgType, v))
+			{
+				anyInRange = true;
+				break;
+			}
+			if (!intRangeExcluded(BTEqualStrategyNumber, mn, mx, v))
+				anyInRange = true;
+		}
 	}
 	if (elems)
 		pfree(elems);
