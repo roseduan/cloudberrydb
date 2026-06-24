@@ -33,6 +33,7 @@ datalakeCreateFileReader(MemoryContext mcxt,
 				 void *extraArg,
 				 int64_t beginOffset,
 				 int64_t endOffset,
-				 void *buffer);
+				 void *buffer,
+				 List *quals);
 
 #endif // FILE_READER_H

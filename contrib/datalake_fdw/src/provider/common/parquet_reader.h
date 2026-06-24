@@ -25,9 +25,20 @@ private:
 	std::shared_ptr<parquet::FileMetaData> metadata;
 
 	dataBufferArray *buffer_;
+	List *quals_;	/* WHERE-clause quals (Expr) for row-group min/max skip; NIL if none */
+	int rowGroupsSkipped_ = 0;	/* count of row groups pruned by min/max stats (observability) */
 
 	bool invalidFileOffset(int64_t startIndex, int64_t preStartIndex, int64_t preCompressedSize);
 	void filterRowGroupByOffset(int64_t startOffset, int64_t endOffset);
+	/* issue #297: row-group min/max ("zone map") pruning.
+	 * rowGroupMightMatch returns false if quals_ prove row group rgIdx has no
+	 * matching rows.  The expr helpers take Expr* / parquet::RowGroupMetaData*
+	 * (declared void* to keep PG node types out of this header) and return true
+	 * only when they PROVE the row group is excluded. */
+	bool rowGroupMightMatch(int rgIdx);
+	bool exprExcludesRowGroup(void *expr, void *rgMeta);
+	bool opExprExcludesRowGroup(void *opExpr, void *rgMeta);
+	bool nullTestExcludesRowGroup(void *nullTest, void *rgMeta);
 	TIMEUNIT getTimeUnit(const parquet::ColumnDescriptor *field);
 
 	/* Per-type direct read functions — eliminate virtual + switch per column */
@@ -49,7 +60,7 @@ protected:
 	void decodeRecord();
 
 public:
-	ParquetReader(MemoryContext rowContext, char *filePath, gopherFS gopherFilesystem, dataBufferArray *buffer);
+	ParquetReader(MemoryContext rowContext, char *filePath, gopherFS gopherFilesystem, dataBufferArray *buffer, List *quals);
 	~ParquetReader();
 
 	void open(List *columnDesc, bool *attrUsed, int64_t startOffset, int64_t endOffset);

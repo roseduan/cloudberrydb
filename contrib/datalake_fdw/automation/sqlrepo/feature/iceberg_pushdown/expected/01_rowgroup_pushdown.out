@@ -1,0 +1,218 @@
+-- 01_rowgroup_pushdown.sql
+-- Iceberg AM row-group min/max ("zone map") predicate pushdown.
+--
+-- Loads data in two batches with disjoint value ranges so the table spans
+-- multiple Parquet data files (each a single row group).  The native Parquet
+-- reader prunes whole row groups whose column min/max cannot satisfy the
+-- WHERE clause.  Correctness is asserted by comparing results with pushdown
+-- enabled vs disabled -- they must be identical (prune only, never drop rows).
+\i ../../../lib/sql/common_setup.sql
+-- common_setup.sql
+-- Base setup for all datalake_fdw tests
+-- This file should be included at the beginning of all test SQL files
+-- Create required extensions
+CREATE EXTENSION IF NOT EXISTS datalake_fdw;
+psql:../../../lib/sql/common_setup.sql:6: NOTICE:  extension "datalake_fdw" already exists, skipping
+CREATE EXTENSION IF NOT EXISTS hive_connector;
+-- gp_exttable_delimiter may not be available in all environments.
+-- Silence the "already exists, skipping" NOTICE emitted in CI where the
+-- extension has been created by an earlier test or initdb step.
+SET client_min_messages = WARNING;
+DO $$ BEGIN
+    CREATE EXTENSION IF NOT EXISTS gp_exttable_delimiter;
+EXCEPTION WHEN OTHERS THEN
+    -- Extension not available, skip silently
+END $$;
+RESET client_min_messages;
+-- Create foreign data wrapper if not already present
+-- Note: CREATE FOREIGN DATA WRAPPER does not support IF NOT EXISTS syntax
+DO $$ BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_foreign_data_wrapper WHERE fdwname = 'datalake_fdw') THEN
+        EXECUTE 'CREATE FOREIGN DATA WRAPPER datalake_fdw
+            HANDLER datalake_fdw_handler
+            VALIDATOR datalake_fdw_validator
+            OPTIONS (mpp_execute ''all segments'')';
+    END IF;
+END $$;
+-- Set standard date style for consistent output
+SET datestyle = ISO, MDY;
+-- Create logging utility function
+CREATE OR REPLACE FUNCTION test_log(message text)
+RETURNS void AS $$
+BEGIN
+    RAISE NOTICE '[TEST] %', message;
+END;
+$$ LANGUAGE plpgsql;
+-- Log setup completion
+SELECT test_log('Common setup completed');
+psql:../../../lib/sql/common_setup.sql:43: NOTICE:  [TEST] Common setup completed
+ test_log 
+----------
+ 
+(1 row)
+
+SELECT test_log('Feature Test: Iceberg row-group min/max pushdown');
+psql:sql/01_rowgroup_pushdown.sql:12: NOTICE:  [TEST] Feature Test: Iceberg row-group min/max pushdown
+ test_log 
+----------
+ 
+(1 row)
+
+-- Builtin catalog + S3 (MinIO) volume.
+DROP SERVER IF EXISTS rgp_cat_srv CASCADE;
+psql:sql/01_rowgroup_pushdown.sql:15: NOTICE:  server "rgp_cat_srv" does not exist, skipping
+CREATE SERVER rgp_cat_srv FOREIGN DATA WRAPPER iceberg_catalog_fdw;
+CREATE USER MAPPING FOR current_user SERVER rgp_cat_srv;
+CREATE FOREIGN CATALOG rgp_cat SERVER rgp_cat_srv;
+SET iceberg_default_catalog='rgp_cat';
+DROP SERVER IF EXISTS rgp_vol_srv CASCADE;
+psql:sql/01_rowgroup_pushdown.sql:21: NOTICE:  server "rgp_vol_srv" does not exist, skipping
+CREATE SERVER rgp_vol_srv FOREIGN DATA WRAPPER iceberg_volume_fdw
+    OPTIONS (type 's3', endpoint 'http://minio:9000', region 'us-east-1',
+             bucket_name 'warehouse', path_style_access 'true');
+CREATE USER MAPPING FOR current_user SERVER rgp_vol_srv
+    OPTIONS (access_key_id 'admin', secret_access_key 'admin12345');
+CREATE FOREIGN VOLUME rgp_vol SERVER rgp_vol_srv OPTIONS(base_path '/rgp_vol/');
+SET iceberg_default_volume='rgp_vol';
+DROP TABLE IF EXISTS rgp_t;
+psql:sql/01_rowgroup_pushdown.sql:30: NOTICE:  table "rgp_t" does not exist, skipping
+CREATE ICEBERG TABLE rgp_t (id int, d date, ts timestamp, nm varchar(20));
+-- Batch A: ids 1..100, year 2020, nm NOT NULL.
+INSERT INTO rgp_t
+SELECT g, DATE '2020-01-01' + g,
+       TIMESTAMP '2020-01-01' + (g || ' days')::interval, 'a' || g
+FROM generate_series(1, 100) g;
+-- Batch B: ids 1001..1100, year 2024, nm all NULL.
+INSERT INTO rgp_t
+SELECT g, DATE '2024-01-01' + (g - 1000),
+       TIMESTAMP '2024-01-01' + ((g - 1000) || ' days')::interval, NULL
+FROM generate_series(1001, 1100) g;
+SELECT count(*) AS total_rows FROM rgp_t;
+ total_rows 
+------------
+        200
+(1 row)
+
+-- Helper: run the same battery of predicates and report counts.  With pushdown
+-- ON, row groups for the non-matching batch are skipped via min/max; results
+-- must match the pushdown-OFF baseline exactly.
+\set qbattery 'SELECT count(*) AS c_int_range FROM rgp_t WHERE id BETWEEN 1001 AND 1100; SELECT count(*) AS c_int_eq FROM rgp_t WHERE id = 50; SELECT count(*) AS c_int_gt FROM rgp_t WHERE id > 5000; SELECT count(*) AS c_date_ge FROM rgp_t WHERE d >= DATE ''2024-01-01''; SELECT count(*) AS c_date_lt FROM rgp_t WHERE d < DATE ''2021-01-01''; SELECT count(*) AS c_ts_lt FROM rgp_t WHERE ts < TIMESTAMP ''2021-01-01''; SELECT count(*) AS c_isnull FROM rgp_t WHERE nm IS NULL; SELECT count(*) AS c_isnotnull FROM rgp_t WHERE nm IS NOT NULL;'
+SELECT test_log('--- pushdown ON ---');
+psql:sql/01_rowgroup_pushdown.sql:52: NOTICE:  [TEST] --- pushdown ON ---
+ test_log 
+----------
+ 
+(1 row)
+
+SET gp_external_enable_filter_pushdown = on;
+:qbattery
+ c_int_range 
+-------------
+         100
+(1 row)
+
+ c_int_eq 
+----------
+        1
+(1 row)
+
+ c_int_gt 
+----------
+        0
+(1 row)
+
+ c_date_ge 
+-----------
+       100
+(1 row)
+
+ c_date_lt 
+-----------
+       100
+(1 row)
+
+ c_ts_lt 
+---------
+     100
+(1 row)
+
+ c_isnull 
+----------
+      100
+(1 row)
+
+ c_isnotnull 
+-------------
+         100
+(1 row)
+
+SELECT test_log('--- pushdown OFF (control: results must be identical) ---');
+psql:sql/01_rowgroup_pushdown.sql:56: NOTICE:  [TEST] --- pushdown OFF (control: results must be identical) ---
+ test_log 
+----------
+ 
+(1 row)
+
+SET gp_external_enable_filter_pushdown = off;
+:qbattery
+ c_int_range 
+-------------
+         100
+(1 row)
+
+ c_int_eq 
+----------
+        1
+(1 row)
+
+ c_int_gt 
+----------
+        0
+(1 row)
+
+ c_date_ge 
+-----------
+       100
+(1 row)
+
+ c_date_lt 
+-----------
+       100
+(1 row)
+
+ c_ts_lt 
+---------
+     100
+(1 row)
+
+ c_isnull 
+----------
+      100
+(1 row)
+
+ c_isnotnull 
+-------------
+         100
+(1 row)
+
+RESET gp_external_enable_filter_pushdown;
+-- Plan shape: predicate pushed into the Iceberg Custom Scan.
+EXPLAIN (COSTS OFF) SELECT count(*) FROM rgp_t WHERE id BETWEEN 1001 AND 1100;
+                      QUERY PLAN                       
+-------------------------------------------------------
+ Aggregate
+   ->  Gather Motion 3:1  (slice1; segments: 3)
+         ->  Custom Scan (Iceberg Scan) on rgp_t
+               Filter: ((id >= 1001) AND (id <= 1100))
+ Optimizer: GPORCA
+(5 rows)
+
+DROP TABLE rgp_t;
+DROP SERVER rgp_cat_srv CASCADE;
+psql:sql/01_rowgroup_pushdown.sql:66: NOTICE:  drop cascades to 2 other objects
+DETAIL:  drop cascades to user mapping for gpadmin on server rgp_cat_srv
+drop cascades to catalog rgp_cat
+DROP SERVER rgp_vol_srv CASCADE;
+psql:sql/01_rowgroup_pushdown.sql:67: NOTICE:  drop cascades to 2 other objects
+DETAIL:  drop cascades to user mapping for gpadmin on server rgp_vol_srv
+drop cascades to volume rgp_vol

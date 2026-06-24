@@ -176,7 +176,7 @@ icebergBuildDeleteIndex(MemoryContext parentMcxt,
 			FileFragment *deleteCopy = copyObject(deleteFile);
 			reader = (Reader *) datalakeCreateFileReader(indexMcxt, schema, attrUsed,
 														 true, deleteCopy,
-														 gopherFilesystem, -1, -1, NULL);
+														 gopherFilesystem, -1, -1, NULL, NIL);
 		}
 
 		while (reader->Next(reader, &record))

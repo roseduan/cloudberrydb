@@ -12,13 +12,307 @@ extern "C"
 #include "datatype/timestamp.h"
 #include "utils/memutils.h"
 #include "nodes/pg_list.h"
+#include "nodes/primnodes.h"
 #include "utils/builtins.h"
+#include "utils/lsyscache.h"
+#include "access/stratnum.h"
+#include "catalog/pg_type.h"
+#include "utils/date.h"
 #include "utils.h"
 #include "src/datalake_def.h"
 }
 
-ParquetReader::ParquetReader(MemoryContext rowContext, char *filePath, gopherFS gopherFilesystem, dataBufferArray *buffer)
-	: BaseFileReader(rowContext), numColumns_(0), filePath_(filePath), gopherFilesystem_(gopherFilesystem), buffer_(buffer)
+/* ---------------------------------------------------------------------------
+ * issue #297: row-group min/max ("zone map") pruning helpers.
+ *
+ * Given the WHERE-clause quals (raw Expr) and a Parquet row group's per-column
+ * statistics, decide whether the row group can be skipped entirely.  The rule
+ * is strictly conservative: a helper returns "excluded" only when it can PROVE
+ * no row in [min,max] satisfies the predicate; anything unhandled (unsupported
+ * type/operator, missing stats) returns "not excluded" so the row group is kept
+ * and the executor still applies the real qual.  v1 handles integer columns
+ * (INT32/INT64) with btree comparison operators and AND/OR composition.
+ * --------------------------------------------------------------------------- */
+namespace {
+
+/* Row group [min,max] as int64 in PG's internal domain for the column type
+ * (integer / date / timestamp).  Converts Parquet's Unix-epoch date/timestamp
+ * to PG's 2000-epoch domain using the SAME formulas the value reader uses, so
+ * the comparison is consistent.  Returns false for unsupported types, missing
+ * stats, or risky unit conversions (timestamp NANOS truncation). */
+static bool
+pqStatMinMaxInt64(parquet::ColumnChunkMetaData *cc, Oid pgType, int timeUnit,
+				  int64_t &mn, int64_t &mx)
+{
+	auto stats = cc->statistics();
+	if (!stats || !stats->HasMinMax())
+		return false;
+
+	int64_t rawMin, rawMax;
+	switch (cc->type())
+	{
+		case parquet::Type::INT32:
+		{
+			auto s = std::static_pointer_cast<parquet::Int32Statistics>(stats);
+			rawMin = s->min(); rawMax = s->max(); break;
+		}
+		case parquet::Type::INT64:
+		{
+			auto s = std::static_pointer_cast<parquet::Int64Statistics>(stats);
+			rawMin = s->min(); rawMax = s->max(); break;
+		}
+		default:
+			return false;
+	}
+
+	switch (pgType)
+	{
+		case INT2OID: case INT4OID: case INT8OID:
+			mn = rawMin; mx = rawMax;
+			return true;
+		case DATEOID:
+			/* Parquet DATE = days since Unix epoch; PG DateADT = days since 2000-01-01. */
+			mn = rawMin + (UNIX_EPOCH_JDATE - POSTGRES_EPOCH_JDATE);
+			mx = rawMax + (UNIX_EPOCH_JDATE - POSTGRES_EPOCH_JDATE);
+			return true;
+		case TIMESTAMPOID:
+		case TIMESTAMPTZOID:
+		{
+			const int64_t off = ((int64_t)(POSTGRES_EPOCH_JDATE - UNIX_EPOCH_JDATE))
+								 * SECS_PER_DAY * USECS_PER_SEC;
+			switch (timeUnit)
+			{
+				case TIMEUNIT_MILLIS:
+					mn = rawMin * 1000 - off; mx = rawMax * 1000 - off; return true;
+				case TIMEUNIT_MICROS:
+					mn = rawMin - off; mx = rawMax - off; return true;
+				default:
+					/* NANOS (/1000 truncation risks boundary errors) or unknown: keep. */
+					return false;
+			}
+		}
+		default:
+			return false;
+	}
+}
+
+/* Const value as int64 in the column's PG domain; false unless the (non-null)
+ * Const type matches the column's domain (int/date/timestamp). */
+static bool
+pgConstInt64(Const *c, Oid colType, int64_t &out)
+{
+	if (c->constisnull)
+		return false;
+	switch (colType)
+	{
+		case INT2OID: case INT4OID: case INT8OID:
+			switch (c->consttype)
+			{
+				case INT2OID: out = (int64_t) DatumGetInt16(c->constvalue); return true;
+				case INT4OID: out = (int64_t) DatumGetInt32(c->constvalue); return true;
+				case INT8OID: out = (int64_t) DatumGetInt64(c->constvalue); return true;
+				default: return false;
+			}
+		case DATEOID:
+			if (c->consttype != DATEOID) return false;
+			out = (int64_t) DatumGetDateADT(c->constvalue);
+			return true;
+		case TIMESTAMPOID:
+		case TIMESTAMPTZOID:
+			if (c->consttype != TIMESTAMPOID && c->consttype != TIMESTAMPTZOID) return false;
+			out = (int64_t) DatumGetTimestamp(c->constvalue);
+			return true;
+		default:
+			return false;
+	}
+}
+
+/* btree strategy (1=<,2=<=,3==,4=>=,5=>) for opno, or 0 if not a btree comparison. */
+static int
+pgOpBtreeStrategy(Oid opno)
+{
+	int			strat = 0;
+	List	   *interp = get_op_btree_interpretation(opno);
+	ListCell   *lc;
+
+	foreach(lc, interp)
+	{
+		OpBtreeInterpretation *opi = (OpBtreeInterpretation *) lfirst(lc);
+		if (opi->strategy >= BTLessStrategyNumber &&
+			opi->strategy <= BTGreaterStrategyNumber)
+		{
+			strat = opi->strategy;
+			break;
+		}
+	}
+	list_free_deep(interp);
+	return strat;
+}
+
+/* true iff integer range [mn,mx] provably has NO value v with (v strat c). */
+static bool
+intRangeExcluded(int strat, int64_t mn, int64_t mx, int64_t c)
+{
+	switch (strat)
+	{
+		case BTLessStrategyNumber:			return mn >= c;	/* no v < c   */
+		case BTLessEqualStrategyNumber:		return mn >  c;	/* no v <= c  */
+		case BTEqualStrategyNumber:			return c < mn || c > mx;
+		case BTGreaterEqualStrategyNumber:	return mx <  c;	/* no v >= c  */
+		case BTGreaterStrategyNumber:		return mx <= c;	/* no v > c   */
+		default:							return false;
+	}
+}
+
+} /* anonymous namespace */
+
+bool
+ParquetReader::opExprExcludesRowGroup(void *opPtr, void *rgPtr)
+{
+	OpExpr *op = (OpExpr *) opPtr;
+	parquet::RowGroupMetaData *rg = (parquet::RowGroupMetaData *) rgPtr;
+
+	if (list_length(op->args) != 2)
+		return false;
+
+	Node *larg = (Node *) linitial(op->args);
+	Node *rarg = (Node *) lsecond(op->args);
+	Var *var = NULL;
+	Const *con = NULL;
+	bool varOnLeft;
+
+	if (IsA(larg, Var) && IsA(rarg, Const)) { var = (Var *) larg; con = (Const *) rarg; varOnLeft = true; }
+	else if (IsA(larg, Const) && IsA(rarg, Var)) { var = (Var *) rarg; con = (Const *) larg; varOnLeft = false; }
+	else return false;
+
+	int strat = pgOpBtreeStrategy(op->opno);
+	if (strat == 0)
+		return false;
+
+	/* (const op var) -> express as (var flipped-op const). */
+	if (!varOnLeft)
+	{
+		switch (strat)
+		{
+			case BTLessStrategyNumber:			strat = BTGreaterStrategyNumber; break;
+			case BTLessEqualStrategyNumber:		strat = BTGreaterEqualStrategyNumber; break;
+			case BTGreaterStrategyNumber:		strat = BTLessStrategyNumber; break;
+			case BTGreaterEqualStrategyNumber:	strat = BTLessEqualStrategyNumber; break;
+			default: break;	/* '=' is symmetric */
+		}
+	}
+
+	int attno = var->varattno;
+	if (attno <= 0 || (size_t) attno > typeMap_.size())
+		return false;
+	const auto &ti = typeMap_[attno - 1];
+	if (ti.columnIndex_ < 0)
+		return false;
+
+	int64_t c;
+	if (!pgConstInt64(con, ti.pgTypeId_, c))
+		return false;
+
+	int64_t mn, mx;
+	auto cc = rg->ColumnChunk(ti.columnIndex_);
+	if (!pqStatMinMaxInt64(cc.get(), ti.pgTypeId_, (int) ti.timeUnit_, mn, mx))
+		return false;
+
+	return intRangeExcluded(strat, mn, mx, c);
+}
+
+/* true iff an IS NULL / IS NOT NULL test proves the row group has no matching rows. */
+bool
+ParquetReader::nullTestExcludesRowGroup(void *ntPtr, void *rgPtr)
+{
+	NullTest *nt = (NullTest *) ntPtr;
+	parquet::RowGroupMetaData *rg = (parquet::RowGroupMetaData *) rgPtr;
+
+	if (nt->arg == NULL || !IsA(nt->arg, Var))
+		return false;
+	Var *var = (Var *) nt->arg;
+	int attno = var->varattno;
+	if (attno <= 0 || (size_t) attno > typeMap_.size())
+		return false;
+	const auto &ti = typeMap_[attno - 1];
+	if (ti.columnIndex_ < 0)
+		return false;
+
+	auto cc = rg->ColumnChunk(ti.columnIndex_);
+	auto stats = cc->statistics();
+	if (!stats || !stats->HasNullCount())
+		return false;
+	int64_t nulls = stats->null_count();
+
+	if (nt->nulltesttype == IS_NULL)
+		return nulls == 0;					/* no nulls -> IS NULL excluded */
+	else								/* IS_NOT_NULL */
+		return nulls == rg->num_rows();		/* all null  -> IS NOT NULL excluded */
+}
+
+/* true iff expr proves the row group has no matching rows. */
+bool
+ParquetReader::exprExcludesRowGroup(void *exprPtr, void *rgPtr)
+{
+	Expr *expr = (Expr *) exprPtr;
+
+	if (expr == NULL)
+		return false;
+
+	switch (nodeTag(expr))
+	{
+		case T_OpExpr:
+			return opExprExcludesRowGroup(expr, rgPtr);
+		case T_NullTest:
+			return nullTestExcludesRowGroup(expr, rgPtr);
+		case T_BoolExpr:
+		{
+			BoolExpr *b = (BoolExpr *) expr;
+			ListCell *lc;
+
+			if (b->boolop == AND_EXPR)
+			{
+				/* AND excluded if ANY conjunct excludes. */
+				foreach(lc, b->args)
+					if (exprExcludesRowGroup((void *) lfirst(lc), rgPtr))
+						return true;
+				return false;
+			}
+			if (b->boolop == OR_EXPR)
+			{
+				/* OR excluded only if ALL disjuncts exclude. */
+				foreach(lc, b->args)
+					if (!exprExcludesRowGroup((void *) lfirst(lc), rgPtr))
+						return false;
+				return true;
+			}
+			return false;	/* NOT: conservative, keep */
+		}
+		default:
+			return false;
+	}
+}
+
+bool
+ParquetReader::rowGroupMightMatch(int rgIdx)
+{
+	if (quals_ == NIL)
+		return true;
+
+	auto rg = metadata->RowGroup(rgIdx);
+	ListCell *lc;
+
+	foreach(lc, quals_)
+	{
+		Expr *e = (Expr *) lfirst(lc);
+		if (exprExcludesRowGroup((void *) e, (void *) rg.get()))
+			return false;
+	}
+	return true;
+}
+
+ParquetReader::ParquetReader(MemoryContext rowContext, char *filePath, gopherFS gopherFilesystem, dataBufferArray *buffer, List *quals)
+	: BaseFileReader(rowContext), numColumns_(0), filePath_(filePath), gopherFilesystem_(gopherFilesystem), buffer_(buffer), quals_(quals)
 {}
 
 ParquetReader::~ParquetReader()
@@ -130,6 +424,12 @@ ParquetReader::open(List *columnDesc, bool *attrUsed, int64 startOffset, int64 e
 	metadata = reader_->metadata();
 	createMapping(columnDesc, attrUsed);
 	filterRowGroupByOffset(startOffset, endOffset);
+
+	/* Report row-group min/max pruning at DEBUG1 for diagnostics. */
+	if (rowGroupsSkipped_ > 0)
+		elog(DEBUG1,
+			 "datalake parquet row-group skip: file=%s skipped=%d of %d row groups by min/max",
+			 filePath_.c_str(), rowGroupsSkipped_, metadata->num_row_groups());
 }
 
 void
@@ -173,8 +473,13 @@ ParquetReader::filterRowGroupByOffset(int64_t startOffset, int64_t endOffset)
 
 		if (startOffset == -1)
 		{
-			rowGroups_.push_back(i);
-			rowPositions_.push_back(0);
+			if (rowGroupMightMatch(i))
+			{
+				rowGroups_.push_back(i);
+				rowPositions_.push_back(0);
+			}
+			else
+				rowGroupsSkipped_++;
 			continue;
 		}
 
@@ -201,8 +506,13 @@ ParquetReader::filterRowGroupByOffset(int64_t startOffset, int64_t endOffset)
 		int64_t midPoint = startIndex + totalSize / 2;
 		if (midPoint >= startOffset && midPoint < endOffset)
 		{
-			rowGroups_.push_back(i);
-			rowPositions_.push_back(curRowCount);
+			if (rowGroupMightMatch(i))
+			{
+				rowGroups_.push_back(i);
+				rowPositions_.push_back(curRowCount);
+			}
+			else
+				rowGroupsSkipped_++;
 		}
 
 		curRowCount += rowGroup->num_rows();

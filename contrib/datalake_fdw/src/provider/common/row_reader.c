@@ -324,6 +324,7 @@ datalakeRowReaderNext(DatalakeRowReader *reader, DatalakeInternalRecord *record)
 			initInfo.tableOptions = reader->tableOptions;
 			initInfo.buffer = reader->buffer;
 			initInfo.deleteIndex = reader->deleteIndex;
+			initInfo.filterQuals = reader->filterQuals;
 
 			/* For Iceberg tables, use the file ID stored in the task */
 			if (datalake_iceberg_file_index_map != NULL)
@@ -776,4 +777,14 @@ datalakeProtocolImportStart(dataLakeFdwScanState *scanstate, DatalakeProtocolCon
 													combinedScanTasks,
 													scanstate->options->format,
 													tableOptions);
+
+	/*
+	 * Carry the WHERE-clause quals (raw Expr list, captured on the QE in
+	 * datalakefdw_begin_foreign_scan when gp_external_enable_filter_pushdown
+	 * is on) down to the per-task data-file readers so the Parquet reader can
+	 * skip row groups by min/max statistics.  Pointer is valid for the scan
+	 * lifetime; the row groups are selected at file open during the scan.
+	 */
+	context->file->reader->filterQuals = scanstate->quals;
+	context->filterQuals = scanstate->quals;
 }

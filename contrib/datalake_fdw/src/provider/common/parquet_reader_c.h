@@ -15,7 +15,8 @@ extern "C" {
 typedef struct
 {
 	gopherFS gopherFilesystem;
-	void *buffer;  // dataBufferArray 
+	void *buffer;  // dataBufferArray
+	List *quals;   // WHERE-clause quals (Expr) for row-group min/max pushdown; NIL if none
 } ParquetReadContext;
 
 void *create_parquet_reader(MemoryContext mcxt, void *filePath, void *readContext);

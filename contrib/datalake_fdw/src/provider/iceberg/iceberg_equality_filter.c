@@ -182,7 +182,7 @@ readEqualityDeletes(MemoryContext filterMcxt,
 	createDeletesReaderResources(filterMcxt, datafileDesc, &deleteFile, &deletesSet, deletes);
 	elog(DEBUG1, "scanning equalityDeletes file %s", deleteFile->filePath);
 	curReader = (Reader *) datalakeCreateFileReader(readerMcxt, datafileDesc, deletesSet->attrUsed,
-													true, deleteFile, gopherFilesystem, -1, -1, NULL);
+													true, deleteFile, gopherFilesystem, -1, -1, NULL, NIL);
 	destroyDeletesReaderResource(&deletes);
 
 	result = lappend(result, deletesSet);
@@ -207,7 +207,7 @@ readEqualityDeletes(MemoryContext filterMcxt,
 
 			elog(DEBUG1, "scanning equalityDeletes file %s", deleteFile->filePath);
 			curReader = (Reader *) datalakeCreateFileReader(readerMcxt, datafileDesc, deletesSet->attrUsed,
-															true, deleteFile, gopherFilesystem, -1, -1, NULL);
+															true, deleteFile, gopherFilesystem, -1, -1, NULL, NIL);
 			destroyDeletesReaderResource(&deletes);
 
 			result = lappend(result, deletesSet);

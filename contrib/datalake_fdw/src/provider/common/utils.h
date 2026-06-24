@@ -27,6 +27,7 @@ typedef struct DatalakeReaderInitInfo
 	void		   *buffer;
 	uint32			fileId;			/* File ID for current task (Iceberg only) */
 	void		   *deleteIndex;	/* IcebergDeleteIndex for pre-built delete bitmaps */
+	List		   *filterQuals;	/* WHERE-clause quals for row-group pushdown (data file only) */
 } DatalakeReaderInitInfo;
 
 typedef struct DatalakeInternalRecord
@@ -107,6 +108,7 @@ typedef struct DatalakeRowReader
 	Reader					*handler;
 	char					format;
 	ExternalTableMetadata	*tableOptions;
+	List					*filterQuals;	/* WHERE-clause quals (Expr) for row-group min/max pushdown */
 	MemoryContext			taskMcxt;
 	MemoryContext			taskListMcxt;	/* holds the persistent copy of
 											 * fileScanTasks; freed once at

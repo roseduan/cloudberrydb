@@ -224,7 +224,7 @@ processDataBlock(HudiMergedLogfileRecordReader *reader, HudiLogFileBlock *block)
 	schema = (char *) logBlockGetSchema(block);
 	blockReader = (Reader *) datalakeCreateFileReader(reader->readerMcxt, reader->columnDesc, reader->attrUsed,
 											  false, stream, schema, dataBlock->length, strlen(schema),
-											  NULL);
+											  NULL, NIL);
 
 	datalakeInitRecord(&record, reader->mergeProvider->recordDesc, list_length(reader->columnDesc));
 	while (true)

@@ -11,7 +11,7 @@ create_parquet_reader(MemoryContext mcxt, void *filePath, void *readContext)
 
 	try
 	{
-		reader = new ParquetReader(mcxt, (char *) filePath, context->gopherFilesystem, (dataBufferArray*) context->buffer);
+		reader = new ParquetReader(mcxt, (char *) filePath, context->gopherFilesystem, (dataBufferArray*) context->buffer, context->quals);
 	}
 	catch (std::exception &e)
 	{

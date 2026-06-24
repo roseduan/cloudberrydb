@@ -55,7 +55,7 @@ createLogFilter(MemoryContext mcxt,
 	/* data files only */
 	filter = (Reader *) datalakeCreateFileReader(mcxt, datafileDesc, attrUsed, true,
 										 dataFile, gopherFilesystem, datafileStart,
-										 datafileStart + dataFileLength, buffer);
+										 datafileStart + dataFileLength, buffer, NIL);
 
 	if (list_length(deltaLogs) == 0 || list_length(tableOptions->recordKeyFields) == 0)
 	{

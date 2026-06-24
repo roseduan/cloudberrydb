@@ -57,7 +57,8 @@ datalakeCreateFileReader(MemoryContext mcxt,
 				 void *extraArg,
 				 int64_t beginOffset,
 				 int64_t endOffset,
-				 void *buffer)
+				 void *buffer,
+				 List *quals)
 {
 	FileReader *reader = palloc0(sizeof(FileReader));
 	ParquetReadContext parquetContext;
@@ -73,6 +74,7 @@ datalakeCreateFileReader(MemoryContext mcxt,
 			reader->formatReader = &parquetReader;
 			parquetContext.gopherFilesystem = (gopherFS) extraArg;
 			parquetContext.buffer = buffer;
+			parquetContext.quals = quals;
 			extraArg = (void *) &parquetContext;
 			break;
 		case ORC:
