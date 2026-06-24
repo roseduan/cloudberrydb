@@ -63,6 +63,11 @@ pqStatMinMaxInt64(parquet::ColumnChunkMetaData *cc, Oid pgType, int timeUnit,
 			auto s = std::static_pointer_cast<parquet::Int64Statistics>(stats);
 			rawMin = s->min(); rawMax = s->max(); break;
 		}
+		case parquet::Type::BOOLEAN:
+		{
+			auto s = std::static_pointer_cast<parquet::BoolStatistics>(stats);
+			rawMin = s->min() ? 1 : 0; rawMax = s->max() ? 1 : 0; break;
+		}
 		default:
 			return false;
 	}
@@ -70,6 +75,7 @@ pqStatMinMaxInt64(parquet::ColumnChunkMetaData *cc, Oid pgType, int timeUnit,
 	switch (pgType)
 	{
 		case INT2OID: case INT4OID: case INT8OID:
+		case BOOLOID:		/* bool ordered false(0) < true(1) */
 			mn = rawMin; mx = rawMax;
 			return true;
 		case DATEOID:
@@ -123,6 +129,10 @@ pgConstInt64(Const *c, Oid colType, int64_t &out)
 		case TIMESTAMPTZOID:
 			if (c->consttype != TIMESTAMPOID && c->consttype != TIMESTAMPTZOID) return false;
 			out = (int64_t) DatumGetTimestamp(c->constvalue);
+			return true;
+		case BOOLOID:
+			if (c->consttype != BOOLOID) return false;
+			out = DatumGetBool(c->constvalue) ? 1 : 0;
 			return true;
 		default:
 			return false;
@@ -179,6 +189,7 @@ datumToColInt64(Datum d, Oid colType, int64_t &out)
 		case DATEOID: out = (int64_t) DatumGetDateADT(d); return true;
 		case TIMESTAMPOID:
 		case TIMESTAMPTZOID: out = (int64_t) DatumGetTimestamp(d); return true;
+		case BOOLOID: out = DatumGetBool(d) ? 1 : 0; return true;
 		default: return false;
 	}
 }
@@ -505,6 +516,33 @@ ParquetReader::saoExprExcludesRowGroup(void *saoPtr, void *rgPtr)
 	return !anyInRange;				/* excluded iff no element in [min,max] */
 }
 
+/* A boolean column used directly as a qual ("WHERE flag" => flag = true) or
+ * negated ("WHERE NOT flag" => flag = false).  Excluded when the row group
+ * holds none of the wanted value. */
+bool
+ParquetReader::boolVarExcludesRowGroup(void *varPtr, void *rgPtr, bool wantTrue)
+{
+	Var *var = (Var *) varPtr;
+	parquet::RowGroupMetaData *rg = (parquet::RowGroupMetaData *) rgPtr;
+
+	int attno = var->varattno;
+	if (attno <= 0 || (size_t) attno > typeMap_.size())
+		return false;
+	const auto &ti = typeMap_[attno - 1];
+	if (ti.pgTypeId_ != BOOLOID || ti.columnIndex_ < 0)
+		return false;
+
+	int64_t mn, mx;
+	auto cc = rg->ColumnChunk(ti.columnIndex_);
+	if (!pqStatMinMaxInt64(cc.get(), ti.pgTypeId_, (int) ti.timeUnit_, mn, mx))
+		return false;
+
+	if (wantTrue)
+		return mx == 0;		/* no true value present */
+	else
+		return mn == 1;		/* no false value present */
+}
+
 /* true iff expr proves the row group has no matching rows. */
 bool
 ParquetReader::exprExcludesRowGroup(void *exprPtr, void *rgPtr)
@@ -522,6 +560,11 @@ ParquetReader::exprExcludesRowGroup(void *exprPtr, void *rgPtr)
 			return saoExprExcludesRowGroup(expr, rgPtr);
 		case T_NullTest:
 			return nullTestExcludesRowGroup(expr, rgPtr);
+		case T_Var:
+			/* bare boolean column qual: "WHERE flag" => flag = true */
+			if (((Var *) expr)->vartype == BOOLOID)
+				return boolVarExcludesRowGroup(expr, rgPtr, true);
+			return false;
 		case T_BoolExpr:
 		{
 			BoolExpr *b = (BoolExpr *) expr;
@@ -543,7 +586,14 @@ ParquetReader::exprExcludesRowGroup(void *exprPtr, void *rgPtr)
 						return false;
 				return true;
 			}
-			return false;	/* NOT: conservative, keep */
+			/* NOT of a bare boolean column: "WHERE NOT flag" => flag = false */
+			if (b->boolop == NOT_EXPR && list_length(b->args) == 1)
+			{
+				Node *a = (Node *) linitial(b->args);
+				if (IsA(a, Var) && ((Var *) a)->vartype == BOOLOID)
+					return boolVarExcludesRowGroup(a, rgPtr, false);
+			}
+			return false;	/* other NOT: conservative, keep */
 		}
 		default:
 			return false;

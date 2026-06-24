@@ -28,20 +28,20 @@ CREATE FOREIGN VOLUME rgp_vol SERVER rgp_vol_srv OPTIONS(base_path '/rgp_vol/');
 SET iceberg_default_volume='rgp_vol';
 
 DROP TABLE IF EXISTS rgp_t;
-CREATE ICEBERG TABLE rgp_t (id int, d date, ts timestamp, nm varchar(20), amt numeric(10,2));
+CREATE ICEBERG TABLE rgp_t (id int, d date, ts timestamp, nm varchar(20), amt numeric(10,2), flag bool);
 
--- Batch A: ids 1..100, year 2020, nm NOT NULL, amt 1.25..125.00.
+-- Batch A: ids 1..100, year 2020, nm NOT NULL, amt 1.25..125.00, flag true.
 INSERT INTO rgp_t
 SELECT g, DATE '2020-01-01' + g,
        TIMESTAMP '2020-01-01' + (g || ' days')::interval, 'a' || g,
-       (g * 1.25)::numeric(10,2)
+       (g * 1.25)::numeric(10,2), true
 FROM generate_series(1, 100) g;
 
--- Batch B: ids 1001..1100, year 2024, nm all NULL, amt 1251.25..1375.00.
+-- Batch B: ids 1001..1100, year 2024, nm all NULL, amt 1251.25..1375.00, flag false.
 INSERT INTO rgp_t
 SELECT g, DATE '2024-01-01' + (g - 1000),
        TIMESTAMP '2024-01-01' + ((g - 1000) || ' days')::interval, NULL,
-       (g * 1.25)::numeric(10,2)
+       (g * 1.25)::numeric(10,2), false
 FROM generate_series(1001, 1100) g;
 
 SELECT count(*) AS total_rows FROM rgp_t;
@@ -49,7 +49,7 @@ SELECT count(*) AS total_rows FROM rgp_t;
 -- Helper: run the same battery of predicates and report counts.  With pushdown
 -- ON, row groups for the non-matching batch are skipped via min/max; results
 -- must match the pushdown-OFF baseline exactly.
-\set qbattery 'SELECT count(*) AS c_int_range FROM rgp_t WHERE id BETWEEN 1001 AND 1100; SELECT count(*) AS c_int_eq FROM rgp_t WHERE id = 50; SELECT count(*) AS c_int_gt FROM rgp_t WHERE id > 5000; SELECT count(*) AS c_date_ge FROM rgp_t WHERE d >= DATE ''2024-01-01''; SELECT count(*) AS c_date_lt FROM rgp_t WHERE d < DATE ''2021-01-01''; SELECT count(*) AS c_ts_lt FROM rgp_t WHERE ts < TIMESTAMP ''2021-01-01''; SELECT count(*) AS c_isnull FROM rgp_t WHERE nm IS NULL; SELECT count(*) AS c_isnotnull FROM rgp_t WHERE nm IS NOT NULL; SELECT count(*) AS c_text_eq FROM rgp_t WHERE nm = ''a50''; SELECT count(*) AS c_text_none FROM rgp_t WHERE nm = ''zzz''; SELECT count(*) AS c_in_hit FROM rgp_t WHERE id IN (50, 1050); SELECT count(*) AS c_in_none FROM rgp_t WHERE id IN (8000, 9000); SELECT count(*) AS c_num_gt FROM rgp_t WHERE amt > 1300.00; SELECT count(*) AS c_num_lt FROM rgp_t WHERE amt < 200.00;'
+\set qbattery 'SELECT count(*) AS c_int_range FROM rgp_t WHERE id BETWEEN 1001 AND 1100; SELECT count(*) AS c_int_eq FROM rgp_t WHERE id = 50; SELECT count(*) AS c_int_gt FROM rgp_t WHERE id > 5000; SELECT count(*) AS c_date_ge FROM rgp_t WHERE d >= DATE ''2024-01-01''; SELECT count(*) AS c_date_lt FROM rgp_t WHERE d < DATE ''2021-01-01''; SELECT count(*) AS c_ts_lt FROM rgp_t WHERE ts < TIMESTAMP ''2021-01-01''; SELECT count(*) AS c_isnull FROM rgp_t WHERE nm IS NULL; SELECT count(*) AS c_isnotnull FROM rgp_t WHERE nm IS NOT NULL; SELECT count(*) AS c_text_eq FROM rgp_t WHERE nm = ''a50''; SELECT count(*) AS c_text_none FROM rgp_t WHERE nm = ''zzz''; SELECT count(*) AS c_in_hit FROM rgp_t WHERE id IN (50, 1050); SELECT count(*) AS c_in_none FROM rgp_t WHERE id IN (8000, 9000); SELECT count(*) AS c_num_gt FROM rgp_t WHERE amt > 1300.00; SELECT count(*) AS c_num_lt FROM rgp_t WHERE amt < 200.00; SELECT count(*) AS c_bool_true FROM rgp_t WHERE flag; SELECT count(*) AS c_bool_false FROM rgp_t WHERE NOT flag;'
 
 SELECT test_log('--- pushdown ON ---');
 SET gp_external_enable_filter_pushdown = on;
