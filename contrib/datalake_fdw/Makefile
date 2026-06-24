@@ -75,6 +75,7 @@ OBJS = 	src/datalake_fdw.o \
 		src/provider/common/utils.o \
 		src/provider/common/parquet_reader_c.o \
 		src/provider/common/parquet_reader.o \
+		src/provider/common/rowgroup_filter.o \
 		src/provider/common/avro_block_reader.o \
 		src/provider/common/avro_block_reader_c.o \
 		src/provider/common/file_reader.o \

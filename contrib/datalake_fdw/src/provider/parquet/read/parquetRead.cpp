@@ -128,6 +128,52 @@ bool parquetRead::readNextFile()
     return true;
 }
 
+/*
+ * issue #297: build the column metadata used for row-group min/max pruning.
+ * The generic parquet reader maps table column i to Parquet column i
+ * positionally (see checkSchemaCompatibility).  timeUnit is left unset (-1) so
+ * timestamps fall through to "keep" -- date/int/numeric/text/bool still prune.
+ */
+void parquetRead::buildRowGroupFilterCols()
+{
+	rgFilterCols.clear();
+	auto schema = fileReader.getFileMetadata()->schema();
+	int ncol = schema->num_columns();
+	int natts = tupdesc->natts;
+
+	for (int i = 0; i < natts; i++)
+	{
+		RowGroupColMeta m;
+		m.pgType = tupdesc->attrs[i].atttypid;
+		m.colIdx = (i < ncol) ? i : -1;
+		m.scale = 0;
+		m.precision = 0;
+		m.typeLength = 0;
+		m.timeUnit = -1;
+		if (m.colIdx >= 0)
+		{
+			const auto &col = schema->Column(i);
+			m.scale = col->type_scale();
+			m.precision = col->type_precision();
+			m.typeLength = col->type_length();
+		}
+		rgFilterCols.push_back(m);
+	}
+}
+
+/* true if row group rgIdx should be read (not provably excluded by quals). */
+bool parquetRead::rowGroupKept(int rgIdx)
+{
+	if (scanstate->quals == NIL)
+		return true;
+	auto rg = fileReader.getFileMetadata()->RowGroup(rgIdx);
+	bool keep = !rowGroupExcludedByQuals(scanstate->quals, rg.get(), rgFilterCols);
+	if (!keep)
+		elog(DEBUG1, "datalake parquet row-group skip: file=%s rg=%d skipped by min/max",
+			 curFileName.c_str(), rgIdx);
+	return keep;
+}
+
 bool parquetRead::getRowGropFromSmallFile(metaInfo info)
 {
 	fileReader.closeParquetReader();
@@ -139,10 +185,12 @@ bool parquetRead::getRowGropFromSmallFile(metaInfo info)
     }
 
     checkSchemaCompatibility();
+    buildRowGroupFilterCols();
 
     for (int i = 0; i < fileReader.getRowGroupNums(); i++)
     {
-        tempRowGroupNums.push_back(i);
+        if (rowGroupKept(i))
+            tempRowGroupNums.push_back(i);
     }
     return true;
 }
@@ -162,9 +210,13 @@ bool parquetRead::getRowGropFromBigFile(metaInfo info)
         }
 
         checkSchemaCompatibility();
+        buildRowGroupFilterCols();
         curFileName = info.fileName;
         for (int i = 0; i < fileReader.getRowGroupNums(); i++)
         {
+            /* min/max pruned row groups are dropped entirely (not deferred). */
+            if (!rowGroupKept(i))
+                continue;
             int64_t offset = fileReader.rowGroupOffset(i);
             if (info.rangeOffset <= offset && offset < info.rangeOffsetEnd)
             {

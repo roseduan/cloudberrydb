@@ -36,11 +36,6 @@ private:
 	 * (declared void* to keep PG node types out of this header) and return true
 	 * only when they PROVE the row group is excluded. */
 	bool rowGroupMightMatch(int rgIdx);
-	bool exprExcludesRowGroup(void *expr, void *rgMeta);
-	bool opExprExcludesRowGroup(void *opExpr, void *rgMeta);
-	bool nullTestExcludesRowGroup(void *nullTest, void *rgMeta);
-	bool saoExprExcludesRowGroup(void *scalarArrayOpExpr, void *rgMeta);
-	bool boolVarExcludesRowGroup(void *var, void *rgMeta, bool wantTrue);
 	TIMEUNIT getTimeUnit(const parquet::ColumnDescriptor *field);
 
 	/* Per-type direct read functions — eliminate virtual + switch per column */

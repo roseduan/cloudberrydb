@@ -5,6 +5,7 @@
 #include "src/common/readPolicy.h"
 #include "src/provider/provider.h"
 #include "src/common/dataBufferArray.h"
+#include "src/provider/common/rowgroup_filter.h"
 
 
 namespace Datalake {
@@ -40,11 +41,17 @@ private:
 
 	bool checkSchemaCompatibility();
 
+	/* issue #297: row-group min/max pushdown for the generic parquet path.
+	 * Built (positional table<->parquet column map) when a file is opened. */
+	void buildRowGroupFilterCols();
+	bool rowGroupKept(int rgIdx);
+
 	readBlockPolicy blockPolicy;
 	std::vector<int> rowGroupNums;
     std::vector<int> tempRowGroupNums;
 	int curRowGroupNum;
 	parquetFileReader fileReader;
+	std::vector<RowGroupColMeta> rgFilterCols;
 };
 
 }
