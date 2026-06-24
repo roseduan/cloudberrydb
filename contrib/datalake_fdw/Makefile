@@ -54,6 +54,7 @@ OBJS = 	src/datalake_fdw.o \
 		src/provider/orc/read/orcReadInterface.o \
 		src/provider/orc/read/orcFileReader.o \
 		src/provider/orc/read/orcRead.o \
+		src/provider/orc/read/orc_stripe_filter.o \
 		src/provider/orc/read/orcReadRecordBatch.o \
 		src/provider/orc/write/orcWriter.o \
 		src/provider/archive/read/archiveFileRead.o \

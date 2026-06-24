@@ -1,8 +1,11 @@
 /*-------------------------------------------------------------------------
  *
  * rowgroup_filter.cpp
- *    Parquet row-group min/max ("zone map") predicate pruning shared by both
- *    parquet readers.  See rowgroup_filter.h.
+ *    Columnar min/max ("zone map") predicate pruning shared by the Parquet and
+ *    ORC readers.  See rowgroup_filter.h.
+ *
+ *    The qual-walking and PG-side type/operator logic here is format
+ *    independent; per-format statistics access is provided via IZoneStats.
  *
  * IDENTIFICATION
  *	  contrib/datalake_fdw/src/provider/common/rowgroup_filter.cpp
@@ -33,66 +36,7 @@ extern "C"
 
 namespace {
 
-/* Row group [min,max] as int64 in PG's internal domain (int/date/timestamp/bool). */
-static bool
-pqStatMinMaxInt64(parquet::ColumnChunkMetaData *cc, Oid pgType, int timeUnit,
-				  int64_t &mn, int64_t &mx)
-{
-	auto stats = cc->statistics();
-	if (!stats || !stats->HasMinMax())
-		return false;
-
-	int64_t rawMin, rawMax;
-	switch (cc->type())
-	{
-		case parquet::Type::INT32:
-		{
-			auto s = std::static_pointer_cast<parquet::Int32Statistics>(stats);
-			rawMin = s->min(); rawMax = s->max(); break;
-		}
-		case parquet::Type::INT64:
-		{
-			auto s = std::static_pointer_cast<parquet::Int64Statistics>(stats);
-			rawMin = s->min(); rawMax = s->max(); break;
-		}
-		case parquet::Type::BOOLEAN:
-		{
-			auto s = std::static_pointer_cast<parquet::BoolStatistics>(stats);
-			rawMin = s->min() ? 1 : 0; rawMax = s->max() ? 1 : 0; break;
-		}
-		default:
-			return false;
-	}
-
-	switch (pgType)
-	{
-		case INT2OID: case INT4OID: case INT8OID:
-		case BOOLOID:		/* bool ordered false(0) < true(1) */
-			mn = rawMin; mx = rawMax;
-			return true;
-		case DATEOID:
-			mn = rawMin + (UNIX_EPOCH_JDATE - POSTGRES_EPOCH_JDATE);
-			mx = rawMax + (UNIX_EPOCH_JDATE - POSTGRES_EPOCH_JDATE);
-			return true;
-		case TIMESTAMPOID:
-		case TIMESTAMPTZOID:
-		{
-			const int64_t off = ((int64_t)(POSTGRES_EPOCH_JDATE - UNIX_EPOCH_JDATE))
-								 * SECS_PER_DAY * USECS_PER_SEC;
-			switch (timeUnit)
-			{
-				case TIMEUNIT_MILLIS:
-					mn = rawMin * 1000 - off; mx = rawMax * 1000 - off; return true;
-				case TIMEUNIT_MICROS:
-					mn = rawMin - off; mx = rawMax - off; return true;
-				default:
-					return false;	/* NANOS truncation / unknown: keep */
-			}
-		}
-		default:
-			return false;
-	}
-}
+/* ---- PG-side primitives (format independent) ------------------------- */
 
 /* Const value as int64 in the column's PG domain; false unless the (non-null)
  * Const type matches the column's domain. */
@@ -183,34 +127,6 @@ datumToColInt64(Datum d, Oid colType, int64_t &out)
 	}
 }
 
-/* Row group [min,max] as double (parquet FLOAT/DOUBLE physical types). */
-static bool
-pqStatMinMaxFloat(parquet::ColumnChunkMetaData *cc, double &mn, double &mx)
-{
-	auto stats = cc->statistics();
-	if (!stats || !stats->HasMinMax())
-		return false;
-	switch (cc->type())
-	{
-		case parquet::Type::FLOAT:
-		{
-			auto s = std::static_pointer_cast<parquet::FloatStatistics>(stats);
-			mn = (double) s->min(); mx = (double) s->max(); break;
-		}
-		case parquet::Type::DOUBLE:
-		{
-			auto s = std::static_pointer_cast<parquet::DoubleStatistics>(stats);
-			mn = s->min(); mx = s->max(); break;
-		}
-		default:
-			return false;
-	}
-	/* NaN in the bounds means the order is undefined for zone-map purposes. */
-	if (std::isnan(mn) || std::isnan(mx))
-		return false;
-	return true;
-}
-
 /* Const value as double; accepts float4/float8 consts (cross-type compares
  * between float4 and float8 share a btree opfamily). */
 static bool
@@ -277,23 +193,6 @@ datumToStr(Datum d, Oid elmtype, std::string &out)
 	return true;
 }
 
-/* BYTE_ARRAY [min,max] (UNSIGNED byte order, truncation widens -> safe for '='). */
-static bool
-pqStatMinMaxStr(parquet::ColumnChunkMetaData *cc, std::string &mn, std::string &mx)
-{
-	if (cc->type() != parquet::Type::BYTE_ARRAY)
-		return false;
-	auto stats = cc->statistics();
-	if (!stats || !stats->HasMinMax())
-		return false;
-	auto s = std::static_pointer_cast<parquet::ByteArrayStatistics>(stats);
-	parquet::ByteArray lo = s->min();
-	parquet::ByteArray hi = s->max();
-	mn.assign((const char *) lo.ptr, lo.len);
-	mx.assign((const char *) hi.ptr, hi.len);
-	return true;
-}
-
 static bool
 pgConstStr(Const *c, Oid colType, std::string &out)
 {
@@ -318,60 +217,6 @@ byteLess(const std::string &a, const std::string &b)
 	return a.size() < b.size();
 }
 
-static std::string
-decimalToStr(int64_t unscaled, int scale)
-{
-	if (scale <= 0)
-		return std::to_string(unscaled);
-	std::string s = std::to_string(unscaled);
-	bool neg = (!s.empty() && s[0] == '-');
-	std::string digits = neg ? s.substr(1) : s;
-	if ((int) digits.size() <= scale)
-		digits = std::string(scale - digits.size() + 1, '0') + digits;
-	std::string out = digits.substr(0, digits.size() - scale) + "." +
-					  digits.substr(digits.size() - scale);
-	return neg ? ("-" + out) : out;
-}
-
-static bool
-pqStatMinMaxDecimalStr(parquet::ColumnChunkMetaData *cc, int scale, int precision,
-					   int typeLength, std::string &mn, std::string &mx)
-{
-	auto stats = cc->statistics();
-	if (!stats || !stats->HasMinMax())
-		return false;
-	int64_t rawMin, rawMax;
-	switch (cc->type())
-	{
-		case parquet::Type::INT32:
-		{
-			auto s = std::static_pointer_cast<parquet::Int32Statistics>(stats);
-			rawMin = s->min(); rawMax = s->max(); break;
-		}
-		case parquet::Type::INT64:
-		{
-			auto s = std::static_pointer_cast<parquet::Int64Statistics>(stats);
-			rawMin = s->min(); rawMax = s->max(); break;
-		}
-		case parquet::Type::FIXED_LEN_BYTE_ARRAY:
-		{
-			if (precision <= 0 || precision > 18)
-				return false;
-			auto s = std::static_pointer_cast<parquet::FLBAStatistics>(stats);
-			parquet::FixedLenByteArray lo = s->min();
-			parquet::FixedLenByteArray hi = s->max();
-			rawMin = FLBA_to_int64(lo.ptr, typeLength);
-			rawMax = FLBA_to_int64(hi.ptr, typeLength);
-			break;
-		}
-		default:
-			return false;
-	}
-	mn = decimalToStr(rawMin, scale);
-	mx = decimalToStr(rawMax, scale);
-	return true;
-}
-
 static bool
 numericRangeExcluded(int strat, Datum minN, Datum maxN, Datum c)
 {
@@ -393,7 +238,7 @@ numericRangeExcluded(int strat, Datum minN, Datum maxN, Datum c)
 	}
 }
 
-/* Resolve a Var to its column meta; nullptr if out of range / no Parquet column. */
+/* Resolve a Var to its column meta; nullptr if out of range / no column stats. */
 static const RowGroupColMeta *
 colFor(Var *var, const std::vector<RowGroupColMeta> &cols)
 {
@@ -406,8 +251,10 @@ colFor(Var *var, const std::vector<RowGroupColMeta> &cols)
 	return ci;
 }
 
+/* ---- Generic qual evaluation (over IZoneStats) ----------------------- */
+
 static bool
-opExprExcludes(OpExpr *op, parquet::RowGroupMetaData *rg,
+opExprExcludes(OpExpr *op, IZoneStats &stats,
 			   const std::vector<RowGroupColMeta> &cols)
 {
 	if (list_length(op->args) != 2)
@@ -441,7 +288,6 @@ opExprExcludes(OpExpr *op, parquet::RowGroupMetaData *rg,
 	const RowGroupColMeta *ci = colFor(var, cols);
 	if (!ci)
 		return false;
-	auto cc = rg->ColumnChunk(ci->colIdx);
 
 	/* Text/varchar/bpchar: equality only (byte-order vs collation).  For
 	 * bpchar, trailing spaces are insignificant; the writer stores CHAR(N)
@@ -454,7 +300,7 @@ opExprExcludes(OpExpr *op, parquet::RowGroupMetaData *rg,
 		std::string cs, mns, mxs;
 		if (!pgConstStr(con, ci->pgType, cs))
 			return false;
-		if (!pqStatMinMaxStr(cc.get(), mns, mxs))
+		if (!stats.minMaxStr(*ci, mns, mxs))
 			return false;
 		if (ci->pgType == BPCHAROID)
 		{
@@ -472,7 +318,7 @@ opExprExcludes(OpExpr *op, parquet::RowGroupMetaData *rg,
 		if (!pgConstFloat(con, c))
 			return false;
 		double mn, mx;
-		if (!pqStatMinMaxFloat(cc.get(), mn, mx))
+		if (!stats.minMaxFloat(*ci, mn, mx))
 			return false;
 		return doubleRangeExcluded(strat, mn, mx, c);
 	}
@@ -483,7 +329,7 @@ opExprExcludes(OpExpr *op, parquet::RowGroupMetaData *rg,
 		if (con->consttype != NUMERICOID || con->constisnull)
 			return false;
 		std::string mns, mxs;
-		if (!pqStatMinMaxDecimalStr(cc.get(), ci->scale, ci->precision, ci->typeLength, mns, mxs))
+		if (!stats.minMaxDecimalStr(*ci, mns, mxs))
 			return false;
 		Datum minN = gpdbDirectFunctionCall3(numeric_in, CStringGetDatum(mns.c_str()),
 											 ObjectIdGetDatum(InvalidOid), Int32GetDatum(-1));
@@ -497,13 +343,13 @@ opExprExcludes(OpExpr *op, parquet::RowGroupMetaData *rg,
 	if (!pgConstInt64(con, ci->pgType, c))
 		return false;
 	int64_t mn, mx;
-	if (!pqStatMinMaxInt64(cc.get(), ci->pgType, ci->timeUnit, mn, mx))
+	if (!stats.minMaxInt64(*ci, mn, mx))
 		return false;
 	return intRangeExcluded(strat, mn, mx, c);
 }
 
 static bool
-nullTestExcludes(NullTest *nt, parquet::RowGroupMetaData *rg,
+nullTestExcludes(NullTest *nt, IZoneStats &stats,
 				 const std::vector<RowGroupColMeta> &cols)
 {
 	if (nt->arg == NULL || !IsA(nt->arg, Var))
@@ -511,19 +357,17 @@ nullTestExcludes(NullTest *nt, parquet::RowGroupMetaData *rg,
 	const RowGroupColMeta *ci = colFor((Var *) nt->arg, cols);
 	if (!ci)
 		return false;
-	auto cc = rg->ColumnChunk(ci->colIdx);
-	auto stats = cc->statistics();
-	if (!stats || !stats->HasNullCount())
+	int64_t nullCount, numRows;
+	if (!stats.nullCounts(*ci, nullCount, numRows))
 		return false;
-	int64_t nulls = stats->null_count();
 	if (nt->nulltesttype == IS_NULL)
-		return nulls == 0;
+		return nullCount == 0;
 	else
-		return nulls == rg->num_rows();
+		return nullCount == numRows;
 }
 
 static bool
-saoExprExcludes(ScalarArrayOpExpr *sao, parquet::RowGroupMetaData *rg,
+saoExprExcludes(ScalarArrayOpExpr *sao, IZoneStats &stats,
 				const std::vector<RowGroupColMeta> &cols)
 {
 	if (!sao->useOr || list_length(sao->args) != 2)
@@ -538,10 +382,9 @@ saoExprExcludes(ScalarArrayOpExpr *sao, parquet::RowGroupMetaData *rg,
 	const RowGroupColMeta *ci = colFor((Var *) larg, cols);
 	if (!ci)
 		return false;
-	auto cc = rg->ColumnChunk(ci->colIdx);
 
-	/* Fetch the row-group zone for this column's type family up front; bail
-	 * (keep) if stats are missing or the type is not handled. */
+	/* Fetch the zone for this column's type family up front; bail (keep) if
+	 * stats are missing or the type is not handled. */
 	bool		isText = (ci->pgType == TEXTOID || ci->pgType == VARCHAROID || ci->pgType == BPCHAROID);
 	bool		isNumeric = (ci->pgType == NUMERICOID);
 	bool		isFloat = (ci->pgType == FLOAT4OID || ci->pgType == FLOAT8OID);
@@ -552,7 +395,7 @@ saoExprExcludes(ScalarArrayOpExpr *sao, parquet::RowGroupMetaData *rg,
 
 	if (isText)
 	{
-		if (!pqStatMinMaxStr(cc.get(), smn, smx))
+		if (!stats.minMaxStr(*ci, smn, smx))
 			return false;
 		if (ci->pgType == BPCHAROID)
 		{
@@ -563,7 +406,7 @@ saoExprExcludes(ScalarArrayOpExpr *sao, parquet::RowGroupMetaData *rg,
 	else if (isNumeric)
 	{
 		std::string mns, mxs;
-		if (!pqStatMinMaxDecimalStr(cc.get(), ci->scale, ci->precision, ci->typeLength, mns, mxs))
+		if (!stats.minMaxDecimalStr(*ci, mns, mxs))
 			return false;
 		nMin = gpdbDirectFunctionCall3(numeric_in, CStringGetDatum(mns.c_str()),
 									   ObjectIdGetDatum(InvalidOid), Int32GetDatum(-1));
@@ -572,10 +415,10 @@ saoExprExcludes(ScalarArrayOpExpr *sao, parquet::RowGroupMetaData *rg,
 	}
 	else if (isFloat)
 	{
-		if (!pqStatMinMaxFloat(cc.get(), fmn, fmx))
+		if (!stats.minMaxFloat(*ci, fmn, fmx))
 			return false;
 	}
-	else if (!pqStatMinMaxInt64(cc.get(), ci->pgType, ci->timeUnit, mn, mx))
+	else if (!stats.minMaxInt64(*ci, mn, mx))
 		return false;
 
 	Const *arr = (Const *) rarg;
@@ -654,21 +497,20 @@ saoExprExcludes(ScalarArrayOpExpr *sao, parquet::RowGroupMetaData *rg,
 }
 
 static bool
-boolVarExcludes(Var *var, parquet::RowGroupMetaData *rg,
+boolVarExcludes(Var *var, IZoneStats &stats,
 				const std::vector<RowGroupColMeta> &cols, bool wantTrue)
 {
 	const RowGroupColMeta *ci = colFor(var, cols);
 	if (!ci || ci->pgType != BOOLOID)
 		return false;
 	int64_t mn, mx;
-	auto cc = rg->ColumnChunk(ci->colIdx);
-	if (!pqStatMinMaxInt64(cc.get(), ci->pgType, ci->timeUnit, mn, mx))
+	if (!stats.minMaxInt64(*ci, mn, mx))
 		return false;
 	return wantTrue ? (mx == 0) : (mn == 1);
 }
 
 static bool
-exprExcludes(Expr *expr, parquet::RowGroupMetaData *rg,
+exprExcludes(Expr *expr, IZoneStats &stats,
 			 const std::vector<RowGroupColMeta> &cols)
 {
 	if (expr == NULL)
@@ -677,14 +519,14 @@ exprExcludes(Expr *expr, parquet::RowGroupMetaData *rg,
 	switch (nodeTag(expr))
 	{
 		case T_OpExpr:
-			return opExprExcludes((OpExpr *) expr, rg, cols);
+			return opExprExcludes((OpExpr *) expr, stats, cols);
 		case T_ScalarArrayOpExpr:
-			return saoExprExcludes((ScalarArrayOpExpr *) expr, rg, cols);
+			return saoExprExcludes((ScalarArrayOpExpr *) expr, stats, cols);
 		case T_NullTest:
-			return nullTestExcludes((NullTest *) expr, rg, cols);
+			return nullTestExcludes((NullTest *) expr, stats, cols);
 		case T_Var:
 			if (((Var *) expr)->vartype == BOOLOID)
-				return boolVarExcludes((Var *) expr, rg, cols, true);
+				return boolVarExcludes((Var *) expr, stats, cols, true);
 			return false;
 		case T_BoolExpr:
 		{
@@ -694,14 +536,14 @@ exprExcludes(Expr *expr, parquet::RowGroupMetaData *rg,
 			if (b->boolop == AND_EXPR)
 			{
 				foreach(lc, b->args)
-					if (exprExcludes((Expr *) lfirst(lc), rg, cols))
+					if (exprExcludes((Expr *) lfirst(lc), stats, cols))
 						return true;
 				return false;
 			}
 			if (b->boolop == OR_EXPR)
 			{
 				foreach(lc, b->args)
-					if (!exprExcludes((Expr *) lfirst(lc), rg, cols))
+					if (!exprExcludes((Expr *) lfirst(lc), stats, cols))
 						return false;
 				return true;
 			}
@@ -709,7 +551,7 @@ exprExcludes(Expr *expr, parquet::RowGroupMetaData *rg,
 			{
 				Node *a = (Node *) linitial(b->args);
 				if (IsA(a, Var) && ((Var *) a)->vartype == BOOLOID)
-					return boolVarExcludes((Var *) a, rg, cols, false);
+					return boolVarExcludes((Var *) a, stats, cols, false);
 			}
 			return false;
 		}
@@ -718,11 +560,187 @@ exprExcludes(Expr *expr, parquet::RowGroupMetaData *rg,
 	}
 }
 
+/* ---- Parquet IZoneStats implementation ------------------------------- */
+
+struct ParquetZoneStats : public IZoneStats
+{
+	parquet::RowGroupMetaData *rg_;
+	explicit ParquetZoneStats(parquet::RowGroupMetaData *rg) : rg_(rg) {}
+
+	bool minMaxInt64(const RowGroupColMeta &c, int64_t &mn, int64_t &mx) override
+	{
+		auto cc = rg_->ColumnChunk(c.colIdx);
+		auto stats = cc->statistics();
+		if (!stats || !stats->HasMinMax())
+			return false;
+
+		int64_t rawMin, rawMax;
+		switch (cc->type())
+		{
+			case parquet::Type::INT32:
+			{
+				auto s = std::static_pointer_cast<parquet::Int32Statistics>(stats);
+				rawMin = s->min(); rawMax = s->max(); break;
+			}
+			case parquet::Type::INT64:
+			{
+				auto s = std::static_pointer_cast<parquet::Int64Statistics>(stats);
+				rawMin = s->min(); rawMax = s->max(); break;
+			}
+			case parquet::Type::BOOLEAN:
+			{
+				auto s = std::static_pointer_cast<parquet::BoolStatistics>(stats);
+				rawMin = s->min() ? 1 : 0; rawMax = s->max() ? 1 : 0; break;
+			}
+			default:
+				return false;
+		}
+
+		switch (c.pgType)
+		{
+			case INT2OID: case INT4OID: case INT8OID:
+			case BOOLOID:		/* bool ordered false(0) < true(1) */
+				mn = rawMin; mx = rawMax;
+				return true;
+			case DATEOID:
+				mn = rawMin + (UNIX_EPOCH_JDATE - POSTGRES_EPOCH_JDATE);
+				mx = rawMax + (UNIX_EPOCH_JDATE - POSTGRES_EPOCH_JDATE);
+				return true;
+			case TIMESTAMPOID:
+			case TIMESTAMPTZOID:
+			{
+				const int64_t off = ((int64_t)(POSTGRES_EPOCH_JDATE - UNIX_EPOCH_JDATE))
+									 * SECS_PER_DAY * USECS_PER_SEC;
+				switch (c.timeUnit)
+				{
+					case TIMEUNIT_MILLIS:
+						mn = rawMin * 1000 - off; mx = rawMax * 1000 - off; return true;
+					case TIMEUNIT_MICROS:
+						mn = rawMin - off; mx = rawMax - off; return true;
+					default:
+						return false;	/* NANOS truncation / unknown: keep */
+				}
+			}
+			default:
+				return false;
+		}
+	}
+
+	bool minMaxFloat(const RowGroupColMeta &c, double &mn, double &mx) override
+	{
+		(void) c;
+		auto cc = rg_->ColumnChunk(c.colIdx);
+		auto stats = cc->statistics();
+		if (!stats || !stats->HasMinMax())
+			return false;
+		switch (cc->type())
+		{
+			case parquet::Type::FLOAT:
+			{
+				auto s = std::static_pointer_cast<parquet::FloatStatistics>(stats);
+				mn = (double) s->min(); mx = (double) s->max(); break;
+			}
+			case parquet::Type::DOUBLE:
+			{
+				auto s = std::static_pointer_cast<parquet::DoubleStatistics>(stats);
+				mn = s->min(); mx = s->max(); break;
+			}
+			default:
+				return false;
+		}
+		if (std::isnan(mn) || std::isnan(mx))
+			return false;
+		return true;
+	}
+
+	bool minMaxStr(const RowGroupColMeta &c, std::string &mn, std::string &mx) override
+	{
+		(void) c;
+		auto cc = rg_->ColumnChunk(c.colIdx);
+		if (cc->type() != parquet::Type::BYTE_ARRAY)
+			return false;
+		auto stats = cc->statistics();
+		if (!stats || !stats->HasMinMax())
+			return false;
+		auto s = std::static_pointer_cast<parquet::ByteArrayStatistics>(stats);
+		parquet::ByteArray lo = s->min();
+		parquet::ByteArray hi = s->max();
+		mn.assign((const char *) lo.ptr, lo.len);
+		mx.assign((const char *) hi.ptr, hi.len);
+		return true;
+	}
+
+	bool minMaxDecimalStr(const RowGroupColMeta &c, std::string &mn, std::string &mx) override
+	{
+		auto cc = rg_->ColumnChunk(c.colIdx);
+		auto stats = cc->statistics();
+		if (!stats || !stats->HasMinMax())
+			return false;
+		int64_t rawMin, rawMax;
+		switch (cc->type())
+		{
+			case parquet::Type::INT32:
+			{
+				auto s = std::static_pointer_cast<parquet::Int32Statistics>(stats);
+				rawMin = s->min(); rawMax = s->max(); break;
+			}
+			case parquet::Type::INT64:
+			{
+				auto s = std::static_pointer_cast<parquet::Int64Statistics>(stats);
+				rawMin = s->min(); rawMax = s->max(); break;
+			}
+			case parquet::Type::FIXED_LEN_BYTE_ARRAY:
+			{
+				if (c.precision <= 0 || c.precision > 18)
+					return false;
+				auto s = std::static_pointer_cast<parquet::FLBAStatistics>(stats);
+				parquet::FixedLenByteArray lo = s->min();
+				parquet::FixedLenByteArray hi = s->max();
+				rawMin = FLBA_to_int64(lo.ptr, c.typeLength);
+				rawMax = FLBA_to_int64(hi.ptr, c.typeLength);
+				break;
+			}
+			default:
+				return false;
+		}
+		mn = decimalToStr(rawMin, c.scale);
+		mx = decimalToStr(rawMax, c.scale);
+		return true;
+	}
+
+	bool nullCounts(const RowGroupColMeta &c, int64_t &nullCount, int64_t &numRows) override
+	{
+		auto cc = rg_->ColumnChunk(c.colIdx);
+		auto stats = cc->statistics();
+		if (!stats || !stats->HasNullCount())
+			return false;
+		nullCount = stats->null_count();
+		numRows = rg_->num_rows();
+		return true;
+	}
+
+private:
+	/* unscaled integer -> decimal text with `scale` fractional digits. */
+	static std::string decimalToStr(int64_t unscaled, int scale)
+	{
+		if (scale <= 0)
+			return std::to_string(unscaled);
+		std::string s = std::to_string(unscaled);
+		bool neg = (!s.empty() && s[0] == '-');
+		std::string digits = neg ? s.substr(1) : s;
+		if ((int) digits.size() <= scale)
+			digits = std::string(scale - digits.size() + 1, '0') + digits;
+		std::string out = digits.substr(0, digits.size() - scale) + "." +
+						  digits.substr(digits.size() - scale);
+		return neg ? ("-" + out) : out;
+	}
+};
+
 } /* anonymous namespace */
 
 bool
-rowGroupExcludedByQuals(List *quals, parquet::RowGroupMetaData *rg,
-						const std::vector<RowGroupColMeta> &cols)
+zoneExcludedByQuals(List *quals, const std::vector<RowGroupColMeta> &cols,
+					IZoneStats &stats)
 {
 	ListCell *lc;
 
@@ -731,8 +749,16 @@ rowGroupExcludedByQuals(List *quals, parquet::RowGroupMetaData *rg,
 
 	foreach(lc, quals)
 	{
-		if (exprExcludes((Expr *) lfirst(lc), rg, cols))
+		if (exprExcludes((Expr *) lfirst(lc), stats, cols))
 			return true;
 	}
 	return false;
+}
+
+bool
+rowGroupExcludedByQuals(List *quals, parquet::RowGroupMetaData *rg,
+						const std::vector<RowGroupColMeta> &cols)
+{
+	ParquetZoneStats stats(rg);
+	return zoneExcludedByQuals(quals, cols, stats);
 }

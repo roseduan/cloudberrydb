@@ -3,6 +3,8 @@
 
 #include "src/provider/provider.h"
 #include "orcFileReader.h"
+#include "orc_stripe_filter.h"
+#include <vector>
 
 
 namespace Datalake {
@@ -28,6 +30,11 @@ protected:
 
 	bool getStripeFromBigFile(metaInfo info);
 
+	/* issue #297: ORC stripe min/max pushdown.  Built positionally (table
+	 * column i -> ORC column id i+1) when a file is opened. */
+	void buildOrcFilterCols();
+	bool stripeKept(int stripeIdx, const std::string &fileName);
+
 	virtual bool getRow(Datum *values, bool *nulls);
 
 	virtual bool getNextGroup();
@@ -41,6 +48,7 @@ protected:
 	int64_t tupleIndex;
 	int stripeIndex;
 	orcReadDeltaFile deltaFile;
+	std::vector<RowGroupColMeta> orcFilterCols;
 };
 
 }

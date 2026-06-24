@@ -167,6 +167,51 @@ bool orcRead::readNextFile()
 	return true;
 }
 
+/*
+ * issue #297: build the column metadata used for ORC stripe min/max pruning.
+ * The reader maps table column i to ORC column id i+1 positionally; decimal
+ * scale/precision are unused on the ORC path (orc::Decimal::toString already
+ * yields scaled text), and timestamps are intentionally not pruned (kept).
+ */
+void orcRead::buildOrcFilterCols()
+{
+	orcFilterCols.clear();
+	int natts = tupdesc->natts;
+	for (int i = 0; i < natts; i++)
+	{
+		RowGroupColMeta m;
+		m.pgType = tupdesc->attrs[i].atttypid;
+		m.colIdx = i;
+		m.scale = 0;
+		m.precision = 0;
+		m.typeLength = 0;
+		m.timeUnit = -1;
+		orcFilterCols.push_back(m);
+	}
+}
+
+/* true if stripe stripeIdx should be read (not provably excluded by quals). */
+bool orcRead::stripeKept(int stripeIdx, const std::string &fileName)
+{
+	if (scanstate->quals == NIL)
+		return true;
+	/* Transactional (ACID) ORC nests data columns under a wrapper struct, so
+	 * the positional column-id mapping does not hold; skip pruning then. */
+	if (options.transactionTable)
+		return true;
+	/* No stripe statistics in the file footer -> cannot prune. */
+	if (fileReader.readInterface.reader->getStripeStatisticsLength() == 0)
+		return true;
+
+	auto ss = fileReader.readInterface.reader->getStripeStatistics(stripeIdx);
+	int64_t numRows = (int64_t) fileReader.readInterface.reader->getStripe(stripeIdx)->getNumberOfRows();
+	bool keep = !stripeExcludedByQuals(scanstate->quals, ss.get(), numRows, orcFilterCols);
+	if (!keep)
+		elog(DEBUG1, "datalake orc stripe skip: file=%s stripe=%d skipped by min/max",
+			 fileName.c_str(), stripeIdx);
+	return keep;
+}
+
 bool orcRead::getStripeFromSmallFile(metaInfo info)
 {
 	fileReader.closeORCReader();
@@ -177,8 +222,11 @@ bool orcRead::getStripeFromSmallFile(metaInfo info)
 		return true;
 	}
 
+	buildOrcFilterCols();
 	for (uint64_t i = 0; i < fileReader.readInterface.reader->getNumberOfStripes(); i++)
 	{
+		if (!stripeKept((int) i, info.fileName))
+			continue;
 		fileReader.readInterface.tempStripes.push_back(fileReader.readInterface.reader->getStripe(i));
 	}
 	return true;
@@ -198,8 +246,14 @@ bool orcRead::getStripeFromBigFile(metaInfo info)
 		}
 
 		curFileName = info.fileName;
+		buildOrcFilterCols();
 		for (uint64_t i = 0; i < fileReader.readInterface.reader->getNumberOfStripes(); i++)
 		{
+			/* min/max pruned stripes are dropped entirely (not deferred); they
+			 * never enter `stripes`, so the same-file branch below only ever
+			 * reuses already-kept stripes. */
+			if (!stripeKept((int) i, info.fileName))
+				continue;
 			ORC_UNIQUE_PTR<orc::StripeInformation> result = fileReader.readInterface.reader->getStripe(i);
 			int64_t stripeOffset = result->getOffset();
 			if (info.rangeOffset <= stripeOffset && stripeOffset < info.rangeOffsetEnd)
