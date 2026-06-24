@@ -13,6 +13,14 @@ extern "C" {
 
 using Datalake::Internal::FileSystem;
 
+/*
+ * GUC datalake.disable_cache_file (defined in datalake_fdw.c). Default OFF
+ * (false) = caching enabled. Gates the fs-level gopher cache_strategy so the
+ * GUC globally controls block caching for all datalake reads (incl. native
+ * iceberg AM tables, whose volume options never set enableCache).
+ */
+extern bool disableCacheFile;
+
 struct ossInternalFileStream {
 public:
 	ossInternalFileStream(FileSystem *ctx) : context(ctx) {}
@@ -380,7 +388,7 @@ gopherConfig* datalakeCreateGopherConfig(void *opt)
 	conf->master_ip = pstrdup(MyProcPort->remote_host);
 	conf->external_hdfs_list_use_master = enable_list_in_master;
 
-	if (options->enableCache)
+	if (options->enableCache || !disableCacheFile)
 	{
 		conf->cache_strategy = GOPHER_CACHE;
 	}

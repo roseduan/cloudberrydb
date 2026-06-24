@@ -2,6 +2,14 @@
 #include <random>
 #include <algorithm>
 
+/*
+ * GUC datalake.disable_cache_file (defined in datalake_fdw.c). Default OFF
+ * (false) means caching is enabled. Referenced here so the GUC can globally
+ * control gopher block caching for all datalake reads, including native
+ * iceberg AM tables that have no per-table enablecache option.
+ */
+extern bool disableCacheFile;
+
 namespace Datalake {
 namespace Internal {
 
@@ -35,7 +43,7 @@ void readLogical::initParameter(void *sstate)
 	exec = false;
 	last = false;
 	options.buffer.allocDataBufferArray(ncolumns);
-	options.enableCache = scanstate->options->gopher->enableCache;
+	options.enableCache = scanstate->options->gopher->enableCache || !disableCacheFile;
 	if (PROTOCOL_IS_HDFS(scanstate->options->protocol))
 	{
 		options.ptype = PROTOTCOL_HDFS;

@@ -658,7 +658,14 @@ datalakeCreateContext(dataLakeOptions *options)
 
 	context = (DatalakeProtocolContext *)palloc0(sizeof(DatalakeProtocolContext));
 
-	disableCacheFile = !isCacheEnabled(options->cache_enabled);
+	/*
+	 * Only let an explicit per-table cache_enabled option override the GUC
+	 * datalake.disable_cache_file. When the option is unset (e.g. native
+	 * iceberg AM tables), keep the GUC value so it globally controls caching
+	 * (default OFF = cache on) instead of being forced on every scan.
+	 */
+	if (options->cache_enabled != NULL)
+		disableCacheFile = !isCacheEnabled(options->cache_enabled);
 	gopherConfig = datalakeCreateGopherConfig((void*)(options->gopher));
 	gopherUserCanceledCallBack(&checkInterrupt);
 
