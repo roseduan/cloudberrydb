@@ -3,7 +3,7 @@
 PGXS := $(shell pg_config --pgxs)
 include $(PGXS)
 
-REGRESS = 01_filter_pushdown 02_advanced_pushdown
+REGRESS = 01_filter_pushdown 02_advanced_pushdown 03_rowgroup_pushdown
 
 S3_PATHS = /warehouse/fdw-test/feature/pushdown/
 
