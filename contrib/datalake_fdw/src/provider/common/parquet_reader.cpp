@@ -18,6 +18,7 @@ extern "C"
 #include "access/stratnum.h"
 #include "catalog/pg_type.h"
 #include "utils/date.h"
+#include "utils/array.h"
 #include "utils.h"
 #include "src/datalake_def.h"
 }
@@ -164,6 +165,68 @@ intRangeExcluded(int strat, int64_t mn, int64_t mx, int64_t c)
 	}
 }
 
+/* A single Datum (e.g. an IN-list element) of the column's type as int64 in
+ * PG's internal domain (int/date/timestamp).  false for other types. */
+static bool
+datumToColInt64(Datum d, Oid colType, int64_t &out)
+{
+	switch (colType)
+	{
+		case INT2OID: out = (int64_t) DatumGetInt16(d); return true;
+		case INT4OID: out = (int64_t) DatumGetInt32(d); return true;
+		case INT8OID: out = (int64_t) DatumGetInt64(d); return true;
+		case DATEOID: out = (int64_t) DatumGetDateADT(d); return true;
+		case TIMESTAMPOID:
+		case TIMESTAMPTZOID: out = (int64_t) DatumGetTimestamp(d); return true;
+		default: return false;
+	}
+}
+
+/* Row group string [min,max] for a BYTE_ARRAY column.  Parquet sorts byte
+ * arrays UNSIGNED and truncates min down / max up, so the stored [min,max] is
+ * a (possibly widened) superset of the real range -- safe for equality. */
+static bool
+pqStatMinMaxStr(parquet::ColumnChunkMetaData *cc, std::string &mn, std::string &mx)
+{
+	if (cc->type() != parquet::Type::BYTE_ARRAY)
+		return false;
+	auto stats = cc->statistics();
+	if (!stats || !stats->HasMinMax())
+		return false;
+	auto s = std::static_pointer_cast<parquet::ByteArrayStatistics>(stats);
+	parquet::ByteArray lo = s->min();
+	parquet::ByteArray hi = s->max();
+	mn.assign((const char *) lo.ptr, lo.len);
+	mx.assign((const char *) hi.ptr, hi.len);
+	return true;
+}
+
+/* Const text value as bytes; false unless column and const are TEXT/VARCHAR. */
+static bool
+pgConstStr(Const *c, Oid colType, std::string &out)
+{
+	if (c->constisnull)
+		return false;
+	if (colType != TEXTOID && colType != VARCHAROID)
+		return false;
+	if (c->consttype != TEXTOID && c->consttype != VARCHAROID)
+		return false;
+	text *t = DatumGetTextPP(c->constvalue);
+	out.assign(VARDATA_ANY(t), VARSIZE_ANY_EXHDR(t));
+	return true;
+}
+
+/* Unsigned byte-wise less-than (matches Parquet UNSIGNED byte-array ordering). */
+static bool
+byteLess(const std::string &a, const std::string &b)
+{
+	size_t n = (a.size() < b.size()) ? a.size() : b.size();
+	int r = (n > 0) ? memcmp(a.data(), b.data(), n) : 0;
+	if (r != 0)
+		return r < 0;
+	return a.size() < b.size();
+}
+
 } /* anonymous namespace */
 
 bool
@@ -209,6 +272,22 @@ ParquetReader::opExprExcludesRowGroup(void *opPtr, void *rgPtr)
 	if (ti.columnIndex_ < 0)
 		return false;
 
+	/* Text columns: only equality is sound -- byte order != collation order for
+	 * non-C collations, but a value equal to the constant is byte-equal and thus
+	 * within the UNSIGNED-byte [min,max] Parquet records. */
+	if (ti.pgTypeId_ == TEXTOID || ti.pgTypeId_ == VARCHAROID)
+	{
+		if (strat != BTEqualStrategyNumber)
+			return false;
+		std::string cs, mns, mxs;
+		if (!pgConstStr(con, ti.pgTypeId_, cs))
+			return false;
+		auto cc = rg->ColumnChunk(ti.columnIndex_);
+		if (!pqStatMinMaxStr(cc.get(), mns, mxs))
+			return false;
+		return byteLess(cs, mns) || byteLess(mxs, cs);	/* c < min || c > max */
+	}
+
 	int64_t c;
 	if (!pgConstInt64(con, ti.pgTypeId_, c))
 		return false;
@@ -250,6 +329,78 @@ ParquetReader::nullTestExcludesRowGroup(void *ntPtr, void *rgPtr)
 		return nulls == rg->num_rows();		/* all null  -> IS NOT NULL excluded */
 }
 
+/* true iff "col IN (...)" (ScalarArrayOpExpr, ANY/=) proves the row group has
+ * no matching rows: every list element lies outside the column's [min,max].
+ * Handles int/date/timestamp element domains; anything else keeps the group. */
+bool
+ParquetReader::saoExprExcludesRowGroup(void *saoPtr, void *rgPtr)
+{
+	ScalarArrayOpExpr *sao = (ScalarArrayOpExpr *) saoPtr;
+	parquet::RowGroupMetaData *rg = (parquet::RowGroupMetaData *) rgPtr;
+
+	if (!sao->useOr)					/* x = ALL(...) / NOT IN: don't prune */
+		return false;
+	if (list_length(sao->args) != 2)
+		return false;
+	Node *larg = (Node *) linitial(sao->args);
+	Node *rarg = (Node *) lsecond(sao->args);
+	if (!IsA(larg, Var) || !IsA(rarg, Const))
+		return false;
+	if (pgOpBtreeStrategy(sao->opno) != BTEqualStrategyNumber)
+		return false;
+
+	Var *var = (Var *) larg;
+	int attno = var->varattno;
+	if (attno <= 0 || (size_t) attno > typeMap_.size())
+		return false;
+	const auto &ti = typeMap_[attno - 1];
+	if (ti.columnIndex_ < 0)
+		return false;
+
+	int64_t mn, mx;
+	auto cc = rg->ColumnChunk(ti.columnIndex_);
+	if (!pqStatMinMaxInt64(cc.get(), ti.pgTypeId_, (int) ti.timeUnit_, mn, mx))
+		return false;					/* non-int/date/ts domain: keep */
+
+	Const *arr = (Const *) rarg;
+	if (arr->constisnull)
+		return false;
+	ArrayType *at = DatumGetArrayTypeP(arr->constvalue);
+	Oid elmtype = ARR_ELEMTYPE(at);
+	int16 elmlen;
+	bool elmbyval;
+	char elmalign;
+	get_typlenbyvalalign(elmtype, &elmlen, &elmbyval, &elmalign);
+
+	Datum *elems;
+	bool *nulls;
+	int nelems;
+	deconstruct_array(at, elmtype, elmlen, elmbyval, elmalign, &elems, &nulls, &nelems);
+
+	bool anyInRange = false;
+	for (int i = 0; i < nelems && !anyInRange; i++)
+	{
+		int64_t v;
+
+		if (nulls[i])
+			continue;				/* NULL never matches '=' */
+		if (!datumToColInt64(elems[i], ti.pgTypeId_, v))
+		{
+			anyInRange = true;		/* unknown element domain: conservatively keep */
+			break;
+		}
+		if (!intRangeExcluded(BTEqualStrategyNumber, mn, mx, v))
+			anyInRange = true;		/* this value falls within [min,max] */
+	}
+
+	if (elems)
+		pfree(elems);
+	if (nulls)
+		pfree(nulls);
+
+	return !anyInRange;				/* excluded iff no element in [min,max] */
+}
+
 /* true iff expr proves the row group has no matching rows. */
 bool
 ParquetReader::exprExcludesRowGroup(void *exprPtr, void *rgPtr)
@@ -263,6 +414,8 @@ ParquetReader::exprExcludesRowGroup(void *exprPtr, void *rgPtr)
 	{
 		case T_OpExpr:
 			return opExprExcludesRowGroup(expr, rgPtr);
+		case T_ScalarArrayOpExpr:
+			return saoExprExcludesRowGroup(expr, rgPtr);
 		case T_NullTest:
 			return nullTestExcludesRowGroup(expr, rgPtr);
 		case T_BoolExpr:

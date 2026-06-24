@@ -39,6 +39,7 @@ private:
 	bool exprExcludesRowGroup(void *expr, void *rgMeta);
 	bool opExprExcludesRowGroup(void *opExpr, void *rgMeta);
 	bool nullTestExcludesRowGroup(void *nullTest, void *rgMeta);
+	bool saoExprExcludesRowGroup(void *scalarArrayOpExpr, void *rgMeta);
 	TIMEUNIT getTimeUnit(const parquet::ColumnDescriptor *field);
 
 	/* Per-type direct read functions — eliminate virtual + switch per column */

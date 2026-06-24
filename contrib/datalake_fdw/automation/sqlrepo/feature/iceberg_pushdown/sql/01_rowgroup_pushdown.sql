@@ -47,7 +47,7 @@ SELECT count(*) AS total_rows FROM rgp_t;
 -- Helper: run the same battery of predicates and report counts.  With pushdown
 -- ON, row groups for the non-matching batch are skipped via min/max; results
 -- must match the pushdown-OFF baseline exactly.
-\set qbattery 'SELECT count(*) AS c_int_range FROM rgp_t WHERE id BETWEEN 1001 AND 1100; SELECT count(*) AS c_int_eq FROM rgp_t WHERE id = 50; SELECT count(*) AS c_int_gt FROM rgp_t WHERE id > 5000; SELECT count(*) AS c_date_ge FROM rgp_t WHERE d >= DATE ''2024-01-01''; SELECT count(*) AS c_date_lt FROM rgp_t WHERE d < DATE ''2021-01-01''; SELECT count(*) AS c_ts_lt FROM rgp_t WHERE ts < TIMESTAMP ''2021-01-01''; SELECT count(*) AS c_isnull FROM rgp_t WHERE nm IS NULL; SELECT count(*) AS c_isnotnull FROM rgp_t WHERE nm IS NOT NULL;'
+\set qbattery 'SELECT count(*) AS c_int_range FROM rgp_t WHERE id BETWEEN 1001 AND 1100; SELECT count(*) AS c_int_eq FROM rgp_t WHERE id = 50; SELECT count(*) AS c_int_gt FROM rgp_t WHERE id > 5000; SELECT count(*) AS c_date_ge FROM rgp_t WHERE d >= DATE ''2024-01-01''; SELECT count(*) AS c_date_lt FROM rgp_t WHERE d < DATE ''2021-01-01''; SELECT count(*) AS c_ts_lt FROM rgp_t WHERE ts < TIMESTAMP ''2021-01-01''; SELECT count(*) AS c_isnull FROM rgp_t WHERE nm IS NULL; SELECT count(*) AS c_isnotnull FROM rgp_t WHERE nm IS NOT NULL; SELECT count(*) AS c_text_eq FROM rgp_t WHERE nm = ''a50''; SELECT count(*) AS c_text_none FROM rgp_t WHERE nm = ''zzz''; SELECT count(*) AS c_in_hit FROM rgp_t WHERE id IN (50, 1050); SELECT count(*) AS c_in_none FROM rgp_t WHERE id IN (8000, 9000);'
 
 SELECT test_log('--- pushdown ON ---');
 SET gp_external_enable_filter_pushdown = on;
