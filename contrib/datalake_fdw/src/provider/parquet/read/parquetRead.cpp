@@ -1,4 +1,5 @@
 #include "parquetRead.h"
+#include "src/provider/common/base_reader.h"		/* TIMEUNIT_* enum */
 
 extern "C" {
 	#include "src/common/random_segment.h"
@@ -7,6 +8,36 @@ extern "C" {
 
 namespace Datalake {
 namespace Internal {
+
+/*
+ * issue #297: map a Parquet column's logical type to the reader's TIMEUNIT
+ * enum, so timestamp row-group min/max pruning works on the generic path too.
+ * Mirrors ParquetReader::getTimeUnit (provider/common/parquet_reader.cpp).
+ * Non-timestamp / unknown precision -> TIMEUNIT_UNKNOWN (the shared evaluator
+ * conservatively keeps row groups it cannot interpret).
+ */
+static int
+parquetColTimeUnit(const parquet::ColumnDescriptor *col)
+{
+	const auto &logicalType = col->logical_type();
+	if (!logicalType || !logicalType->is_timestamp())
+		return TIMEUNIT_UNKNOWN;
+
+	const auto *ts = dynamic_cast<const parquet::TimestampLogicalType *>(logicalType.get());
+	if (ts == nullptr)
+		return TIMEUNIT_UNKNOWN;
+	switch (ts->time_unit())
+	{
+		case parquet::LogicalType::TimeUnit::MILLIS:
+			return TIMEUNIT_MILLIS;
+		case parquet::LogicalType::TimeUnit::MICROS:
+			return TIMEUNIT_MICROS;
+		case parquet::LogicalType::TimeUnit::NANOS:
+			return TIMEUNIT_NANOS;
+		default:
+			return TIMEUNIT_UNKNOWN;
+	}
+}
 
 void parquetRead::createHandler(void *sstate)
 {
@@ -131,8 +162,8 @@ bool parquetRead::readNextFile()
 /*
  * issue #297: build the column metadata used for row-group min/max pruning.
  * The generic parquet reader maps table column i to Parquet column i
- * positionally (see checkSchemaCompatibility).  timeUnit is left unset (-1) so
- * timestamps fall through to "keep" -- date/int/numeric/text/bool still prune.
+ * positionally (see checkSchemaCompatibility).  timeUnit is derived from the
+ * column's Parquet logical type so timestamp row groups prune too.
  */
 void parquetRead::buildRowGroupFilterCols()
 {
@@ -149,20 +180,23 @@ void parquetRead::buildRowGroupFilterCols()
 		m.scale = 0;
 		m.precision = 0;
 		m.typeLength = 0;
-		m.timeUnit = -1;
+		m.timeUnit = TIMEUNIT_UNKNOWN;
 		if (m.colIdx >= 0)
 		{
 			const auto &col = schema->Column(i);
 			m.scale = col->type_scale();
 			m.precision = col->type_precision();
 			m.typeLength = col->type_length();
+			m.timeUnit = parquetColTimeUnit(col);
 		}
 		rgFilterCols.push_back(m);
 	}
 }
 
-/* true if row group rgIdx should be read (not provably excluded by quals). */
-bool parquetRead::rowGroupKept(int rgIdx)
+/* true if row group rgIdx should be read (not provably excluded by quals).
+ * fileName is used only for the debug log (curFileName is not set on the
+ * small-file path, so the caller passes the open file's name explicitly). */
+bool parquetRead::rowGroupKept(int rgIdx, const std::string &fileName)
 {
 	if (scanstate->quals == NIL)
 		return true;
@@ -170,7 +204,7 @@ bool parquetRead::rowGroupKept(int rgIdx)
 	bool keep = !rowGroupExcludedByQuals(scanstate->quals, rg.get(), rgFilterCols);
 	if (!keep)
 		elog(DEBUG1, "datalake parquet row-group skip: file=%s rg=%d skipped by min/max",
-			 curFileName.c_str(), rgIdx);
+			 fileName.c_str(), rgIdx);
 	return keep;
 }
 
@@ -189,7 +223,7 @@ bool parquetRead::getRowGropFromSmallFile(metaInfo info)
 
     for (int i = 0; i < fileReader.getRowGroupNums(); i++)
     {
-        if (rowGroupKept(i))
+        if (rowGroupKept(i, info.fileName))
             tempRowGroupNums.push_back(i);
     }
     return true;
@@ -215,7 +249,7 @@ bool parquetRead::getRowGropFromBigFile(metaInfo info)
         for (int i = 0; i < fileReader.getRowGroupNums(); i++)
         {
             /* min/max pruned row groups are dropped entirely (not deferred). */
-            if (!rowGroupKept(i))
+            if (!rowGroupKept(i, info.fileName))
                 continue;
             int64_t offset = fileReader.rowGroupOffset(i);
             if (info.rangeOffset <= offset && offset < info.rangeOffsetEnd)

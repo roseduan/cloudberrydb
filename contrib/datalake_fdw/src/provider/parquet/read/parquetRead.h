@@ -44,7 +44,7 @@ private:
 	/* issue #297: row-group min/max pushdown for the generic parquet path.
 	 * Built (positional table<->parquet column map) when a file is opened. */
 	void buildRowGroupFilterCols();
-	bool rowGroupKept(int rgIdx);
+	bool rowGroupKept(int rgIdx, const std::string &fileName);
 
 	readBlockPolicy blockPolicy;
 	std::vector<int> rowGroupNums;
