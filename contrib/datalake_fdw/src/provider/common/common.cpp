@@ -25,6 +25,38 @@ gpdbPalloc(Size size)
 }
 
 Datum
+gpdbDirectFunctionCall2(PGFunction func, Datum arg1, Datum arg2)
+{
+	Datum result;
+	char errStr[ERROR_STR_LEN];
+	bool error = false;
+	MemoryContext mcxt = CurrentMemoryContext;
+
+	PG_TRY();
+	{
+		result = DirectFunctionCall2(func, arg1, arg2);
+	}
+	PG_CATCH();
+	{
+		ErrorData *errdata;
+
+		error = true;
+
+		MemoryContextSwitchTo(mcxt);
+		errdata = CopyErrorData();
+		FlushErrorState();
+		strncpy(errStr, errdata->message, ERROR_STR_LEN - 1);
+		FreeErrorData(errdata);
+	}
+	PG_END_TRY();
+
+	if (error)
+		throw std::runtime_error(errStr);
+
+	return result;
+}
+
+Datum
 gpdbDirectFunctionCall3(PGFunction func, Datum arg1, Datum arg2, Datum arg3)
 {
 	Datum result;

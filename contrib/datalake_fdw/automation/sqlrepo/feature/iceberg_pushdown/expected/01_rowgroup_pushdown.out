@@ -77,16 +77,18 @@ CREATE FOREIGN VOLUME rgp_vol SERVER rgp_vol_srv OPTIONS(base_path '/rgp_vol/');
 SET iceberg_default_volume='rgp_vol';
 DROP TABLE IF EXISTS rgp_t;
 psql:sql/01_rowgroup_pushdown.sql:30: NOTICE:  table "rgp_t" does not exist, skipping
-CREATE ICEBERG TABLE rgp_t (id int, d date, ts timestamp, nm varchar(20));
--- Batch A: ids 1..100, year 2020, nm NOT NULL.
+CREATE ICEBERG TABLE rgp_t (id int, d date, ts timestamp, nm varchar(20), amt numeric(10,2));
+-- Batch A: ids 1..100, year 2020, nm NOT NULL, amt 1.25..125.00.
 INSERT INTO rgp_t
 SELECT g, DATE '2020-01-01' + g,
-       TIMESTAMP '2020-01-01' + (g || ' days')::interval, 'a' || g
+       TIMESTAMP '2020-01-01' + (g || ' days')::interval, 'a' || g,
+       (g * 1.25)::numeric(10,2)
 FROM generate_series(1, 100) g;
--- Batch B: ids 1001..1100, year 2024, nm all NULL.
+-- Batch B: ids 1001..1100, year 2024, nm all NULL, amt 1251.25..1375.00.
 INSERT INTO rgp_t
 SELECT g, DATE '2024-01-01' + (g - 1000),
-       TIMESTAMP '2024-01-01' + ((g - 1000) || ' days')::interval, NULL
+       TIMESTAMP '2024-01-01' + ((g - 1000) || ' days')::interval, NULL,
+       (g * 1.25)::numeric(10,2)
 FROM generate_series(1001, 1100) g;
 SELECT count(*) AS total_rows FROM rgp_t;
  total_rows 
@@ -97,9 +99,9 @@ SELECT count(*) AS total_rows FROM rgp_t;
 -- Helper: run the same battery of predicates and report counts.  With pushdown
 -- ON, row groups for the non-matching batch are skipped via min/max; results
 -- must match the pushdown-OFF baseline exactly.
-\set qbattery 'SELECT count(*) AS c_int_range FROM rgp_t WHERE id BETWEEN 1001 AND 1100; SELECT count(*) AS c_int_eq FROM rgp_t WHERE id = 50; SELECT count(*) AS c_int_gt FROM rgp_t WHERE id > 5000; SELECT count(*) AS c_date_ge FROM rgp_t WHERE d >= DATE ''2024-01-01''; SELECT count(*) AS c_date_lt FROM rgp_t WHERE d < DATE ''2021-01-01''; SELECT count(*) AS c_ts_lt FROM rgp_t WHERE ts < TIMESTAMP ''2021-01-01''; SELECT count(*) AS c_isnull FROM rgp_t WHERE nm IS NULL; SELECT count(*) AS c_isnotnull FROM rgp_t WHERE nm IS NOT NULL; SELECT count(*) AS c_text_eq FROM rgp_t WHERE nm = ''a50''; SELECT count(*) AS c_text_none FROM rgp_t WHERE nm = ''zzz''; SELECT count(*) AS c_in_hit FROM rgp_t WHERE id IN (50, 1050); SELECT count(*) AS c_in_none FROM rgp_t WHERE id IN (8000, 9000);'
+\set qbattery 'SELECT count(*) AS c_int_range FROM rgp_t WHERE id BETWEEN 1001 AND 1100; SELECT count(*) AS c_int_eq FROM rgp_t WHERE id = 50; SELECT count(*) AS c_int_gt FROM rgp_t WHERE id > 5000; SELECT count(*) AS c_date_ge FROM rgp_t WHERE d >= DATE ''2024-01-01''; SELECT count(*) AS c_date_lt FROM rgp_t WHERE d < DATE ''2021-01-01''; SELECT count(*) AS c_ts_lt FROM rgp_t WHERE ts < TIMESTAMP ''2021-01-01''; SELECT count(*) AS c_isnull FROM rgp_t WHERE nm IS NULL; SELECT count(*) AS c_isnotnull FROM rgp_t WHERE nm IS NOT NULL; SELECT count(*) AS c_text_eq FROM rgp_t WHERE nm = ''a50''; SELECT count(*) AS c_text_none FROM rgp_t WHERE nm = ''zzz''; SELECT count(*) AS c_in_hit FROM rgp_t WHERE id IN (50, 1050); SELECT count(*) AS c_in_none FROM rgp_t WHERE id IN (8000, 9000); SELECT count(*) AS c_num_gt FROM rgp_t WHERE amt > 1300.00; SELECT count(*) AS c_num_lt FROM rgp_t WHERE amt < 200.00;'
 SELECT test_log('--- pushdown ON ---');
-psql:sql/01_rowgroup_pushdown.sql:52: NOTICE:  [TEST] --- pushdown ON ---
+psql:sql/01_rowgroup_pushdown.sql:54: NOTICE:  [TEST] --- pushdown ON ---
  test_log 
 ----------
  
@@ -167,8 +169,18 @@ SET gp_external_enable_filter_pushdown = on;
          0
 (1 row)
 
+ c_num_gt 
+----------
+       60
+(1 row)
+
+ c_num_lt 
+----------
+      100
+(1 row)
+
 SELECT test_log('--- pushdown OFF (control: results must be identical) ---');
-psql:sql/01_rowgroup_pushdown.sql:56: NOTICE:  [TEST] --- pushdown OFF (control: results must be identical) ---
+psql:sql/01_rowgroup_pushdown.sql:58: NOTICE:  [TEST] --- pushdown OFF (control: results must be identical) ---
  test_log 
 ----------
  
@@ -236,6 +248,16 @@ SET gp_external_enable_filter_pushdown = off;
          0
 (1 row)
 
+ c_num_gt 
+----------
+       60
+(1 row)
+
+ c_num_lt 
+----------
+      100
+(1 row)
+
 RESET gp_external_enable_filter_pushdown;
 -- Plan shape: predicate pushed into the Iceberg Custom Scan.
 EXPLAIN (COSTS OFF) SELECT count(*) FROM rgp_t WHERE id BETWEEN 1001 AND 1100;
@@ -250,10 +272,10 @@ EXPLAIN (COSTS OFF) SELECT count(*) FROM rgp_t WHERE id BETWEEN 1001 AND 1100;
 
 DROP TABLE rgp_t;
 DROP SERVER rgp_cat_srv CASCADE;
-psql:sql/01_rowgroup_pushdown.sql:66: NOTICE:  drop cascades to 2 other objects
+psql:sql/01_rowgroup_pushdown.sql:68: NOTICE:  drop cascades to 2 other objects
 DETAIL:  drop cascades to user mapping for gpadmin on server rgp_cat_srv
 drop cascades to catalog rgp_cat
 DROP SERVER rgp_vol_srv CASCADE;
-psql:sql/01_rowgroup_pushdown.sql:67: NOTICE:  drop cascades to 2 other objects
+psql:sql/01_rowgroup_pushdown.sql:69: NOTICE:  drop cascades to 2 other objects
 DETAIL:  drop cascades to user mapping for gpadmin on server rgp_vol_srv
 drop cascades to volume rgp_vol

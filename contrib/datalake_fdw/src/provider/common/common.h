@@ -33,6 +33,7 @@ struct Error : std::exception
 };
 
 void *gpdbPalloc(Size size);
+Datum gpdbDirectFunctionCall2(PGFunction func, Datum arg1, Datum arg2);
 Datum gpdbDirectFunctionCall3(PGFunction func, Datum arg1, Datum arg2, Datum arg3);
 Oid mapParquetDataType(parquet::Type::type type);
 Oid mapAvroDataType(avro_type_t type);

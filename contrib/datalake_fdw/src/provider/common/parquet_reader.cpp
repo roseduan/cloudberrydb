@@ -19,6 +19,7 @@ extern "C"
 #include "catalog/pg_type.h"
 #include "utils/date.h"
 #include "utils/array.h"
+#include "utils/fmgrprotos.h"
 #include "utils.h"
 #include "src/datalake_def.h"
 }
@@ -227,6 +228,91 @@ byteLess(const std::string &a, const std::string &b)
 	return a.size() < b.size();
 }
 
+/* Format a Parquet unscaled decimal integer + scale as an exact decimal string
+ * (unscaled=12345, scale=2 -> "123.45") for building an exact PG numeric. */
+static std::string
+decimalToStr(int64_t unscaled, int scale)
+{
+	if (scale <= 0)
+		return std::to_string(unscaled);
+	std::string s = std::to_string(unscaled);
+	bool neg = (!s.empty() && s[0] == '-');
+	std::string digits = neg ? s.substr(1) : s;
+	if ((int) digits.size() <= scale)
+		digits = std::string(scale - digits.size() + 1, '0') + digits;
+	std::string out = digits.substr(0, digits.size() - scale) + "." +
+					  digits.substr(digits.size() - scale);
+	return neg ? ("-" + out) : out;
+}
+
+/* Row group decimal [min,max] as exact decimal strings.  Handles INT32/INT64
+ * and FIXED_LEN_BYTE_ARRAY backed decimals up to precision 18 (fits int64);
+ * higher precision (int128) returns false so the caller keeps the row group. */
+static bool
+pqStatMinMaxDecimalStr(parquet::ColumnChunkMetaData *cc, int scale, int precision,
+					   int typeLength, std::string &mn, std::string &mx)
+{
+	auto stats = cc->statistics();
+	if (!stats || !stats->HasMinMax())
+		return false;
+	int64_t rawMin, rawMax;
+	switch (cc->type())
+	{
+		case parquet::Type::INT32:
+		{
+			auto s = std::static_pointer_cast<parquet::Int32Statistics>(stats);
+			rawMin = s->min(); rawMax = s->max(); break;
+		}
+		case parquet::Type::INT64:
+		{
+			auto s = std::static_pointer_cast<parquet::Int64Statistics>(stats);
+			rawMin = s->min(); rawMax = s->max(); break;
+		}
+		case parquet::Type::FIXED_LEN_BYTE_ARRAY:
+		{
+			/* Parquet DECIMAL sorts signed-numerically, so FLBA min/max are the
+			 * true numeric bounds.  Decode big-endian two's complement (the same
+			 * helper the value reader uses).  >18 digits need int128: keep. */
+			if (precision <= 0 || precision > 18)
+				return false;
+			auto s = std::static_pointer_cast<parquet::FLBAStatistics>(stats);
+			parquet::FixedLenByteArray lo = s->min();
+			parquet::FixedLenByteArray hi = s->max();
+			rawMin = FLBA_to_int64(lo.ptr, typeLength);
+			rawMax = FLBA_to_int64(hi.ptr, typeLength);
+			break;
+		}
+		default:
+			return false;
+	}
+	mn = decimalToStr(rawMin, scale);
+	mx = decimalToStr(rawMax, scale);
+	return true;
+}
+
+/* true iff numeric range [minN,maxN] provably excludes (col strat c), using
+ * PG numeric_cmp (-1/0/1).  PG calls are isolated via gpdbDirectFunctionCall*. */
+static bool
+numericRangeExcluded(int strat, Datum minN, Datum maxN, Datum c)
+{
+	switch (strat)
+	{
+		case BTLessStrategyNumber:			/* col < c : excluded iff min >= c */
+			return DatumGetInt32(gpdbDirectFunctionCall2(numeric_cmp, minN, c)) >= 0;
+		case BTLessEqualStrategyNumber:		/* col <= c: excluded iff min > c  */
+			return DatumGetInt32(gpdbDirectFunctionCall2(numeric_cmp, minN, c)) > 0;
+		case BTEqualStrategyNumber:			/* excluded iff c < min || c > max */
+			return DatumGetInt32(gpdbDirectFunctionCall2(numeric_cmp, c, minN)) < 0 ||
+				   DatumGetInt32(gpdbDirectFunctionCall2(numeric_cmp, c, maxN)) > 0;
+		case BTGreaterEqualStrategyNumber:	/* col >= c: excluded iff max < c  */
+			return DatumGetInt32(gpdbDirectFunctionCall2(numeric_cmp, maxN, c)) < 0;
+		case BTGreaterStrategyNumber:		/* col > c : excluded iff max <= c */
+			return DatumGetInt32(gpdbDirectFunctionCall2(numeric_cmp, maxN, c)) <= 0;
+		default:
+			return false;
+	}
+}
+
 } /* anonymous namespace */
 
 bool
@@ -286,6 +372,24 @@ ParquetReader::opExprExcludesRowGroup(void *opPtr, void *rgPtr)
 		if (!pqStatMinMaxStr(cc.get(), mns, mxs))
 			return false;
 		return byteLess(cs, mns) || byteLess(mxs, cs);	/* c < min || c > max */
+	}
+
+	/* Numeric/decimal: reconstruct the row group's exact decimal min/max and
+	 * compare with the constant via PG numeric_cmp.  Only INT32/INT64-backed
+	 * Parquet decimals are handled; others keep the row group. */
+	if (ti.pgTypeId_ == NUMERICOID)
+	{
+		if (con->consttype != NUMERICOID || con->constisnull)
+			return false;
+		std::string mns, mxs;
+		auto cc = rg->ColumnChunk(ti.columnIndex_);
+		if (!pqStatMinMaxDecimalStr(cc.get(), ti.scale_, ti.precision_, ti.typeLength_, mns, mxs))
+			return false;
+		Datum minN = gpdbDirectFunctionCall3(numeric_in, CStringGetDatum(mns.c_str()),
+											 ObjectIdGetDatum(InvalidOid), Int32GetDatum(-1));
+		Datum maxN = gpdbDirectFunctionCall3(numeric_in, CStringGetDatum(mxs.c_str()),
+											 ObjectIdGetDatum(InvalidOid), Int32GetDatum(-1));
+		return numericRangeExcluded(strat, minN, maxN, con->constvalue);
 	}
 
 	int64_t c;
