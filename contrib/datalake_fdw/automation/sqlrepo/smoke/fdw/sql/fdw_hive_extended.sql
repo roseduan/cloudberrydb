@@ -1,3 +1,9 @@
+-- Normalize C/C++ source locations appended to backend error messages so the
+-- test does not break when unrelated changes shift line numbers.
+-- start_matchsubs
+-- m/\(hive_connector\.c:\d+\)/
+-- s/\(hive_connector\.c:\d+\)/(hive_connector.c:XXX)/
+-- end_matchsubs
 -- FDW Hive Extended Coverage Test
 -- Purpose: Maximize coverage of dlproxy, grammar_convert, logicalType, filters, partition_selector
 -- Target: filters.c, protocol.c, libchurl.c, headers.c, grammar_convert.c,

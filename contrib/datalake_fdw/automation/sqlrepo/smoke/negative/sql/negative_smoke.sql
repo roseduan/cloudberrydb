@@ -1,3 +1,9 @@
+-- Normalize C/C++ source locations appended to backend error messages so the
+-- test does not break when unrelated changes shift line numbers.
+-- start_matchsubs
+-- m/\(fileSystemWrapper\.cpp:\d+\)/
+-- s/\(fileSystemWrapper\.cpp:\d+\)/(fileSystemWrapper.cpp:XXX)/
+-- end_matchsubs
 -- Error Handling / Negative Tests Smoke
 -- Purpose: Verify datalake_fdw produces clear error messages for invalid operations
 -- Tests: bad paths, format mismatch, schema mismatch, invalid options, permission errors

@@ -1,3 +1,15 @@
+-- Normalize C/C++ source locations appended to backend error messages so the
+-- test does not break when unrelated changes shift line numbers.
+-- start_matchsubs
+-- m/\(avroRead\.cpp:\d+\)/
+-- s/\(avroRead\.cpp:\d+\)/(avroRead.cpp:XXX)/
+-- m/\(parquetRead\.cpp:\d+\)/
+-- s/\(parquetRead\.cpp:\d+\)/(parquetRead.cpp:XXX)/
+-- m/\(parquetFileReader\.cpp:\d+\)/
+-- s/\(parquetFileReader\.cpp:\d+\)/(parquetFileReader.cpp:XXX)/
+-- m/\(orcFileReader\.cpp:\d+\)/
+-- s/\(orcFileReader\.cpp:\d+\)/(orcFileReader.cpp:XXX)/
+-- end_matchsubs
 -- FDW Error Read Path Coverage Test
 -- Purpose: Trigger error branches in file readers via corrupted/mismatched data
 -- Target: parquetFileReader.cpp error paths, orcFileReader.cpp error paths,

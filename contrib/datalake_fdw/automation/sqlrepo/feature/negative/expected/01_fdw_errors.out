@@ -1,3 +1,9 @@
+-- Normalize C/C++ source locations appended to backend error messages so the
+-- test does not break when unrelated changes shift line numbers.
+-- start_matchsubs
+-- m/\(fileSystemWrapper\.cpp:\d+\)/
+-- s/\(fileSystemWrapper\.cpp:\d+\)/(fileSystemWrapper.cpp:XXX)/
+-- end_matchsubs
 -- 01_fdw_errors.sql
 -- Test FDW error paths and negative scenarios
 \i ../../../lib/sql/common_setup.sql
