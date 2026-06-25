@@ -655,6 +655,7 @@ datalakeCreateContext(dataLakeOptions *options)
 	DatalakeProtocolContext *context;
 	gopherConfig    *gopherConfig;
 	gopherFS        fs;
+	bool            saved_disable_cache;
 
 	context = (DatalakeProtocolContext *)palloc0(sizeof(DatalakeProtocolContext));
 
@@ -663,10 +664,25 @@ datalakeCreateContext(dataLakeOptions *options)
 	 * datalake.disable_cache_file. When the option is unset (e.g. native
 	 * iceberg AM tables), keep the GUC value so it globally controls caching
 	 * (default OFF = cache on) instead of being forced on every scan.
+	 *
+	 * disableCacheFile is the live GUC-backed variable, read by other callers
+	 * later in the session (config.c, rewrLogical.cpp, gopher_random_file.cpp).
+	 * Scope the per-table override to exactly the datalakeCreateGopherConfig
+	 * call below -- its only consumer on this path -- and restore the GUC
+	 * value afterwards so the override never leaks across scans.
 	 */
-	if (options->cache_enabled != NULL)
-		disableCacheFile = !isCacheEnabled(options->cache_enabled);
-	gopherConfig = datalakeCreateGopherConfig((void*)(options->gopher));
+	saved_disable_cache = disableCacheFile;
+	PG_TRY();
+	{
+		if (options->cache_enabled != NULL)
+			disableCacheFile = !isCacheEnabled(options->cache_enabled);
+		gopherConfig = datalakeCreateGopherConfig((void*)(options->gopher));
+	}
+	PG_FINALLY();
+	{
+		disableCacheFile = saved_disable_cache;
+	}
+	PG_END_TRY();
 	gopherUserCanceledCallBack(&checkInterrupt);
 
 	fs = gopherConnect(*gopherConfig);
