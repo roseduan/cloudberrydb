@@ -37,6 +37,7 @@ variables:
       unprotect: true
       paths:
         - ${CI_PROJECT_DIR}/database
+        - ${CI_PROJECT_DIR}/services
       when: 'on_success'
       policy: pull
 
@@ -71,6 +72,7 @@ variables:
       unprotect: true
       paths:
         - ${CI_PROJECT_DIR}/database
+        - ${CI_PROJECT_DIR}/services
       when: 'always'
 
 
@@ -437,16 +439,108 @@ test_datalake_smoke:
 
     set -euxo pipefail
 
-    export ENV=devel
-    make prepare-datalake-smoke
+    pushd ${CI_PROJECT_DIR}
+      docker network create share-enterprise-ci || true
+      docker compose -f services/datalake-test-env.yml up -d
+      docker cp database/contrib/datalake_fdw/automation/prepare/prepare_hive/hive_iceberg_fdw.sql spark-master:/tmp/
+      docker cp database/contrib/datalake_fdw/automation/prepare/prepare_hive/hive_smoke.sql hiveserver2:/tmp/
+      docker cp database/contrib/datalake_fdw/automation/prepare/prepare_hdfs/hdfs_smoke.sql hiveserver2:/tmp/
+      # Hudi prep must run the same hudi version the datalake_fdw reader and
+      # the committed expected files are calibrated against (0.13.1).  The
+      # spark image ships hudi-spark3.3-bundle 0.14.1, whose shaded hbase is
+      # ABI-incompatible with the image's hadoop-client 3.3.2: writes crash at
+      # commit time with NoSuchMethodError: HdfsDataInputStream
+      # .getReadStatistics() while closing metadata-table HFile readers
+      # (pipeline #139668).  Swap the bundle inside the freshly composed
+      # container before running any hudi SQL.
+      HUDI_BUNDLE=hudi-spark3.3-bundle_2.12-0.13.1.jar
+      curl -fsSL -o /tmp/${HUDI_BUNDLE} "https://hashdata-download.obs.cn-north-4.myhuaweicloud.com/lightning-ci/packages/${HUDI_BUNDLE}"
+      docker exec spark-master bash -c 'rm -f /opt/spark/jars/hudi-spark3*-bundle_*.jar'
+      docker cp /tmp/${HUDI_BUNDLE} spark-master:/opt/spark/jars/${HUDI_BUNDLE}
+
+      docker cp database/contrib/datalake_fdw/automation/prepare/prepare_hudi/hudi_smoke.sql spark-master:/tmp/hudi_smoke.sql
+      docker cp database/contrib/datalake_fdw/automation/prepare/prepare_hudi/hudi_coverage.sql spark-master:/tmp/hudi_coverage.sql
+      docker cp database/contrib/datalake_fdw/automation/prepare/prepare_s3/s3_smoke.sql hiveserver2:/tmp/s3_smoke.sql
+
+      while true;do
+        if  docker exec -i hiveserver2 /bin/bash -lc 'echo >/dev/tcp/hiveserver2/10000';then
+          echo hiveserver started
+          break
+        fi
+        echo waiting for hiveserver start...
+        sleep 1
+      done
+
+      docker exec -i hiveserver2 /opt/hive/bin/beeline -u jdbc:hive2://hiveserver2:10000/default -n hive -e "CREATE DATABASE IF NOT EXISTS public;"
+      docker exec -i hiveserver2 /opt/hive/bin/beeline -u jdbc:hive2://hiveserver2:10000/default -n hive -f /tmp/hdfs_smoke.sql
+      docker exec -i hiveserver2 /opt/hive/bin/beeline -u jdbc:hive2://hiveserver2:10000/default -n hive -f /tmp/hive_smoke.sql || true
+      docker exec -i hiveserver2 /opt/hive/bin/beeline -u jdbc:hive2://hiveserver2:10000/default -n hive -f /tmp/s3_smoke.sql
+
+      docker exec -i spark-master /opt/spark/bin/spark-sql --master local[*] \
+          --conf hive.stats.jdbc.timeout=10 \
+        --conf spark.hadoop.fs.s3a.endpoint=http://minio:9000 \
+        --conf spark.hadoop.fs.s3a.access.key=admin \
+        --conf spark.hadoop.fs.s3a.secret.key=admin12345 \
+        --conf spark.hadoop.fs.s3a.path.style.access=true \
+        --conf spark.hadoop.fs.s3a.aws.credentials.provider=org.apache.hadoop.fs.s3a.SimpleAWSCredentialsProvider \
+        --conf spark.serializer=org.apache.spark.serializer.KryoSerializer \
+        --conf spark.sql.extensions=org.apache.spark.sql.hudi.HoodieSparkSessionExtension \
+        --conf spark.sql.catalog.spark_catalog=org.apache.spark.sql.hudi.catalog.HoodieCatalog \
+        --conf spark.hadoop.hive.metastore.uris=thrift://hive-metastore:9083 \
+        --conf spark.hadoop.dfs.client.block.write.replace-datanode-on-failure.policy=NEVER \
+        --conf spark.hadoop.dfs.client.block.write.replace-datanode-on-failure.enable=false \
+        --conf spark.hadoop.dfs.replication=1 -f /tmp/hudi_smoke.sql
+
+      docker exec -i spark-master /opt/spark/bin/spark-sql --master local[*] \
+          --conf hive.stats.jdbc.timeout=10 \
+        --conf spark.hadoop.fs.s3a.endpoint=http://minio:9000 \
+        --conf spark.hadoop.fs.s3a.access.key=admin \
+        --conf spark.hadoop.fs.s3a.secret.key=admin12345 \
+        --conf spark.hadoop.fs.s3a.path.style.access=true \
+        --conf spark.hadoop.fs.s3a.aws.credentials.provider=org.apache.hadoop.fs.s3a.SimpleAWSCredentialsProvider \
+        --conf spark.serializer=org.apache.spark.serializer.KryoSerializer \
+        --conf spark.sql.extensions=org.apache.spark.sql.hudi.HoodieSparkSessionExtension \
+        --conf spark.sql.catalog.spark_catalog=org.apache.spark.sql.hudi.catalog.HoodieCatalog \
+        --conf spark.hadoop.hive.metastore.uris=thrift://hive-metastore:9083 \
+        --conf spark.hadoop.dfs.client.block.write.replace-datanode-on-failure.policy=NEVER \
+        --conf spark.hadoop.dfs.client.block.write.replace-datanode-on-failure.enable=false \
+        --conf spark.hadoop.dfs.replication=1 -f /tmp/hudi_coverage.sql
+
+
+      docker exec -i spark-master /opt/spark/bin/spark-sql --master local[*] \
+          --conf hive.stats.jdbc.timeout=10 \
+        --conf spark.hadoop.hive.metastore.uris=thrift://hive-metastore:9083 \
+        --conf spark.hadoop.fs.s3a.endpoint=http://minio:9000 \
+        --conf spark.hadoop.fs.s3a.access.key=admin \
+        --conf spark.hadoop.fs.s3a.secret.key=admin12345 \
+        --conf spark.hadoop.fs.s3a.path.style.access=true \
+        --conf spark.hadoop.fs.s3a.aws.credentials.provider=org.apache.hadoop.fs.s3a.SimpleAWSCredentialsProvider \
+        --conf spark.sql.extensions=org.apache.iceberg.spark.extensions.IcebergSparkSessionExtensions \
+        --conf spark.sql.catalog.ic=org.apache.iceberg.spark.SparkCatalog \
+        --conf spark.sql.catalog.ic.type=hive \
+        --conf spark.sql.catalog.ic.uri=thrift://hive-metastore:9083 -f /tmp/hive_iceberg_fdw.sql
+    popd
+
+    export ENV=release
+
+    # The smoke Makefiles (notably smoke/s3/Makefile and smoke/iceberg_am_*)
+    # invoke `mc` / `beeline` / `hdfs` to clean and seed minio + hiveserver2
+    # before pg_regress runs.  Those binaries are not on the runner image,
+    # so pre-populate the cache from the internal OBS mirror and let
+    # check_services.sh's install_tools.sh extract them into tools/bin
+    # (which run_smoke_tests.sh already prepends to PATH).
+    bash database/contrib/datalake_fdw/automation/docker/singlecluster/download_cache/download.sh
+    export INSTALL_TOOLS=1
+
+    # make prepare-datalake-smoke
     make test-datalake-smoke
+
   after_script: |
     cd ${CI_PROJECT_DIR}/database/contrib/datalake_fdw/automation/docker/singlecluster && \
       docker compose down -v || :
   rules:
     # TODO: re-enable once the umbrella prepare-datalake-smoke / test-datalake-smoke
     # entry points are wired through.  Drop the `when: never` line below to restore.
-    - when: never
     - !reference [ .common-rules ]
   artifacts:
     <<: *artifacts
@@ -459,17 +553,108 @@ test_datalake_feature:
     trap 'test -e /tmp/.debugging && tmux new-session -d -s debug && tmux wait-for done' EXIT
 
     set -euxo pipefail
+    pushd ${CI_PROJECT_DIR}
+      docker network create share-enterprise-ci || true
+      docker compose -f services/datalake-test-env.yml up -d
+      docker cp database/contrib/datalake_fdw/automation/prepare/prepare_hive/hive_iceberg_fdw.sql spark-master:/tmp/
+      docker cp database/contrib/datalake_fdw/automation/prepare/prepare_hive/hive_smoke.sql hiveserver2:/tmp/
+      docker cp database/contrib/datalake_fdw/automation/prepare/prepare_hdfs/hdfs_smoke.sql hiveserver2:/tmp/
+      # Hudi prep must run the same hudi version the datalake_fdw reader and
+      # the committed expected files are calibrated against (0.13.1).  The
+      # spark image ships hudi-spark3.3-bundle 0.14.1, whose shaded hbase is
+      # ABI-incompatible with the image's hadoop-client 3.3.2: writes crash at
+      # commit time with NoSuchMethodError: HdfsDataInputStream
+      # .getReadStatistics() while closing metadata-table HFile readers
+      # (pipeline #139668).  Swap the bundle inside the freshly composed
+      # container before running any hudi SQL.
+      HUDI_BUNDLE=hudi-spark3.3-bundle_2.12-0.13.1.jar
+      curl -fsSL -o /tmp/${HUDI_BUNDLE} "https://hashdata-download.obs.cn-north-4.myhuaweicloud.com/lightning-ci/packages/${HUDI_BUNDLE}"
+      docker exec spark-master bash -c 'rm -f /opt/spark/jars/hudi-spark3*-bundle_*.jar'
+      docker cp /tmp/${HUDI_BUNDLE} spark-master:/opt/spark/jars/${HUDI_BUNDLE}
 
-    export ENV=devel
-    make prepare-datalake-feature
+      docker cp database/contrib/datalake_fdw/automation/prepare/prepare_hudi/hudi_smoke.sql spark-master:/tmp/hudi_smoke.sql
+      docker cp database/contrib/datalake_fdw/automation/prepare/prepare_hudi/hudi_coverage.sql spark-master:/tmp/hudi_coverage.sql
+      docker cp database/contrib/datalake_fdw/automation/prepare/prepare_s3/s3_smoke.sql hiveserver2:/tmp/s3_smoke.sql
+
+
+      while true;do
+        if  docker exec -i hiveserver2 /bin/bash -lc 'echo >/dev/tcp/hiveserver2/10000';then
+          echo hiveserver started
+          break
+        fi
+        echo waiting for hiveserver start...
+        sleep 1
+      done
+
+      docker exec -i hiveserver2 /opt/hive/bin/beeline -u jdbc:hive2://hiveserver2:10000/default -n hive -e "CREATE DATABASE IF NOT EXISTS public;"
+      docker exec -i hiveserver2 /opt/hive/bin/beeline -u jdbc:hive2://hiveserver2:10000/default -n hive -f /tmp/hdfs_smoke.sql
+      docker exec -i hiveserver2 /opt/hive/bin/beeline -u jdbc:hive2://hiveserver2:10000/default -n hive -f /tmp/hive_smoke.sql || true
+      docker exec -i hiveserver2 /opt/hive/bin/beeline -u jdbc:hive2://hiveserver2:10000/default -n hive -f /tmp/s3_smoke.sql
+
+      docker exec -i spark-master /opt/spark/bin/spark-sql --master local[*] \
+          --conf hive.stats.jdbc.timeout=10 \
+        --conf spark.hadoop.fs.s3a.endpoint=http://minio:9000 \
+        --conf spark.hadoop.fs.s3a.access.key=admin \
+        --conf spark.hadoop.fs.s3a.secret.key=admin12345 \
+        --conf spark.hadoop.fs.s3a.path.style.access=true \
+        --conf spark.hadoop.fs.s3a.aws.credentials.provider=org.apache.hadoop.fs.s3a.SimpleAWSCredentialsProvider \
+        --conf spark.serializer=org.apache.spark.serializer.KryoSerializer \
+        --conf spark.sql.extensions=org.apache.spark.sql.hudi.HoodieSparkSessionExtension \
+        --conf spark.sql.catalog.spark_catalog=org.apache.spark.sql.hudi.catalog.HoodieCatalog \
+        --conf spark.hadoop.hive.metastore.uris=thrift://hive-metastore:9083 \
+        --conf spark.hadoop.dfs.client.block.write.replace-datanode-on-failure.policy=NEVER \
+        --conf spark.hadoop.dfs.client.block.write.replace-datanode-on-failure.enable=false \
+        --conf spark.hadoop.dfs.replication=1 -f /tmp/hudi_smoke.sql
+
+      docker exec -i spark-master /opt/spark/bin/spark-sql --master local[*] \
+          --conf hive.stats.jdbc.timeout=10 \
+        --conf spark.hadoop.fs.s3a.endpoint=http://minio:9000 \
+        --conf spark.hadoop.fs.s3a.access.key=admin \
+        --conf spark.hadoop.fs.s3a.secret.key=admin12345 \
+        --conf spark.hadoop.fs.s3a.path.style.access=true \
+        --conf spark.hadoop.fs.s3a.aws.credentials.provider=org.apache.hadoop.fs.s3a.SimpleAWSCredentialsProvider \
+        --conf spark.serializer=org.apache.spark.serializer.KryoSerializer \
+        --conf spark.sql.extensions=org.apache.spark.sql.hudi.HoodieSparkSessionExtension \
+        --conf spark.sql.catalog.spark_catalog=org.apache.spark.sql.hudi.catalog.HoodieCatalog \
+        --conf spark.hadoop.hive.metastore.uris=thrift://hive-metastore:9083 \
+        --conf spark.hadoop.dfs.client.block.write.replace-datanode-on-failure.policy=NEVER \
+        --conf spark.hadoop.dfs.client.block.write.replace-datanode-on-failure.enable=false \
+        --conf spark.hadoop.dfs.replication=1 -f /tmp/hudi_coverage.sql
+
+
+      docker exec -i spark-master /opt/spark/bin/spark-sql --master local[*] \
+          --conf hive.stats.jdbc.timeout=10 \
+        --conf spark.hadoop.hive.metastore.uris=thrift://hive-metastore:9083 \
+        --conf spark.hadoop.fs.s3a.endpoint=http://minio:9000 \
+        --conf spark.hadoop.fs.s3a.access.key=admin \
+        --conf spark.hadoop.fs.s3a.secret.key=admin12345 \
+        --conf spark.hadoop.fs.s3a.path.style.access=true \
+        --conf spark.hadoop.fs.s3a.aws.credentials.provider=org.apache.hadoop.fs.s3a.SimpleAWSCredentialsProvider \
+        --conf spark.sql.extensions=org.apache.iceberg.spark.extensions.IcebergSparkSessionExtensions \
+        --conf spark.sql.catalog.ic=org.apache.iceberg.spark.SparkCatalog \
+        --conf spark.sql.catalog.ic.type=hive \
+        --conf spark.sql.catalog.ic.uri=thrift://hive-metastore:9083 -f /tmp/hive_iceberg_fdw.sql
+    popd
+
+    export ENV=release
+
+    # The feature test Makefiles invoke `mc` / `beeline` / `hdfs` to clean
+    # and seed minio + hiveserver2 before pg_regress runs.  Those binaries
+    # are not on the runner image, so pre-populate the cache from the
+    # internal OBS mirror and let check_services.sh's install_tools.sh
+    # extract them into tools/bin (run_smoke_tests.sh already prepends to PATH).
+    bash database/contrib/datalake_fdw/automation/docker/singlecluster/download_cache/download.sh
+    export INSTALL_TOOLS=1
+
+    # make prepare-datalake-smoke
     make test-datalake-feature
+
   after_script: |
     cd ${CI_PROJECT_DIR}/database/contrib/datalake_fdw/automation/docker/singlecluster && \
       docker compose down -v || :
   rules:
     # TODO: re-enable once the umbrella prepare-datalake-feature / test-datalake-feature
     # entry points are wired through.  Drop the `when: never` line below to restore.
-    - when: never
     - !reference [ .common-rules ]
   artifacts:
     <<: *artifacts
