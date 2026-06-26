@@ -31,6 +31,7 @@
 #include "catalog/pg_am.h"
 #include "catalog/pg_constraint.h"
 #include "catalog/pg_directory_table.h"
+#include "catalog/partition.h"
 #include "catalog/pg_inherits.h"
 #include "catalog/pg_opclass.h"
 #include "catalog/pg_opfamily.h"
@@ -119,6 +120,8 @@ static void ReindexPartitions(ReindexStmt *stmt, Oid relid, ReindexParams *param
 							  bool isTopLevel);
 static void ReindexMultipleInternal(ReindexStmt *stmt, List *relids,
 									ReindexParams *params);
+static void reindexValidateParentIndex(Oid parentIdxOid);
+static void reindexValidateParentIndexes(List *leafOids, bool leafIsIndex);
 static void index_concurrently_build_index(Oid relationId, Oid indexRelationId,
 										   LOCKTAG heaplocktag, bool safe_index);
 static void index_concurrently_validate_index(LOCKTAG heaplocktag,
@@ -3185,6 +3188,174 @@ ChooseIndexColumnNames(List *indexElems)
 }
 
 /*
+ * reindexValidateParentIndex
+ *
+ * Re-run validatePartitionedIndex() for a single parent partitioned index,
+ * flipping its pg_index.indisvalid to true once every attached child index is
+ * valid.  REINDEX rebuilds the leaf children but otherwise never touches the
+ * parent partitioned index, so a parent left invalid by an earlier CREATE
+ * INDEX (DefineIndex's invalidate_parent path) would stay invalid forever.
+ *
+ * The caller MUST NOT hold any lock on the child partitions.  We acquire the
+ * parent locks top-down (table before index), the same order used by ALTER
+ * TABLE / DROP INDEX on a partitioned root; acquiring them while still holding
+ * child locks -- as reindex_index() would, running in the per-leaf
+ * transaction -- inverts that order and deadlocks against concurrent DDL.
+ * validatePartitionedIndex() recurses to any grandparent on its own, again
+ * top-down, so multi-level partition trees are covered safely.
+ *
+ * Runs on both QD (from ReindexPartitions) and QE (dispatched from
+ * ReindexPartitions via the internal "gp_revalidate_parent" marker), keeping
+ * the parent's indisvalid in sync across coordinator and segments.
+ */
+static void
+reindexValidateParentIndex(Oid parentIdxOid)
+{
+	Oid			parentTblOid;
+	Relation	parentIdx;
+	Relation	parentTbl;
+
+	if (!SearchSysCacheExists1(RELOID, ObjectIdGetDatum(parentIdxOid)))
+		return;
+
+	parentTblOid = IndexGetRelation(parentIdxOid, true);
+	if (!OidIsValid(parentTblOid))
+		return;
+
+	/* Lock table first (top-down order), then index. */
+	parentTbl = relation_open(parentTblOid, AccessShareLock);
+	parentIdx = relation_open(parentIdxOid, AccessExclusiveLock);
+
+	if (parentIdx->rd_rel->relkind == RELKIND_PARTITIONED_INDEX &&
+		!parentIdx->rd_index->indisvalid)
+		validatePartitionedIndex(parentIdx, parentTbl);
+
+	relation_close(parentIdx, NoLock);
+	relation_close(parentTbl, NoLock);
+}
+
+/*
+ * reindexValidateParentIndexes
+ *
+ * GPDB: After rebuilding one or more leaf partitions via REINDEX, revalidate
+ * all partitioned parent index(es) above those leaves and dispatch the same
+ * revalidation to the segments.
+ *
+ * leafOids    - OIDs of the leaf partitions that were just rebuilt:
+ *               index OIDs if leafIsIndex is true,
+ *               table OIDs if leafIsIndex is false
+ * leafIsIndex - true for REINDEX INDEX, false for REINDEX TABLE
+ *
+ * Issues CommandCounterIncrement() first so validatePartitionedIndex sees the
+ * just-updated leaf indisvalid=true within the same transaction.  When called
+ * after ReindexMultipleInternal (each leaf in its own committed transaction),
+ * the caller must push an active snapshot before calling this function.
+ *
+ * Must be called with no child partition locks held.  Acquires parent locks
+ * top-down (table before index) to avoid the child-before-parent inversion
+ * that deadlocks against concurrent DDL.
+ */
+static void
+reindexValidateParentIndexes(List *leafOids, bool leafIsIndex)
+{
+	List	   *parentIdxOids = NIL;
+	ListCell   *lc;
+
+	CommandCounterIncrement();
+
+	if (leafIsIndex)
+	{
+		/* Leaf index OIDs: collect their immediate parent index OIDs. */
+		foreach(lc, leafOids)
+		{
+			Oid		leafIdxOid = lfirst_oid(lc);
+			Oid		parentIdxOid;
+
+			if (!SearchSysCacheExists1(RELOID, ObjectIdGetDatum(leafIdxOid)))
+				continue;
+			parentIdxOid = get_partition_parent(leafIdxOid, true);
+			if (!OidIsValid(parentIdxOid))
+				continue;
+			if (!list_member_oid(parentIdxOids, parentIdxOid))
+				parentIdxOids = lappend_oid(parentIdxOids, parentIdxOid);
+		}
+	}
+	else
+	{
+		/*
+		 * Leaf table OIDs: find their immediate parent tables, then collect
+		 * any RELKIND_PARTITIONED_INDEX entries on those parents.
+		 */
+		List	   *parentTblOids = NIL;
+		Relation	pgIndexRel;
+		SysScanDesc	scan;
+		ScanKeyData	skey;
+		HeapTuple	htup;
+
+		foreach(lc, leafOids)
+		{
+			Oid		leafTblOid = lfirst_oid(lc);
+			Oid		parentTblOid;
+
+			if (!SearchSysCacheExists1(RELOID, ObjectIdGetDatum(leafTblOid)))
+				continue;
+			parentTblOid = get_partition_parent(leafTblOid, true);
+			if (!OidIsValid(parentTblOid))
+				continue;
+			if (!list_member_oid(parentTblOids, parentTblOid))
+				parentTblOids = lappend_oid(parentTblOids, parentTblOid);
+		}
+
+		pgIndexRel = table_open(IndexRelationId, AccessShareLock);
+		foreach(lc, parentTblOids)
+		{
+			Oid		parentTblOid = lfirst_oid(lc);
+
+			ScanKeyInit(&skey, Anum_pg_index_indrelid,
+						BTEqualStrategyNumber, F_OIDEQ,
+						ObjectIdGetDatum(parentTblOid));
+			scan = systable_beginscan(pgIndexRel, IndexIndrelidIndexId,
+									  true, NULL, 1, &skey);
+			while ((htup = systable_getnext(scan)) != NULL)
+			{
+				Form_pg_index	indForm = (Form_pg_index) GETSTRUCT(htup);
+				Oid				idxOid = indForm->indexrelid;
+
+				if (get_rel_relkind(idxOid) == RELKIND_PARTITIONED_INDEX &&
+					!list_member_oid(parentIdxOids, idxOid))
+					parentIdxOids = lappend_oid(parentIdxOids, idxOid);
+			}
+			systable_endscan(scan);
+		}
+		table_close(pgIndexRel, AccessShareLock);
+	}
+
+	foreach(lc, parentIdxOids)
+	{
+		Oid		parentIdxOid = lfirst_oid(lc);
+
+		reindexValidateParentIndex(parentIdxOid);
+
+		if (Gp_role == GP_ROLE_DISPATCH)
+		{
+			ReindexStmt *qestmt = makeNode(ReindexStmt);
+
+			qestmt->kind = REINDEX_OBJECT_INDEX;
+			qestmt->relation = NULL;
+			qestmt->relid = parentIdxOid;
+			qestmt->params =
+				list_make1(makeDefElem("gp_revalidate_parent", NULL, -1));
+
+			CdbDispatchUtilityStatement((Node *) qestmt,
+										DF_CANCEL_ON_ERROR |
+										DF_WITH_SNAPSHOT,
+										GetAssignedOidsForDispatch(),
+										NULL);
+		}
+	}
+}
+
+/*
  * ExecReindex
  *
  * Primary entry point for manual REINDEX commands.  This is mainly a
@@ -3198,6 +3369,7 @@ ExecReindex(ParseState *pstate, ReindexStmt *stmt, bool isTopLevel)
 	ListCell   *lc;
 	bool		concurrently = false;
 	bool		verbose = false;
+	bool		revalidateParent = false;
 	char	   *tablespacename = NULL;
 
 	/* Parse option list */
@@ -3213,12 +3385,31 @@ ExecReindex(ParseState *pstate, ReindexStmt *stmt, bool isTopLevel)
 		}
 		else if (strcmp(opt->defname, "tablespace") == 0)
 			tablespacename = defGetString(opt);
+		else if (strcmp(opt->defname, "gp_revalidate_parent") == 0)
+			revalidateParent = true;
 		else
 			ereport(ERROR,
 					(errcode(ERRCODE_SYNTAX_ERROR),
 					 errmsg("unrecognized REINDEX option \"%s\"",
 							opt->defname),
 					 parser_errposition(pstate, opt->location)));
+	}
+
+	/*
+	 * GPDB: "gp_revalidate_parent" is an internal-only marker dispatched by
+	 * ReindexPartitions on the QD so a segment re-validates a parent
+	 * partitioned index's indisvalid flag (flipping it true once all child
+	 * indexes are valid) without reindexing anything.  reindex_index() on the
+	 * QEs skipped this step to avoid a child-before-parent lock-order
+	 * deadlock, so the QD drives it here, once, after every leaf has been
+	 * rebuilt and committed.  stmt->relid is the parent partitioned index.
+	 */
+	if (revalidateParent)
+	{
+		Assert(Gp_role == GP_ROLE_EXECUTE);
+		Assert(OidIsValid(stmt->relid));
+		reindexValidateParentIndex(stmt->relid);
+		return;
 	}
 
 	if (concurrently)
@@ -3376,6 +3567,11 @@ ReindexIndex(ReindexStmt *stmt, ReindexParams *params, bool isTopLevel)
 									GetAssignedOidsForDispatch(),
 									NULL);
 	}
+
+	/* GPDB: revalidate parent partitioned index(es) for single-leaf REINDEX. */
+	if (relkind == RELKIND_INDEX && !concurrent &&
+		get_rel_relispartition(indOid))
+		reindexValidateParentIndexes(list_make1_oid(indOid), true);
 }
 
 /*
@@ -3536,6 +3732,11 @@ ReindexTable(ReindexStmt *stmt, ReindexParams *params, bool isTopLevel)
 									GetAssignedOidsForDispatch(),
 									NULL);
 	}
+
+	/* GPDB: revalidate parent partitioned index(es) for single-leaf REINDEX. */
+	if (get_rel_relkind(heapOid) != RELKIND_PARTITIONED_TABLE && !concurrent &&
+		get_rel_relispartition(heapOid))
+		reindexValidateParentIndexes(list_make1_oid(heapOid), false);
 
 	return heapOid;
 }
@@ -3861,6 +4062,15 @@ ReindexPartitions(ReindexStmt *stmt, Oid relid, ReindexParams *params, bool isTo
 	 * this commits and then starts a new transaction immediately.
 	 */
 	ReindexMultipleInternal(stmt, partitions, params);
+
+	/* GPDB: revalidate parent partitioned index(es) after all leaf rebuilds. */
+	if (!(params->options & REINDEXOPT_CONCURRENTLY))
+	{
+		PushActiveSnapshot(GetTransactionSnapshot());
+		reindexValidateParentIndexes(partitions,
+									 relkind == RELKIND_PARTITIONED_INDEX);
+		PopActiveSnapshot();
+	}
 
 	/*
 	 * Clean up working storage --- note we must do this after

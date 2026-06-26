@@ -570,7 +570,6 @@ static void DetachPartitionFinalize(Relation rel, Relation partRel,
 static ObjectAddress ATExecDetachPartitionFinalize(Relation rel, RangeVar *name);
 static ObjectAddress ATExecAttachPartitionIdx(List **wqueue, Relation rel,
 											  RangeVar *name);
-static void validatePartitionedIndex(Relation partedIdx, Relation partedTbl);
 static void refuseDupeIndexAttach(Relation parentIdx, Relation partIdx,
 								  Relation partitionTbl);
 static List *GetParentedForeignKeyRefs(Relation partition);
@@ -22988,7 +22987,7 @@ refuseDupeIndexAttach(Relation parentIdx, Relation partIdx, Relation partitionTb
  *
  * This should be called each time a partition index is attached.
  */
-static void
+void
 validatePartitionedIndex(Relation partedIdx, Relation partedTbl)
 {
 	Relation	inheritsRel;

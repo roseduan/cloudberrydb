@@ -125,6 +125,7 @@ extern bool PartConstraintImpliedByRelConstraint(Relation scanrel,
 												 List *partConstraint);
 extern void ComputePartitionAttrs(ParseState *pstate, Relation rel, List *partParams, AttrNumber *partattrs,
 								  List **partexprs, Oid *partopclass, Oid *partcollation, char strategy);
+extern void validatePartitionedIndex(Relation partedIdx, Relation partedTbl);
 
 /* GPDB specific functions */
 extern void ATExecGPPartCmds(Relation origrel, AlterTableCmd *cmd);
