@@ -658,6 +658,32 @@ WaitForOlderSnapshots(TransactionId limitXmin, bool progress)
 
 
 /*
+ * RelationGetNoConcurrentIndexKind
+ *
+ * Cloudberry: AO row, AO column and PAX tables cannot build or rebuild an
+ * index concurrently -- their table AMs do not implement the
+ * index_validate_scan step that the concurrent (multi-phase) index machinery
+ * relies on.  (Concurrent DROP INDEX is fine; it never scans/rebuilds.)
+ * Returns a human-readable storage-kind name when the relation is one of
+ * these, so the CREATE INDEX / REINDEX CONCURRENTLY paths can reject it
+ * promptly with a clear message instead of failing deep inside the build;
+ * returns NULL for an ordinary heap (and for any AM that does support
+ * concurrent index builds).
+ */
+static const char *
+RelationGetNoConcurrentIndexKind(Relation rel)
+{
+	if (RelationIsAoRows(rel))
+		return "append-only";
+	if (RelationIsAoCols(rel))
+		return "append-only columnar";
+	if (RelationIsPax(rel))
+		return "PAX";
+	return NULL;
+}
+
+
+/*
  * DefineIndex
  *		Creates a new index.
  *
@@ -941,6 +967,25 @@ DefineIndex(Oid relationId,
 	}
 
 	/*
+	 * Cloudberry: AO row/column and PAX tables cannot build indexes concurrently.
+	 * Reject up front -- before any catalog work or the build itself --
+	 * instead of failing deep in the concurrent build.  We test
+	 * stmt->concurrent rather than the local 'concurrent' so the error is
+	 * raised consistently even for temporary tables, matching the
+	 * partitioned-table check above.
+	 */
+	if (stmt->concurrent)
+	{
+		const char *kind = RelationGetNoConcurrentIndexKind(rel);
+
+		if (kind != NULL)
+			ereport(ERROR,
+					(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+					 errmsg("cannot create index on %s table \"%s\" concurrently",
+							kind, RelationGetRelationName(rel))));
+	}
+
+	/*
 	 * Don't try to CREATE INDEX on temp tables of other backends.
 	 */
 	if (RELATION_IS_OTHER_TEMP(rel))
@@ -1145,16 +1190,6 @@ DefineIndex(Oid relationId,
 						errhint("ALTER TABLE <table-name> SET WITH (REORGANIZE = true) before creating the unique index")));
 		}
 	}
-
-	/*
-	 * The TableAmRoutine of AO/AOCS does not implement the index_validate_scan method,
-	 * which is required in step 3 of concurrently index build.
-	 */
-	if (stmt->concurrent && RelationIsAppendOptimized(rel))
-		ereport(ERROR,
-				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-					errmsg("cannot create index on append-only table \"%s\" concurrently",
-						RelationGetRelationName(rel))));
 
 	amcanorder = amRoutine->amcanorder;
 	amoptions = amRoutine->amoptions;
@@ -4069,6 +4104,37 @@ ReindexRelationConcurrently(ReindexStmt *stmt, Oid relationOid, ReindexParams *p
 	}
 
 	relkind = get_rel_relkind(relationOid);
+
+	/*
+	 * Cloudberry: AO row/column and PAX tables do not support concurrent index
+	 * builds.  Reject early -- before any of the multi-transaction
+	 * concurrent-reindex machinery runs -- rather than failing deep in the
+	 * build (e.g. in appendonly_index_validate_scan).  relationOid is either
+	 * the table being reindexed or an index on it; in both cases the caller
+	 * already holds a lock on it (and on the index's heap), so opening with
+	 * NoLock here is safe.
+	 */
+	{
+		Oid	chkHeapOid = (relkind == RELKIND_INDEX) ?
+			IndexGetRelation(relationOid, true) : relationOid;
+
+		if (OidIsValid(chkHeapOid))
+		{
+			Relation	chkRel = try_table_open(chkHeapOid, NoLock, false);
+
+			if (chkRel != NULL)
+			{
+				const char *kind = RelationGetNoConcurrentIndexKind(chkRel);
+
+				if (kind != NULL)
+					ereport(ERROR,
+							(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+							 errmsg("cannot reindex %s table \"%s\" concurrently",
+									kind, RelationGetRelationName(chkRel))));
+				table_close(chkRel, NoLock);
+			}
+		}
+	}
 
 	/*
 	 * Extract the list of indexes that are going to be rebuilt based on the

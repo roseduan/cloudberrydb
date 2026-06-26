@@ -60,7 +60,7 @@ CREATE INDEX regress_tblspace_test_tbl_idx ON regress_tblspace_test_tbl (num1);
 REINDEX (TABLESPACE pg_global) INDEX regress_tblspace_test_tbl_idx;
 ERROR:  only shared relations can be placed in pg_global tablespace
 REINDEX (TABLESPACE pg_global) INDEX CONCURRENTLY regress_tblspace_test_tbl_idx;
-ERROR:  cannot move non-shared relation to tablespace "pg_global"
+ERROR:  cannot reindex PAX table "regress_tblspace_test_tbl" concurrently
 -- check transactional behavior of REINDEX (TABLESPACE)
 BEGIN;
 REINDEX (TABLESPACE regress_tblspace) INDEX regress_tblspace_test_tbl_idx;
