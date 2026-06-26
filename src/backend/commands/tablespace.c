@@ -107,6 +107,7 @@
 #include "cdb/cdbdisp_query.h"
 #include "cdb/cdbvars.h"
 #include "cdb/cdbutil.h"
+#include "crypto/tblspc_kmgr.h"
 #include "miscadmin.h"
 
 
@@ -510,6 +511,31 @@ CreateTableSpace(CreateTableSpaceStmt *stmt)
 	SIMPLE_FAULT_INJECTOR("after_xlog_create_tablespace");
 	
 	/*
+	 * If the tablespace was created with an encryption_method option, generate
+	 * and persist a DEK for it now.  This must happen before commit so that
+	 * any data written to the tablespace in the same transaction is already
+	 * protected.  TblspcKmgrCreateKey() is called on every node (QD and QE)
+	 * because each node maintains its own $PGDATA/pg_cryptokeys/ directory.
+	 */
+	if (newOptions != (Datum) 0)
+	{
+		TableSpaceOpts *tsOpts =
+			(TableSpaceOpts *) tablespace_reloptions(newOptions, false);
+
+		if (tsOpts && tsOpts->encryptionMethodOffset != 0)
+		{
+			const char *enc_method =
+				(const char *) tsOpts + tsOpts->encryptionMethodOffset;
+			const char *kms_key_id = (tsOpts->kmsKeyIdOffset != 0) ?
+				(const char *) tsOpts + tsOpts->kmsKeyIdOffset : NULL;
+
+			TblspcKmgrCreateKey(tablespaceoid, enc_method, kms_key_id);
+		}
+
+		pfree(tsOpts);
+	}
+
+	/*
 	 * Force synchronous commit, to minimize the window between creating the
 	 * symlink on-disk and marking the transaction committed.  It's not great
 	 * that there is any window at all, but definitely we don't want to make
@@ -794,6 +820,17 @@ DropTableSpace(DropTableSpaceStmt *stmt)
 	 * Note: because we checked that the tablespace was empty, there should be
 	 * no need to worry about flushing shared buffers or free space map
 	 * entries for relations in the tablespace.
+	 */
+
+	/*
+	 * Removal of the TDE key (DEK eviction from shared memory and unlink of the
+	 * .wkey file) is deferred to commit, mirroring the directory deletion
+	 * scheduled just above.  Doing it here would be unsafe: a rolled-back DROP
+	 * (BEGIN; DROP TABLESPACE enc_spc; ROLLBACK;) restores the catalog entry,
+	 * but an eagerly deleted key file would be gone, leaving the tablespace
+	 * permanently unreadable.  The key is dropped from
+	 * AtCommit_TablespaceStorage / AtTwoPhaseCommit_TablespaceStorage using the
+	 * same pending-for-commit tablespace oid recorded above.
 	 */
 
 	/*

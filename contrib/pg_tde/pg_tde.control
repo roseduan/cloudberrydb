@@ -1,0 +1,6 @@
+# pg_tde extension
+comment = 'Tablespace TDE key management'
+default_version = '1.0'
+module_pathname = '$libdir/pg_tde'
+relocatable = false
+superuser = true

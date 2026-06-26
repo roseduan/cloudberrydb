@@ -1,0 +1,70 @@
+#!/bin/sh
+#
+# tde_kms_local_cmd.sh.sample
+#
+# Example tde_kms_command script for tde_kms_provider = 'local_cmd'.
+#
+# This script must print exactly 64 lowercase hexadecimal characters
+# (a 256-bit AES KEK) on stdout and exit with status 0 on success.
+#
+# Configure in postgresql.conf:
+#   tde_kms_provider = 'local_cmd'
+#   tde_kms_command  = '/etc/postgresql/get_kek.sh %k'
+#
+# The %k token is replaced with the kms_key_id supplied in
+# CREATE TABLESPACE ... WITH (encryption_method = 'AES256', kms_key_id = '...')
+# or the value of tde_kms_default_key_id.
+# If kms_key_id is empty, %k expands to an empty string.
+#
+# Usage: this_script.sh [kms_key_id]
+#
+
+KMS_KEY_ID="${1:-default}"
+
+# -----------------------------------------------------------------------
+# Option A: Static file on disk (simplest, not recommended for production)
+# -----------------------------------------------------------------------
+# Store the key in a file with mode 0400 owned by the postgres user.
+#
+# KEY_FILE="/etc/postgresql/tde_kek_${KMS_KEY_ID}.hex"
+# if [ ! -f "$KEY_FILE" ]; then
+#     echo "key file not found: $KEY_FILE" >&2
+#     exit 1
+# fi
+# cat "$KEY_FILE"
+# exit 0
+
+# -----------------------------------------------------------------------
+# Option B: HashiCorp Vault (KV v2)
+# -----------------------------------------------------------------------
+# Requires the vault CLI and VAULT_ADDR / VAULT_TOKEN env variables set
+# in the postgres service environment (e.g. /etc/systemd/system/postgresql.service).
+#
+# SECRET_PATH="secret/data/tde/${KMS_KEY_ID}"
+# vault kv get -field=kek "$SECRET_PATH"
+# exit $?
+
+# -----------------------------------------------------------------------
+# Option C: AWS Secrets Manager
+# -----------------------------------------------------------------------
+# Requires the aws CLI and appropriate IAM permissions.
+#
+# SECRET_ID="tde-kek/${KMS_KEY_ID}"
+# aws secretsmanager get-secret-value --secret-id "$SECRET_ID" \
+#     --query SecretString --output text
+# exit $?
+
+# -----------------------------------------------------------------------
+# Option D: Cosmian KMS via ckms CLI (KEK-export mode)
+# -----------------------------------------------------------------------
+# Only works if the Cosmian key allows export.  For server-side wrapping
+# where the KEK never leaves Cosmian, use tde_kms_provider = 'cosmian'.
+#
+# ckms sym keys export --id "$KMS_KEY_ID" --format hex 2>/dev/null
+# exit $?
+
+# -----------------------------------------------------------------------
+# PLACEHOLDER — replace this block with one of the options above.
+# -----------------------------------------------------------------------
+echo "ERROR: tde_kms_local_cmd.sh is not configured" >&2
+exit 1

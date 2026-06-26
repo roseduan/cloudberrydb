@@ -18,6 +18,8 @@
 #include "access/itup.h"
 #include "access/xlog.h"
 #include "crypto/bufenc.h"
+#include "crypto/tblspc_enc.h"
+#include "crypto/tblspc_kmgr.h"
 #include "pgstat.h"
 #include "storage/checksum.h"
 #include "utils/memdebug.h"
@@ -87,7 +89,7 @@ PageInit(Page page, Size pageSize, Size specialSize)
  */
 bool
 PageIsVerifiedExtended(Page page, ForkNumber forknum,
-					   BlockNumber blkno, int flags)
+					   BlockNumber blkno, Oid spcOid, int flags)
 {
 	PageHeader	p = (PageHeader) page;
 	size_t	   *pagebytes;
@@ -110,7 +112,7 @@ PageIsVerifiedExtended(Page page, ForkNumber forknum,
 				checksum_failure = true;
 		}
 
-		PageDecryptInplace(page, forknum, blkno);
+		PageDecryptInplace(page, forknum, blkno, spcOid);
 
 		/*
 		 * The following checks don't prove the header is correct, only that
@@ -1566,6 +1568,32 @@ PageEncryptCopy(Page page, ForkNumber forknum,
 	return pageCopy;
 }
 
+/*
+ * PageEncryptCopyForSpc
+ *		Encrypt a page copy using the per-tablespace DEK (tablespace TDE).
+ *
+ * Returns the original page pointer unchanged if no encryption is needed.
+ * Otherwise returns a process-local copy with the data portion encrypted.
+ * The static buffer is reused on each call; callers must consume the result
+ * before the next write.
+ */
+char *
+PageEncryptCopyForSpc(Page page, Oid spcOid,
+					  ForkNumber forknum, BlockNumber blkno)
+{
+	static char *pageCopySpc = NULL;
+
+	if (PageIsNew(page) || forknum != MAIN_FORKNUM)
+		return (char *) page;
+
+	if (pageCopySpc == NULL)
+		pageCopySpc = MemoryContextAlloc(TopMemoryContext, BLCKSZ);
+
+	memcpy(pageCopySpc, (char *) page, BLCKSZ);
+	EncryptPageForSpc((Page) pageCopySpc, spcOid, forknum, blkno);
+	return pageCopySpc;
+}
+
 void
 PageEncryptInplace(Page page, ForkNumber forknum,
 				   BlockNumber blkno)
@@ -1579,10 +1607,13 @@ PageEncryptInplace(Page page, ForkNumber forknum,
 
 void
 PageDecryptInplace(Page page, ForkNumber forknum,
-				   BlockNumber blkno)
+				   BlockNumber blkno, Oid spcOid)
 {
-	if (PageIsNew(page) || !PageNeedsToBeEncrypted(forknum))
+	if (PageIsNew(page) || forknum != MAIN_FORKNUM)
 		return;
 
-	DecryptPage(page, blkno);
+	if (OidIsValid(spcOid) && TblspcEncryptionEnabled(spcOid))
+		DecryptPageForSpc(page, spcOid, forknum, blkno);
+	else if (FileEncryptionEnabled)
+		DecryptPage(page, blkno);
 }

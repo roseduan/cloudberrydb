@@ -21,6 +21,8 @@
 #include "access/xlog.h"
 #include "cdb/cdbvarblock.h"
 #include "crypto/bufenc.h"
+#include "crypto/tblspc_enc.h"
+#include "crypto/tblspc_kmgr.h"
 
 static VarBlockByteLen VarBlockGetItemLen(
 				   VarBlockReader *varBlockReader,
@@ -353,12 +355,18 @@ VarBlockMakerFinish(
 /* #endif */
 
 	/* for singerow, we don't encrypt in the var block. */
-	if (VarBlockMakerItemCount(varBlockMaker) != 1 && FileEncryptionEnabled) 
+	if (VarBlockMakerItemCount(varBlockMaker) != 1)
 	{
 		int encryptDataOffset = VARBLOCK_HEADER_LEN;
-		EncryptAOBLock(buffer + encryptDataOffset,
-						bufferLen - encryptDataOffset,
-						&storageWrite->relFileNode.node);
+
+		if (TblspcEncryptionEnabled(storageWrite->relFileNode.node.spcNode))
+			EncryptAOBlockForSpc(buffer + encryptDataOffset,
+								 bufferLen - encryptDataOffset,
+								 &storageWrite->relFileNode.node);
+		else if (FileEncryptionEnabled)
+			EncryptAOBLock(buffer + encryptDataOffset,
+						   bufferLen - encryptDataOffset,
+						   &storageWrite->relFileNode.node);
 	}
 
 	return bufferLen;
@@ -675,12 +683,18 @@ VarBlockReaderInit(
 	offsetToOffsetArray = VARBLOCK_HEADER_LEN +
 		((itemLenSum + 1) / 2) * 2;
 	
-	if (FileEncryptionEnabled && needDecrypt)
-	{		
-		int 	encryptDataOffset = VARBLOCK_HEADER_LEN;
-		DecryptAOBlock(buffer + encryptDataOffset,
-						bufferLen - encryptDataOffset, 
-						file_node);
+	if (needDecrypt)
+	{
+		int encryptDataOffset = VARBLOCK_HEADER_LEN;
+
+		if (TblspcEncryptionEnabled(file_node->spcNode))
+			DecryptAOBlockForSpc(buffer + encryptDataOffset,
+								 bufferLen - encryptDataOffset,
+								 file_node);
+		else if (FileEncryptionEnabled)
+			DecryptAOBlock(buffer + encryptDataOffset,
+						   bufferLen - encryptDataOffset,
+						   file_node);
 	}
 
 	if (VarBlockGet_offsetsAreSmall(header))
@@ -893,10 +907,10 @@ VarBlockCollapseToSingleItem(
 			itemPtr,
 			itemLen);
 
-	if (FileEncryptionEnabled)
-		EncryptAOBLock(target, 
-						itemLen, 
-						&storageWrite->relFileNode.node);
+	if (TblspcEncryptionEnabled(storageWrite->relFileNode.node.spcNode))
+		EncryptAOBlockForSpc(target, itemLen, &storageWrite->relFileNode.node);
+	else if (FileEncryptionEnabled)
+		EncryptAOBLock(target, itemLen, &storageWrite->relFileNode.node);
 
 	return itemLen;
 }

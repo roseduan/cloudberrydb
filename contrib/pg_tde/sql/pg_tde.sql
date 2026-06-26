@@ -1,0 +1,43 @@
+-- pg_tde regression test
+-- Tests the extension DDL and privilege enforcement.
+-- Does not require a running KMS; tests run without tde_kms_provider set.
+
+CREATE EXTENSION pg_tde;
+
+-- Extension objects exist
+SELECT count(*) FROM pg_proc WHERE proname IN (
+    'pg_tde_status', 'tde_open_tablespace', 'tde_sync_keys');
+
+SELECT count(*) FROM pg_views WHERE viewname = 'pg_tde_tablespace_status';
+
+-- With no encrypted tablespaces, status is empty
+SELECT count(*) FROM pg_tde_tablespace_status;
+
+-- tde_sync_keys() returns 0 when no .wkey directory or files exist
+SELECT tde_sync_keys();
+
+-- tde_open_tablespace: missing tablespace must error
+SELECT tde_open_tablespace('no_such_tablespace_xyzzy');
+
+-- Non-superuser must be denied on all three entry points
+-- Note: role names must not start with "pg_" in Cloudberry
+CREATE ROLE tde_unpriv;
+SET ROLE tde_unpriv;
+
+SELECT * FROM pg_tde_status();               -- ERROR: must be superuser
+
+SELECT tde_open_tablespace('pg_default');    -- ERROR: must be superuser
+
+SELECT tde_sync_keys();                      -- ERROR: must be superuser
+
+RESET ROLE;
+DROP ROLE tde_unpriv;
+
+-- View columns are as advertised
+\d pg_tde_tablespace_status
+
+DROP EXTENSION pg_tde;
+
+-- Extension objects gone
+SELECT count(*) FROM pg_proc WHERE proname IN (
+    'pg_tde_status', 'tde_open_tablespace', 'tde_sync_keys');

@@ -59,6 +59,7 @@
 #include "commands/laketablecmds.h"
 #include "common/string.h"
 #include "crypto/kmgr.h"
+#include "crypto/tblspc_kmgr.h"
 #include "funcapi.h"
 #include "jit/jit.h"
 #include "libpq/auth.h"
@@ -3703,6 +3704,46 @@ static struct config_int ConfigureNamesInt[] =
 		check_client_connection_check_interval, NULL, NULL
 	},
 
+	{
+		{"tde_kms_port", PGC_SIGHUP, ENCRYPTION,
+			gettext_noop("KMS server port for tablespace-level TDE."),
+			NULL
+		},
+		&tde_kms_port,
+		5696, 1, 65535,
+		NULL, NULL, NULL
+	},
+
+	{
+		{"tde_kms_connect_timeout", PGC_SIGHUP, ENCRYPTION,
+			gettext_noop("KMS TCP connect timeout in seconds for tablespace-level TDE."),
+			NULL
+		},
+		&tde_kms_connect_timeout,
+		10, 1, 300,
+		NULL, NULL, NULL
+	},
+
+	{
+		{"tde_kms_operation_timeout", PGC_SIGHUP, ENCRYPTION,
+			gettext_noop("Timeout in seconds for a single KMS operation (tablespace TDE)."),
+			NULL
+		},
+		&tde_kms_operation_timeout,
+		30, 1, 600,
+		NULL, NULL, NULL
+	},
+
+	{
+		{"tde_max_tablespace_keys", PGC_POSTMASTER, ENCRYPTION,
+			gettext_noop("Maximum number of tablespace DEKs cached in shared memory."),
+			NULL
+		},
+		&tde_max_tablespace_keys,
+		128, 1, 4096,
+		NULL, NULL, NULL
+	},
+
 	/* End-of-list marker */
 	{
 		{NULL, 0, 0, NULL, NULL}, NULL, 0, 0, 0, NULL, NULL, NULL
@@ -4782,6 +4823,115 @@ static struct config_string ConfigureNamesString[] =
 			NULL
 		},
 		&cluster_key_command,
+		"",
+		NULL, NULL, NULL
+	},
+
+	/* ----------------------------------------------------------------
+	 * Tablespace-level TDE GUCs
+	 * ---------------------------------------------------------------- */
+
+	{
+		{"tde_kms_provider", PGC_POSTMASTER, ENCRYPTION,
+			gettext_noop("KMS provider for tablespace-level TDE."),
+			gettext_noop("Valid values: none, builtin, cosmian, kmip, local_cmd. "
+						 "Requires restart to take effect.")
+		},
+		&tde_kms_provider,
+		"none",
+		NULL, NULL, NULL
+	},
+
+	{
+		{"tde_kms_builtin_passphrase", PGC_SIGHUP, ENCRYPTION,
+			gettext_noop("Passphrase for the built-in TDE KMS provider (development only)."),
+			NULL,
+			GUC_SUPERUSER_ONLY | GUC_NOT_IN_SAMPLE | GUC_NO_SHOW_ALL
+		},
+		&tde_kms_builtin_passphrase,
+		"",
+		NULL, NULL, NULL
+	},
+
+	{
+		{"tde_kms_command", PGC_SIGHUP, ENCRYPTION,
+			gettext_noop("Shell command that returns a 256-bit KEK as 64 hex chars "
+						 "for the local_cmd TDE KMS provider."),
+			gettext_noop("The command is run with /bin/sh -c. "
+						 "Use %k for the kms_key_id and %% for a literal percent.")
+		},
+		&tde_kms_command,
+		"",
+		NULL, NULL, NULL
+	},
+
+	{
+		{"tde_kms_host", PGC_SIGHUP, ENCRYPTION,
+			gettext_noop("KMS server hostname or IP for tablespace-level TDE."),
+			NULL
+		},
+		&tde_kms_host,
+		"",
+		NULL, NULL, NULL
+	},
+
+	{
+		{"tde_kms_ca_cert", PGC_SIGHUP, ENCRYPTION,
+			gettext_noop("Path to TLS CA certificate for KMS connections."),
+			NULL
+		},
+		&tde_kms_ca_cert,
+		"",
+		NULL, NULL, NULL
+	},
+
+	{
+		{"tde_kms_client_cert", PGC_SIGHUP, ENCRYPTION,
+			gettext_noop("Path to mTLS client certificate for KMS connections."),
+			NULL
+		},
+		&tde_kms_client_cert,
+		"",
+		NULL, NULL, NULL
+	},
+
+	{
+		{"tde_kms_client_key", PGC_SIGHUP, ENCRYPTION,
+			gettext_noop("Path to mTLS client private key for KMS connections."),
+			NULL
+		},
+		&tde_kms_client_key,
+		"",
+		NULL, NULL, NULL
+	},
+
+	{
+		{"tde_kms_username", PGC_SIGHUP, ENCRYPTION,
+			gettext_noop("KMIP credential username for KMS connections."),
+			NULL
+		},
+		&tde_kms_username,
+		"",
+		NULL, NULL, NULL
+	},
+
+	{
+		{"tde_kms_password", PGC_SIGHUP, ENCRYPTION,
+			gettext_noop("KMIP credential password for KMS connections."),
+			NULL,
+			GUC_SUPERUSER_ONLY | GUC_NOT_IN_SAMPLE | GUC_NO_SHOW_ALL
+		},
+		&tde_kms_password,
+		"",
+		NULL, NULL, NULL
+	},
+
+	{
+		{"tde_kms_default_key_id", PGC_SIGHUP, ENCRYPTION,
+			gettext_noop("Default KMS key ID used when CREATE TABLESPACE omits kms_key_id."),
+			NULL
+		},
+		&tde_kms_default_key_id,
 		"",
 		NULL, NULL, NULL
 	},

@@ -65,7 +65,8 @@ SUBDIRS += \
 		formatter_fixedwidth \
 		extprotocol \
 		indexscan  \
-		file_content
+		file_content \
+		pg_tde
 
 ifeq ($(with_ssl),openssl)
 SUBDIRS += sslinfo

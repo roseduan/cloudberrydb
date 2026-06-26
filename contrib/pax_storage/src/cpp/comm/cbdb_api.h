@@ -141,6 +141,8 @@ extern "C" {
 #include "utils/tuplesort.h"
 #include "utils/wait_event.h"
 #include "access/xlogutils.h"
+#include "crypto/tblspc_enc.h"
+#include "crypto/tblspc_kmgr.h"
 
 // no header file in cbdb
 extern BlockNumber system_nextsampleblock(SampleScanState *node,  // NOLINT

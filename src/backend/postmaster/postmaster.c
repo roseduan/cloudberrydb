@@ -110,6 +110,7 @@
 #include "common/string.h"
 #include "crypto/bufenc.h"
 #include "crypto/kmgr.h"
+#include "crypto/tblspc_kmgr.h"
 #include "lib/ilist.h"
 #include "libpq/auth.h"
 #include "libpq/libpq.h"
@@ -3423,6 +3424,7 @@ reset_shared(void)
 	 */
 	InitializeKmgr();
 	InitializeBufferEncryption();
+	TblspcKmgrStartup();
 
 }
 

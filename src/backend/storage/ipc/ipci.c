@@ -31,6 +31,7 @@
 #include "commands/async.h"
 #include "commands/matview.h"
 #include "crypto/kmgr.h"
+#include "crypto/tblspc_kmgr.h"
 #include "executor/nodeShareInputScan.h"
 #include "miscadmin.h"
 #include "pgstat.h"
@@ -200,6 +201,7 @@ CreateSharedMemoryAndSemaphores(void)
 		size = add_size(size, SyncScanShmemSize());
 		size = add_size(size, AsyncShmemSize());
 		size = add_size(size, KmgrShmemSize());
+		size = add_size(size, TblspcKmgrShmemSize());
 #ifdef EXEC_BACKEND
 		size = add_size(size, ShmemBackendArraySize());
 #endif
@@ -401,6 +403,7 @@ CreateSharedMemoryAndSemaphores(void)
 
 	GpExpandVersionShmemInit();
 	KmgrShmemInit();
+	TblspcKmgrShmemInit();
 
 #ifdef EXEC_BACKEND
 

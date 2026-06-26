@@ -841,6 +841,7 @@ NeonReadBuffer_common(SMgrRelation smgr, char relpersistence, ForkNumber forkNum
 
             /* check for garbage data */
             if (!PageIsVerifiedExtended((Page) bufBlock, forkNum, blockNum,
+                                        smgr->smgr_rnode.node.spcNode,
                                         PIV_LOG_WARNING | PIV_REPORT_STAT))
             {
                 if (mode == RBM_ZERO_ON_ERROR || zero_damaged_pages)

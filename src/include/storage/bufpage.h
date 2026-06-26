@@ -461,7 +461,7 @@ do { \
 						((is_heap) ? PAI_IS_HEAP : 0))
 
 #define PageIsVerified(page, blkno) \
-	PageIsVerifiedExtended(page, MAIN_FORKNUM, blkno, \
+	PageIsVerifiedExtended(page, MAIN_FORKNUM, blkno, InvalidOid, \
 						   PIV_LOG_WARNING | PIV_REPORT_STAT)
 
 /*
@@ -476,7 +476,7 @@ StaticAssertDecl(BLCKSZ == ((BLCKSZ / sizeof(size_t)) * sizeof(size_t)),
 
 extern void PageInit(Page page, Size pageSize, Size specialSize);
 extern bool PageIsVerifiedExtended(Page page, ForkNumber forknum,
-								   BlockNumber blkno,
+								   BlockNumber blkno, Oid spcOid,
 								   int flags);
 extern OffsetNumber PageAddItemExtended(Page page, Item item, Size size,
 										OffsetNumber offsetNumber, int flags);
@@ -499,9 +499,11 @@ extern char *PageSetChecksumCopy(Page page, BlockNumber blkno);
 extern void PageSetChecksumInplace(Page page, BlockNumber blkno);
 extern char *PageEncryptCopy(Page page, ForkNumber forknum,
 							 BlockNumber blkno);
+extern char *PageEncryptCopyForSpc(Page page, Oid spcOid,
+								   ForkNumber forknum, BlockNumber blkno);
 extern void PageEncryptInplace(Page page, ForkNumber forknum,
 							   BlockNumber blkno);
 extern void PageDecryptInplace(Page page, ForkNumber forknum,
-							   BlockNumber blkno);
+							   BlockNumber blkno, Oid spcOid);
 
 #endif							/* BUFPAGE_H */

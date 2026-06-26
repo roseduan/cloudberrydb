@@ -1,0 +1,71 @@
+#!/bin/sh
+#
+# tde_kms_cosmian.sh.sample
+#
+# Example postgresql.conf snippet for Cosmian KMS with the native
+# tde_kms_provider = 'cosmian' provider.
+#
+# Cosmian KMS (https://github.com/Cosmian/kms) implements KMIP 2.0 and
+# exposes a REST API at POST /kmip/2.0.  The tablespace DEK is wrapped
+# and unwrapped server-side so the KEK never leaves Cosmian.
+#
+# -----------------------------------------------------------------------
+# postgresql.conf settings
+# -----------------------------------------------------------------------
+#
+#   tde_kms_provider         = 'cosmian'
+#
+#   # Cosmian server (default port 9998, or 5696 for strict KMIP)
+#   tde_kms_host             = 'cosmian.example.com'
+#   tde_kms_port             = 9998
+#
+#   # TLS: CA certificate is required for server verification
+#   tde_kms_ca_cert          = '/etc/ssl/certs/cosmian-ca.pem'
+#
+#   # mTLS (recommended): client certificate + key
+#   tde_kms_client_cert      = '/etc/postgresql/tde-client.crt'
+#   tde_kms_client_key       = '/etc/postgresql/tde-client.key'
+#
+#   # OR API-key authentication (set password only, leave username empty)
+#   # tde_kms_password        = 'ey...'   -- bearer token / API key
+#
+#   # OR Basic authentication
+#   # tde_kms_username        = 'postgres-tde'
+#   # tde_kms_password        = 'secret'
+#
+#   tde_kms_connect_timeout  = 10
+#   tde_kms_operation_timeout = 30
+#
+#   # Default Cosmian key UID used when CREATE TABLESPACE omits kms_key_id
+#   tde_kms_default_key_id   = 'xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx'
+#
+# -----------------------------------------------------------------------
+# Cosmian key creation (one-time setup)
+# -----------------------------------------------------------------------
+#
+# Create a symmetric AES-256 key in Cosmian for each tablespace, or use
+# one shared key identified by kms_key_id:
+#
+#   ckms sym keys create --algorithm aes --size-in-bits 256 \
+#       --tag "hashdata-tde-tablespace"
+#   # Note the UID returned; use it as kms_key_id in CREATE TABLESPACE.
+#
+# -----------------------------------------------------------------------
+# CREATE TABLESPACE example
+# -----------------------------------------------------------------------
+#
+#   CREATE TABLESPACE enc_spc LOCATION ''
+#     WITH (encryption_method = 'AES256',
+#           kms_key_id = 'xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx');
+#
+# -----------------------------------------------------------------------
+# Security notes
+# -----------------------------------------------------------------------
+#
+# - The plaintext DEK is held in PostgreSQL shared memory after unwrapping
+#   and is used for AES-CTR I/O.  The KEK never leaves Cosmian.
+# - Revoke or rotate the Cosmian key to permanently lock the tablespace
+#   (existing data becomes inaccessible without the key).
+# - Protect tde_kms_client_key (chmod 0400, owned by postgres user).
+# - Use mTLS in production; bearer-token auth requires TLS certificate
+#   pinning to prevent MITM attacks.

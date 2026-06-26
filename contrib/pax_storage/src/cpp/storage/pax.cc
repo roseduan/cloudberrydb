@@ -137,9 +137,15 @@ namespace pax {
 
 TableWriter::TableWriter(Relation relation)
     : relation_(relation), summary_callback_(nullptr), options_cached_(false) {
+  auto opts = std::make_shared<LocalFileSystemOptions>();
+
   Assert(relation);
 
   file_system_ = Singleton<LocalFileSystem>::GetInstance();
+
+  opts->spc_oid = (unsigned int) relation->rd_node.spcNode;
+  opts->db_node = (unsigned int) relation->rd_node.dbNode;
+  file_system_options_ = opts;
 }
 
 TableWriter *TableWriter::SetWriteSummaryCallback(
@@ -326,8 +332,14 @@ TableReader::TableReader(
       reader_(nullptr),
       is_empty_(false),
       reader_options_(options) {
+  auto opts = std::make_shared<LocalFileSystemOptions>();
+
   file_system_ = Singleton<LocalFileSystem>::GetInstance();
   use_prefetch_ = reader_options_.use_prefetch;
+
+  opts->spc_oid = (unsigned int) reader_options_.table_space_id;
+  opts->db_node = (unsigned int) reader_options_.db_node;
+  file_system_options_ = opts;
 }
 
 TableReader::~TableReader() {
@@ -537,12 +549,13 @@ int TableReader::GetTuple(TupleTableSlot *slot, ScanDirection direction,
   if (current_block_metadata_.GetExistToast()) {
     toast_file = file_system_->Open(
         current_block_metadata_.GetFileName() + TOAST_FILE_SUFFIX,
-        fs::kReadMode);
+        fs::kReadMode, file_system_options_);
   }
 
   reader_ = MicroPartitionFileFactory::CreateMicroPartitionReader(
       std::move(options), reader_flags,
-      file_system_->Open(current_block_metadata_.GetFileName(), fs::kReadMode),
+      file_system_->Open(current_block_metadata_.GetFileName(), fs::kReadMode,
+                         file_system_options_),
       std::move(toast_file));
 
   // row_index start from 0, so row_index = offset -1
@@ -584,14 +597,15 @@ std::unique_ptr<MicroPartitionReader> TableReader::OpenFile2(const MicroPartitio
 #endif
 
   if (meta.GetExistToast()) {
-    // must exist the file in disk
-    toast_file =
-        file_system_->Open(meta.GetFileName() + TOAST_FILE_SUFFIX, fs::kReadMode);
+    /* must exist the file in disk */
+    toast_file = file_system_->Open(meta.GetFileName() + TOAST_FILE_SUFFIX,
+                                    fs::kReadMode, file_system_options_);
   }
 
   return MicroPartitionFileFactory::CreateMicroPartitionReader(
       std::move(options), reader_flags,
-      file_system_->Open(meta.GetFileName(), fs::kReadMode),
+      file_system_->Open(meta.GetFileName(), fs::kReadMode,
+                         file_system_options_),
       std::move(toast_file));
 }
 
@@ -601,6 +615,11 @@ TableDeleter::TableDeleter(
     : rel_(rel), snapshot_(snapshot), delete_bitmap_(delete_bitmap) {
   need_wal_ = cbdb::NeedWAL(rel);
   file_system_ = Singleton<LocalFileSystem>::GetInstance();
+
+  auto opts = std::make_shared<LocalFileSystemOptions>();
+  opts->spc_oid = (unsigned int) rel->rd_node.spcNode;
+  opts->db_node = (unsigned int) rel->rd_node.dbNode;
+  file_system_options_ = opts;
 }
 
 void TableDeleter::UpdateStatsInAuxTable(
@@ -805,6 +824,7 @@ std::unique_ptr<TableReader> TableDeleter::OpenReader(
   TableReader::ReaderOptions reader_options{};
 
   reader_options.table_space_id = rel_->rd_rel->reltablespace;
+  reader_options.db_node = rel_->rd_node.dbNode;
   reader_options.use_prefetch = pax::pax_enable_prefetch;
   auto reader =
       std::make_unique<TableReader>(std::move(iterator), reader_options);

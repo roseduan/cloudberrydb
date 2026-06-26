@@ -44,6 +44,8 @@
 #include "catalog/storage.h"
 #include "catalog/storage_xlog.h"
 #include "crypto/bufenc.h"
+#include "crypto/tblspc_enc.h"
+#include "crypto/tblspc_kmgr.h"
 #include "executor/instrument.h"
 #include "lib/binaryheap.h"
 #include "miscadmin.h"
@@ -1133,6 +1135,7 @@ ReadBuffer_common(SMgrRelation smgr, char relpersistence, ForkNumber forkNum,
 			/* check for garbage data */
 			if (!PageIsVerifiedExtended((Page) bufBlock, forkNum,
 										blockNum,
+										smgr->smgr_rnode.node.spcNode,
 										PIV_LOG_WARNING | PIV_REPORT_STAT))
 			{
 				if (mode == RBM_ZERO_ON_ERROR || zero_damaged_pages)
@@ -3064,7 +3067,19 @@ FlushBuffer(BufferDesc *buf, SMgrRelation reln)
 	 */
 	bufBlock = BufHdrGetBlock(buf);
 
-	if (FileEncryptionEnabled)
+	if (TblspcEncryptionEnabled(buf->tag.rnode.spcNode))
+	{
+		/*
+		 * Tablespace-level TDE takes priority over cluster-level TDE.
+		 * The page copy is encrypted with the per-tablespace DEK.
+		 */
+		bufToWrite = PageEncryptCopyForSpc((Page) bufBlock,
+										   buf->tag.rnode.spcNode,
+										   buf->tag.forkNum,
+										   buf->tag.blockNum);
+		PageSetChecksumInplace((Page) bufToWrite, buf->tag.blockNum);
+	}
+	else if (FileEncryptionEnabled)
 	{
 		/*
 		 * Technically BM_PERMANENT could indicate an init fork, but that's

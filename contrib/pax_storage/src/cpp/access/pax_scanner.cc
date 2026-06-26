@@ -163,10 +163,15 @@ bool PaxIndexScanDesc::OpenMicroPartition(BlockNumber block,
     auto block_name = std::to_string(block);
     auto file_name = cbdb::BuildPaxFilePath(rel_path_, block_name);
     auto fs = Singleton<LocalFileSystem>::GetInstance();
-    data_file = fs->Open(file_name, fs::kReadMode);
-    if (metadata.GetExistToast()) {
-      auto toast_file_name = metadata.GetFileName() + TOAST_FILE_SUFFIX;
-      toast_file = fs->Open(toast_file_name, fs::kReadMode);
+    {
+      auto tde_opts = std::make_shared<LocalFileSystemOptions>();
+      tde_opts->spc_oid = (unsigned int) base_.rel->rd_node.spcNode;
+      tde_opts->db_node = (unsigned int) base_.rel->rd_node.dbNode;
+      data_file = fs->Open(file_name, fs::kReadMode, tde_opts);
+      if (metadata.GetExistToast()) {
+        auto toast_file_name = metadata.GetFileName() + TOAST_FILE_SUFFIX;
+        toast_file = fs->Open(toast_file_name, fs::kReadMode, tde_opts);
+      }
     }
     if (!gp_select_invisible && !metadata.GetVisibilityBitmapFile().empty()) {
       auto const &visibility_bitmap_file = metadata.GetVisibilityBitmapFile();
@@ -300,9 +305,10 @@ TableScanDesc PaxScanDesc::BeginScan(Relation relation, Snapshot snapshot,
 
   old_ctx = MemoryContextSwitchTo(desc->memory_context_);
 
-  // build reader
+  /* build reader */
   reader_options.reused_buffer = desc->reused_buffer_;
   reader_options.table_space_id = relation->rd_rel->reltablespace;
+  reader_options.db_node = relation->rd_node.dbNode;
   reader_options.filter = filter;
   reader_options.use_prefetch = use_prefetch;
 

@@ -141,6 +141,7 @@ class TableReader final {
       use_prefetch = pax::pax_enable_prefetch;
     }
     Oid table_space_id = 0;
+    Oid db_node = 0;		/* dbNode from RelFileNode for TDE */
 
     std::shared_ptr<DataBuffer<char>> reused_buffer;
 
@@ -208,6 +209,7 @@ class TableReader final {
   // only for analyze scan
   size_t current_block_row_index_ = 0;
   FileSystem *file_system_ = nullptr;
+  std::shared_ptr<FileSystemOptions> file_system_options_;
 };
 
 class TableDeleter final {

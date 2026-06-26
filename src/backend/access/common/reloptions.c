@@ -573,6 +573,24 @@ static relopt_string stringRelOpts[] =
 		},
 		0, true, NULL, NULL, NULL
 	},
+	{
+		{
+			"encryption_method",
+			"encryption algorithm for tablespace TDE (e.g. AES256)",
+			RELOPT_KIND_TABLESPACE,
+			AccessExclusiveLock
+		},
+		0, true, NULL, NULL, NULL
+	},
+	{
+		{
+			"kms_key_id",
+			"KMS key identifier used to wrap the tablespace DEK",
+			RELOPT_KIND_TABLESPACE,
+			AccessExclusiveLock
+		},
+		0, true, NULL, NULL, NULL
+	},
 	/* list terminator */
 	{{NULL}}
 };
@@ -2130,7 +2148,9 @@ tablespace_reloptions(Datum reloptions, bool validate)
 		{"maintenance_io_concurrency", RELOPT_TYPE_INT, offsetof(TableSpaceOpts, maintenance_io_concurrency)},
 		{"stage", RELOPT_TYPE_BOOL, offsetof(TableSpaceOpts, stage)},
 		{"server", RELOPT_TYPE_STRING, offsetof(TableSpaceOpts, serverOffset)},
-		{"path", RELOPT_TYPE_STRING, offsetof(TableSpaceOpts, pathOffset)}
+		{"path", RELOPT_TYPE_STRING, offsetof(TableSpaceOpts, pathOffset)},
+		{"encryption_method", RELOPT_TYPE_STRING, offsetof(TableSpaceOpts, encryptionMethodOffset)},
+		{"kms_key_id", RELOPT_TYPE_STRING, offsetof(TableSpaceOpts, kmsKeyIdOffset)}
 	};
 
 	return (bytea *) build_reloptions(reloptions, validate,

@@ -60,6 +60,8 @@
 #include "storage/smgr.h"
 #include "tcop/tcopprot.h"		/* pgrminclude ignore */
 #include "utils/rel.h"
+#include "crypto/tblspc_enc.h"
+#include "crypto/tblspc_kmgr.h"
 #include "utils/sortsupport.h"
 #include "utils/tuplesort.h"
 
@@ -665,8 +667,14 @@ _bt_blwritepage(BTWriteState *wstate, Page page, BlockNumber blkno)
 				   true);
 	}
 
-	PageEncryptInplace(page, MAIN_FORKNUM,
-					   blkno);
+	{
+		Oid spcOid = wstate->index->rd_node.spcNode;
+
+		if (TblspcEncryptionEnabled(spcOid))
+			EncryptPageForSpc(page, spcOid, MAIN_FORKNUM, blkno);
+		else
+			PageEncryptInplace(page, MAIN_FORKNUM, blkno);
+	}
 	PageSetChecksumInplace(page, blkno);
 
 	/*

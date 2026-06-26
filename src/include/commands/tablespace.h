@@ -48,6 +48,8 @@ typedef struct TableSpaceOpts
 	bool 		stage;
 	int			serverOffset;
 	int			pathOffset;
+	int			encryptionMethodOffset;	/* TDE: encryption algorithm, e.g. "AES256" */
+	int			kmsKeyIdOffset;			/* TDE: KMS key identifier (optional) */
 } TableSpaceOpts;
 
 extern Oid	CreateTableSpace(CreateTableSpaceStmt *stmt);

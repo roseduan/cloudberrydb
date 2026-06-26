@@ -39,6 +39,18 @@
 
 namespace pax {
 
+/*
+ * Options for LocalFileSystem::Open().
+ *
+ * When spc_oid is valid and the tablespace is encrypted, LocalFile will
+ * transparently encrypt PWrite calls and decrypt PRead/ReadBatch calls
+ * using EncryptPaxAtOffsetForSpc / DecryptPaxAtOffsetForSpc.
+ */
+struct LocalFileSystemOptions : public FileSystemOptions {
+  unsigned int spc_oid = 0;	/* Oid of the tablespace; 0 = unencrypted */
+  unsigned int db_node = 0;	/* dbNode from RelFileNode */
+};
+
 class LocalFileSystem final : public FileSystem {
   friend class Singleton<LocalFileSystem>;
   friend class ClassCreator;
