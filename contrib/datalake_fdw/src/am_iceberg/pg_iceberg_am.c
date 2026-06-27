@@ -15,6 +15,7 @@
 #include "postgres.h"
 
 #include "access/multixact.h"
+#include "access/sysattr.h"
 #include "access/table.h"
 #include "access/tableam.h"
 #include "access/xact.h"
@@ -101,6 +102,62 @@ iceberg_get_all_attrs(Relation rel)
 	return attrs;
 }
 
+/*
+ * iceberg_get_needed_attrs
+ *
+ * Column projection pushdown for the Iceberg AM scan: return only the
+ * attributes actually referenced by the scan node's target list and quals,
+ * so the reader decodes just those columns instead of every column in the
+ * table.  Without this the reader always materialized the whole row (see the
+ * previous unconditional iceberg_get_all_attrs() call), so even SELECT count(*)
+ * paid to decode every column -- including the wide numeric/decimal columns.
+ *
+ * Falls back to all attributes when the plan is unavailable or references the
+ * whole row (varattno 0).  An empty result (e.g. count(*)) is intentional and
+ * correct: the reader drives its row count from the row-group metadata
+ * (num_rows), so it still emits the right number of (empty) tuples without
+ * opening any column scanner.
+ */
+static List *
+iceberg_get_needed_attrs(Relation rel, struct PlanState *ps)
+{
+	List	   *attrs = NIL;
+	TupleDesc	tupdesc = RelationGetDescr(rel);
+	int			natts = tupdesc->natts;
+	Bitmapset  *needed = NULL;
+	Index		scanrelid;
+	int			i;
+
+	/* No plan context (e.g. ANALYZE/VACUUM sampling): read every column. */
+	if (ps == NULL || ps->plan == NULL || !IsA(ps->plan, CustomScan))
+		return iceberg_get_all_attrs(rel);
+
+	scanrelid = ((Scan *) ps->plan)->scanrelid;
+
+	pull_varattnos((Node *) ps->plan->targetlist, scanrelid, &needed);
+	pull_varattnos((Node *) ps->plan->qual, scanrelid, &needed);
+
+	/* A whole-row reference needs every column. */
+	if (bms_is_member(0 - FirstLowInvalidHeapAttributeNumber, needed))
+	{
+		bms_free(needed);
+		return iceberg_get_all_attrs(rel);
+	}
+
+	for (i = 0; i < natts; i++)
+	{
+		Form_pg_attribute attr = TupleDescAttr(tupdesc, i);
+
+		if (attr->attisdropped)
+			continue;
+		if (bms_is_member((i + 1) - FirstLowInvalidHeapAttributeNumber, needed))
+			attrs = lappend_int(attrs, i + 1);
+	}
+
+	bms_free(needed);
+	return attrs;
+}
+
 static List *
 iceberg_build_fdw_private(List *retrieved_attrs, List *am_private)
 {
@@ -130,7 +187,7 @@ iceberg_create_foreign_scan_state(IcebergScanDesc scanDesc,
 	plan = makeNode(ForeignScan);
 	plan->scan.plan.qual = ps->plan->qual;
 	plan->fdw_private = iceberg_build_fdw_private(
-		iceberg_get_all_attrs(scanDesc->rs_base.rs_rd), am_private
+		iceberg_get_needed_attrs(scanDesc->rs_base.rs_rd, ps), am_private
 	);
 	scanState->ss.ps.plan = (Plan *) plan;
 
