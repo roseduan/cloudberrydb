@@ -51,6 +51,7 @@ import java.util.HashMap;
 import java.util.Map;
 import java.util.List;
 import java.util.ArrayList;
+import cloud.elastic.dlagent.api.utilities.ColumnDescriptor;
 import java.io.StringWriter;
 import java.io.PrintWriter;
 import org.slf4j.Logger;
@@ -303,6 +304,13 @@ public class IcebergRestController {
 
         // convert to RequestContext and reuse the original iceberg logic
         RequestContext context = createRequestContext(namespace, table, properties);
+
+        // Predicate pushdown (AM path): the serialized filter references columns
+        // by 0-based index, so the filter machinery needs a ColumnDescriptor list
+        // in attno order.  Build it from the request's filterColumns array.
+        if (context.hasFilter()) {
+            populateFilterTupleDescription(request, context);
+        }
 
         // Get table metadata fragment using ServiceResult
         String fragment = icebergService.getTableFragment(namespace, table, properties, context);
@@ -1619,6 +1627,54 @@ public class IcebergRestController {
      * legacy semantics where the C side piggy-backs {@code buildInCatalog.*}
      * plumbing keys into the same JSON {@code properties} field.
      */
+    /**
+     * Populate RequestContext.tupleDescription from the request's
+     * IcebergConfig.IcebergAdditionalConfig.filterColumns array (sent by the AM
+     * layer alongside a pushdown filter).  Each element is {name, oid, typmod}
+     * and the array is in attno order, so the list index equals the filter's
+     * 0-based column reference (varattno-1).  Required for
+     * IcebergExpressionBuilder / SupportedDataTypePruner to resolve filter
+     * attributes to the correct Iceberg column name and value type; without it
+     * the (empty) default list would throw IndexOutOfBounds.
+     */
+    @SuppressWarnings("unchecked")
+    private void populateFilterTupleDescription(Map<String, Object> request, RequestContext context) {
+        Object cfg = request.get("IcebergConfig");
+        if (!(cfg instanceof Map)) {
+            return;
+        }
+        Object add = ((Map<String, Object>) cfg).get("IcebergAdditionalConfig");
+        if (!(add instanceof Map)) {
+            return;
+        }
+        Object cols = ((Map<String, Object>) add).get("filterColumns");
+        if (!(cols instanceof List)) {
+            return;
+        }
+
+        List<ColumnDescriptor> tupleDescription = context.getTupleDescription();
+        tupleDescription.clear();
+
+        int index = 0;
+        for (Object o : (List<Object>) cols) {
+            if (!(o instanceof Map)) {
+                continue;
+            }
+            Map<String, Object> col = (Map<String, Object>) o;
+            String name = (String) col.get("name");
+            int oid = col.get("oid") == null ? 0 : ((Number) col.get("oid")).intValue();
+            Object typmodObj = col.get("typmod");
+            Integer[] typeMods = null;
+            if (typmodObj instanceof Number) {
+                int typmod = ((Number) typmodObj).intValue();
+                if (typmod >= 0) {
+                    typeMods = new Integer[] { typmod };
+                }
+            }
+            tupleDescription.add(new ColumnDescriptor(name, oid, index++, null, typeMods));
+        }
+    }
+
     private Map<String, String> extractProperties(Map<String, Object> request) {
         IcebergRequestConfig cfg = requestParser.parse(request);
         Map<String, String> properties = cfg.toFlatPropertiesMap();

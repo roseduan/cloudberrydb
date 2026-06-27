@@ -580,9 +580,14 @@ IcebergBeginCustomScan(CustomScanState *node, EState *estate, int eflags)
 	CustomScan *cscan = (CustomScan *) node->ss.ps.plan;
 	Relation	rel = node->ss.ss_currentRelation;
 
+	/*
+	 * Pass the scan PlanState so build_scan_am_private can serialize the
+	 * node's restriction quals (node->ss.ps.plan->qual) for predicate
+	 * pushdown / data-file pruning on the agent.
+	 */
 	if (Gp_role == GP_ROLE_DISPATCH)
 		cscan->custom_private =
-			pg_iceberg_build_scan_am_private(rel, NULL,
+			pg_iceberg_build_scan_am_private(rel, &node->ss.ps,
 											 external_table_limit_segment_num);
 
 	/* GPDB: the iceberg_volume_fdw layer reads ps.scandesc. */

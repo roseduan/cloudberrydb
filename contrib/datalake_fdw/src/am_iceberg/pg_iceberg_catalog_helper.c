@@ -207,6 +207,9 @@ execute_get_fragments_via_fdw(const char *metadata_location,
 		fdwState->request.buildInCatalog.tableExists = true;
 	}
 
+	/* Carry the serialized scan filter so the agent can prune data files. */
+	fdwState->request.pushdownFilter = pushdown_filter;
+
 	scanstate->fdw_state = fdwState;
 	fdwRoutine->BeginForeignScan(scanstate, 0);
 	fdwRoutine->EndForeignScan(scanstate);

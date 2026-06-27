@@ -68,6 +68,7 @@
 #include "../iceberg_catalog_fdw/iceberg_catalog_fdw.h"
 #include "../iceberg_volume_fdw/iceberg_volume_fdw.h"
 #include "../dlproxy/iceberg_common.h"
+#include "../dlproxy/filters.h"
 #include "../common/random_segment.h"
 
 extern int external_table_limit_segment_num;
@@ -244,6 +245,7 @@ pg_iceberg_getnextslot(TableScanDesc sscan, ScanDirection direction, TupleTableS
  */
 static char *
 iceberg_fetch_fragments_json(Relation rel, IcebergTableInfo *table_info,
+							 const char *pushdown_filter,
 							 bool *is_internal_out)
 {
 	char			   *fragments;
@@ -281,7 +283,7 @@ iceberg_fetch_fragments_json(Relation rel, IcebergTableInfo *table_info,
 													  table_info,
 													  scan_metadata_location,
 													  is_internal,
-													  NULL);
+													  pushdown_filter);
 
 	pfree(scan_metadata_location);
 
@@ -330,13 +332,26 @@ pg_iceberg_build_scan_am_private(Relation rel, struct PlanState *ps, int random_
 {
 	List			   *am_private = NIL;
 	char			   *fragments = NULL;
+	char			   *pushdown_filter = NULL;
 	bool				is_internal;
 	IcebergTableInfo   *table_info;
 	int					segment_count = getgpsegmentCount();
 
 	table_info = pg_iceberg_get_table_info(RelationGetRelid(rel));
 
-	fragments = iceberg_fetch_fragments_json(rel, table_info, &is_internal);
+	/*
+	 * Predicate pushdown: serialize the scan node's restriction quals into the
+	 * dlproxy filter wire format so the agent can prune whole Iceberg data
+	 * files via manifest column bounds at planning time.  serializeDlProxyFilterQuals
+	 * is all-or-nothing -- it returns NULL if any qual is unsupported -- so a
+	 * non-NULL result encodes the full AND of the scan restriction and can
+	 * never drop a matching file.  The executor still re-applies plan->qual.
+	 */
+	if (ps != NULL && ps->plan != NULL && ps->plan->qual != NIL)
+		pushdown_filter = serializeDlProxyFilterQuals(ps->plan->qual);
+
+	fragments = iceberg_fetch_fragments_json(rel, table_info, pushdown_filter,
+											 &is_internal);
 
 	/*
 	 * Carry the raw JSON in the plan; pg_iceberg_materialize_am_private()
@@ -401,7 +416,7 @@ pg_iceberg_list_data_fragments_json(Relation rel)
 	IcebergTableInfo   *table_info;
 
 	table_info = pg_iceberg_get_table_info(RelationGetRelid(rel));
-	fragments = iceberg_fetch_fragments_json(rel, table_info, NULL);
+	fragments = iceberg_fetch_fragments_json(rel, table_info, NULL, NULL);
 	pg_iceberg_free_table_info(table_info);
 
 	return fragments;

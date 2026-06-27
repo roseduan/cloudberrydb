@@ -256,7 +256,7 @@ public class IcebergMetadataFetcher extends BasePlugin implements MetadataFetche
 
         // Use file list from JSON POST request body
         for (FileListRequest.FileEntry fileEntry : context.getFileList()) {
-            DataFile dataFile = icebergUtilities.transFileFromFileEntry(fileEntry);
+            DataFile dataFile = icebergUtilities.transFileFromFileEntry(fileEntry, table.io(), org.apache.iceberg.MetricsConfig.forTable(table));
             batchAppend.appendFile(dataFile);
         }
 
@@ -279,7 +279,7 @@ public class IcebergMetadataFetcher extends BasePlugin implements MetadataFetche
         Transaction txn = table.newTransaction();
         AppendFiles batchAppend = txn.newAppend();
         for (Fragment fragment : context.getFragments()) {
-            DataFile dataFile = icebergUtilities.transFileFromGpdb(fragment);
+            DataFile dataFile = icebergUtilities.transFileFromGpdb(fragment, table.io(), org.apache.iceberg.MetricsConfig.forTable(table));
             batchAppend.appendFile(dataFile);
         }
         batchAppend.commit(); // writes manifest only
@@ -334,7 +334,7 @@ public class IcebergMetadataFetcher extends BasePlugin implements MetadataFetche
                 rowDelta.addDeletes(deleteFile);
             } else {
                 // Default to DATA_FILE
-                DataFile dataFile = icebergUtilities.transFileFromFileEntry(fileEntry);
+                DataFile dataFile = icebergUtilities.transFileFromFileEntry(fileEntry, table.io(), org.apache.iceberg.MetricsConfig.forTable(table));
                 rowDelta.addRows(dataFile);
             }
         }
@@ -356,7 +356,7 @@ public class IcebergMetadataFetcher extends BasePlugin implements MetadataFetche
         for (Fragment fragment : context.getFragments()) {
             GpdbFragmentMetadata meta = (GpdbFragmentMetadata)fragment.getMetadata();
             if (meta.getContentType() == GpdbFragmentMetadata.ContentType.DATA_FILE) {
-                DataFile dataFile = icebergUtilities.transFileFromGpdb(fragment);
+                DataFile dataFile = icebergUtilities.transFileFromGpdb(fragment, table.io(), org.apache.iceberg.MetricsConfig.forTable(table));
                 rowDelta.addRows(dataFile);
             } else if (meta.getContentType() == GpdbFragmentMetadata.ContentType.POSITION_DELETE) {
                 DeleteFile deleteFile = icebergUtilities.transPosDeleteFromGpdb(fragment);
@@ -451,11 +451,11 @@ public class IcebergMetadataFetcher extends BasePlugin implements MetadataFetche
         rewrite.dataSequenceNumber(sequenceNumber);
 
         for (Fragment fragment : context.getRewrittenFragments()) {
-            DataFile dataFile = icebergUtilities.transFileFromGpdb(fragment);
+            DataFile dataFile = icebergUtilities.transFileFromGpdb(fragment, table.io(), org.apache.iceberg.MetricsConfig.forTable(table));
             rewrite.deleteFile(dataFile);
         }
         for (Fragment fragment : context.getFragments()) {
-            DataFile dataFile = icebergUtilities.transFileFromGpdb(fragment);
+            DataFile dataFile = icebergUtilities.transFileFromGpdb(fragment, table.io(), org.apache.iceberg.MetricsConfig.forTable(table));
             rewrite.addFile(dataFile);
         }
 
@@ -585,7 +585,7 @@ public class IcebergMetadataFetcher extends BasePlugin implements MetadataFetche
         healLegacyTableProperties(table);
         AppendFiles batchAppend = table.newAppend();
         for (Fragment fragment : context.getFragments()) {
-            DataFile dataFile = icebergUtilities.transFileFromGpdb(fragment);
+            DataFile dataFile = icebergUtilities.transFileFromGpdb(fragment, table.io(), org.apache.iceberg.MetricsConfig.forTable(table));
             batchAppend.appendFile(dataFile);
         }
         batchAppend.commit(); // normal commit — updates catalog
@@ -605,7 +605,7 @@ public class IcebergMetadataFetcher extends BasePlugin implements MetadataFetche
         for (Fragment fragment : context.getFragments()) {
             GpdbFragmentMetadata meta = (GpdbFragmentMetadata)fragment.getMetadata();
             if (meta.getContentType() == GpdbFragmentMetadata.ContentType.DATA_FILE) {
-                DataFile dataFile = icebergUtilities.transFileFromGpdb(fragment);
+                DataFile dataFile = icebergUtilities.transFileFromGpdb(fragment, table.io(), org.apache.iceberg.MetricsConfig.forTable(table));
                 rowDelta.addRows(dataFile);
             } else if (meta.getContentType() == GpdbFragmentMetadata.ContentType.POSITION_DELETE) {
                 DeleteFile deleteFile = icebergUtilities.transPosDeleteFromGpdb(fragment);
@@ -639,11 +639,11 @@ public class IcebergMetadataFetcher extends BasePlugin implements MetadataFetche
         rewrite.dataSequenceNumber(sequenceNumber);
 
         for (Fragment fragment : context.getRewrittenFragments()) {
-            DataFile dataFile = icebergUtilities.transFileFromGpdb(fragment);
+            DataFile dataFile = icebergUtilities.transFileFromGpdb(fragment, table.io(), org.apache.iceberg.MetricsConfig.forTable(table));
             rewrite.deleteFile(dataFile);
         }
         for (Fragment fragment : context.getFragments()) {
-            DataFile dataFile = icebergUtilities.transFileFromGpdb(fragment);
+            DataFile dataFile = icebergUtilities.transFileFromGpdb(fragment, table.io(), org.apache.iceberg.MetricsConfig.forTable(table));
             rewrite.addFile(dataFile);
         }
 
@@ -673,6 +673,17 @@ public class IcebergMetadataFetcher extends BasePlugin implements MetadataFetche
 
         // 4. Reuse existing scan logic
         TableScan scan = table.newScan().project(expectedSchema(table));
+
+        // Apply predicate pushdown so manifest column bounds prune data files,
+        // matching getFragments().  The AM path (builtin catalog) always sends a
+        // metadata_location and therefore reaches this uncommitted-metadata branch
+        // (see IcebergServiceImpl.getTableFragment), so the filter must be applied
+        // here too or AM scans would never prune.
+        Expression expression = filterExpression();
+        if (expression != null) {
+            scan = scan.filter(expression);
+        }
+
         List<CombinedScanTask> scanTasks;
         try (CloseableIterable<CombinedScanTask> tasks = scan.planTasks()) {
             scanTasks = Lists.newArrayList(tasks);

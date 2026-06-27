@@ -572,6 +572,56 @@ createCreateRequestJson(IcebergCatalogFdwState* fdwState, IcebergCatalogOptions 
     agentcli_cJSON *icebergConfig = createIcebergConfig(option, volumeOpt);
     agentcli_cJSON_AddItemToObject(request, DATALAKEFDW_ICEBERG_KEY_ICEBERGCONFIG, icebergConfig);
 
+    /*
+     * Predicate pushdown (get-fragment path): inject the per-query serialized
+     * scan filter into IcebergConfig.IcebergAdditionalConfig.filterString so
+     * the agent applies it via TableScan.filter() to prune data files.  This
+     * overrides any static catalog-option filter_string for this request.
+     */
+    if (req.pushdownFilter != NULL && strlen(req.pushdownFilter) > 0)
+    {
+        agentcli_cJSON *additionalConfig =
+            agentcli_cJSON_GetObjectItem(icebergConfig, DATALAKEFDW_ICEBERG_KEY_ICEBERG_ADDITIONALCONFIG);
+        if (additionalConfig != NULL)
+        {
+            if (agentcli_cJSON_GetObjectItem(additionalConfig, DATALAKEFDW_ICEBERG_KEY_FILTERSTRING))
+                agentcli_cJSON_ReplaceItemInObject(additionalConfig, DATALAKEFDW_ICEBERG_KEY_FILTERSTRING,
+                                                   agentcli_cJSON_CreateString(req.pushdownFilter));
+            else
+                agentcli_cJSON_AddStringToObject(additionalConfig, DATALAKEFDW_ICEBERG_KEY_FILTERSTRING,
+                                                 req.pushdownFilter);
+
+            /*
+             * The serialized filter references columns by 0-based index
+             * (varattno-1).  Ship the full table columns in attno order so the
+             * agent can rebuild ColumnDescriptors (name + GPDB type OID) and
+             * resolve each filter attribute to the right Iceberg column name
+             * and value type.  Only emitted alongside a pushdown filter.
+             */
+            if (req.schema != NULL && req.schema->columns != NIL)
+            {
+                agentcli_cJSON *filterColumns = agentcli_cJSON_CreateArray();
+                ListCell   *lc;
+
+                foreach(lc, req.schema->columns)
+                {
+                    IcebergColumnDef *colDef = (IcebergColumnDef *) lfirst(lc);
+                    agentcli_cJSON *col = agentcli_cJSON_CreateObject();
+
+                    agentcli_cJSON_AddStringToObject(col, DATALAKEFDW_ICEBERG_KEY_NAME, colDef->columnName);
+                    agentcli_cJSON_AddNumberToObject(col, "oid", (double) colDef->dataType);
+                    agentcli_cJSON_AddNumberToObject(col, "typmod", (double) colDef->typeModifier);
+                    agentcli_cJSON_AddItemToArray(filterColumns, col);
+                }
+
+                if (agentcli_cJSON_GetObjectItem(additionalConfig, "filterColumns"))
+                    agentcli_cJSON_ReplaceItemInObject(additionalConfig, "filterColumns", filterColumns);
+                else
+                    agentcli_cJSON_AddItemToObject(additionalConfig, "filterColumns", filterColumns);
+            }
+        }
+    }
+
     // Add schema - use real schema if available, otherwise use default
     agentcli_cJSON *schema = createSchemaFromRequest(req);
     agentcli_cJSON_AddItemToObject(request, DATALAKEFDW_ICEBERG_KEY_SCHEMA, schema);

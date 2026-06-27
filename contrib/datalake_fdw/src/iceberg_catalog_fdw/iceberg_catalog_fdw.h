@@ -108,6 +108,7 @@ typedef struct IcebergCatalogRequest {
 	int targetFileSizeMb;
 	const char* location;  /* pre-formatted location from AM layer, must be non-NULL */
 	const char* metadataLocation;  /* deferred commit temp metadata location for RYOW */
+	const char* pushdownFilter;  /* serialized dlproxy scan filter for data-file pruning (get-fragment only) */
 } IcebergCatalogRequest;
 
 typedef struct IcebergCatalogInfo {

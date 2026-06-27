@@ -596,7 +596,9 @@ public class IcebergUtilities {
      * @param fileEntry FileEntry from JSON request body
      * @return DataFile for Iceberg
      */
-    public DataFile transFileFromFileEntry(FileListRequest.FileEntry fileEntry) {
+    public DataFile transFileFromFileEntry(FileListRequest.FileEntry fileEntry,
+                                           org.apache.iceberg.io.FileIO io,
+                                           org.apache.iceberg.MetricsConfig metricsConfig) {
         // Parse format string to FileFormat enum
         org.apache.iceberg.FileFormat format;
         String formatStr = fileEntry.getFormat();
@@ -619,12 +621,17 @@ public class IcebergUtilities {
             }
         }
 
-        return DataFiles.builder(PartitionSpec.unpartitioned())
+        DataFiles.Builder builder = DataFiles.builder(PartitionSpec.unpartitioned())
                         .withPath(fileEntry.getFilePath())
                         .withFormat(format)
                         .withFileSizeInBytes(fileEntry.getFileSize() != null ? fileEntry.getFileSize() : 0L)
-                        .withRecordCount(fileEntry.getRecordCount() != null ? fileEntry.getRecordCount() : 0L)
-                        .build();
+                        .withRecordCount(fileEntry.getRecordCount() != null ? fileEntry.getRecordCount() : 0L);
+        org.apache.iceberg.Metrics metrics =
+                computeParquetMetrics(io, metricsConfig, fileEntry.getFilePath(), format.name());
+        if (metrics != null) {
+            builder.withMetrics(metrics);
+        }
+        return builder.build();
     }
 
     /**
@@ -738,14 +745,47 @@ public class IcebergUtilities {
         }
     }
 
-    public DataFile transFileFromGpdb(Fragment gpdbFile) {
+    public DataFile transFileFromGpdb(Fragment gpdbFile,
+                                      org.apache.iceberg.io.FileIO io,
+                                      org.apache.iceberg.MetricsConfig metricsConfig) {
         GpdbFragmentMetadata metadata = (GpdbFragmentMetadata) gpdbFile.getMetadata();
-        return DataFiles.builder(PartitionSpec.unpartitioned())
+        DataFiles.Builder builder = DataFiles.builder(PartitionSpec.unpartitioned())
                         .withPath(gpdbFile.getSourceName())
                         .withFormat(metadata.getFileFormat())
                         .withFileSizeInBytes(metadata.getFileSize())
-                        .withRecordCount(metadata.getRowCount())
-                        .build();
+                        .withRecordCount(metadata.getRowCount());
+        org.apache.iceberg.Metrics metrics =
+                computeParquetMetrics(io, metricsConfig, gpdbFile.getSourceName(), metadata.getFileFormat());
+        if (metrics != null) {
+            builder.withMetrics(metrics);
+        }
+        return builder.build();
+    }
+
+    /**
+     * Derive column-level Metrics (record/value/null counts and lower/upper
+     * bounds) by reading the just-written Parquet file footer, so the Iceberg
+     * manifest carries the per-file statistics that TableScan.filter() needs to
+     * prune data files at planning time.  Only Parquet is handled here; other
+     * formats, a null FileIO, or any read failure return null -- pruning then
+     * degrades to a full scan but results are never wrong.
+     */
+    private org.apache.iceberg.Metrics computeParquetMetrics(org.apache.iceberg.io.FileIO io,
+                                                             org.apache.iceberg.MetricsConfig metricsConfig,
+                                                             String path,
+                                                             String fileFormat) {
+        if (io == null || fileFormat == null || !"PARQUET".equalsIgnoreCase(fileFormat)) {
+            return null;
+        }
+        try {
+            org.apache.iceberg.io.InputFile inputFile = io.newInputFile(path);
+            org.apache.iceberg.MetricsConfig mc =
+                    (metricsConfig != null) ? metricsConfig : org.apache.iceberg.MetricsConfig.getDefault();
+            return org.apache.iceberg.parquet.ParquetUtil.fileMetrics(inputFile, mc);
+        } catch (Exception e) {
+            LOG.warn("failed to compute parquet metrics for {}: {}", path, e.toString());
+            return null;
+        }
     }
 
     public DeleteFile transPosDeleteFromGpdb(Fragment gpdbFile) {
