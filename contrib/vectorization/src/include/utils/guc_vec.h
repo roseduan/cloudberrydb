@@ -42,6 +42,8 @@ extern bool print_fallback_log;
 extern int hashjoin_spill_memory_mb;
 /* memory budget (MB) for window aggregate spill; 0 means disabled (no spill) */
 extern int winagg_spill_memory_mb;
+/* memory budget (MB) for sonic hash-aggregate spill; 0 means disabled */
+extern int sonicagg_spill_memory_mb;
 extern bool sort_use_external_sort;
 extern int sort_external_batch_size;
 extern int sort_external_num_threads;

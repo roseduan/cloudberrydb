@@ -1,0 +1,89 @@
+-- Sonic HashAgg spill concurrent-eviction regression test.
+--
+-- Separate session from sonicagg_spill.sql so the Arrow-side
+-- SpillMemoryManager starts from a clean state.  Mixing non-spilling and
+-- spilling runs in a single session can leave stale per-plan state that
+-- obscures the concurrent-eviction path.
+--
+-- pool_threads = 4 routes Sink() calls from four Arrow worker threads
+-- concurrently.  This exercises the runs_mutex_ lock in GlobalAggregator
+-- and the thread-safe RegisterRun callback, which is the path that caused
+-- deadlocks before the spill implementation stabilised.
+--
+-- The test also explicitly covers the spill-disabled branch
+-- (sonicagg_spill_memory_mb = 0) so that build_aggregatation_options'
+-- no-spill code path is executed in CI.
+
+SET vector.enable_vectorization = on;
+SET default_table_access_method = pax;
+
+DROP TABLE IF EXISTS sa_spill_par_t;
+CREATE TABLE sa_spill_par_t (
+    id       int,
+    grp_int  int,
+    grp_text text,
+    val      int
+) DISTRIBUTED BY (id);
+
+INSERT INTO sa_spill_par_t
+SELECT
+    i,
+    i                               AS grp_int,
+    'key_' || i                     AS grp_text,
+    i % 1000                        AS val
+FROM generate_series(1, 200000) i;
+
+ANALYZE sa_spill_par_t;
+
+-- ============================================================================
+-- Step 1: spill disabled (sonicagg_spill_memory_mb = 0)
+-- Exercises the build_aggregatation_options no-spill branch; without this
+-- query that branch is never reached in CI.
+-- ============================================================================
+SET vector.sonicagg_spill_memory_mb = 0;
+SELECT count(*) AS rows_no_spill,
+       sum(val) AS sum_no_spill
+FROM (
+    SELECT grp_int, sum(val) AS val
+    FROM sa_spill_par_t
+    GROUP BY grp_int
+) t;
+RESET vector.sonicagg_spill_memory_mb;
+
+-- ============================================================================
+-- Step 2: concurrent eviction with pool_threads = 4 and 1 MB budget
+-- Multiple Arrow worker threads call Sink() concurrently; runs_mutex_ and
+-- RegisterRun must be race-free.  Result must match step 1.
+-- ============================================================================
+SET vector.pool_threads = 4;
+SET vector.sonicagg_spill_memory_mb = 1;
+
+-- INT key + SUM: same aggregate shape as step 1 — mismatch = data loss.
+SELECT count(*) AS rows_with_spill,
+       sum(val) AS sum_with_spill
+FROM (
+    SELECT grp_int, sum(val) AS val
+    FROM sa_spill_par_t
+    GROUP BY grp_int
+) t;
+
+-- TEXT key + COUNT(*): exercises varlen-key spill under concurrent workers.
+SELECT count(*) AS groups_text_spill,
+       sum(cnt) AS total_cnt_text_spill
+FROM (
+    SELECT grp_text, count(*) AS cnt
+    FROM sa_spill_par_t
+    GROUP BY grp_text
+) t;
+
+RESET vector.sonicagg_spill_memory_mb;
+RESET vector.pool_threads;
+
+-- ============================================================================
+-- Cleanup
+-- ============================================================================
+
+DROP TABLE sa_spill_par_t;
+
+RESET default_table_access_method;
+RESET vector.enable_vectorization;

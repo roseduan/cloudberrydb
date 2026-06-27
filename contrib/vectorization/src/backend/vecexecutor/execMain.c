@@ -4585,6 +4585,54 @@ build_aggregatation_options(GList *aggregations, PlanBuildContext *pcontext,
 															/* sort_options */ NULL,
 															ds_options,
 															&error);
+
+		/*
+		 * Wire spill onto the Sonic aggregate when enabled. We must NOT use
+		 * garrow_general_aggregate_node_options_new_with_spill here because it
+		 * drops ds_options; instead set the spill fields on the options just
+		 * built. Files mirror the window path ($DataDir/base/pgsql_tmp/ with
+		 * the shared VEC_SPILL_FILE_PREFIX, reclaimed by CleanupArrowSpillFiles
+		 * and the post-crash RemovePgTempFiles sweep); file_ops are left unset
+		 * so arrow falls back to its POSIX temp-file implementation, same as
+		 * the window path above. Routing through real PG temp-file callbacks
+		 * (ResourceOwner-visible instead of relying on the exit/restart sweep)
+		 * is a known, accepted gap shared by both spill paths — see the
+		 * matching comment on garrow_general_aggregate_node_options_set_spill
+		 * in compute.h — and would be a cross-cutting follow-up, not scoped
+		 * to this commit.
+		 */
+		if (options != NULL && sonicagg_spill_memory_mb > 0)
+		{
+			char spill_dir[MAXPGPATH];
+			char spill_file_base[MAXPGPATH];
+
+			snprintf(spill_dir, sizeof(spill_dir), "%s/base/%s",
+					 DataDir, PG_TEMP_FILES_DIR);
+			if (MakePGDirectory(spill_dir) < 0 && errno != EEXIST)
+			{
+				/*
+				 * options is a g_autoptr, but ereport(ERROR) below does a
+				 * siglongjmp that skips the compiler-inserted cleanup code,
+				 * so the GObject would otherwise leak. Unlike the "if
+				 * (error)" case below, options is already non-NULL here
+				 * (built above), so it must be unreffed explicitly.
+				 */
+				g_object_unref(options);
+				ereport(ERROR,
+						(errcode_for_file_access(),
+						 errmsg("could not create temporary file directory \"%s\": %m",
+								spill_dir)));
+			}
+			snprintf(spill_file_base, sizeof(spill_file_base),
+					 "%s/%s_%s_%d_%d", spill_dir,
+					 PG_TEMP_FILE_PREFIX, VEC_SPILL_FILE_PREFIX,
+					 MyProcPid, pcontext->planstate->plan->plan_node_id);
+			garrow_general_aggregate_node_options_set_spill(
+				GARROW_EXECUTE_NODE_OPTIONS(options),
+				spill_file_base,
+				(gint64) sonicagg_spill_memory_mb * 1024L * 1024L);
+		}
+
 		if (pcontext->aggstrategy == AGG_HASHED)
 			((VecAggState *) pcontext->planstate)->method = VEC_AGG_METHOD_SONIC;
 	}

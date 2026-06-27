@@ -261,6 +261,18 @@ _PG_init(void)
                             GUC_GPDB_NEED_SYNC,
                             NULL, NULL, NULL);
 
+    DefineCustomIntVariable("vector.sonicagg_spill_memory_mb",
+                            "Memory budget in MB for sonic hash-aggregate spill. "
+                            "When the in-memory partition state exceeds this, "
+                            "partitions are spilled to disk. 0 means disabled.",
+                            NULL,
+                            &sonicagg_spill_memory_mb,
+                            512,
+                            0, INT_MAX,
+                            PGC_USERSET,
+                            GUC_GPDB_NEED_SYNC,
+                            NULL, NULL, NULL);
+
     DefineCustomIntVariable("vector.topk_bound_threshold",
                             "Max K value for TopKNode; larger K falls back to OrderByNode+SelectK",
                             NULL,

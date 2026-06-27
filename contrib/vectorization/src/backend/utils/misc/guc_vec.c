@@ -45,6 +45,7 @@ int pool_threads = 0;
 bool print_fallback_log = false;
 int hashjoin_spill_memory_mb = 512;
 int winagg_spill_memory_mb = 512;
+int sonicagg_spill_memory_mb = 512;
 int topk_bound_threshold = 2000;
 bool enable_topk_runtime_filter = true;
 int limit_hashagg_max_total = 1000;
