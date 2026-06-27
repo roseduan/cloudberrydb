@@ -96,7 +96,7 @@ public class IcebergExpressionBuilder implements TreeVisitor {
 
         ColumnDescriptor filterColumn = columnDescriptors.get(columnIndexOperand.index());
         String filterColumnName = filterColumn.columnName();
-        Object filterValue;
+        Object filterValue = null;
 
         if (valueOperandNode instanceof CollectionOperandNode) {
             CollectionOperandNode collectionOperand = (CollectionOperandNode) valueOperandNode;
@@ -108,12 +108,14 @@ public class IcebergExpressionBuilder implements TreeVisitor {
                             filterColumn.getDataType(),
                             data)))
                     .collect(Collectors.toList());
-        } else {
+        } else if (valueOperandNode != null) {
             ScalarOperandNode scalarOperand = (ScalarOperandNode) valueOperandNode;
             filterValue = Utilities.boxLiteral(Utilities.convertDataValue(
                     filterColumn.getDataType(),
                     scalarOperand.getValue()));
         }
+        // IS_NULL / IS_NOT_NULL carry no value operand; filterValue stays null
+        // and the operator switch builds isNull()/notNull() without it.
 
         if (operator == Operator.NOOP) {
             // NOT boolean wraps a NOOP

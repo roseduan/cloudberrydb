@@ -184,7 +184,16 @@ public class IcebergMetadataFetcher extends BasePlugin implements MetadataFetche
                 .newScan()
                 .project(expectedSchema(table));
 
-        Expression expression = filterExpression();
+        // Predicate pushdown is best-effort: if a qual cannot be translated to an
+        // Iceberg expression (unsupported type/value, e.g. a DATE literal), log
+        // and scan without the filter rather than failing the query.  Correctness
+        // is unaffected -- the executor re-applies the original quals.
+        Expression expression = null;
+        try {
+            expression = filterExpression();
+        } catch (Exception e) {
+            LOG.warn("predicate pushdown skipped (filter build failed): {}", e.toString());
+        }
         if (expression != null) {
             scan = scan.filter(expression);
         }
@@ -679,7 +688,16 @@ public class IcebergMetadataFetcher extends BasePlugin implements MetadataFetche
         // metadata_location and therefore reaches this uncommitted-metadata branch
         // (see IcebergServiceImpl.getTableFragment), so the filter must be applied
         // here too or AM scans would never prune.
-        Expression expression = filterExpression();
+        // Predicate pushdown is best-effort: if a qual cannot be translated to an
+        // Iceberg expression (unsupported type/value, e.g. a DATE literal), log
+        // and scan without the filter rather than failing the query.  Correctness
+        // is unaffected -- the executor re-applies the original quals.
+        Expression expression = null;
+        try {
+            expression = filterExpression();
+        } catch (Exception e) {
+            LOG.warn("predicate pushdown skipped (filter build failed): {}", e.toString());
+        }
         if (expression != null) {
             scan = scan.filter(expression);
         }
