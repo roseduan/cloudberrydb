@@ -39,12 +39,17 @@ OBJS = \
 	pg_backup_tar.o \
 	pg_backup_utils.o
 
-OBJS += dumputils_gp.o
+OBJS += dumputils_gp.o pg_dump_pax.o
+
+# pg_dump_pax_emit.o calls pg_dump.c static-ish helpers and so is only
+# linked into pg_dump; pg_restore/pg_dumpall don't emit OID
+# preassignment, so they don't need it.
+PG_DUMP_PAX_EMIT_OBJ = pg_dump_pax_emit.o
 
 all: pg_dump pg_restore pg_dumpall
 
-pg_dump: pg_dump.o common.o pg_dump_sort.o $(OBJS) | submake-libpq submake-libpgport submake-libpgfeutils
-	$(CC) $(CFLAGS) pg_dump.o common.o pg_dump_sort.o $(OBJS) $(LDFLAGS) $(LDFLAGS_EX) $(LIBS) -o $@$(X)
+pg_dump: pg_dump.o common.o pg_dump_sort.o $(PG_DUMP_PAX_EMIT_OBJ) $(OBJS) | submake-libpq submake-libpgport submake-libpgfeutils
+	$(CC) $(CFLAGS) pg_dump.o common.o pg_dump_sort.o $(PG_DUMP_PAX_EMIT_OBJ) $(OBJS) $(LDFLAGS) $(LDFLAGS_EX) $(LIBS) -o $@$(X)
 
 pg_restore: pg_restore.o $(OBJS) | submake-libpq submake-libpgport submake-libpgfeutils
 	$(CC) $(CFLAGS) pg_restore.o $(OBJS) $(LDFLAGS) $(LDFLAGS_EX) $(LIBS) -o $@$(X)
@@ -71,5 +76,5 @@ uninstall:
 
 clean distclean maintainer-clean:
 	$(MAKE) -C test clean
-	rm -f pg_dump$(X) pg_restore$(X) pg_dumpall$(X) $(OBJS) pg_dump.o common.o pg_dump_sort.o pg_restore.o pg_dumpall.o
+	rm -f pg_dump$(X) pg_restore$(X) pg_dumpall$(X) $(OBJS) $(PG_DUMP_PAX_EMIT_OBJ) pg_dump.o common.o pg_dump_sort.o pg_restore.o pg_dumpall.o
 	rm -rf tmp_check

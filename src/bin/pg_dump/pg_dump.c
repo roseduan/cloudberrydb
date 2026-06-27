@@ -67,6 +67,7 @@
 #include "pg_backup_db.h"
 #include "pg_backup_utils.h"
 #include "pg_dump.h"
+#include "pg_dump_pax.h"
 #include "storage/block.h"
 
 typedef struct
@@ -166,13 +167,6 @@ static int	extra_float_digits;
  * --inserts is specified without --rows-per-insert
  */
 #define DUMP_DEFAULT_ROWS_PER_INSERT 1
-
-/*
- * FIXME: CBDB should not know the am oid of PAX. We put here because the kernel
- * can't distinguish the PAX and renamed heap(heap_psql) in test `psql`.
- * The definition of temporary is here and should be consistent with util/rel.h
- */
-#define PAX_AM_OID 7047
 
 /*
  * FIXME: CBDB should not know the am oid of ICEBERG. We put here because the kernel
@@ -334,17 +328,17 @@ static void binary_upgrade_set_namespace_oid(Archive *fout,
 static void binary_upgrade_set_type_oids_for_ao(Archive *fout,
 								 PQExpBuffer upgrade_buffer, Oid pg_rel_oid,
 								 char *ao_aux_typname);
-static void binary_upgrade_set_type_oids_by_rel_oid_impl(Archive *fout,
-								 PQExpBuffer upgrade_buffer, Oid pg_rel_oid,
-								 char *typname_override);
+/*
+ * binary_upgrade_set_pg_class_oids_impl and
+ * binary_upgrade_set_type_oids_by_rel_oid_impl below are non-static so
+ * pg_dump_pax.c can reuse them via prototypes in pg_dump_pax.h.  This
+ * lets PAX aux-table OID preassignment piggyback on the same plumbing
+ * AO already uses, without duplicating catalog-query logic.
+ */
 static void binary_upgrade_set_pg_class_oids_for_ao(Archive *fout,
 								 PQExpBuffer upgrade_buffer,
 								 Oid pg_class_oid, bool is_index,
 								 char *ao_aux_relname);
-static void binary_upgrade_set_pg_class_oids_impl(Archive *fout,
-								 PQExpBuffer upgrade_buffer,
-								 Oid pg_class_oid, bool is_index,
-								 char *relname_override);
 static void dumpSearchPath(Archive *AH);
 static void binary_upgrade_set_type_oids_by_type_oid(Archive *fout,
 													 PQExpBuffer upgrade_buffer,
@@ -2056,12 +2050,12 @@ selectDumpableTable(TableInfo *tbinfo, Archive *fout)
 		tbinfo->dobj.dump = DUMP_COMPONENT_NONE;
 
 	/*
-	 * Pax not support pg_dump yet
+	 * Iceberg not support pg_dump yet
 	 */
-	if (tbinfo->amoid == PAX_AM_OID || tbinfo->amoid == ICEBERG_AM_OID) {
+	if (tbinfo->amoid == ICEBERG_AM_OID) {
 		tbinfo->dobj.dump = DUMP_COMPONENT_NONE;
 
-		pg_log_warning("unsupport am pax yet, current relation \"%s\" will be ignore",
+		pg_log_warning("unsupport am iceberg yet, current relation \"%s\" will be ignore",
 					   tbinfo->dobj.name);
 	}
 }
@@ -5350,7 +5344,7 @@ binary_upgrade_set_type_oids_by_rel_oid(Archive *fout,
 														pg_rel_oid, NULL);
 }
 
-static void 
+void
 binary_upgrade_set_type_oids_by_rel_oid_impl(Archive *fout,
 											 PQExpBuffer upgrade_buffer,
 											 Oid pg_rel_oid,
@@ -5462,7 +5456,7 @@ binary_upgrade_set_pg_class_oids(Archive *fout,
 										  NULL);
 }
 
-static void
+void
 binary_upgrade_set_pg_class_oids_impl(Archive *fout,
 									  PQExpBuffer upgrade_buffer,
 									  Oid pg_class_oid,
@@ -5492,10 +5486,11 @@ binary_upgrade_set_pg_class_oids_impl(Archive *fout,
 	Oid			ao_visimapidxid = InvalidOid;
 	bool		ao_columnstore = false;
 	char		pg_class_relkind;
+	Oid			pg_class_relam;
 
 	/* GPDB_14_MERGE_FIXME: we must put this sql here for variables which will befetched later by other sqls */
 	appendPQExpBuffer(upgrade_query,
-					  "SELECT c.reltoastrelid, c.relkind, t.relnamespace AS toast_relnamespace, t.relname AS toast_relname, "
+					  "SELECT c.reltoastrelid, c.relkind, c.relam, t.relnamespace AS toast_relnamespace, t.relname AS toast_relname, "
 					  "       c.relnamespace, c.relname, "
 					  "       i.indexrelid, ti.relname AS tidx_relname, "
 					  "       bi.oid AS bmoid, bidx.oid AS bmidxoid, "
@@ -5517,6 +5512,7 @@ binary_upgrade_set_pg_class_oids_impl(Archive *fout,
 	pg_class_reltoastrelid = atooid(PQgetvalue(upgrade_res, 0, PQfnumber(upgrade_res, "reltoastrelid")));
 	pg_class_relkind = *PQgetvalue(upgrade_res, 0,
 								   PQfnumber(upgrade_res, "relkind"));
+	pg_class_relam = atooid(PQgetvalue(upgrade_res, 0, PQfnumber(upgrade_res, "relam")));
 	pg_index_indexrelid = atooid(PQgetvalue(upgrade_res, 0, PQfnumber(upgrade_res, "indexrelid")));
 
 	/* Cloudberry specific values */
@@ -5636,6 +5632,10 @@ binary_upgrade_set_pg_class_oids_impl(Archive *fout,
 			create_ao_idxname(ao_relname, sizeof(ao_relname), "pg_aovisimap", pg_class_oid);
 			binary_upgrade_set_pg_class_oids_for_ao(fout, upgrade_buffer, ao_visimapidxid, true, ao_relname);
 		}
+
+		/* PAX-specific aux OID preassignment (no-op for non-PAX). */
+		pax_emit_aux_oid_preassignment(fout, upgrade_buffer,
+									   pg_class_oid, pg_class_relam);
 
 		PQclear(upgrade_res);
 		destroyPQExpBuffer(upgrade_query);
@@ -7458,6 +7458,45 @@ getTables(Archive *fout, int *numTables)
 						  "AND pip.objsubid = 0) "
 						  "WHERE c.relkind in ('%c', '%c', '%c', '%c', '%c', '%c', '%c') "
 						  "AND c.relnamespace <> 7012 " /* BM_BITMAPINDEX_NAMESPACE */
+	/*
+	 * Skip orphan temp tables and the PAX aux tables that belonged to them.
+	 *
+	 * Sessions can leave temp tables behind in pg_class when they terminate
+	 * abnormally (kill -9, segment PANIC before resetSessionForPrimaryGangLoss
+	 * dispatches GpDropTempTables, isolation2 utility-mode session forced
+	 * kills, etc.) — see doc/internals/orphan_temp_autovacuum_design.md.  The
+	 * parent table lives in a pg_temp_<gp_session_id> namespace; for PAX
+	 * parents an aux table additionally lives in pg_ext_aux as
+	 * pg_pax_blocks_<parent_oid> or pg_manifest_<parent_oid>.
+	 *
+	 * selectDumpableNamespace already skips pg_-prefixed namespaces post-fetch,
+	 * so most invocations of pg_dump are implicitly safe.  We add an explicit
+	 * query-level filter here so:
+	 *  (1) temp rels and their PAX aux never enter pg_dump's in-memory rel
+	 *      array, eliminating a class of edge cases that depend on namespace
+	 *      iteration order; and
+	 *  (2) the filter is symmetric with the one in
+	 *      src/bin/pg_upgrade/info.c::get_rel_infos, which makes the contract
+	 *      visible in both places.
+	 */
+						  "AND c.relpersistence <> 't' "
+						  "AND (NOT EXISTS (SELECT 1 "
+						  "                 FROM pg_catalog.pg_namespace n "
+						  "                 WHERE n.oid = c.relnamespace "
+						  "                   AND (n.nspname ~ '^pg_temp_' OR "
+						  "                        n.nspname ~ '^pg_toast_temp_'))) "
+						  "AND (NOT (c.relname ~ '^(pg_pax_blocks_|pg_manifest_)[0-9]+$' AND "
+						  "           EXISTS (SELECT 1 "
+						  "                   FROM pg_catalog.pg_namespace n "
+						  "                   WHERE n.oid = c.relnamespace "
+						  "                     AND n.nspname = 'pg_ext_aux')) "
+						  "      OR EXISTS (SELECT 1 "
+						  "                 FROM pg_catalog.pg_class pc "
+						  "                 JOIN pg_catalog.pg_namespace pn "
+						  "                      ON pn.oid = pc.relnamespace "
+						  "                 WHERE pc.oid::text = substring(c.relname FROM '([0-9]+)$') "
+						  "                   AND pn.nspname !~ '^pg_temp_' "
+						  "                   AND pn.nspname !~ '^pg_toast_temp_')) "
 						  "ORDER BY c.oid",
 						  acl_subquery->data,
 						  racl_subquery->data,
@@ -18211,7 +18250,26 @@ dumpTableSchema(Archive *fout, const TableInfo *tbinfo)
 			}
 
 			if (tbinfo->relkind == RELKIND_PARTITIONED_TABLE)
+			{
 				appendPQExpBuffer(q, "\nPARTITION BY %s", tbinfo->partkeydef);
+				/*
+				 * Partitioned roots are storage-less, but Cloudberry /
+				 * Greenplum allow them to carry a non-default relam
+				 * (e.g. `CREATE TABLE … USING pax PARTITION BY …`).
+				 * The default_table_access_method GUC path that
+				 * pg_dump uses for relkind='r'/'m' is intentionally
+				 * ignored by the backend for partition roots — only
+				 * an explicit USING clause writes relam to the root.
+				 * Emit USING inline so the AM round-trips.
+				 *
+				 * Placement: AFTER `PARTITION BY <key>` and BEFORE
+				 * Cloudberry's `DISTRIBUTED BY (...)` (which addDistributedBy
+				 * appends later).  CBDB's grammar rejects `(cols) USING <am>
+				 * PARTITION BY ... DISTRIBUTED BY ...`; this ordering parses.
+				 */
+				if (tbinfo->amname != NULL && tbinfo->amname[0] != '\0')
+					appendPQExpBuffer(q, " USING %s", fmtId(tbinfo->amname));
+			}
 
 			if (tbinfo->relkind == RELKIND_FOREIGN_TABLE)
 				appendPQExpBuffer(q, "\nSERVER %s", fmtId(srvname));

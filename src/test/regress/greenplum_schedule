@@ -29,6 +29,7 @@ test: profile
 test: pg_ext_aux
 
 test: pg_dump_binary_upgrade
+test: pg_dump_pax
 
 test: gp_dispatch_keepalives
 
