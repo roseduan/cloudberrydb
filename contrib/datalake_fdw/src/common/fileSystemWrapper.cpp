@@ -543,6 +543,14 @@ gopherConfig* datalakeCreateGopherConfig(void *opt)
 		{
 			conf->ufs_type = S3AV2;
 		}
+		else if (pg_strcasecmp(strConvertLow(options->gopherType), "azure") == 0)
+		{
+			conf->ufs_type = AZURE;
+		}
+		else if (pg_strcasecmp(strConvertLow(options->gopherType), "gcs") == 0)
+		{
+			conf->ufs_type = GCS;
+		}
 		else
 		{
 			ereport(ERROR,

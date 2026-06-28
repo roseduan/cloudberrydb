@@ -26,6 +26,8 @@
 #define DATALAKE_OSS_PROTOCOL_S3B "s3b"
 #define DATALAKE_OSS_PROTOCOL_HUAWEI "huawei"
 #define DATALAKE_OSS_PROTOCOL_KS3 "ks3"
+#define DATALAKE_OSS_PROTOCOL_AZURE "azure"
+#define DATALAKE_OSS_PROTOCOL_GCS "gcs"
 #define DATALAKE_HDFS_PROTOCOL "hdfs"
 #define DATALAKE_FTP_PROTOCOL "ftp"
 
@@ -166,6 +168,8 @@
 	protocol == DL_OSS_PROTOCOL_S3AV2 || \
 	protocol == DL_OSS_PROTOCOL_HUAWEI || \
 	protocol == DL_OSS_PROTOCOL_KS3 || \
+	protocol == DL_OSS_PROTOCOL_AZURE || \
+	protocol == DL_OSS_PROTOCOL_GCS || \
 	protocol == DL_OSS_PROTOCOL_S3A)
 
 #define PARQUET_SUPPORT_COMPRESS(compress) (compress == UNCOMPRESS || \

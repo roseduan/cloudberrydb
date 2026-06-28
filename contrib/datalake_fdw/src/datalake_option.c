@@ -171,6 +171,8 @@ static const struct FdwProtocolOption protocol_mapping[] = {
 	{DATALAKE_OSS_PROTOCOL_QINGSTORE, DL_OSS_PROTOCOL_QINGSTORE},
 	{DATALAKE_OSS_PROTOCOL_HUAWEI, DL_OSS_PROTOCOL_HUAWEI},
 	{DATALAKE_OSS_PROTOCOL_KS3, DL_OSS_PROTOCOL_KS3},
+	{DATALAKE_OSS_PROTOCOL_AZURE, DL_OSS_PROTOCOL_AZURE},
+	{DATALAKE_OSS_PROTOCOL_GCS, DL_OSS_PROTOCOL_GCS},
 };
 
 static DLProt datalakeGetProtocol(const char* protocol)
@@ -1196,7 +1198,7 @@ void check_server_option(List *options_list, Oid catalog)
 			ereport(ERROR,
 					(errcode(ERRCODE_FDW_INVALID_OPTION_NAME),
 					 errmsg("invalid protocol \"%s\". datalake support hdfs, ftp, and oss protocol"
-					 " ali, cos, qs, s3, s3b, huawei, ks3", protocolStr)));
+					 " ali, cos, qs, s3, s3b, huawei, ks3, azure, gcs", protocolStr)));
 			break;
 		}
 		case DL_HDFS_PROTOCOL:

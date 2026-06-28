@@ -37,6 +37,8 @@
 #define DFS_OSS_PROTOCOL_QINIU     "qiniu"
 #define DFS_OSS_PROTOCOL_UCLOUD    "ucloud"
 #define DFS_OSS_PROTOCOL_SWIFT     "swift"
+#define DFS_OSS_PROTOCOL_AZURE     "azure"
+#define DFS_OSS_PROTOCOL_GCS       "gcs"
 #define DFS_HDFS_PROTOCOL_HDFS     "hdfs"
 
 #define DFS_HDFS_USER_AUTH_SIMPLE   "simple"
