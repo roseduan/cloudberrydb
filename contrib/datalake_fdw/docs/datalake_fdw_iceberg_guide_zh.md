@@ -5,7 +5,7 @@
 `datalake_fdw` 是 HashData Lightning 的数据湖访问扩展，提供两大能力：
 
 - **FDW 外部表**：直接读写 S3/HDFS/Hive 上的 Parquet、ORC、Avro、Text、CSV 文件
-- **Iceberg 表**：通过 Catalog + Volume + Iceberg Table 三层架构，支持事务性的 ACID 读写、Schema 演化、快照隔离和 VACUUM 压缩
+- **Iceberg 表**：通过 Catalog + Volume + Iceberg Table 三层架构，支持事务性的 ACID 读写、schema 兼容读（field-id 映射）、快照隔离和 VACUUM 压缩
 
 ```
                     datalake_fdw
@@ -162,9 +162,9 @@ SELECT sync_hive_database(
 Iceberg 表采用三层架构，每一层独立配置、可组合：
 
 ```
-Catalog (元数据管理)     支持: Polaris / Hive / Builtin
+Catalog (元数据管理)     支持: Builtin / Hive / Polaris / Hadoop / S3
     +
-Volume  (存储访问)       支持: S3 / HDFS / ABFSS（Azure）
+Volume  (存储访问)       支持: S3 / HDFS
     +
 Iceberg Table (数据表)   支持: CREATE / INSERT / UPDATE / DELETE / VACUUM
 ```
@@ -172,9 +172,32 @@ Iceberg Table (数据表)   支持: CREATE / INSERT / UPDATE / DELETE / VACUUM
 > **关于实现机制**：`CREATE ICEBERG TABLE …` 使用的是原生 Table Access Method
 > （`CREATE ACCESS METHOD iceberg`），表对象本身是普通 PostgreSQL relation，
 > 不是 FOREIGN TABLE。`iceberg_catalog_fdw` 与 `iceberg_volume_fdw` 仅作为元数据
-> 与存储层的接入对象（FOREIGN CATALOG / FOREIGN VOLUME）使用。这意味着
-> 对 Iceberg 表的查询计划走 PG 原生 executor，不经过 dlproxy；FDW 路径只在
-> 通用外部表（第 3 节）和 catalog/volume 元数据交互时使用。
+> 与存储层的接入对象（FOREIGN CATALOG / FOREIGN VOLUME）使用。
+
+#### 为什么 Catalog 与 Volume 都要配连接信息（设计说明）
+
+某些组合下两边的连接信息看起来重复——例如 hadoop catalog 的
+`warehouse_location_prefix 'hdfs://lakehouse:8020/…'` 已含 NameNode 地址，HDFS volume
+又要配一遍 `hdfs_namenodes`。这是**元数据面与数据面分离**的有意设计：
+
+| 对象 | 回答的问题 | 消费方 |
+|------|-----------|--------|
+| Catalog | 表在哪注册、metadata.json 指针由谁管 | QD → datalake_agent（元数据面：建表 / 加载 / 提交 / fragments） |
+| Volume | 数据文件的字节怎么读写、用什么凭据 | 各 segment 的 gopher（数据面：SELECT / INSERT 的文件 IO） |
+
+分离带来的能力：
+
+- **自由组合**：catalog 与 volume 是两条独立的轴（见下文兼容矩阵）；同一 catalog
+  下的不同表可以落在不同 volume（不同桶 / 不同集群 / 不同凭据）上
+- **凭据域天然不同**：catalog 侧是 HMS Kerberos / Polaris OAuth，volume 侧是
+  S3 AK/SK / HDFS Kerberos，混在一个对象上无法表达"元数据与数据分属不同权限体系"
+- **可以只配一边**：Polaris catalog 由服务端下发存储凭据（vended credentials），
+  无需建 volume——印证了"连接信息的归宿在 volume，catalog 原则上只管元数据"
+
+短期的重叠点（hadoop / s3 catalog 的 `warehouse_location_prefix` 里携带的
+host / bucket 必须与 volume 的 `hdfs_namenodes` / `bucket_name` 保持一致）来源于
+两个平面各自独立取配置；配置文件模式（`server_name`，见 4.3）落地后，这部分
+重复会进一步收敛为"两边引用同一个 conf 段"。
 
 ### 4.2 Catalog 配置
 
@@ -203,13 +226,15 @@ OPTIONS (
 );
 ```
 
-Kerberos 认证时需额外 User Mapping 选项：
+Hive Catalog 的 User Mapping 选项：
 
 | 选项 | 说明 |
 |------|------|
-| `krb_service_principal` | Hive 服务端 principal |
-| `krb_client_principal` | 客户端 principal |
-| `krb_client_keytab` | Keytab 文件路径 |
+| `username` | 操作系统用户 |
+| `auth_method` | 认证方式（`simple` / `kerberos`） |
+| `krb_service_principal` | Hive 服务端 principal（kerberos） |
+| `krb_client_principal` | 客户端 principal（kerberos） |
+| `krb_client_keytab` | Keytab 文件路径（kerberos） |
 
 #### Polaris Catalog（REST API）
 
@@ -246,7 +271,7 @@ CREATE SERVER hd_cat_srv FOREIGN DATA WRAPPER iceberg_catalog_fdw
     OPTIONS (type 'hadoop');
 CREATE USER MAPPING FOR current_user SERVER hd_cat_srv;
 CREATE FOREIGN CATALOG hd_cat SERVER hd_cat_srv
-    OPTIONS (warehouse_location_prefix 's3a://warehouse/iceberg/');
+    OPTIONS (warehouse_location_prefix 's3://warehouse/iceberg/');
 
 CREATE SERVER hd_vol_srv FOREIGN DATA WRAPPER iceberg_volume_fdw
     OPTIONS (type 's3', endpoint 'http://lakehouse:9100',
@@ -267,7 +292,8 @@ CREATE FOREIGN CATALOG hd_hdfs_cat SERVER hd_hdfs_cat_srv
     OPTIONS (warehouse_location_prefix 'hdfs://lakehouse:8020/iceberg/');
 
 CREATE SERVER hd_hdfs_vol_srv FOREIGN DATA WRAPPER iceberg_volume_fdw
-    OPTIONS (type 'hdfs', endpoint 'hdfs://lakehouse:8020');
+    OPTIONS (type 'hdfs', hdfs_namenodes 'lakehouse:8020',
+             hdfs_auth_method 'simple');
 CREATE USER MAPPING FOR current_user SERVER hd_hdfs_vol_srv
     OPTIONS (username 'gpadmin');
 CREATE FOREIGN VOLUME hd_hdfs_vol SERVER hd_hdfs_vol_srv
@@ -275,7 +301,7 @@ CREATE FOREIGN VOLUME hd_hdfs_vol SERVER hd_hdfs_vol_srv
 ```
 
 特点：
-- 无需 `url`、`catalog_name` —— `warehouse_location_prefix` 必填且要带协议（`s3a://` 或 `hdfs://`）
+- 无需 `url`、`catalog_name` —— `warehouse_location_prefix` 必填且要带协议（`s3://` 或 `hdfs://`）
 - 表的 metadata.json 与数据文件位于 `<warehouse_location_prefix>/<namespace>/<table>/`
 - 同一份表可被 Spark / Trino / Flink 通过 Iceberg HadoopCatalog 直读
 - Iceberg 提交沿用 HDFS / S3 的原子 rename 语义；当存储不支持原子 rename（部分对象存储）需配合 lock 服务，本实现不内置 lock
@@ -289,7 +315,7 @@ CREATE SERVER s3_cat_srv FOREIGN DATA WRAPPER iceberg_catalog_fdw
     OPTIONS (type 's3');
 CREATE USER MAPPING FOR current_user SERVER s3_cat_srv;
 CREATE FOREIGN CATALOG s3_cat SERVER s3_cat_srv
-    OPTIONS (warehouse_location_prefix 's3a://warehouse/iceberg_s3/');
+    OPTIONS (warehouse_location_prefix 's3://warehouse/iceberg_s3/');
 
 CREATE SERVER s3_vol_srv FOREIGN DATA WRAPPER iceberg_volume_fdw
     OPTIONS (type 's3', endpoint 'http://lakehouse:9100',
@@ -306,7 +332,7 @@ CREATE FOREIGN VOLUME s3_vol SERVER s3_vol_srv
 | 维度 | `hadoop` | `s3` |
 |------|----------|------|
 | 适用 Volume | s3 / hdfs | 仅 s3 |
-| `warehouse_location_prefix` 要求 | 含协议（`s3a://...` 或 `hdfs://...`） | 含协议（`s3a://...`） |
+| `warehouse_location_prefix` 要求 | 含协议（`s3://...` 或 `hdfs://...`） | 含协议（`s3://...`） |
 | 内部 Java 实现 | `IcebergHadoopCatalog` | `IcebergS3Catalog`（拆 fs.defaultFS / fs.prefix） |
 | 适合场景 | 单存储（HDFS-only 或 S3-only），最简配置 | S3 多端点 / KMS / vended credentials |
 
@@ -327,13 +353,13 @@ CREATE FOREIGN VOLUME s3_vol SERVER s3_vol_srv
 | `type` | 全部（SERVER） | `builtin` / `hive` / `polaris` / `hadoop` / `s3` |
 | `url` | hive / polaris（SERVER） | hive: `thrift://host:9083`；polaris: REST 地址 |
 | `polaris_server_realm` | Polaris（SERVER） | 发往 Polaris 的 `Polaris-Realm` 请求头；不设置时默认 `POLARIS`，需与服务端配置的 realm 一致（如 `default`） |
+| `server_name` | hive（SERVER） | 配置文件模式：未在 SQL OPTIONS 里写的连接配置从 `gphive.conf` 对应段补齐，SQL 里写了的优先（见 4.3 末尾"配置文件模式"） |
 | `catalog_name` | Hive / Polaris | 远端 catalog 名称 |
 | `default_namespace` | 全部 | 默认命名空间 |
 | `enable_metadata_cache` | 全部 | 启用元数据缓存 |
 | `metadata_cache_ttl` | 全部 | 缓存 TTL（秒） |
 | `auto_refresh_metadata` | 全部 | 自动刷新 |
 | `warehouse_location_prefix` | Hive / Polaris / Hadoop / S3 | 仓库路径前缀；hadoop / s3 必填且带协议 |
-| `allow_exists` | Polaris | 远端已存在时不报错（默认 true） |
 
 ### 4.3 Volume 配置
 
@@ -358,6 +384,7 @@ OPTIONS (base_path '/warehouse/', allow_writes 'true');
 
 ```sql
 -- 单节点 + Simple 认证
+-- hdfs_namenodes 支持 host:port 拼接；也可拆成 hdfs_namenodes '192.168.1.10' + hdfs_port '9000'
 CREATE SERVER hdfs_vol_srv FOREIGN DATA WRAPPER iceberg_volume_fdw
 OPTIONS (
     type 'hdfs',
@@ -370,12 +397,15 @@ OPTIONS (username 'gpadmin');
 CREATE FOREIGN VOLUME hdfs_vol SERVER hdfs_vol_srv
 OPTIONS (base_path '/iceberg-warehouse/', allow_writes 'true');
 
--- HA 模式 + Kerberos
+-- HA 模式 + Kerberos（HA 时 hdfs_namenodes 填 nameservice 名，不带端口）
 CREATE SERVER hdfs_ha_vol_srv FOREIGN DATA WRAPPER iceberg_volume_fdw
 OPTIONS (
     type 'hdfs',
     hdfs_namenodes 'mycluster',
     hdfs_auth_method 'kerberos',
+    krb_principal 'gpadmin/master@REALM.COM',
+    krb_principal_keytab '/home/gpadmin/gpadmin.keytab',
+    krb_service_principal 'hdfs/namenode@REALM.COM',
     hadoop_rpc_protection 'privacy',
     is_ha_supported 'true',
     dfs_nameservices 'mycluster',
@@ -385,11 +415,7 @@ OPTIONS (
         'org.apache.hadoop.hdfs.server.namenode.ha.ConfiguredFailoverProxyProvider'
 );
 CREATE USER MAPPING FOR current_user SERVER hdfs_ha_vol_srv
-OPTIONS (
-    username 'gpadmin',
-    krb_principal 'gpadmin/master@REALM.COM',
-    krb_principal_keytab '/home/gpadmin/gpadmin.keytab'
-);
+OPTIONS (username 'gpadmin');
 ```
 
 Volume 选项汇总（按对象级分层）：
@@ -398,8 +424,9 @@ Volume 选项汇总（按对象级分层）：
 
 | 选项 | 适用 type | 说明 |
 |------|----------|------|
-| `type` | 全部 | `s3` / `hdfs` / `abfss` |
-| `endpoint` | s3 | 对象存储 endpoint（含协议） |
+| `type` | 全部 | `s3` / `s3v2` / `hdfs` |
+| `server_name` | 全部 | 配置文件模式：未在 SQL OPTIONS 里写的连接配置从 `s3.conf` / `gphdfs.conf` 的对应段补齐，SQL 里写了的优先（详见本节末"配置文件模式"） |
+| `endpoint` | s3 | 对象存储 endpoint（含协议）；hdfs 不使用此选项 |
 | `region` | s3 | 区域 |
 | `bucket_name` | s3 | 桶名 |
 | `path_style_access` | s3 | path-style（MinIO 必须 `true`） |
@@ -407,12 +434,16 @@ Volume 选项汇总（按对象级分层）：
 | `sts_endpoint` / `sts_unavailable` | s3（Polaris） | STS endpoint 与禁用开关 |
 | `role_arn` / `external_id` / `user_arn` | s3（Polaris） | Vended-credentials 角色信息 |
 | `current_kms_key` / `allowed_kms_keys` | s3（Polaris） | SSE-KMS 密钥 |
-| `hdfs_namenodes` | hdfs | NameNode 主机或 nameservice |
+| `hdfs_namenodes` | hdfs | NameNode 地址，支持 `host` 或 `host:port` 拼接（拼接中的端口优先于 `hdfs_port`）；HA 模式填 nameservice 名（不带端口） |
+| `hdfs_port` | hdfs | NameNode RPC 端口（默认 8020；用拼接写法或 HA 模式时不需要） |
 | `hdfs_auth_method` | hdfs | `simple` / `kerberos` |
+| `krb_principal` / `krb_principal_keytab` | hdfs (kerberos) | 客户端 Kerberos 凭据 |
+| `krb_service_principal` | hdfs (kerberos) | NameNode 服务端 principal |
 | `hadoop_rpc_protection` | hdfs | `authentication` / `integrity` / `privacy` |
+| `data_transfer_protocol` | hdfs | 是否启用 SASL data transfer（`true` / `false`） |
+| `dfs_client_use_datanode_hostname` | hdfs | 是否用 DataNode 主机名（而非 IP）建立数据连接（`true` / `false`）；DataNode 在 NAT / 容器网络后时需置 `true` |
 | `is_ha_supported` | hdfs | 是否启用 HA |
 | `dfs_nameservices` / `dfs_ha_namenodes` / `dfs_namenode_rpc_address` / `dfs_client_failover_proxy_provider` | hdfs (HA) | HA 路由配置 |
-| `tenant_id` / `multi_tenant_app_name` / `consent_url` / `hierarchical` | abfss | Azure Data Lake Gen2 多租户访问 |
 
 **USER MAPPING OPTIONS**
 
@@ -420,15 +451,307 @@ Volume 选项汇总（按对象级分层）：
 |------|------|------|
 | `username` | 全部 | 操作系统用户 |
 | `access_key_id` / `secret_access_key` | s3 | 静态 AK/SK |
-| `krb_principal` / `krb_principal_keytab` | hdfs(kerberos) | Kerberos 凭据 |
 
 **CREATE FOREIGN VOLUME OPTIONS**
 
 | 选项 | 说明 |
 |------|------|
 | `base_path` | 存储基础路径 |
-| `allow_writes` | 允许写操作（默认 false） |
-| `enable_caching` | 启用缓存（默认 false） |
+| `allow_writes` | 允许写操作（默认 false；当前版本解析但未生效） |
+| `enable_caching` | 启用缓存（默认 false；当前版本解析但未生效） |
+
+#### 配置文件模式（server_name 与 s3.conf / gphdfs.conf / gphive.conf）
+
+除了在 SERVER OPTIONS 里 inline 写连接配置，也可以在 catalog / volume 的 SERVER 上指定
+`server_name '<段名>'`，把连接信息放进配置文件。
+
+**优先级（与 Hadoop 配置文件的习惯一致）**：SQL OPTIONS 优先于配置文件，按键合并——
+某个键在 SQL OPTIONS 里写了就用 SQL 的值；没写的键回退到 conf 段里的值。conf 文件
+相当于站点级默认值，SQL 相当于按对象覆盖。例如 conf 段里有完整连接信息时 DDL 只需
+`server_name`；想为某个 SERVER 单独换一个 endpoint，则在该 SERVER 的 OPTIONS 里
+加 `endpoint`，其余键继续取自 conf。
+
+**键名所见即所得**：conf 文件里的键名与 SQL OPTIONS 的选项名**完全相同**（哪一级对象的
+选项就叫什么名字，含 USER MAPPING 的凭据键）。旧版 Hadoop 风格键名
+（`fs.s3a.*`、`fs.gopher.*`、`uris`、`hdfs_namenode_host`、点号 `dfs.*` 等）在
+iceberg 路径**不再支持，读到即报错**，错误信息会列出对应的新键名（通用外部表
+FDW（第 3 节）的旧格式仍兼容，新旧键同段共存时以新键为准）。
+
+文件与对象的对应关系：
+
+| SERVER 类型 | 配置文件 | 触发条件 |
+|------------|---------|---------|
+| `iceberg_catalog_fdw`（type=hive） | `gphive.conf` | SERVER OPTIONS 含 `server_name` |
+| `iceberg_volume_fdw`（type=s3/s3v2） | `s3.conf` | 同上 |
+| `iceberg_volume_fdw`（type=hdfs） | `gphdfs.conf` | 同上 |
+
+**位置与格式**：两处各放一份——
+- **QD / 各 segment 实例的数据目录**（与 hive_connector 读 `gphive.conf` 的约定一致），
+  供数据库侧（QD/QE）读取；
+- **datalake_agent 进程的工作目录**，供 agent 读取。
+
+格式为 YAML，顶层 key 即段名（也就是 `server_name` 的取值），一个文件可以放多个段。
+
+**gphive.conf**（样例：`contrib/datalake_fdw/example/gphive.conf`）——
+键名 = catalog SERVER / USER MAPPING 的选项名：
+
+```yaml
+hive_cluster:
+    url: thrift://192.168.50.22:9083           # = SERVER 选项 url
+    auth_method: simple                        # = USER MAPPING 选项（simple / kerberos）
+    krb_service_principal: hive/host@REALM     # kerberos 时
+    krb_client_principal: user/host@REALM
+    krb_client_keytab: /path/to/user.keytab
+```
+
+> 旧键 `uris` 已废弃，读到报错，改用 `url`。
+
+**s3.conf**（样例：`contrib/datalake_fdw/example/s3.conf`）——
+键名 = volume SERVER / USER MAPPING 的选项名：
+
+```yaml
+s3_cluster:
+    type: s3                                   # = SERVER 选项 type（s3 / s3v2）
+    endpoint: http://127.0.0.1:9000            # = SERVER 选项 endpoint
+    region: us-east-1                          # = SERVER 选项 region
+    path_style_access: true                    # = SERVER 选项（MinIO 必须 true）
+    access_key_id: admin                       # = USER MAPPING 选项
+    secret_access_key: password                # = USER MAPPING 选项
+    # bucket_name: warehouse                   # 可写；通常放 DDL（volume 身份信息）
+```
+
+> 旧键 `fs.s3a.endpoint` / `fs.s3a.access.key` / `fs.s3a.secret.key` /
+> `fs.s3a.endpoint.region` / `fs.s3a.path.style.access` / `fs.gopher.ufs_type`
+> 已废弃，读到报错；对应新键依次为 `endpoint` / `access_key_id` /
+> `secret_access_key` / `region` / `path_style_access` / `type`。
+> bucket 与路径前缀通常仍由表的 location（`warehouse_location_prefix` /
+> volume `base_path`）解析得到，conf 里的 `bucket_name` 只作缺省回退。
+
+**gphdfs.conf**（样例：`contrib/datalake_fdw/example/gphdfs.conf`）——
+键名 = volume SERVER 的 hdfs 选项名：
+
+```yaml
+paa_cluster:
+    hdfs_namenodes: 192.168.1.10               # = SERVER 选项（host 或 host:port；HA 填 nameservice 名）
+    hdfs_port: 9000                            # = SERVER 选项（拼接写法 / HA 时不需要）
+    hdfs_auth_method: simple                   # simple / kerberos
+    hadoop_rpc_protection: authentication
+    # kerberos 时：
+    # krb_principal: gpadmin/master@REALM.COM
+    # krb_principal_keytab: /home/gpadmin/gpadmin.keytab
+    # krb_service_principal: hdfs/namenode@REALM.COM
+    # HA 时：
+    # is_ha_supported: true
+    # dfs_nameservices: mycluster
+    # dfs_ha_namenodes: nn1,nn2
+    # dfs_namenode_rpc_address: 192.168.1.10:9000,192.168.1.11:9000
+    # dfs_client_failover_proxy_provider: org.apache.hadoop.hdfs.server.namenode.ha.ConfiguredFailoverProxyProvider
+```
+
+> 旧键 `hdfs_namenode_host` / `hdfs_namenode_port` 与点号写法
+> `dfs.nameservices` / `dfs.ha.namenodes` / `dfs.namenode.rpc-address` /
+> `dfs.client.failover.proxy.provider.<ns>` 已废弃，读到报错；
+> 对应新键为 `hdfs_namenodes` / `hdfs_port` 与下划线的同名 `dfs_*` 键。
+
+三个文件中未列出的未知键仍会作为 Hadoop 配置原样透传，但命中上述废弃键
+（含 `fs.s3a.` / `fs.gopher.` 前缀与点号 `dfs.` 前缀）一律报错，不会静默透传。
+
+> 注意（conf 文件在各链路的生效范围不同）：
+> - **通用外部表（FDW，第 3 节）**：conf 文件全程参与，包括数据读取——QE 发起的读请求携带
+>   conf 文件名与 `hive_cluster_name` / `hdfs_cluster_name`（即 conf 段名，见 3.4 节
+>   `sync_hive_table('hive_cluster', …, 'paa_cluster', …)` 的两个集群名），由本机
+>   datalake_agent 读取 conf 完成存储访问。该路径仍兼容旧键名。
+> - **Iceberg 表**：设计语义是设了 `server_name` 后 **QD、QE 与 agent 用同一套合并
+>   结果**（SQL OPTIONS 覆盖 conf 段，缺省回退 conf）。当前实现中 agent 侧
+>   （建表 / fragments / commit / 统计）已按此工作；QE 上 gopher 直读/直写数据文件的
+>   conf 读取尚未接入（暂仍依赖 inline 连接选项），按该语义打通的改造进行中。
+
+#### gopher 配置详解
+
+gopher 是数据湖访问的原生 IO 客户端，出现在两个平面，连接配置来源不同：
+
+| 平面 | 进程 | 连接配置来源 |
+|------|------|-------------|
+| QE 数据面 | segment 侧 gopher 服务（经本地 socket 承接 SELECT / INSERT 的数据文件读写） | volume SERVER 的 inline 选项；`server_name` 模式下按设计用同一套「SQL 覆盖 conf」合并结果（QE 侧接入改造中，暂仍需 inline） |
+| agent 元数据面 | datalake_agent 内的 GopherFileIO（读写 metadata.json / manifest；`gopher.enabled=true` 时启用） | inline 选项；设了 `server_name` 时按「SQL 覆盖 conf」合并 |
+
+**agent 端基线**（datalake_agent 的 `application.properties`）：
+
+```properties
+gopher.enabled=false          # 总开关（当前构建默认 false：元数据面回退 ResolvingFileIO，
+                              # 即 s3 走 S3FileIO、其余走 HadoopFileIO）
+gopher.worker-path=           # gopher socket 路径，通常留空——由数据库端随每个请求自动注入
+gopher.connect-path=
+gopher.cache-strategy=GOPHER_CACHE
+gopher.log-level=info
+gopher.liboss2-log-level=info
+gopher.block-size=16777216
+gopher.buffer-size=16384
+```
+
+`gopher.*` 键全部由系统自动换算，**用户不需要也不应该手写**；下面用例子说明
+"用户写什么 → 系统换算成什么"，便于排障时核对。
+
+**例 1：gopher 连接 S3（inline，最常用）**
+
+用户只写普通的 volume DDL：
+
+```sql
+CREATE SERVER s3_vol_srv FOREIGN DATA WRAPPER iceberg_volume_fdw
+    OPTIONS (type 's3', endpoint 'http://192.168.50.30:9000',
+             region 'us-east-1', bucket_name 'warehouse',
+             path_style_access 'true');
+CREATE USER MAPPING FOR current_user SERVER s3_vol_srv
+    OPTIONS (access_key_id 'admin', secret_access_key 'password');
+```
+
+系统换算出的 gopher 连接配置：
+
+| 用户写的 | 换算后的键 | 值 |
+|---------|-----------|----|
+| `endpoint 'http://192.168.50.30:9000'` | `gopher.endpoint` | `192.168.50.30:9000`（scheme 剥掉） |
+| 同上（`http` → 非 https） | `gopher.useHttps` | `false` |
+| `bucket_name 'warehouse'` | `gopher.bucket` | `warehouse` |
+| `region 'us-east-1'` | `gopher.region` | `us-east-1` |
+| `path_style_access 'true'` | `gopher.useVirtualHost` | `false`（取反） |
+| `access_key_id` / `secret_access_key` | `gopher.access_key` / `gopher.secret_key` | `admin` / `password` |
+| `type 's3'` | `gopher.ufs_type` | `s3` |
+
+> 当前限制：QE 数据面不会从 endpoint 的 scheme 推导 `useHttps`（仅 agent 元数据面会），
+> 因此 inline `endpoint` 请使用 `http://`；`https://` 端点在数据面暂不会启用 TLS。
+
+**例 2：gopher 连接 S3（conf-file 模式）**
+
+设了 `server_name` 后，连接配置按「SQL OPTIONS 覆盖 conf 段」合并；conf 段写全
+连接信息时，inline 连接选项可全部省略（`bucket_name` 属于 volume 身份信息而非
+连接配置，仍写在 DDL 里）。`s3.conf` 按上文"位置与格式"部署到数据库实例数据目录
+与 agent 工作目录，**键名与 SQL 选项名相同**：
+
+```yaml
+minio_prod:
+    type: s3
+    endpoint: http://192.168.50.30:9000
+    region: us-east-1
+    path_style_access: true
+    access_key_id: admin
+    secret_access_key: password
+```
+
+DDL 只需引用段名：
+
+```sql
+CREATE SERVER s3_vol_srv FOREIGN DATA WRAPPER iceberg_volume_fdw
+    OPTIONS (type 's3', server_name 'minio_prod', bucket_name 'warehouse');
+```
+
+换算关系与例 1 完全相同——conf 键名就是 SQL 选项名，不存在第二套对照表;
+`type: s3` 让 agent 设置 `fs.defaultFS = s3://<bucket>`，bucket 取自表
+location / DDL。若想按 SERVER 覆盖某一项（如临时切换 endpoint），直接在
+OPTIONS 里写 `endpoint '…'` 即可，其余键继续取自 conf。
+
+> 当前实现状态：agent 侧已按 `server_name` 合并 conf；QE 数据面 gopher 连接的
+> conf 读取尚未接入（暂仍需 inline 连接选项），打通改造进行中。
+
+**例 3：gopher 连接 HDFS（simple 认证）**
+
+```sql
+CREATE SERVER hdfs_vol_srv FOREIGN DATA WRAPPER iceberg_volume_fdw
+    OPTIONS (type 'hdfs', hdfs_namenodes '192.168.50.10:8020',
+             hdfs_auth_method 'simple');
+CREATE USER MAPPING FOR current_user SERVER hdfs_vol_srv
+    OPTIONS (username 'gpadmin');
+```
+
+| 用户写的 | 换算后的键 | 值 |
+|---------|-----------|----|
+| `type 'hdfs'` | `gopher.ufs_type` | `hdfs` |
+| `hdfs_namenodes '192.168.50.10:8020'` | `gopher.name_node` / `gopher.port` | `192.168.50.10` / `8020` |
+| `hdfs_auth_method 'simple'` | `gopher.auth_method` | `simple` |
+
+**例 4：gopher 连接 HDFS（Kerberos，含 keytab 准备步骤）**
+
+第一步，准备 keytab。`krb_principal_keytab` 填的是**各主机本地的文件路径**：
+QE 数据面要求每台 segment 主机该路径下都有 keytab，agent 元数据面要求 agent
+所在主机（通常是 coordinator）也有。用相同路径分发一份即可：
+
+```bash
+# 1. 从 KDC 导出（或向 Kerberos 管理员索取）gpadmin 的 keytab，放到 /tmp/gpadmin.keytab
+# 2. 分发到所有主机的同一路径并收紧权限（hostfile 含 coordinator + 全部 segment 主机）
+gpssh -f hostfile 'mkdir -p /home/gpadmin/keytab'
+gpscp -f hostfile /tmp/gpadmin.keytab =:/home/gpadmin/keytab/gpadmin.keytab
+gpssh -f hostfile 'chmod 600 /home/gpadmin/keytab/gpadmin.keytab'
+# 3. 确认各主机 /etc/krb5.conf 指向正确的 KDC / realm
+```
+
+第二步，DDL 引用该路径：
+
+```sql
+CREATE SERVER hdfs_krb_vol_srv FOREIGN DATA WRAPPER iceberg_volume_fdw
+OPTIONS (
+    type 'hdfs',
+    hdfs_namenodes '192.168.50.10:8020',
+    hdfs_auth_method 'kerberos',
+    krb_principal 'gpadmin@REALM.COM',
+    krb_principal_keytab '/home/gpadmin/keytab/gpadmin.keytab',
+    hadoop_rpc_protection 'privacy'
+);
+```
+
+| 用户写的 | 换算后的键 |
+|---------|-----------|
+| `hdfs_auth_method 'kerberos'` | `gopher.auth_method = kerberos` |
+| `krb_principal 'gpadmin@REALM.COM'` | `gopher.krb_principal` |
+| `krb_principal_keytab '/home/gpadmin/keytab/gpadmin.keytab'` | `gopher.krb_server_key_file`（各主机本地路径） |
+| `hadoop_rpc_protection 'privacy'` | `gopher.hadoop_rpc_protection` |
+
+**例 5：gopher 连接 HDFS（HA）**
+
+```sql
+CREATE SERVER hdfs_ha_vol_srv FOREIGN DATA WRAPPER iceberg_volume_fdw
+OPTIONS (
+    type 'hdfs',
+    hdfs_namenodes 'mycluster',              -- HA：填 nameservice 名，不带端口
+    hdfs_auth_method 'simple',
+    is_ha_supported 'true',
+    dfs_nameservices 'mycluster',
+    dfs_ha_namenodes 'nn1,nn2',
+    dfs_namenode_rpc_address '192.168.50.10:8020,192.168.50.11:8020',
+    dfs_client_failover_proxy_provider
+        'org.apache.hadoop.hdfs.server.namenode.ha.ConfiguredFailoverProxyProvider'
+);
+```
+
+`is_ha_supported` / `dfs_nameservices` / `dfs_ha_namenodes` /
+`dfs_client_failover_proxy_provider` 原样映射为同名 `gopher.dfs_*` 键；
+`dfs_namenode_rpc_address` 的逗号列表会按 namenode 逐个展开，交给 gopher 做 failover 路由：
+
+```
+dfs.namenode.rpc-address.mycluster.nn1 = 192.168.50.10:8020
+dfs.namenode.rpc-address.mycluster.nn2 = 192.168.50.11:8020
+```
+
+**例 6：gopher 连接 HDFS（conf-file 模式）**
+
+`gphdfs.conf`（键表见上文模板，键名 = SQL 选项名）按"位置与格式"部署到数据库实例
+数据目录与 agent 工作目录，DDL 只需引用段名（语义同例 2：SQL OPTIONS 覆盖 conf，
+conf 写全时 inline 连接选项可省）：
+
+```sql
+CREATE SERVER hdfs_vol_srv FOREIGN DATA WRAPPER iceberg_volume_fdw
+    OPTIONS (type 'hdfs', server_name 'paa_cluster');
+```
+
+conf 键的换算与例 3-5 的 inline 选项完全一致（同名同义）：
+
+| gphdfs.conf 键（= SQL 选项） | 换算后的键 | 说明 |
+|---------------|-----------|------|
+| `hdfs_namenodes` / `hdfs_port` | `gopher.name_node` / `gopher.port` | 同时拼出 `fs.defaultFS = hdfs://<host>:<port>` |
+| `hdfs_auth_method` | `hadoop.security.authentication` | gopher 模式下同步 `gopher.auth_method` |
+| `krb_principal` / `krb_principal_keytab` | kerberos 登录凭据 | gopher 模式下同步 `gopher.krb_principal` 与 keytab |
+| `hadoop_rpc_protection` | `hadoop.rpc.protection` | gopher 模式下同步 `gopher.hadoop_rpc_protection` |
+| `data_transfer_protocol` | `dfs.encrypt.data.transfer` | gopher 模式下同步 `gopher.data_transfer_protocol` |
+| `is_ha_supported`、`dfs_nameservices`、`dfs_ha_namenodes`、`dfs_namenode_rpc_address`、`dfs_client_failover_proxy_provider` | `gopher.is_ha_supported` / `gopher.dfs_*` | HA 路由配置（展开方式见例 5） |
+| —（gopher 模式自动设置） | `gopher.ufs_type=hdfs`；`fs.hdfs.impl` → GopherFileSystem | 使所有 `hdfs://` 路径的 IO 经由 gopher |
 
 ### 4.4 创建 Iceberg 表
 
@@ -454,8 +777,8 @@ CATALOG hive_catalog
 VOLUME s3_volume
 OPTIONS (
     namespace 'analytics',
-    table_name 'sales_2024',
-    base_location '/data/sales/'
+    table 'sales_2024',
+    location '/data/sales/'
 );
 ```
 
@@ -467,7 +790,7 @@ OPTIONS (
 
 **数据路径组成**（新表）：
 ```
-protocol://bucket/base_path/base_location/namespace/tablename
+protocol://bucket/base_path/location/namespace/tablename
 ```
 
 **CREATE ICEBERG TABLE OPTIONS 全集**：
@@ -475,10 +798,12 @@ protocol://bucket/base_path/base_location/namespace/tablename
 | OPTION | 类型 | 说明 |
 |--------|------|------|
 | `catalog` | string | 指定 Catalog（与子句 `CATALOG` 等价；二选一） |
-| `namespace` / `namespace_name` | string | 命名空间 |
-| `table_name` | string | 在 catalog 中暴露的表名（默认与 PG 表名一致） |
-| `base_location` | string | 表数据目录（相对 Volume 的 `base_path`） |
+| `namespace` | string | 命名空间 |
+| `table` | string | 在 catalog 中暴露的表名（默认与 PG 表名一致） |
+| `location` | string | 表数据目录（相对 Volume 的 `base_path`） |
 | `autovacuum_enabled` | bool | 是否参与 `datalake.iceberg_autovacuum` 自动 VACUUM（默认 `true`） |
+
+> ⚠️ 未识别的 OPTION **不会报错而是被静默忽略**，注意拼写（如误写 `table_name`、`base_location` 将不生效）。
 
 ### 4.5 支持的数据类型
 
@@ -492,12 +817,17 @@ protocol://bucket/base_path/base_location/namespace/tablename
 | `double precision` | double | |
 | `decimal(p,s)` / `numeric(p,s)` | decimal(p,s) | **必须指定精度** |
 | `text` / `varchar(n)` | string | |
+| `char(n)` / `bpchar` | string | Iceberg 无定长字符类型；尾部空格/右填充语义**不保留**（对齐 Snowflake/Spark/Trino） |
 | `date` | date | |
 | `timestamp` | timestamp | 无时区 |
-| `timestamptz` | timestamptz | 带时区 |
+| `timestamptz` | timestamptz | 映射为带时区语义的 Iceberg `timestamptz`（`isAdjustedToUTC`），存 UTC 瞬时值；Spark/Trino/Flink 按 UTC 正确读取（issue #366，早期误映射为无时区 timestamp） |
 | `bytea` | binary | |
 
-> **重要**：`numeric` 不指定精度时，Iceberg（Parquet 编码）会报错。务必写成 `numeric(p,s)`。
+> **重要**：`numeric` 不指定精度时，建表会成功（元数据按缺省 `decimal(38,9)` 注册），
+> 但 **INSERT 写入时报错**（`The precision of numeric in foreign tables with parquet
+> format should be specified explicitly`）。务必写成 `numeric(p,s)`。
+>
+> 未列出的类型（如 `uuid`、`json`）建表时会发出 WARNING 并按 string 映射，请谨慎使用。
 
 ### 4.6 DML 操作
 
@@ -588,10 +918,12 @@ VACUUM **不做**的事（容易误解）：
 
 ### 4.9 自动 VACUUM
 
+自动 VACUUM **默认开启**（`datalake.iceberg_autovacuum = on`，每 10 分钟检查一次）。
+调整间隔或关闭（需 superuser，修改后需 reload）：
+
 ```sql
--- 启用自动 VACUUM（需 superuser，修改后需 reload）
-ALTER SYSTEM SET datalake.iceberg_autovacuum = on;
-ALTER SYSTEM SET datalake.iceberg_autovacuum_naptime = 600;  -- 每 10 分钟检查
+ALTER SYSTEM SET datalake.iceberg_autovacuum_naptime = 1200;  -- 改为每 20 分钟检查
+ALTER SYSTEM SET datalake.iceberg_autovacuum = off;           -- 如需关闭
 SELECT pg_reload_conf();
 ```
 
@@ -599,24 +931,35 @@ SELECT pg_reload_conf();
 
 `datalake_fdw` 注册了一组 SQL 函数用于直接调用 catalog/volume 操作或检查表元数据。所有函数定义在 `iceberg_toolkit` schema 下。
 
+> ⚠️ **`iceberg_toolkit` 是内部开发/排障工具，不是对外产品接口**。函数签名与行为可能随版本变化，
+> 不提供兼容性保证；生产业务不要依赖这些函数，正常使用请走 `CREATE ICEBERG TABLE` / DML。
+
 | 函数 | 说明 | 典型用途 |
 |------|------|---------|
-| `iceberg_toolkit.catalog_fdw(server_name text, op text, args jsonb) → jsonb` | 在指定 catalog server 上执行底层操作（列出 namespace/表、创建 namespace 等） | 排查 catalog 连通性 |
-| `iceberg_toolkit.volume_fdw(server_name text, op text, args jsonb) → jsonb` | 在指定 volume server 上执行底层存储操作 | 列目录、读对象元数据 |
-| `iceberg_toolkit.create_table(catalog text, namespace text, table_name text, schema_def text, …)` | 不通过 SQL DDL，直接调用 catalog 注册一张 Iceberg 表 | 快速接入已有数据目录 |
-| `iceberg_toolkit.get_fragments(table_oid oid) → setof record` | 列出某张表的 scan fragment（数据文件、起止 offset） | 分析数据布局、定位倾斜 |
-| `iceberg_toolkit.polaris_list_catalogs(server_name text) → setof text` | 列出 Polaris 服务端可见 catalog | 配置阶段排查 |
-| `iceberg_toolkit.polaris_list_namespaces(server_name text, catalog text) → setof text` | 列出 Polaris catalog 下的 namespace | 同上 |
+| `iceberg_toolkit.catalog_fdw(operation text, name_space text, table_name text, catalog_server_name text, catalog_table_name text, volume_server_name text, volume_table_name text, append_json_string text) → text` | 在指定 catalog/volume 对象上执行底层操作（`create_table`、`get_fragment` 等） | 排查 catalog 连通性 |
+| `iceberg_toolkit.volume_fdw(operation text, name_space text, table_name text, row_limit integer, catalog_server_name text, catalog_table_name text, volume_server_name text, volume_table_name text) → setof record` | 在指定 volume 上执行底层存储读取 | 直读数据做抽样核对 |
+| `iceberg_toolkit.create_table(table_name text, name_space text, catalog_server text, catalog_table text, volume_server text, volume_table text) → text` | `catalog_fdw('create_table', …)` 的便捷封装，不经 SQL DDL 直接注册 Iceberg 表 | 快速接入已有数据目录 |
+| `iceberg_toolkit.get_fragments(table_name text, name_space text, catalog_server text, catalog_table text, volume_server text, volume_table text) → text` | `catalog_fdw('get_fragment', …)` 的便捷封装，列出表的 scan fragment | 分析数据布局、定位倾斜 |
+| `iceberg_toolkit.polaris_list_catalogs(datalake_agent_url text, polaris_url text, client_id text, client_secret text, scope text DEFAULT 'PRINCIPAL_ROLE:ALL') → text` | 直连 Polaris REST 列出可见 catalog | 配置阶段排查 |
+| `iceberg_toolkit.polaris_list_namespaces(datalake_agent_url text, polaris_url text, client_id text, client_secret text, catalog_name text, scope text DEFAULT 'PRINCIPAL_ROLE:ALL') → text` | 列出 Polaris catalog 下的 namespace | 同上 |
 
 ```sql
--- 例：列出 Polaris catalog
-SELECT * FROM iceberg_toolkit.polaris_list_catalogs('polaris_cat_srv');
+-- 例：列出 Polaris catalog（凭据显式传入，首参为 datalake_agent 地址）
+SELECT iceberg_toolkit.polaris_list_catalogs(
+    'http://localhost:3888',
+    'http://polaris:8181/api/catalog',
+    'my_client_id', 'my_client_secret');
 
 -- 例：查看一张表的 fragment 分布
-SELECT * FROM iceberg_toolkit.get_fragments('orders'::regclass);
+SELECT iceberg_toolkit.get_fragments(
+    'orders',        -- 表名
+    'public',        -- namespace
+    'cat_srv',       -- catalog SERVER 名
+    'my_catalog',    -- FOREIGN CATALOG 名
+    'vol_srv',       -- volume SERVER 名
+    'my_volume');    -- FOREIGN VOLUME 名
 ```
 
-> 这些函数提供"绕开 DDL"的检查能力，主要用于排障；正常业务请走 `CREATE ICEBERG TABLE` / `INSERT` / `SELECT`。
 
 ### 4.11 当前不支持的功能 / 已知限制
 
@@ -646,8 +989,8 @@ SELECT * FROM iceberg_toolkit.get_fragments('orders'::regclass);
 |------|------|
 | 所有 `ALTER TABLE` 子命令（`ADD / DROP / RENAME COLUMN`、`ALTER COLUMN TYPE`、`SET/DROP NOT NULL`、`ADD CONSTRAINT` 等） | `ERRCODE_FEATURE_NOT_SUPPORTED`: `ALTER TABLE is not supported on Iceberg tables`（datalake_fdw.c） |
 | `RENAME COLUMN`（通过 `ALTER TABLE … RENAME COLUMN`） | `ERRCODE_FEATURE_NOT_SUPPORTED`: `RENAME COLUMN is not supported on Iceberg tables`（datalake_fdw.c） |
-| TID range scan（如 `WHERE ctid <@ '...'` 之类的范围 TID 谓词） | `ERRCODE_FEATURE_NOT_SUPPORTED`: `not supported`（pg_iceberg_am_handler.c:496） |
-| ANALYZE 内部的 `analyze_next_block` / `analyze_next_tuple` API | `ERRCODE_INTERNAL_ERROR`: `API not supported for iceberg relations`（pg_iceberg_am_handler.c:668） |
+| TID range scan（如 `WHERE ctid <@ '...'` 之类的范围 TID 谓词） | `ERRCODE_FEATURE_NOT_SUPPORTED`: `not supported`（pg_iceberg_am_handler.c） |
+| ANALYZE 内部的 `analyze_next_block` / `analyze_next_tuple` API | `ERRCODE_INTERNAL_ERROR`: `API not supported for iceberg relations`（pg_iceberg_am_handler.c） |
 
 #### 4.11.4 并发写入约束
 
@@ -732,7 +1075,7 @@ RESET datalake.disable_filter_pushdown;
 
 | GUC | 默认值 | 说明 |
 |-----|--------|------|
-| `datalake.iceberg_autovacuum` | `off` | 启用自动 VACUUM |
+| `datalake.iceberg_autovacuum` | `on` | 启用自动 VACUUM |
 | `datalake.iceberg_autovacuum_naptime` | `600` | 自动 VACUUM 间隔（秒） |
 | `datalake.iceberg_log_autovacuum_min_duration` | `600000` | 记录超过此时长（ms）的自动 VACUUM；`-1` 全不记录、`0` 全部记录 |
 
@@ -835,7 +1178,7 @@ DROP SERVER cat_server CASCADE;  -- 级联删除所有依赖对象
 
 | 问题 / 错误信息 | 原因 | 解决 |
 |----------------|------|------|
-| `numeric` 列建表报错 | Parquet 编码要求精度 | 改为 `numeric(p,s)` |
+| `numeric` 无精度列 INSERT 报错 | Parquet 编码要求显式精度（建表成功，写入时报错） | 改为 `numeric(p,s)` |
 | VACUUM 在函数内报错 | PG 限制 | 在函数外执行 VACUUM |
 | Hive Catalog 读回为空 | Hive Metastore 配置 | 检查 `url` 格式：`thrift://host:port` |
 | 下推不生效 | GUC 被关闭 | `RESET datalake.disable_filter_pushdown` |
@@ -847,17 +1190,15 @@ DROP SERVER cat_server CASCADE;  -- 级联删除所有依赖对象
 | 错误信息（出处） | 含义 | 排查方向 |
 |-----------------|------|---------|
 | `iceberg table "%s.%s" does not exist in external catalog "%s"` | catalog 中未注册该表 | 确认远端 catalog 名 / namespace / table 拼写；Polaris 检查 `default_namespace` |
-| `failed to resolve iceberg table location for relation "%s"` | catalog 拿不到表位置 | catalog 服务连通性、`base_location` 是否被改动、metadata 是否损坏 |
+| `failed to resolve iceberg table location for relation "%s"` | catalog 拿不到表位置 | catalog 服务连通性、`location` 是否被改动、metadata 是否损坏 |
 | `failed to load iceberg table metadata for relation %u` | metadata.json 读不下来 | 检查 Volume 凭据、`base_path`；若使用对象存储确认 endpoint |
 | `external catalog "%s" returned empty table location for "%s.%s"` | catalog 返回空 location | catalog 实现 bug 或 namespace 入库异常；可用 `iceberg_toolkit.catalog_fdw` 直查 |
 | `empty iceberg table location suffix` | builtin catalog 解析出空路径 | 表名 / namespace 含特殊字符；规整后重建 |
 | `iceberg metadata catalog is not available on this segment` | 在 QE 上调用了 QD-only 的元数据接口 | 检查是否在 PL/pgSQL 中误用了元数据函数；改为在 QD 上执行 |
 | `foreign catalog with OID %u does not exist` | catalog 对象引用失效 | 排查是否 DROP 后未重建；`pg_foreign_catalog` 中确认存在 |
 | `foreign volume with OID %u does not exist` | volume 对象引用失效 | 同上 |
-| `must be superuser to create iceberg metadata table` | 非 superuser 触发首次元数据初始化 | 由 superuser 先执行一次任意 Iceberg DDL 完成初始化 |
-| `API not supported for iceberg relations` | 调用了 heap-specific API（如 part of CTID-only path） | 多见于第三方扩展直接调内部 API；汇报到 issue |
 | `invalid value for boolean option "%s": "%s"` | OPTION 取值不是布尔字面量 | 用 `true` / `false`，不要用 `0/1` 或 `yes/no` |
 | `failed to commit iceberg metadata for table %u after %d retries due to concurrent updates` | 并发写入冲突 CAS 重试 10 次仍失败（详见 4.11.4） | 把多笔写合并成一笔事务、降低并发写并发度，或排查是否有外部引擎同时在写同一张表 |
-| `not supported`（来自 pg_iceberg_am_handler.c:496） | 触发了 TID range scan 路径 | 改用基于普通列的谓词，避免 `ctid <@ ...` 之类查询 |
-| `API not supported for iceberg relations` | 调用了 heap-only API（多见于第三方扩展或 ANALYZE 内部 block API） | 见 4.11.3；或避免该扩展直接走 iceberg 表 |
+| `not supported`（来自 pg_iceberg_am_handler.c） | 触发了 TID range scan 路径 | 改用基于普通列的谓词，避免 `ctid <@ ...` 之类查询 |
+| `API not supported for iceberg relations` | 调用了 heap-only API（多见于第三方扩展直接调内部 API，或 ANALYZE 内部 block API） | 见 4.11.3；避免该扩展直接作用于 iceberg 表 |
 | `ANALYZE on Iceberg tables refreshed pg_class.reltuples/relpages from Iceberg catalog metadata` | 不是错误，只是 NOTICE | ANALYZE 仅刷新 reltuples/relpages（供 ORCA 使用）；列级统计来自 Iceberg manifest，不做采样 |
