@@ -11,6 +11,7 @@
 -- immune to the async autovacuum consumer (it cannot see/drain uncommitted
 -- rows); no GUC toggling, no MinIO file inspection.
 CREATE EXTENSION IF NOT EXISTS datalake_fdw;
+NOTICE:  extension "datalake_fdw" already exists, skipping
 SET DateStyle = 'ISO, YMD';
 -- catalog + volume setup (mirrors iceberg_namespace.sql / iceberg_acid_double_update.sql)
 CREATE SERVER dsc_catalog_server FOREIGN DATA WRAPPER iceberg_catalog_fdw;

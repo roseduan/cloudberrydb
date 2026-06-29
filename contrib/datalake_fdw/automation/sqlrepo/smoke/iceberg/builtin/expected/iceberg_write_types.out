@@ -210,7 +210,7 @@ TRUNCATE wt_truncate;
 SELECT COUNT(*) FROM wt_truncate;
  count 
 -------
-    20
+     0
 (1 row)
 
 -- Re-insert after truncate
@@ -219,27 +219,7 @@ SELECT * FROM wt_truncate;
  id |      val       
 ----+----------------
   1 | after_truncate
-  2 | val_2
-  5 | val_5
- 10 | val_10
- 16 | val_16
-  3 | val_3
-  4 | val_4
-  6 | val_6
-  9 | val_9
- 11 | val_11
- 18 | val_18
-  1 | val_1
-  7 | val_7
-  8 | val_8
- 12 | val_12
- 13 | val_13
- 14 | val_14
- 15 | val_15
- 17 | val_17
- 19 | val_19
- 20 | val_20
-(21 rows)
+(1 row)
 
 DROP TABLE wt_truncate;
 -- ============================================================
