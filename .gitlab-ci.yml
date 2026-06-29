@@ -462,10 +462,15 @@ test_datalake_smoke:
       docker cp database/contrib/datalake_fdw/automation/prepare/prepare_hudi/hudi_coverage.sql spark-master:/tmp/hudi_coverage.sql
       docker cp database/contrib/datalake_fdw/automation/prepare/prepare_s3/s3_smoke.sql hiveserver2:/tmp/s3_smoke.sql
 
+      deadline=$(( $(date +%s) + 300 ))
       while true;do
         if  docker exec -i hiveserver2 /bin/bash -lc 'echo >/dev/tcp/hiveserver2/10000';then
           echo hiveserver started
           break
+        fi
+        if [ "$(date +%s)" -ge "${deadline}" ]; then
+          echo "ERROR: timed out waiting for hiveserver2 after 300s" >&2
+          exit 1
         fi
         echo waiting for hiveserver start...
         sleep 1
@@ -536,11 +541,8 @@ test_datalake_smoke:
     make test-datalake-smoke
 
   after_script: |
-    cd ${CI_PROJECT_DIR}/database/contrib/datalake_fdw/automation/docker/singlecluster && \
-      docker compose down -v || :
+    cd ${CI_PROJECT_DIR} && docker compose -f services/datalake-test-env.yml down -v || true
   rules:
-    # TODO: re-enable once the umbrella prepare-datalake-smoke / test-datalake-smoke
-    # entry points are wired through.  Drop the `when: never` line below to restore.
     - !reference [ .common-rules ]
   artifacts:
     <<: *artifacts
@@ -577,10 +579,15 @@ test_datalake_feature:
       docker cp database/contrib/datalake_fdw/automation/prepare/prepare_s3/s3_smoke.sql hiveserver2:/tmp/s3_smoke.sql
 
 
+      deadline=$(( $(date +%s) + 300 ))
       while true;do
         if  docker exec -i hiveserver2 /bin/bash -lc 'echo >/dev/tcp/hiveserver2/10000';then
           echo hiveserver started
           break
+        fi
+        if [ "$(date +%s)" -ge "${deadline}" ]; then
+          echo "ERROR: timed out waiting for hiveserver2 after 300s" >&2
+          exit 1
         fi
         echo waiting for hiveserver start...
         sleep 1
@@ -650,11 +657,8 @@ test_datalake_feature:
     make test-datalake-feature
 
   after_script: |
-    cd ${CI_PROJECT_DIR}/database/contrib/datalake_fdw/automation/docker/singlecluster && \
-      docker compose down -v || :
+    cd ${CI_PROJECT_DIR} && docker compose -f services/datalake-test-env.yml down -v || true
   rules:
-    # TODO: re-enable once the umbrella prepare-datalake-feature / test-datalake-feature
-    # entry points are wired through.  Drop the `when: never` line below to restore.
     - !reference [ .common-rules ]
   artifacts:
     <<: *artifacts
