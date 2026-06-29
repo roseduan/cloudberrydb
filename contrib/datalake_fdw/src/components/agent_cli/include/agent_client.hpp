@@ -138,6 +138,12 @@ private:
     std::atomic<long> failed_requests_{0};
 
     std::string build_url(const std::string& endpoint) const;
+    // Percent-encode a single URL path segment (e.g. a table name) so that
+    // reserved characters are not interpreted as URL syntax. (Issue #369.)
+    static std::string encode_path_segment(const std::string& segment);
+    // Build "api/v1/tables/<encoded table_name>/<op>".
+    std::string build_table_endpoint(const std::string& table_name,
+                                     const std::string& op) const;
     Response execute_request(const std::string& method,
                            const std::string& url,
                            const std::string& json_data,

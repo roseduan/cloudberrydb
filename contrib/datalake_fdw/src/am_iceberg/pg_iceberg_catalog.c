@@ -363,6 +363,14 @@ pg_iceberg_create_table_with_catalog(Relation rel, bool *is_internal)
 		catalogName = NULL;
 
 		/*
+		 * Reject names that are unsafe across catalog backends before they
+		 * reach the catalog or get interpolated into the warehouse storage
+		 * path / REST URL.  (Issue #369.)
+		 */
+		pg_iceberg_validate_object_name(nameSpace, "namespace");
+		pg_iceberg_validate_object_name(tableName, "table");
+
+		/*
 		 * For builtin catalog, we generate the storage location locally
 		 * from the volume base path.  For external catalogs (hive, polaris),
 		 * the catalog itself determines the location, so we pass NULL and
@@ -447,6 +455,14 @@ pg_iceberg_create_table_with_catalog(Relation rel, bool *is_internal)
 		if (load_result == NULL)
 		{
 			IcebergLoadTableResult *refresh_result;
+
+			/*
+			 * Creating a new table on the external catalog: enforce the same
+			 * name whitelist as the internal path.  (Mounting an existing
+			 * table, i.e. load_result != NULL, is left untouched.)  (Issue #369.)
+			 */
+			pg_iceberg_validate_object_name(nameSpace, "namespace");
+			pg_iceberg_validate_object_name(tableName, "table");
 
 			/* Table doesn't exist on external catalog, create it */
 			result = pg_iceberg_create_table(rel,

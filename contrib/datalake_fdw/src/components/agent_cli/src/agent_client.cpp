@@ -3,6 +3,7 @@
 #include <logger.hpp>
 #include <sstream>
 #include <stdexcept>
+#include <curl/curl.h>
 
 namespace agent_cli {
 
@@ -28,6 +29,27 @@ std::string AgentClient::build_url(const std::string& endpoint) const {
     return oss.str();
 }
 
+std::string AgentClient::encode_path_segment(const std::string& segment) {
+    // The curl handle argument is ignored by libcurl and may be null.
+    char* escaped = curl_easy_escape(nullptr, segment.c_str(),
+                                     static_cast<int>(segment.size()));
+    if (escaped == nullptr) {
+        // Out of memory in libcurl; fall back to the raw value rather than
+        // dropping the request. (Extremely unlikely.)
+        return segment;
+    }
+    std::string result(escaped);
+    curl_free(escaped);
+    return result;
+}
+
+std::string AgentClient::build_table_endpoint(const std::string& table_name,
+                                             const std::string& op) const {
+    std::ostringstream endpoint;
+    endpoint << "api/v1/tables/" << encode_path_segment(table_name) << "/" << op;
+    return endpoint.str();
+}
+
 Response AgentClient::create_table(const std::string& request_json,
                                   const RequestConfig* request_config) {
     std::string url = build_url("api/v1/tables/create");
@@ -37,90 +59,70 @@ Response AgentClient::create_table(const std::string& request_json,
 Response AgentClient::load_table(const std::string& table_name,
                                 const std::string& request_json,
                                 const RequestConfig* request_config) {
-    std::ostringstream endpoint;
-    endpoint << "api/v1/tables/" << table_name << "/load";
-    std::string url = build_url(endpoint.str());
+    std::string url = build_url(build_table_endpoint(table_name, "load"));
     return execute_request("POST", url, request_json, request_config);
 }
 
 Response AgentClient::table_exists(const std::string& table_name,
                                   const std::string& request_json,
                                   const RequestConfig* request_config) {
-    std::ostringstream endpoint;
-    endpoint << "api/v1/tables/" << table_name << "/exists";
-    std::string url = build_url(endpoint.str());
+    std::string url = build_url(build_table_endpoint(table_name, "exists"));
     return execute_request("POST", url, request_json, request_config);
 }
 
 Response AgentClient::get_fragment(const std::string& table_name,
                                   const std::string& request_json,
                                   const RequestConfig* request_config) {
-    std::ostringstream endpoint;
-    endpoint << "api/v1/tables/" << table_name << "/getFragment";
-    std::string url = build_url(endpoint.str());
+    std::string url = build_url(build_table_endpoint(table_name, "getFragment"));
     return execute_request("POST", url, request_json, request_config);
 }
 
 Response AgentClient::plan_file_groups(const std::string& table_name,
                                        const std::string& request_json,
                                        const RequestConfig* request_config) {
-    std::ostringstream endpoint;
-    endpoint << "api/v1/tables/" << table_name << "/planFileGroups";
-    std::string url = build_url(endpoint.str());
+    std::string url = build_url(build_table_endpoint(table_name, "planFileGroups"));
     return execute_request("POST", url, request_json, request_config);
 }
 
 Response AgentClient::commit_file_groups(const std::string& table_name,
                                           const std::string& request_json,
                                           const RequestConfig* request_config) {
-    std::ostringstream endpoint;
-    endpoint << "api/v1/tables/" << table_name << "/commitFileGroups";
-    std::string url = build_url(endpoint.str());
+    std::string url = build_url(build_table_endpoint(table_name, "commitFileGroups"));
     return execute_request("POST", url, request_json, request_config);
 }
 
 Response AgentClient::commit_append(const std::string& table_name,
                                     const std::string& request_json,
                                     const RequestConfig* request_config) {
-    std::ostringstream endpoint;
-    endpoint << "api/v1/tables/" << table_name << "/commitAppend";
-    std::string url = build_url(endpoint.str());
+    std::string url = build_url(build_table_endpoint(table_name, "commitAppend"));
     return execute_request("POST", url, request_json, request_config);
 }
 
 Response AgentClient::commit_update(const std::string& table_name,
                                     const std::string& request_json,
                                     const RequestConfig* request_config) {
-    std::ostringstream endpoint;
-    endpoint << "api/v1/tables/" << table_name << "/commitUpdate";
-    std::string url = build_url(endpoint.str());
+    std::string url = build_url(build_table_endpoint(table_name, "commitUpdate"));
     return execute_request("POST", url, request_json, request_config);
 }
 
 Response AgentClient::commit_rewrite(const std::string& table_name,
                                      const std::string& request_json,
                                      const RequestConfig* request_config) {
-    std::ostringstream endpoint;
-    endpoint << "api/v1/tables/" << table_name << "/commitRewrite";
-    std::string url = build_url(endpoint.str());
+    std::string url = build_url(build_table_endpoint(table_name, "commitRewrite"));
     return execute_request("POST", url, request_json, request_config);
 }
 
 Response AgentClient::append_table(const std::string& table_name,
                                   const std::string& request_json,
                                   const RequestConfig* request_config) {
-    std::ostringstream endpoint;
-    endpoint << "api/v1/tables/" << table_name << "/append";
-    std::string url = build_url(endpoint.str());
+    std::string url = build_url(build_table_endpoint(table_name, "append"));
     return execute_request("POST", url, request_json, request_config);
 }
 
 Response AgentClient::update_table(const std::string& table_name,
                                   const std::string& request_json,
                                   const RequestConfig* request_config) {
-    std::ostringstream endpoint;
-    endpoint << "api/v1/tables/" << table_name << "/update";
-    std::string url = build_url(endpoint.str());
+    std::string url = build_url(build_table_endpoint(table_name, "update"));
     return execute_request("POST", url, request_json, request_config);
 }
 
@@ -136,18 +138,14 @@ Response AgentClient::truncate_table(const std::string& table_name,
 Response AgentClient::drop_table(const std::string& table_name,
                                  const std::string& request_json,
                                  const RequestConfig* request_config) {
-    std::ostringstream endpoint;
-    endpoint << "api/v1/tables/" << table_name << "/drop";
-    std::string url = build_url(endpoint.str());
+    std::string url = build_url(build_table_endpoint(table_name, "drop"));
     return execute_request("POST", url, request_json, request_config);
 }
 
 Response AgentClient::get_statistics(const std::string& table_name,
                                      const std::string& request_json,
                                      const RequestConfig* request_config) {
-    std::ostringstream endpoint;
-    endpoint << "api/v1/tables/" << table_name << "/getStatistics";
-    std::string url = build_url(endpoint.str());
+    std::string url = build_url(build_table_endpoint(table_name, "getStatistics"));
     return execute_request("POST", url, request_json, request_config);
 }
 

@@ -37,6 +37,46 @@
 #include "utils/timestamp.h"
 
 /*
+ * pg_iceberg_validate_object_name
+ *		Reject iceberg table / namespace names that are unsafe across catalog
+ *		backends.  See header for the rationale; the rule mirrors a Spark
+ *		regular identifier (and is a subset of Hive's [a-zA-Z_0-9]+):
+ *		non-empty, every byte in [A-Za-z0-9_], and not all digits.
+ */
+void
+pg_iceberg_validate_object_name(const char *name, const char *kind)
+{
+	const unsigned char *p;
+	bool		has_nondigit = false;
+
+	if (name == NULL || name[0] == '\0')
+		ereport(ERROR,
+				(errcode(ERRCODE_INVALID_NAME),
+				 errmsg("iceberg %s name must not be empty", kind)));
+
+	for (p = (const unsigned char *) name; *p != '\0'; p++)
+	{
+		unsigned char c = *p;
+
+		if ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || c == '_')
+			has_nondigit = true;
+		else if (c >= '0' && c <= '9')
+			 /* digit: allowed, but cannot be the only kind of character */ ;
+		else
+			ereport(ERROR,
+					(errcode(ERRCODE_INVALID_NAME),
+					 errmsg("iceberg %s name \"%s\" is not allowed", kind, name),
+					 errhint("only ASCII letters, digits and underscores are allowed, and the name cannot be all digits")));
+	}
+
+	if (!has_nondigit)
+		ereport(ERROR,
+				(errcode(ERRCODE_INVALID_NAME),
+				 errmsg("iceberg %s name \"%s\" is not allowed", kind, name),
+				 errhint("only ASCII letters, digits and underscores are allowed, and the name cannot be all digits")));
+}
+
+/*
  * Three-tier iceberg namespace resolver.  See header for contract.
  *
  * The previous code path picked one source per callsite (PG schema for

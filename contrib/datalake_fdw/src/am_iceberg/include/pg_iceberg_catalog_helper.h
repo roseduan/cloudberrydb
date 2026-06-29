@@ -78,6 +78,22 @@ extern const char *pg_iceberg_resolve_namespace(const char *options_namespace,
 												const char *catalog_name,
 												Relation rel);
 
+/*
+ * Validate an iceberg object name (table or namespace) against a strict
+ * whitelist before it is sent to the catalog.
+ *
+ * The name is also used verbatim to build the warehouse storage path
+ * ({warehouse}/{namespace}/{table}) by the builtin/hive/hadoop/s3 catalogs
+ * and is embedded in REST URL paths, neither of which is escaped at the
+ * backend.  We therefore restrict names to the minimal cross-catalog subset
+ * that is also a Spark regular identifier: ASCII letters, digits and
+ * underscore ([A-Za-z0-9_]), and not consisting entirely of digits.  Anything
+ * else (spaces, '/', '#', '?', '%', '"', '\\', '.', non-ASCII/CJK, ...) is
+ * rejected with ERROR.  'kind' is used in the error message ("table" /
+ * "namespace").
+ */
+extern void pg_iceberg_validate_object_name(const char *name, const char *kind);
+
 extern char *pg_iceberg_create_table(Relation relation,
 									 const char *catalogName,
 									 const char *nameSpace,
