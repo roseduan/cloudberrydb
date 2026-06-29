@@ -167,6 +167,16 @@ datalake_av_consume(Oid datid)
     if (Gp_role != GP_ROLE_DISPATCH)
         goto chain;
 
+    /*
+     * No-op when dlagent is not deployed (e.g. CI regression clusters):
+     * with no agent URL configured this consumer has nothing to dispatch
+     * deletions to, so skip the whole cycle -- before opening any
+     * transaction -- to keep the autovacuum worker free of needless catalog
+     * churn that could perturb concurrent backends.
+     */
+    if (datalake_agent_server_url == NULL || datalake_agent_server_url[0] == '\0')
+        goto chain;
+
     now = GetCurrentTimestamp();
     if (last_run_ts != 0 &&
         !TimestampDifferenceExceeds(last_run_ts, now,
@@ -174,19 +184,21 @@ datalake_av_consume(Oid datid)
         goto chain;
     last_run_ts = now;
 
-    StartTransactionCommand();
-    PushActiveSnapshot(GetTransactionSnapshot());
-
     /*
-     * Wrap the cycle in PG_TRY: a raise from the batch fetch (or any other
-     * non-per-entry step) must not escape the hook, which would break the
-     * AutoVacWorkerPostHook chain and log a scary ERROR.  On failure we
-     * abort and downgrade to WARNING; the next autovacuum cycle retries.
-     * Per-entry failures are isolated by subtransactions inside
-     * process_deletion_batch(), not here.
+     * Wrap the whole cycle in PG_TRY, including StartTransactionCommand() and
+     * PushActiveSnapshot(): a raise from transaction setup, the batch fetch,
+     * or any other non-per-entry step must not escape the hook.  Letting it
+     * escape would break the AutoVacWorkerPostHook chain and fall through to
+     * AutoVacWorkerMain's catch, which aborts via AbortOutOfAnyTransaction().
+     * On failure we abort the local transaction and downgrade to WARNING; the
+     * next autovacuum cycle retries.  Per-entry failures are isolated by
+     * subtransactions inside process_deletion_batch(), not here.
      */
     PG_TRY();
     {
+        StartTransactionCommand();
+        PushActiveSnapshot(GetTransactionSnapshot());
+
         /* Only act if datalake_fdw is installed here (missing_ok lookup). */
         if (get_extension_oid("datalake_fdw", true) != InvalidOid)
             process_deletion_batch();
