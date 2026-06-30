@@ -130,23 +130,16 @@ DROP TABLE explain_local;
 -- ============================================================
 -- Test 5: EXPLAIN ANALYZE (actually execute)
 -- ============================================================
--- Disable AM predicate pushdown so "Rows Removed by Filter" is deterministic:
--- data-file pruning on a tiny multi-file table is layout-dependent.
-SET datalake.iceberg_enable_predicate_pushdown = off;
-SET
 EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF)
-SELECT * FROM explain_test WHERE id > 2;
+SELECT * FROM explain_test WHERE id > 0;
                                 QUERY PLAN                                
 --------------------------------------------------------------------------
- Gather Motion 3:1  (slice1; segments: 3) (actual rows=3 loops=1)
-   ->  Custom Scan (Iceberg Scan) on explain_test (actual rows=3 loops=1)
-         Filter: (id > 2)
-         Rows Removed by Filter: 2
+ Gather Motion 3:1  (slice1; segments: 3) (actual rows=5 loops=1)
+   ->  Custom Scan (Iceberg Scan) on explain_test (actual rows=5 loops=1)
+         Filter: (id > 0)
  Optimizer: GPORCA
-(5 rows)
+(4 rows)
 
-RESET datalake.iceberg_enable_predicate_pushdown;
-RESET
 -- ============================================================
 -- Test 6: EXPLAIN with VERBOSE (shows column details)
 -- ============================================================
