@@ -68,7 +68,7 @@ EXCEPTION WHEN OTHERS THEN
 END;
 $$;
 NOTICE:  HDFS volume created successfully
-NOTICE:  HDFS table operation error (expected if HDFS unavailable): Failed to create Iceberg table: HTTP Status: 500, CURL Code: 0
+NOTICE:  HDFS table operation error (expected if HDFS unavailable): failed to acquire resources on one or more segments
 -- ============================================================
 -- Test 2: HDFS HA volume server
 -- ============================================================
