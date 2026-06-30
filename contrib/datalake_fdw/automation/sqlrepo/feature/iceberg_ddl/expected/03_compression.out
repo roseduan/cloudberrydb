@@ -1,0 +1,259 @@
+-- 03_compression.sql
+-- Test native Iceberg AM parquet write compression (per-table options
+-- `compression` and `compression_level`).
+--
+-- Coverage:
+--   * default codec is zstd (writes are compressed unless opted out)
+--   * every supported parquet codec round-trips (write + read back)
+--   * compression_level is accepted for codecs that support it (zstd/gzip)
+--   * invalid codec / level-on-unsupported-codec / out-of-range level are
+--     rejected with an ERROR at write time (not silently downgraded)
+\i ../../../lib/sql/common_setup.sql
+-- common_setup.sql
+-- Base setup for all datalake_fdw tests
+-- This file should be included at the beginning of all test SQL files
+-- Create required extensions
+CREATE EXTENSION IF NOT EXISTS datalake_fdw;
+NOTICE:  extension "datalake_fdw" already exists, skipping
+CREATE EXTENSION IF NOT EXISTS hive_connector;
+NOTICE:  extension "hive_connector" already exists, skipping
+-- gp_exttable_delimiter may not be available in all environments.
+-- Silence the "already exists, skipping" NOTICE emitted in CI where the
+-- extension has been created by an earlier test or initdb step.
+SET client_min_messages = WARNING;
+DO $$ BEGIN
+    CREATE EXTENSION IF NOT EXISTS gp_exttable_delimiter;
+EXCEPTION WHEN OTHERS THEN
+    -- Extension not available, skip silently
+END $$;
+RESET client_min_messages;
+-- Create foreign data wrapper if not already present
+-- Note: CREATE FOREIGN DATA WRAPPER does not support IF NOT EXISTS syntax
+DO $$ BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_foreign_data_wrapper WHERE fdwname = 'datalake_fdw') THEN
+        EXECUTE 'CREATE FOREIGN DATA WRAPPER datalake_fdw
+            HANDLER datalake_fdw_handler
+            VALIDATOR datalake_fdw_validator
+            OPTIONS (mpp_execute ''all segments'')';
+    END IF;
+END $$;
+-- Set standard date style for consistent output
+SET datestyle = ISO, MDY;
+-- Create logging utility function
+CREATE OR REPLACE FUNCTION test_log(message text)
+RETURNS void AS $$
+BEGIN
+    RAISE NOTICE '[TEST] %', message;
+END;
+$$ LANGUAGE plpgsql;
+-- Log setup completion
+SELECT test_log('Common setup completed');
+NOTICE:  [TEST] Common setup completed
+ test_log 
+----------
+ 
+(1 row)
+
+SELECT test_log('Feature Test: Iceberg Write Compression');
+NOTICE:  [TEST] Feature Test: Iceberg Write Compression
+ test_log 
+----------
+ 
+(1 row)
+
+-- ============================================================
+-- Setup: Catalog and volume
+-- ============================================================
+CREATE SERVER co_catalog_server FOREIGN DATA WRAPPER iceberg_catalog_fdw;
+CREATE USER MAPPING FOR current_user SERVER co_catalog_server;
+CREATE FOREIGN CATALOG co_catalog SERVER co_catalog_server;
+SET iceberg_default_catalog = 'co_catalog';
+CREATE SERVER co_volume_server FOREIGN DATA WRAPPER iceberg_volume_fdw
+OPTIONS (type 's3', endpoint 'http://minio:9000', region 'us-east-1',
+         bucket_name 'warehouse', path_style_access 'true');
+CREATE USER MAPPING FOR current_user SERVER co_volume_server
+OPTIONS (access_key_id 'admin', secret_access_key 'admin12345');
+CREATE FOREIGN VOLUME co_volume SERVER co_volume_server OPTIONS(base_path '/co_volume/');
+SET iceberg_default_volume = 'co_volume';
+-- ============================================================
+-- Test 1: default compression (zstd) when no option is given
+-- ============================================================
+SELECT test_log('Test 1: default compression (zstd)');
+NOTICE:  [TEST] Test 1: default compression (zstd)
+ test_log 
+----------
+ 
+(1 row)
+
+CREATE ICEBERG TABLE co_default (id bigint, val text);
+INSERT INTO co_default SELECT g, 'row_' || g FROM generate_series(1, 50) g;
+SELECT count(*) AS n, min(id) AS lo, max(id) AS hi FROM co_default;
+ n  | lo | hi 
+----+----+----
+ 50 |  1 | 50
+(1 row)
+
+SELECT * FROM co_default ORDER BY id LIMIT 3;
+ id |  val  
+----+-------
+  1 | row_1
+  2 | row_2
+  3 | row_3
+(3 rows)
+
+DROP TABLE co_default;
+-- ============================================================
+-- Test 2: each supported parquet codec round-trips
+-- ============================================================
+SELECT test_log('Test 2: explicit codecs round-trip');
+NOTICE:  [TEST] Test 2: explicit codecs round-trip
+ test_log 
+----------
+ 
+(1 row)
+
+CREATE ICEBERG TABLE co_snappy (id bigint, val text) OPTIONS (compression 'snappy');
+INSERT INTO co_snappy SELECT g, 'snappy_' || g FROM generate_series(1, 20) g;
+SELECT count(*) AS snappy_n FROM co_snappy;
+ snappy_n 
+----------
+       20
+(1 row)
+
+SELECT * FROM co_snappy ORDER BY id LIMIT 2;
+ id |   val    
+----+----------
+  1 | snappy_1
+  2 | snappy_2
+(2 rows)
+
+DROP TABLE co_snappy;
+CREATE ICEBERG TABLE co_gzip (id bigint, val text) OPTIONS (compression 'gzip');
+INSERT INTO co_gzip SELECT g, 'gzip_' || g FROM generate_series(1, 20) g;
+SELECT count(*) AS gzip_n FROM co_gzip;
+ gzip_n 
+--------
+     20
+(1 row)
+
+DROP TABLE co_gzip;
+CREATE ICEBERG TABLE co_lz4 (id bigint, val text) OPTIONS (compression 'lz4');
+INSERT INTO co_lz4 SELECT g, 'lz4_' || g FROM generate_series(1, 20) g;
+SELECT count(*) AS lz4_n FROM co_lz4;
+ lz4_n 
+-------
+    20
+(1 row)
+
+DROP TABLE co_lz4;
+CREATE ICEBERG TABLE co_none (id bigint, val text) OPTIONS (compression 'uncompress');
+INSERT INTO co_none SELECT g, 'none_' || g FROM generate_series(1, 20) g;
+SELECT count(*) AS none_n FROM co_none;
+ none_n 
+--------
+     20
+(1 row)
+
+DROP TABLE co_none;
+-- ============================================================
+-- Test 3: compression_level for codecs that support one
+-- ============================================================
+SELECT test_log('Test 3: compression_level (zstd / gzip)');
+NOTICE:  [TEST] Test 3: compression_level (zstd / gzip)
+ test_log 
+----------
+ 
+(1 row)
+
+CREATE ICEBERG TABLE co_zstd_lvl (id bigint, val text)
+OPTIONS (compression 'zstd', compression_level '12');
+INSERT INTO co_zstd_lvl SELECT g, 'zstd12_' || g FROM generate_series(1, 20) g;
+SELECT count(*) AS zstd_lvl_n FROM co_zstd_lvl;
+ zstd_lvl_n 
+------------
+         20
+(1 row)
+
+DROP TABLE co_zstd_lvl;
+CREATE ICEBERG TABLE co_gzip_lvl (id bigint, val text)
+OPTIONS (compression 'gzip', compression_level '6');
+INSERT INTO co_gzip_lvl SELECT g, 'gzip6_' || g FROM generate_series(1, 20) g;
+SELECT count(*) AS gzip_lvl_n FROM co_gzip_lvl;
+ gzip_lvl_n 
+------------
+         20
+(1 row)
+
+DROP TABLE co_gzip_lvl;
+-- ============================================================
+-- Test 4: invalid codec is rejected at write time
+-- ============================================================
+SELECT test_log('Test 4: invalid codec rejected');
+NOTICE:  [TEST] Test 4: invalid codec rejected
+ test_log 
+----------
+ 
+(1 row)
+
+CREATE ICEBERG TABLE co_bad_codec (id bigint, val text)
+OPTIONS (compression 'bogus');
+DO $$
+BEGIN
+    INSERT INTO co_bad_codec VALUES (1, 'x');
+    RAISE NOTICE 'UNEXPECTED: insert succeeded';
+EXCEPTION WHEN OTHERS THEN
+    RAISE NOTICE 'Expected error: %', split_part(SQLERRM, E'\n', 1);
+END $$;
+NOTICE:  Expected error: invalid iceberg write compression "bogus"
+DROP TABLE co_bad_codec;
+-- ============================================================
+-- Test 5: compression_level on a codec without levels is rejected
+-- ============================================================
+SELECT test_log('Test 5: level on snappy rejected');
+NOTICE:  [TEST] Test 5: level on snappy rejected
+ test_log 
+----------
+ 
+(1 row)
+
+CREATE ICEBERG TABLE co_snappy_lvl (id bigint, val text)
+OPTIONS (compression 'snappy', compression_level '5');
+DO $$
+BEGIN
+    INSERT INTO co_snappy_lvl VALUES (1, 'x');
+    RAISE NOTICE 'UNEXPECTED: insert succeeded';
+EXCEPTION WHEN OTHERS THEN
+    RAISE NOTICE 'Expected error: %', split_part(SQLERRM, E'\n', 1);
+END $$;
+NOTICE:  Expected error: compression codec "snappy" does not support a compression level
+DROP TABLE co_snappy_lvl;
+-- ============================================================
+-- Test 6: out-of-range compression_level is rejected
+-- ============================================================
+SELECT test_log('Test 6: out-of-range zstd level rejected');
+NOTICE:  [TEST] Test 6: out-of-range zstd level rejected
+ test_log 
+----------
+ 
+(1 row)
+
+CREATE ICEBERG TABLE co_zstd_bad (id bigint, val text)
+OPTIONS (compression 'zstd', compression_level '99');
+DO $$
+BEGIN
+    INSERT INTO co_zstd_bad VALUES (1, 'x');
+    RAISE NOTICE 'UNEXPECTED: insert succeeded';
+EXCEPTION WHEN OTHERS THEN
+    RAISE NOTICE 'Expected error: %', split_part(SQLERRM, E'\n', 1);
+END $$;
+NOTICE:  Expected error: zstd compression level 99 out of range
+DROP TABLE co_zstd_bad;
+-- ============================================================
+-- Cleanup
+-- ============================================================
+DROP VOLUME co_volume;
+DROP USER MAPPING FOR current_user SERVER co_volume_server;
+DROP SERVER co_volume_server;
+DROP CATALOG co_catalog;
+DROP USER MAPPING FOR current_user SERVER co_catalog_server;
+DROP SERVER co_catalog_server;
