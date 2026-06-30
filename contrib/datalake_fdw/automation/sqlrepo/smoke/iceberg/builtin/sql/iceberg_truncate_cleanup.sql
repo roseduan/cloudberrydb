@@ -56,6 +56,10 @@ SET allow_system_table_mods = on;
 DELETE FROM pg_ext_aux.pg_iceberg_deletion_queue WHERE table_qname LIKE 'tcl.%';
 SET allow_system_table_mods = off;
 DROP SCHEMA tcl CASCADE;
+-- Clean up queue entries created by DROP SCHEMA CASCADE before dropping the server.
+SET allow_system_table_mods = on;
+DELETE FROM pg_ext_aux.pg_iceberg_deletion_queue WHERE table_qname LIKE 'tcl.%';
+SET allow_system_table_mods = off;
 DROP VOLUME tcl_volume;
 DROP USER MAPPING FOR current_user SERVER tcl_volume_server;
 DROP SERVER tcl_volume_server;
