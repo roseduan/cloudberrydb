@@ -22,6 +22,8 @@ package cloud.elastic.dlagent.service.rest;
 import cloud.elastic.dlagent.api.model.RequestContext;
 import cloud.elastic.dlagent.service.RequestParser;
 import cloud.elastic.dlagent.service.controller.ReadService;
+import com.fasterxml.jackson.databind.DeserializationFeature;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
@@ -42,6 +44,14 @@ import javax.servlet.http.HttpServletRequest;
 @RestController
 @RequestMapping("/dlproxy")
 public class DlReadResource extends DlBaseResource<StreamingResponseBody> {
+
+    /**
+     * Parses the file list out of the /write JSON body. The same body also
+     * carries the iceberg/gopher config (merged in by the C dlproxy client),
+     * so unknown properties must be ignored here.
+     */
+    private static final ObjectMapper WRITE_BODY_MAPPER =
+            new ObjectMapper().configure(DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES, false);
 
     private final ReadService readService;
 
@@ -99,34 +109,43 @@ public class DlReadResource extends DlBaseResource<StreamingResponseBody> {
      * @return response object containing stream that will output records
      */
     @PostMapping(value = "/write", produces = MediaType.APPLICATION_OCTET_STREAM_VALUE, consumes = MediaType.APPLICATION_JSON_VALUE)
-    public ResponseEntity<StreamingResponseBody> write(@RequestBody(required = false) FileListRequest fileListRequest,
+    public ResponseEntity<StreamingResponseBody> write(@RequestBody(required = false) String requestBody,
                                                         @RequestHeader MultiValueMap<String, String> headers,
                                                         HttpServletRequest request) {
-        return processRequestWithFileList(fileListRequest, headers, request);
+        return processRequestWithFileList(requestBody, headers, request);
     }
 
     /**
-     * Process write request with file list from JSON body.
-     * This method extends the base processRequest to handle file lists directly from POST body.
+     * Process write request whose JSON body carries both the file list and the
+     * iceberg/gopher config.  The body is parsed twice: once via the request
+     * parser (mirroring the /read path) so the gopher.* config reaches
+     * RequestContext.gopherProperties -- iceberg batchAppend/rowUpdate need it
+     * to initialize the catalog's GopherFileIO -- and once to extract the
+     * file list.
      *
-     * @param fileListRequest JSON request body containing file list
+     * @param requestBody JSON request body ({"files":[...], "gopher":{...}, ...})
      * @param headers http headers
      * @param httpServletRequest HTTP servlet request
      * @return response entity
      */
     private ResponseEntity<StreamingResponseBody> processRequestWithFileList(
-            final FileListRequest fileListRequest,
+            final String requestBody,
             final MultiValueMap<String, String> headers,
             final HttpServletRequest httpServletRequest) {
 
         // use the request processing algorithm as a lambda for the invoking and error handling logic
         StreamingResponseBody response = this.invokeWithErrorHandling(
                 () -> {
-                    RequestContext context = getParser().parseRequest(headers);
+                    // Parse config (gopher.* etc.) from the body just like /read.
+                    RequestContext context = getParser().parseRequest(headers, requestBody);
 
-                    // Add file list from request body to context
-                    if (fileListRequest != null && fileListRequest.getFiles() != null) {
-                        context.setFileList(fileListRequest.getFiles());
+                    // Extract the file list from the same JSON body.
+                    if (requestBody != null && !requestBody.isEmpty()) {
+                        FileListRequest fileListRequest =
+                                WRITE_BODY_MAPPER.readValue(requestBody, FileListRequest.class);
+                        if (fileListRequest != null && fileListRequest.getFiles() != null) {
+                            context.setFileList(fileListRequest.getFiles());
+                        }
                     }
 
                     return produceResponse(context, httpServletRequest);

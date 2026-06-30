@@ -374,6 +374,27 @@ datalakeDoRPC_once(datalake_gphadoop_context *context)
 
 		FDW_serialize_file_list_to_json(context->file_list, &json_data);
 
+		/*
+		 * Iceberg commit (batchAppend/rowUpdate) also needs the gopher socket
+		 * config (gopher.worker_path etc.) so the agent can initialize the
+		 * catalog's GopherFileIO; the commit path stores that config JSON in
+		 * request_body. The file-list POST body would otherwise carry only
+		 * {"files":[...]} and the agent fails with "Gopher Worker path is
+		 * required". Merge the config object's members into the file-list
+		 * object so the body is {"files":[...], <config keys incl. gopher>}.
+		 */
+		if (context->request_body != NULL && context->request_body_len > 2 &&
+			context->request_body[0] == '{' &&
+			strcmp(context->request_body, "{}") != 0 &&
+			json_data.len > 0 && json_data.data[json_data.len - 1] == '}')
+		{
+			json_data.len--;					/* drop the file-list object's closing '}' */
+			json_data.data[json_data.len] = '\0';
+			appendStringInfoChar(&json_data, ',');
+			/* skip the config object's leading '{'; keep its trailing '}' */
+			appendStringInfoString(&json_data, context->request_body + 1);
+		}
+
 		elog(DEBUG2, "datalakeDoRPC: sending POST request with JSON body size: %d, file count: %d",
 			 (int)json_data.len,
 			 list_length(context->file_list));
@@ -948,6 +969,25 @@ get_external_schema_or_create(Oid relid, char *profile, List *locations)
 		pfree(catalogType);
 
 		datalake_churl_headers_append(context->churl_headers, "X-GP-OPTIONS-METHOD", "getOrCreateSchema");
+
+		/*
+		 * The iceberg getOrCreateSchema runs through the agent's iceberg
+		 * catalog (e.g. IcebergHiveCatalog), which builds a GopherFileIO and
+		 * therefore needs the gopher socket paths. Like the read/scan and
+		 * commit paths, supply getIcebergConfigJsonString() in the request
+		 * body; without it the agent has no gopher.worker_path and the write
+		 * path fails at schema resolution with
+		 * "Gopher Worker path is required".
+		 */
+		if (pg_strcasecmp(profile, "iceberg") == 0)
+		{
+			char *jsonConfig = getIcebergConfigJsonString(relid);
+			if (jsonConfig != NULL && strlen(jsonConfig) > 0)
+			{
+				context->request_body = pstrdup(jsonConfig);
+				context->request_body_len = strlen(jsonConfig);
+			}
+		}
 
 		datalakeDoRPC((datalake_gphadoop_context *) context);
 		result = parseSchemaResponse(context->buffer, context->buffer_pos);
