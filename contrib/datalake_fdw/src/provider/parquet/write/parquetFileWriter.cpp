@@ -315,15 +315,15 @@ void parquetFileWriter::writeProperties()
 
     builder.compression(codec_type);
     /*
-     * Apply an explicit compression level only for codecs that support one
-     * (zstd/gzip/brotli). A non-positive level means "unset" and lets Arrow
-     * use the codec's default level. Caller-side validation (getVolumeOptions)
-     * already rejects levels for codecs without one.
+     * Apply an explicit compression level only for the parquet codecs that
+     * accept one here (zstd/gzip). A non-positive level means "unset" and lets
+     * Arrow use the codec's default level. Caller-side validation
+     * (getVolumeOptions) already rejects levels for any other codec, so only
+     * these two can reach the writer with a positive level.
      */
     if (option.compressionLevel > 0 &&
         (codec_type == parquet_arrow::Compression::ZSTD ||
-         codec_type == parquet_arrow::Compression::GZIP ||
-         codec_type == parquet_arrow::Compression::BROTLI))
+         codec_type == parquet_arrow::Compression::GZIP))
     {
         builder.compression_level(option.compressionLevel);
     }
