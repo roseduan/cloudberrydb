@@ -2213,7 +2213,17 @@ public class IcebergRestController {
         // transformHdfsConfig key set (both prefixes). emitS3Inline does the
         // equivalent for object storage.
         setGopherHdfsKey(configuration, "ufs_type", "hdfs");
-        setGopherHdfsKey(configuration, "name_node", host);
+        // Only emit name_node for non-HA deployments. In HA mode `host` is the
+        // nameservice name (e.g. "mycluster"), not a real namenode hostname, so
+        // setting gopher.name_node to it would make gopher attempt a direct TCP
+        // connection to the nameservice id instead of following the HA failover
+        // path. The legacy transformHdfsHaConfig intentionally never sets
+        // name_node in HA mode; gopher resolves the namenode from the
+        // dfs_nameservices / dfs_ha_namenodes / dfs_namenode_rpc_address keys
+        // emitted in the isHa block below.
+        if (!isHa) {
+            setGopherHdfsKey(configuration, "name_node", host);
+        }
         setGopherHdfsKey(configuration, "port", port);
         setGopherHdfsKey(configuration, "auth_method", authMethod);
         setGopherHdfsKey(configuration, "hadoop_rpc_protection", properties.get(volKey(
