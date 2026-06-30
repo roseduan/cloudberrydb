@@ -1,8 +1,15 @@
--- Hive Iceberg FDW Write Coverage Test
--- Purpose: Trigger dlproxy POST write path via Iceberg FDW
--- Target: dlproxy/protocol.c POST path (+132), dlproxy/libchurl.c upload (+48),
---         dlproxy/headers.c file_list headers (+77),
---         datalake_fdw.c EndForeignModify, fdwFunction.c insertModify/endModify
+-- Hive Iceberg FDW Write/CRUD Coverage Test
+-- Purpose: exercise the iceberg FDW write path end to end (INSERT / UPDATE /
+-- DELETE / SELECT) against a Hive-catalog iceberg table.
+--
+-- This drives dlproxy's write path: getOrCreateSchema + batchAppend (INSERT)
+-- and rowUpdate (UPDATE/DELETE, merge-on-read positional deletes). All three
+-- require the gopher socket config (gopher.worker_path etc.) to be sent in the
+-- write request body so the agent's iceberg catalog FileIO initializes; the
+-- fixture is format-version 2 so UPDATE/DELETE can write delete files.
+--
+-- Fixture default.iceberg_fdw_crud (3 rows, v2) is created by
+-- prepare/prepare_hive/hive_iceberg_fdw.sql via spark-sql.
 
 SET client_min_messages = ERROR;
 DROP FOREIGN DATA WRAPPER IF EXISTS datalake_fdw CASCADE;
@@ -17,49 +24,48 @@ CREATE FOREIGN DATA WRAPPER datalake_fdw
 SELECT public.create_foreign_server('hive_server', 'gpadmin', 'datalake_fdw', 'paa_cluster');
 SET datestyle = ISO, MDY;
 
--- ============================================================
--- Test 1: INSERT into Iceberg FDW table (triggers POST write path)
--- ============================================================
-DROP FOREIGN TABLE IF EXISTS iceberg_fdw_write_test;
-CREATE FOREIGN TABLE iceberg_fdw_write_test (
+DROP FOREIGN TABLE IF EXISTS iceberg_fdw_crud;
+CREATE FOREIGN TABLE iceberg_fdw_crud (
     id bigint,
     name text,
-    amount double precision,
-    ts bigint
+    amount double precision
 )
 SERVER hive_server
 OPTIONS (
-    filePath 'default.iceberg_fdw_test',
+    filePath 'default.iceberg_fdw_crud',
     catalog_type 'hive',
     server_name 'hive_cluster',
     hdfs_cluster_name 'paa_cluster',
-    table_identifier 'default.iceberg_fdw_test',
+    table_identifier 'default.iceberg_fdw_crud',
     format 'iceberg'
 );
 
--- Read first to verify table exists
-SELECT COUNT(*) FROM iceberg_fdw_write_test;
-
--- INSERT (triggers datalake_create_write_context_ -> build_uri_for_write
---         -> add_write_querydata_to_http_headers -> datalakeDoRPC POST)
-INSERT INTO iceberg_fdw_write_test VALUES (100, 'fdw_insert_1', 999.99, 9000);
-INSERT INTO iceberg_fdw_write_test VALUES (101, 'fdw_insert_2', 888.88, 9001),
-                                          (102, 'fdw_insert_3', 777.77, 9002);
-
--- Verify data was written
-SELECT COUNT(*) FROM iceberg_fdw_write_test;
-SELECT * FROM iceberg_fdw_write_test WHERE id >= 100 ORDER BY id;
+-- ============================================================
+-- Baseline read (3 seed rows)
+-- ============================================================
+SELECT id, name, amount FROM iceberg_fdw_crud ORDER BY id;
 
 -- ============================================================
--- Test 2: Bulk INSERT (larger file list in POST)
+-- INSERT (dlproxy getOrCreateSchema + batchAppend write path)
 -- ============================================================
-INSERT INTO iceberg_fdw_write_test
-SELECT i::bigint, 'bulk_' || i, (i * 1.1)::double precision, (i + 10000)::bigint
-FROM generate_series(200, 250) i;
+INSERT INTO iceberg_fdw_crud VALUES (4, 'dave', 400.0);
+INSERT INTO iceberg_fdw_crud VALUES (5, 'erin', 500.0), (6, 'frank', 600.0);
+SELECT id, name, amount FROM iceberg_fdw_crud ORDER BY id;
 
-SELECT COUNT(*) FROM iceberg_fdw_write_test WHERE id >= 200;
+-- ============================================================
+-- UPDATE (merge-on-read: positional delete + new data file)
+-- ============================================================
+UPDATE iceberg_fdw_crud SET amount = 999.0 WHERE id = 2;
+SELECT id, name, amount FROM iceberg_fdw_crud ORDER BY id;
+
+-- ============================================================
+-- DELETE (merge-on-read positional delete)
+-- ============================================================
+DELETE FROM iceberg_fdw_crud WHERE id = 4;
+SELECT id, name, amount FROM iceberg_fdw_crud ORDER BY id;
+SELECT count(*) AS final_count FROM iceberg_fdw_crud;
 
 -- ============================================================
 -- Cleanup
 -- ============================================================
-DROP FOREIGN TABLE IF EXISTS iceberg_fdw_write_test;
+DROP FOREIGN TABLE iceberg_fdw_crud;

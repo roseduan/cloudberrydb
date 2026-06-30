@@ -32,3 +32,19 @@ INSERT INTO ic.default.iceberg_fdw_test VALUES
     (CAST(6 AS bigint), 'Frank',   CAST(175.00 AS double), CAST(1005 AS bigint)),
     (CAST(7 AS bigint), 'Grace',   CAST(225.50 AS double), CAST(1006 AS bigint)),
     (CAST(8 AS bigint), 'Hank',    CAST( 80.00 AS double), CAST(1007 AS bigint));
+
+-- v2 fixture for the iceberg FDW CRUD test (hive_iceberg_fdw_write).
+-- format-version=2 is required so UPDATE/DELETE can use merge-on-read
+-- (positional delete files); a v1 table only supports append (INSERT).
+DROP TABLE IF EXISTS ic.default.iceberg_fdw_crud;
+
+CREATE TABLE ic.default.iceberg_fdw_crud (
+    id     bigint,
+    name   string,
+    amount double
+) USING iceberg TBLPROPERTIES ('format-version' = '2');
+
+INSERT INTO ic.default.iceberg_fdw_crud VALUES
+    (CAST(1 AS bigint), 'alice', CAST(100.0 AS double)),
+    (CAST(2 AS bigint), 'bob',   CAST(200.0 AS double)),
+    (CAST(3 AS bigint), 'carol', CAST(300.0 AS double));

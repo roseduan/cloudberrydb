@@ -9,9 +9,7 @@ DROP FOREIGN TABLE IF EXISTS iceberg_fdw_test;
 DROP FOREIGN DATA WRAPPER IF EXISTS datalake_fdw CASCADE;
 RESET client_min_messages;
 CREATE EXTENSION IF NOT EXISTS datalake_fdw;
-NOTICE:  extension "datalake_fdw" already exists, skipping
 CREATE EXTENSION IF NOT EXISTS hive_connector;
-NOTICE:  extension "hive_connector" already exists, skipping
 CREATE FOREIGN DATA WRAPPER datalake_fdw
     HANDLER datalake_fdw_handler
     VALIDATOR datalake_fdw_validator
@@ -166,13 +164,31 @@ SET datalake.enable_iceberg_fragment_cache = off;
 -- Test 3: Multiple reads (protocol.c connection lifecycle)
 -- ============================================================
 SELECT COUNT(*) FROM iceberg_fdw_test;
-ERROR:  dlproxy server error :  Type  Status Report
+ count 
+-------
+     8
+(1 row)
+
 SELECT * FROM iceberg_fdw_test WHERE id = 1;
-ERROR:  dlproxy server error :  Type  Status Report
+ id | name  | amount |  ts  
+----+-------+--------+------
+  1 | Alice |    100 | 1000
+(1 row)
+
 SELECT COUNT(*) FROM iceberg_fdw_test WHERE amount > 100;
-ERROR:  dlproxy server error :  Type  Status Report
+ count 
+-------
+     5
+(1 row)
+
 SELECT id, name FROM iceberg_fdw_test ORDER BY id LIMIT 3;
-ERROR:  dlproxy server error :  Type  Status Report
+ id |  name   
+----+---------
+  1 | Alice
+  2 | Bob
+  3 | Charlie
+(3 rows)
+
 -- ============================================================
 -- Cleanup
 -- ============================================================

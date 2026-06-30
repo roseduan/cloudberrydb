@@ -18,18 +18,15 @@ include $(PGXS)
 # lakehouse-allinone image doesn't run a ResourceManager/NodeManager.
 # Re-enable once the image ships YARN (or the prep is rewritten to use spark-sql).
 #
-# hive_iceberg_fdw and hive_iceberg_fdw_write are temporarily disabled:
-# the fixture (default.iceberg_fdw_test) must be created by spark-sql
-# pointing at hdfs://lakehouse:8020, but the split-container topology in
-# this stack uses hdfs://hadoop:8020 and the spark fixture step silently
-# fails with UnknownHostException.  Once the spark prep config is updated
-# (or the cases are rewritten to use builtin/s3 catalogs), restore them.
-# The dlagent gopher path for these cases also needs proper hdfs namenode
-# config plumbed through `gopher.*` keys -- currently the iceberg-on-hive
-# path returns "Gopher Worker path is required" / "Unrecognized hdfs name
-# node" from native gopherConnect because no hdfs connection params reach
-# the JVM side.
-REGRESS = hive_smoke hive_dlproxy_coverage
+# hive_iceberg_fdw (read) and hive_iceberg_fdw_write (INSERT/UPDATE/DELETE) are
+# re-enabled now that the iceberg FDW write path sends the gopher socket config
+# to the agent (getOrCreateSchema + batchAppend/rowUpdate). Previously the
+# iceberg-on-hive write returned "Gopher Worker path is required" because the
+# write request body carried no gopher.* config; that is fixed in dlproxy
+# (protocol.c) + dlagent (DlReadResource). The fixtures are created on s3a/minio
+# by spark-sql (SPARK_CONF below), so the earlier hdfs://lakehouse hostname
+# issue no longer applies.
+REGRESS = hive_smoke hive_dlproxy_coverage hive_iceberg_fdw hive_iceberg_fdw_write
 
 AUTOMATION_DIR = $(shell cd ../../.. && pwd)
 HIVE_PREPARE_SQL          = $(AUTOMATION_DIR)/prepare/prepare_hive/hive_smoke.sql
