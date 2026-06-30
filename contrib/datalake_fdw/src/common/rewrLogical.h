@@ -67,14 +67,18 @@ class writeOption {
 public:
 	writeOption() {
 		compression = UNSUPPORTCOMPRESS;
+		compressionLevel = -1;
 	}
 
 	writeOption(CompressType compress)
 	{
 		compression = compress;
+		compressionLevel = -1;
 	}
 
 	CompressType compression;
+	/* Compression level for codecs that support one (zstd/gzip); <=0 = codec default. */
+	int compressionLevel;
 	int64_t writeFileSize;
 };
 

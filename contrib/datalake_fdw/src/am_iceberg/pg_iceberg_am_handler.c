@@ -199,6 +199,18 @@ iceberg_modify_init(Relation rel, IcebergDMLState *state, CmdType operation,
 		rel);
 	fdwState->iceTable.tableName = pstrdup(RelationGetRelationName(rel));
 
+	/*
+	 * Native iceberg AM parquet write compression. Honor the per-table options
+	 * (compression / compression_level from pg_lake_table.ltoptions) and default
+	 * to zstd so native iceberg writes are compressed unless the user opts out.
+	 * The non-AM volume path leaves these unset and writes uncompressed.
+	 */
+	fdwState->iceTable.compression =
+		(table_info->opts && table_info->opts->compression) ?
+		table_info->opts->compression : "zstd";
+	fdwState->iceTable.compression_level =
+		table_info->opts ? table_info->opts->compression_level : -1;
+
 	{
 		char	   *location;
 

@@ -20,6 +20,8 @@ void datalakeCheckValidRecordBatchOpt(dataLakeOptions *options);
 
 char* datalakeGetCompressionName(CompressType compress);
 
+CompressType datalakeGetCompression(const char* compress);
+
 void DatalakeGetGopherSocketPath(char *dest);
 
 void DatalakeGetGopherPlasmaSocketPath(char *dest);

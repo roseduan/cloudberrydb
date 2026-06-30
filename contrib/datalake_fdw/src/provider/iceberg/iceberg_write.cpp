@@ -75,6 +75,7 @@ void icebergWrite::initWriteOption()
 {
 	option.writeFileSize = ss->options->fileSizeLimit;
 	option.compression = ss->options->compress;
+	option.compressionLevel = ss->options->compressLevel;
 }
 
 int64_t icebergWrite::write(const void* buf, int64_t length)

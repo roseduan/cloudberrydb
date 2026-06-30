@@ -324,6 +324,11 @@ typedef struct dataLakeOptions
 	char		*filePath;
 	DLTblFmt	format;
 	CompressType compress;
+	/*
+	 * Parquet write compression level for codecs that support it (zstd, gzip).
+	 * Values <= 0 mean "unset" and the writer uses the codec's default level.
+	 */
+	int			compressLevel;
 	/* parser filePath get prefix */
 	char		*prefix;
 	int64_t		fileSizeLimit;

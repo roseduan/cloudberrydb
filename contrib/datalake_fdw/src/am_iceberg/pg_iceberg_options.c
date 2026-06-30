@@ -45,6 +45,8 @@ static const OptionDef icebergTableOptionDefs[] = {
 	OPTION_STRING("table", IcebergTableOptions, table, NULL),
 	OPTION_STRING("location", IcebergTableOptions, location, NULL),
 	OPTION_BOOL("autovacuum_enabled", IcebergTableOptions, autovacuum_enabled, true),
+	OPTION_STRING("compression", IcebergTableOptions, compression, "zstd"),
+	OPTION_INT("compression_level", IcebergTableOptions, compression_level, -1),
 	/* Add new Iceberg table options here */
 };
 

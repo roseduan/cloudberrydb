@@ -85,6 +85,8 @@ typedef struct IcebergTableOptions
 	char *table;		/* Table name in external catalog */
 	char *location;		/* Optional table location URI override */
 	bool autovacuum_enabled;	/* Whether autovacuum is enabled for this table */
+	char *compression;		/* Parquet write compression codec (default zstd) */
+	int  compression_level;	/* Parquet write compression level; -1 = codec default */
 } IcebergTableOptions;
 
 /*

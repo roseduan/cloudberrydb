@@ -443,6 +443,47 @@ getVolumeOptions(icebergTableInfo info)
 	opt->format = DL_ICEBERG_TABLE;
 
 	/*
+	 * Native iceberg AM parquet write compression. The AM layer supplies the
+	 * per-table codec (default "zstd") and an optional level via icebergTableInfo;
+	 * the non-AM volume path leaves info.compression NULL and keeps the palloc0
+	 * default (UNCOMPRESS). Validate at this point (write begin) and fail with an
+	 * ERROR rather than silently writing uncompressed data.
+	 */
+	opt->compressLevel = info.compression_level;
+	if (info.compression != NULL && info.compression[0] != '\0')
+	{
+		CompressType ct = datalakeGetCompression(info.compression);
+
+		if (ct == UNSUPPORTCOMPRESS || !PARQUET_SUPPORT_COMPRESS(ct))
+			ereport(ERROR,
+					(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+					 errmsg("invalid iceberg write compression \"%s\"", info.compression),
+					 errhint("supported parquet codecs are uncompress, snappy, gzip, zstd, lz4")));
+
+		opt->compress = ct;
+
+		/* A compression level only applies to codecs that support one. */
+		if (info.compression_level >= 0)
+		{
+			if (ct == ZSTD && (info.compression_level < 1 || info.compression_level > 22))
+				ereport(ERROR,
+						(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+						 errmsg("zstd compression level %d out of range", info.compression_level),
+						 errhint("valid zstd levels are 1..22")));
+			else if (ct == GZIP && (info.compression_level < 1 || info.compression_level > 9))
+				ereport(ERROR,
+						(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+						 errmsg("gzip compression level %d out of range", info.compression_level),
+						 errhint("valid gzip levels are 1..9")));
+			else if (ct != ZSTD && ct != GZIP)
+				ereport(ERROR,
+						(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+						 errmsg("compression codec \"%s\" does not support a compression level",
+								info.compression)));
+		}
+	}
+
+	/*
 	 * When catalog_properties contains table-location, use it as the
 	 * authoritative data path. This ensures the write/read path matches
 	 * the catalog's table location (e.g., Polaris manages its own location

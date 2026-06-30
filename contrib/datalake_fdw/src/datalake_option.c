@@ -208,7 +208,7 @@ static const struct FdwCompressionOption compression_mapping[] = {
 	{DATALAKE_COMPRESS_ZSTD, ZSTD},
 };
 
-static CompressType datalakeGetCompression(const char* compress)
+CompressType datalakeGetCompression(const char* compress)
 {
 	if (!compress)
 	{

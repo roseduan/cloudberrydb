@@ -314,6 +314,19 @@ void parquetFileWriter::writeProperties()
     }
 
     builder.compression(codec_type);
+    /*
+     * Apply an explicit compression level only for codecs that support one
+     * (zstd/gzip/brotli). A non-positive level means "unset" and lets Arrow
+     * use the codec's default level. Caller-side validation (getVolumeOptions)
+     * already rejects levels for codecs without one.
+     */
+    if (option.compressionLevel > 0 &&
+        (codec_type == parquet_arrow::Compression::ZSTD ||
+         codec_type == parquet_arrow::Compression::GZIP ||
+         codec_type == parquet_arrow::Compression::BROTLI))
+    {
+        builder.compression_level(option.compressionLevel);
+    }
     builder.enable_statistics();
     builder.created_by("Hashdata");
     builder.data_pagesize(1024*1024);
