@@ -83,8 +83,12 @@ DROP TABLE explain_local;
 -- ============================================================
 -- Test 5: EXPLAIN ANALYZE (actually execute)
 -- ============================================================
+-- Disable AM predicate pushdown so "Rows Removed by Filter" is deterministic:
+-- data-file pruning on a tiny multi-file table is layout-dependent.
+SET datalake.iceberg_enable_predicate_pushdown = off;
 EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF)
 SELECT * FROM explain_test WHERE id > 2;
+RESET datalake.iceberg_enable_predicate_pushdown;
 
 -- ============================================================
 -- Test 6: EXPLAIN with VERBOSE (shows column details)

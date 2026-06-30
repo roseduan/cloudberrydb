@@ -29,6 +29,9 @@ extern int pg_iceberg_vacuum_rewrite_target_file_size_mb;
 extern int pg_iceberg_max_file_removals_per_vacuum;
 extern int pg_iceberg_max_compactions_per_vacuum;
 
+/* Scan pushdown */
+extern bool pg_iceberg_enable_predicate_pushdown;
+
 extern void pg_iceberg_init_gucs(void);
 
 #endif /* __PG_ICEBERG_GUC_H__ */

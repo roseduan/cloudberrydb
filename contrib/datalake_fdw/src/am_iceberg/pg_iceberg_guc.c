@@ -36,9 +36,22 @@ int pg_iceberg_vacuum_rewrite_target_file_size_mb = 512;
 int pg_iceberg_max_file_removals_per_vacuum = 100000;
 int pg_iceberg_max_compactions_per_vacuum = 100;
 
+/* Scan pushdown */
+bool pg_iceberg_enable_predicate_pushdown = true;
+
 void
 pg_iceberg_init_gucs(void)
 {
+	DefineCustomBoolVariable("datalake.iceberg_enable_predicate_pushdown",
+							 "Push Iceberg AM scan quals to the datalake agent for "
+							 "manifest-based data-file pruning.",
+							 NULL,
+							 &pg_iceberg_enable_predicate_pushdown,
+							 true,
+							 PGC_USERSET,
+							 0,
+							 NULL, NULL, NULL);
+
 	/* 1. Autovacuum configuration */
 	DefineCustomBoolVariable("datalake.iceberg_autovacuum",
 							 "Global switch for the iceberg autovacuum process.",

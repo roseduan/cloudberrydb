@@ -128,11 +128,21 @@ iceberg_get_needed_attrs(Relation rel, struct PlanState *ps)
 	Index		scanrelid;
 	int			i;
 
-	/* No plan context (e.g. ANALYZE/VACUUM sampling): read every column. */
+	/* No plan context: read every column. */
 	if (ps == NULL || ps->plan == NULL || !IsA(ps->plan, CustomScan))
 		return iceberg_get_all_attrs(rel);
 
 	scanrelid = ((Scan *) ps->plan)->scanrelid;
+
+	/*
+	 * ANALYZE sampling and VACUUM rewrite build a bare CustomScan
+	 * (pg_iceberg_begin_vacuum_scan) with no target list and scanrelid 0 to
+	 * carry the fragment payload; they read whole rows and need every column.
+	 * Only a real planner scan (scanrelid >= 1) carries a target list/qual
+	 * that bounds the referenced columns, so projection is only safe there.
+	 */
+	if (scanrelid == 0)
+		return iceberg_get_all_attrs(rel);
 
 	pull_varattnos((Node *) ps->plan->targetlist, scanrelid, &needed);
 	pull_varattnos((Node *) ps->plan->qual, scanrelid, &needed);
@@ -404,7 +414,8 @@ pg_iceberg_build_scan_am_private(Relation rel, struct PlanState *ps, int random_
 	 * non-NULL result encodes the full AND of the scan restriction and can
 	 * never drop a matching file.  The executor still re-applies plan->qual.
 	 */
-	if (ps != NULL && ps->plan != NULL && ps->plan->qual != NIL)
+	if (pg_iceberg_enable_predicate_pushdown &&
+		ps != NULL && ps->plan != NULL && ps->plan->qual != NIL)
 		pushdown_filter = serializeDlProxyFilterQuals(ps->plan->qual);
 
 	fragments = iceberg_fetch_fragments_json(rel, table_info, pushdown_filter,
