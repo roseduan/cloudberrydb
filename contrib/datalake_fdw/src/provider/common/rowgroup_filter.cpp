@@ -217,6 +217,19 @@ byteLess(const std::string &a, const std::string &b)
 	return a.size() < b.size();
 }
 
+/*
+ * Byte-range pruning of a text equality is only valid when equality means
+ * byte-identity, i.e. for a deterministic collation.  Under a non-deterministic
+ * collation two byte-different strings can compare equal, so a matching value
+ * could lie outside the byte-ordered [min,max] -- pruning would then drop a
+ * matching row.  Treat an invalid/unknown collation as unsafe (keep).
+ */
+static bool
+collationAllowsByteEqPrune(Oid collid)
+{
+	return OidIsValid(collid) && get_collation_isdeterministic(collid);
+}
+
 static bool
 numericRangeExcluded(int strat, Datum minN, Datum maxN, Datum c)
 {
@@ -296,6 +309,8 @@ opExprExcludes(OpExpr *op, IZoneStats &stats,
 	if (ci->pgType == TEXTOID || ci->pgType == VARCHAROID || ci->pgType == BPCHAROID)
 	{
 		if (strat != BTEqualStrategyNumber)
+			return false;
+		if (!collationAllowsByteEqPrune(op->inputcollid))
 			return false;
 		std::string cs, mns, mxs;
 		if (!pgConstStr(con, ci->pgType, cs))
@@ -392,6 +407,11 @@ saoExprExcludes(ScalarArrayOpExpr *sao, IZoneStats &stats,
 	double		fmn = 0, fmx = 0;
 	std::string smn, smx;
 	Datum		nMin = 0, nMax = 0;
+
+	/* Text equality pruning needs byte-identity semantics (see opExprExcludes);
+	 * a non-deterministic collation could treat byte-different strings as equal. */
+	if (isText && !collationAllowsByteEqPrune(sao->inputcollid))
+		return false;
 
 	if (isText)
 	{
