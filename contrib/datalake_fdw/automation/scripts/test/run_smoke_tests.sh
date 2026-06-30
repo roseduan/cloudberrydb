@@ -51,6 +51,7 @@ CATEGORY_REQUIRES=(
     [compression]="minio hdfs"
     [parallel]="minio hdfs"
     [fdw]="minio"
+    [iceberg_conf_merge]="minio"
     [iceberg/builtin]="minio"
     [iceberg/hive]="minio hive"
     [iceberg/polaris]="minio polaris"
