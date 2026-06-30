@@ -50,8 +50,8 @@ ensure-conf:
 	fi; \
 	for dir in $$DATADIRS; do \
 		echo "  Deploying to $$dir"; \
-		printf 'paa_cluster:\n    hdfs_namenode_host: $(HDFS_NAMENODE)\n    hdfs_namenode_port: $(HDFS_PORT)\n    hdfs_auth_method: simple\n    hadoop_rpc_protection: authentication\n\nhive_cluster:\n    hdfs_namenode_host: $(HDFS_NAMENODE)\n    hdfs_namenode_port: $(HDFS_PORT)\n    hdfs_auth_method: simple\n    hadoop_rpc_protection: authentication\n' > "$$dir/gphdfs.conf"; \
-		printf 'hive_cluster:\n    uris: thrift://$(HIVE_METASTORE_HOST):$(HIVE_METASTORE_PORT)\n    auth_method: simple\n' > "$$dir/gphive.conf"; \
+		printf 'paa_cluster:\n    hdfs_namenodes: $(HDFS_NAMENODE)\n    hdfs_port: $(HDFS_PORT)\n    hdfs_auth_method: simple\n    hadoop_rpc_protection: authentication\n\nhive_cluster:\n    hdfs_namenodes: $(HDFS_NAMENODE)\n    hdfs_port: $(HDFS_PORT)\n    hdfs_auth_method: simple\n    hadoop_rpc_protection: authentication\n' > "$$dir/gphdfs.conf"; \
+		printf 'hive_cluster:\n    url: thrift://$(HIVE_METASTORE_HOST):$(HIVE_METASTORE_PORT)\n    auth_method: simple\n' > "$$dir/gphive.conf"; \
 	done
 
 installcheck: ensure-conf
