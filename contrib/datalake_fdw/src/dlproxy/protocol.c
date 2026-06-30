@@ -767,6 +767,25 @@ internal_commit_external_common(Oid relid, List *file_list, List *locations,
 												transform_datalake_options);
 		datalake_churl_headers_append(context->churl_headers, "X-GP-OPTIONS-PROFILE", "iceberg");
 
+		/*
+		 * The iceberg commit (batchAppend/rowUpdate) runs through the agent's
+		 * iceberg service, which needs the gopher socket paths to reach the
+		 * filesystem. The read/scan path supplies these via the request body
+		 * (getIcebergConfigJsonString), but the commit path historically did
+		 * not, so the agent fell back to a non-existent default gopher socket
+		 * ("/tmp/.gopher.socket") and failed with
+		 * "Failed to get file system for path: s3a://...". Send the same config
+		 * here so the agent connects to the per-segment gopher socket.
+		 */
+		{
+			char *jsonConfig = getIcebergConfigJsonString(relid);
+			if (jsonConfig != NULL && strlen(jsonConfig) > 0)
+			{
+				context->request_body = pstrdup(jsonConfig);
+				context->request_body_len = strlen(jsonConfig);
+			}
+		}
+
 		if (pg_strcasecmp(catalogType, "hive") == 0)
 		{
 			datalake_churl_headers_append(context->churl_headers, "X-GP-OPTIONS-CONFIG", "gphive.conf0gphdfs.conf");
