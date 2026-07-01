@@ -1275,11 +1275,60 @@ ExecEndShareInputScan(ShareInputScanState *node)
 void
 ExecReScanShareInputScan(ShareInputScanState *node)
 {
-	/* On first call, initialize the tuplestore state */
+	ShareInputScan *sisc = (ShareInputScan *) node->ss.ps.plan;
+	bool		was_ready = node->isready;
+
+	/* On first call, initialize the tuplestore (or parallel) scan state */
 	if (!node->isready)
 		init_tuplestore_state(node);
 
 	ExecClearTuple(node->ss.ps.ps_ResultTupleSlot);
+
+	/*
+	 * Parallel-aware nodes back the scan with a SharedTuplestore
+	 * (node->sts_accessor), not a local tuplestore -- node->ts_state is NULL
+	 * and node->ts_pos is -1 in this mode, so we must never fall through to
+	 * the tuplestore rescan below (it would dereference NULL).  This is true
+	 * for every parallel role: the intra-slice producer/reader, the
+	 * within-slice consumer and the cross-slice consumer all read via the STS,
+	 * and the cross-slice producer materializes into one.
+	 *
+	 * Whether the shared read state must actually be reset depends on the role,
+	 * so mirror the gate used by the read path in ExecShareInputScan():
+	 *
+	 *   - parallel_scan_started == true  (intra-slice producer/reader,
+	 *     within-slice consumer, cross-slice consumer): a cooperative scan is
+	 *     in progress, restart it.  init_tuplestore_state() already began the
+	 *     scan on the first call, so only restart when the node was ready
+	 *     before this rescan.  Resetting the shared read head is done by one
+	 *     worker and bracketed by barriers so no worker scans while read_page
+	 *     is reset, exactly as in init_tuplestore_state().  Each node uses its
+	 *     own node->parallel_state / node->sts_accessor, which init already
+	 *     wired to the right (shared vs per-consumer-slice) STS and barrier, so
+	 *     intra-slice and cross-slice need no special-casing here.
+	 *
+	 *   - parallel_scan_started == false (cross-slice producer that only
+	 *     materialized and does not read its own STS): nothing to rescan.
+	 */
+	if (node->parallel_state != NULL && sisc->scan.plan.parallel_aware &&
+		node->sts_accessor != NULL)
+	{
+		if (was_ready && node->parallel_scan_started)
+		{
+			ParallelShareInputState *pstate = node->parallel_state;
+
+			BarrierArriveAndWait(&pstate->scan_barrier,
+								 WAIT_EVENT_SHAREINPUT_SCAN);
+			if (ParallelWorkerNumberOfSlice == 0)
+				sts_reinitialize(node->sts_accessor);
+			BarrierArriveAndWait(&pstate->scan_barrier,
+								 WAIT_EVENT_SHAREINPUT_SCAN);
+
+			sts_begin_parallel_scan(node->sts_accessor);
+		}
+		return;
+	}
+
 	Assert(node->ts_pos != -1);
 
 	tuplestore_select_read_pointer(node->ts_state, node->ts_pos);
