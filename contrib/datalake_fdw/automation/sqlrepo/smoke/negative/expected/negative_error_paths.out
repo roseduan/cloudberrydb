@@ -21,7 +21,7 @@ EXCEPTION WHEN OTHERS THEN
     RAISE NOTICE 'invalid protocol: %', regexp_replace(SQLERRM, '\(seg\d.*', '');
 END;
 $$;
-NOTICE:  invalid protocol: invalid protocol "invalid_proto". datalake support hdfs, ftp, and oss protocol ali, cos, qs, s3, s3b, huawei, ks3
+NOTICE:  invalid protocol: invalid protocol "invalid_proto". datalake support hdfs, ftp, and oss protocol ali, cos, qs, s3, s3b, huawei, ks3, azure, gcs
 -- ============================================================
 -- Test 2: Invalid HDFS option (datalake_option.c HDFS validation)
 -- ============================================================
