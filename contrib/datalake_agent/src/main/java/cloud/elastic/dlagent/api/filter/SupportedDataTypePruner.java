@@ -53,7 +53,17 @@ public class SupportedDataTypePruner extends BaseTreePruner {
         if (node instanceof OperatorNode) {
             OperatorNode operatorNode = (OperatorNode) node;
             if (!operatorNode.getOperator().isLogical()) {
-                ColumnDescriptor columnDescriptor = columnDescriptors.get(operatorNode.getColumnIndexOperand().index());
+                int colIdx = operatorNode.getColumnIndexOperand().index();
+                ColumnDescriptor columnDescriptor =
+                        (colIdx >= 0 && colIdx < columnDescriptors.size())
+                                ? columnDescriptors.get(colIdx) : null;
+                if (columnDescriptor == null) {
+                    // Unresolvable column reference (null placeholder for a dropped
+                    // attribute, or an out-of-range index): we cannot prove the
+                    // predicate excludes the block, so prune the operator (keep).
+                    LOG.debug("column index {} is unresolvable; skipping pushdown for this operator", colIdx);
+                    return null;
+                }
                 DataType datatype = columnDescriptor.getDataType();
                 if (!supportedDataTypes.contains(datatype)) {
                     // prune the operator node if its operand is a column of unsupported type

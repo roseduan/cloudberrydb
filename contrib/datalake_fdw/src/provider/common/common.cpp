@@ -46,6 +46,7 @@ gpdbDirectFunctionCall2(PGFunction func, Datum arg1, Datum arg2)
 		errdata = CopyErrorData();
 		FlushErrorState();
 		strncpy(errStr, errdata->message, ERROR_STR_LEN - 1);
+		errStr[ERROR_STR_LEN - 1] = '\0';
 		FreeErrorData(errdata);
 	}
 	PG_END_TRY();
@@ -78,6 +79,7 @@ gpdbDirectFunctionCall3(PGFunction func, Datum arg1, Datum arg2, Datum arg3)
 		errdata = CopyErrorData();
 		FlushErrorState();
 		strncpy(errStr, errdata->message, ERROR_STR_LEN - 1);
+		errStr[ERROR_STR_LEN - 1] = '\0';
 		FreeErrorData(errdata);
 	}
 	PG_END_TRY();

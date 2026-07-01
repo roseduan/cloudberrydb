@@ -394,6 +394,25 @@ pg_iceberg_materialize_am_private(List *am_private)
 	return list_concat(parsed, list_copy_tail(am_private, 1));
 }
 
+/*
+ * True if `rel` has any dropped columns.  The serialized scan filter indexes
+ * columns by physical varattno-1, while the filterColumns array shipped to the
+ * agent is built from the Iceberg live schema (dropped PG attributes absent);
+ * with a dropped column the two no longer line up, so a predicate could resolve
+ * to the wrong column.  Callers skip predicate pushdown in that case.
+ */
+static bool
+iceberg_rel_has_dropped_attrs(Relation rel)
+{
+	TupleDesc	tupdesc = RelationGetDescr(rel);
+	int			i;
+
+	for (i = 0; i < tupdesc->natts; i++)
+		if (TupleDescAttr(tupdesc, i)->attisdropped)
+			return true;
+	return false;
+}
+
 List *
 pg_iceberg_build_scan_am_private(Relation rel, struct PlanState *ps, int random_segment_num)
 {
@@ -415,7 +434,8 @@ pg_iceberg_build_scan_am_private(Relation rel, struct PlanState *ps, int random_
 	 * never drop a matching file.  The executor still re-applies plan->qual.
 	 */
 	if (pg_iceberg_enable_predicate_pushdown &&
-		ps != NULL && ps->plan != NULL && ps->plan->qual != NIL)
+		ps != NULL && ps->plan != NULL && ps->plan->qual != NIL &&
+		!iceberg_rel_has_dropped_attrs(rel))
 		pushdown_filter = serializeDlProxyFilterQuals(ps->plan->qual);
 
 	fragments = iceberg_fetch_fragments_json(rel, table_info, pushdown_filter,

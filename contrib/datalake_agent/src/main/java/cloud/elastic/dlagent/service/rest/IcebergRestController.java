@@ -1657,11 +1657,22 @@ public class IcebergRestController {
 
         int index = 0;
         for (Object o : (List<Object>) cols) {
+            // Keep list position aligned with the filter's 0-based column index
+            // (varattno-1): a non-Map or a name-less placeholder (e.g. a dropped
+            // PG attribute) becomes a null slot rather than shrinking the list,
+            // which would misalign every following attribute.
             if (!(o instanceof Map)) {
+                tupleDescription.add(null);
+                index++;
                 continue;
             }
             Map<String, Object> col = (Map<String, Object>) o;
             String name = (String) col.get("name");
+            if (name == null) {
+                tupleDescription.add(null);
+                index++;
+                continue;
+            }
             int oid = col.get("oid") == null ? 0 : ((Number) col.get("oid")).intValue();
             Object typmodObj = col.get("typmod");
             Integer[] typeMods = null;
