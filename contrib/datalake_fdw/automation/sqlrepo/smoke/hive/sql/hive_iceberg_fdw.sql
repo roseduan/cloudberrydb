@@ -8,10 +8,13 @@
 SET client_min_messages = ERROR;
 DROP FOREIGN TABLE IF EXISTS iceberg_fdw_test;
 DROP FOREIGN DATA WRAPPER IF EXISTS datalake_fdw CASCADE;
-RESET client_min_messages;
-
+-- Keep the CREATE EXTENSION calls under client_min_messages=ERROR so the
+-- "extension already exists, skipping" NOTICE is suppressed. In the full
+-- REGRESS order hive_smoke runs first and creates the extensions, so without
+-- this the NOTICE appears here and diverges from the expected output.
 CREATE EXTENSION IF NOT EXISTS datalake_fdw;
 CREATE EXTENSION IF NOT EXISTS hive_connector;
+RESET client_min_messages;
 CREATE FOREIGN DATA WRAPPER datalake_fdw
     HANDLER datalake_fdw_handler
     VALIDATOR datalake_fdw_validator
