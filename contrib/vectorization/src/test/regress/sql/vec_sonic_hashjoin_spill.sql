@@ -1,0 +1,229 @@
+-- Regression test for Sonic Hash Join spill-to-disk correctness.
+--
+-- Each test section runs the same query twice:
+--   budget = 0  →  all-memory path (spill disabled)
+--   budget = 1  →  spill path (build side spills when estimated
+--                   hash table size exceeds 1 MB)
+-- The two result rows in the .out file must be identical, proving that
+-- the spill path produces no data loss or duplicate rows.
+--
+-- Coverage:
+--   sonic_join_node.cc: OnBuildSideBatch, OnBuildSideFinished,
+--     OnProbeSideBatch, OnProbeSideFinished, StartReplay
+--   Per-partition ScanFullOuterParallel: RIGHT OUTER, FULL OUTER,
+--     RIGHT SEMI, RIGHT ANTI  (PropagatesBuildSide join types)
+--   Rendezvous: build-probe side coordination in spill mode
+--   Concurrency: pool_threads = 4 with 3-way join (two SonicJoin nodes
+--     spilling simultaneously, exercising spill-file-name isolation)
+
+SET vector.enable_vectorization = on;
+SET vector.enable_sonic_hashjoin = on;
+SET default_table_access_method = pax;
+SET optimizer = off;
+SET enable_nestloop  = off;
+SET enable_mergejoin = off;
+
+DROP SCHEMA IF EXISTS sonic_spill CASCADE;
+CREATE SCHEMA sonic_spill;
+SET search_path = sonic_spill;
+
+-- sj_l: 200 000 rows, id 1..200000,   val = id
+-- sj_r: 200 000 rows, id 100001..300000, val = id * 2
+-- Overlap:       id 100001..200000  →  100 000 rows
+-- Only-in-left:  id 1..100000       →  100 000 rows
+-- Only-in-right: id 200001..300000  →  100 000 rows
+--
+-- At budget = 1 MB: 200 000 rows × 8 bytes = 1.6 MB > 1 MB  → spill triggers.
+CREATE TABLE sj_l (id int NOT NULL, val int) DISTRIBUTED BY (id);
+CREATE TABLE sj_r (id int NOT NULL, val int) DISTRIBUTED BY (id);
+
+INSERT INTO sj_l SELECT i,     i     FROM generate_series(1,      200000) i;
+INSERT INTO sj_r SELECT i,     i * 2 FROM generate_series(100001, 300000) i;
+ANALYZE sj_l;
+ANALYZE sj_r;
+
+-- ======================================================================
+-- A: INNER JOIN
+--    Expected: 100 000 matching rows.
+--    sum(l.val + r.val) = 3 × Σ(100001..200000) = 45 000 150 000.
+-- ======================================================================
+SET vector.hashjoin_spill_memory_mb = 0;
+SELECT count(*) AS c, sum(l.val + r.val) AS s
+FROM sj_l l JOIN sj_r r ON l.id = r.id;
+
+SET vector.hashjoin_spill_memory_mb = 1;
+SELECT count(*) AS c, sum(l.val + r.val) AS s
+FROM sj_l l JOIN sj_r r ON l.id = r.id;
+
+-- ======================================================================
+-- B: LEFT OUTER JOIN
+--    All 200 000 left rows; r-side columns are NULL for the 100 000
+--    unmatched left rows.
+--    Expected: count = 200 000.
+-- ======================================================================
+SET vector.hashjoin_spill_memory_mb = 0;
+SELECT count(*) AS c FROM sj_l l LEFT JOIN sj_r r ON l.id = r.id;
+
+SET vector.hashjoin_spill_memory_mb = 1;
+SELECT count(*) AS c FROM sj_l l LEFT JOIN sj_r r ON l.id = r.id;
+
+-- ======================================================================
+-- C: RIGHT OUTER JOIN
+--    All 200 000 right rows; l-side columns are NULL for the 100 000
+--    unmatched right rows.  StartReplay calls ScanFullOuterParallel
+--    per partition to emit unmatched build rows.
+--    Expected: count = 200 000.
+-- ======================================================================
+SET vector.hashjoin_spill_memory_mb = 0;
+SELECT count(*) AS c FROM sj_l l RIGHT JOIN sj_r r ON l.id = r.id;
+
+SET vector.hashjoin_spill_memory_mb = 1;
+SELECT count(*) AS c FROM sj_l l RIGHT JOIN sj_r r ON l.id = r.id;
+
+-- ======================================================================
+-- D: FULL OUTER JOIN
+--    All three groups: 100 000 matched + 100 000 only-left +
+--    100 000 only-right.  Both ScanFullOuterParallel (per partition in
+--    spill mode) and unmatched probe rows must be emitted.
+--    Expected: count = 300 000.
+-- ======================================================================
+SET vector.hashjoin_spill_memory_mb = 0;
+SELECT count(*) AS c FROM sj_l l FULL JOIN sj_r r ON l.id = r.id;
+
+SET vector.hashjoin_spill_memory_mb = 1;
+SELECT count(*) AS c FROM sj_l l FULL JOIN sj_r r ON l.id = r.id;
+
+-- ======================================================================
+-- E: LEFT SEMI JOIN (EXISTS)
+--    Left rows whose id appears in sj_r: id 100001..200000.
+--    Expected: count = 100 000.
+-- ======================================================================
+SET vector.hashjoin_spill_memory_mb = 0;
+SELECT count(*) AS c
+FROM sj_l l
+WHERE EXISTS (SELECT 1 FROM sj_r r WHERE r.id = l.id);
+
+SET vector.hashjoin_spill_memory_mb = 1;
+SELECT count(*) AS c
+FROM sj_l l
+WHERE EXISTS (SELECT 1 FROM sj_r r WHERE r.id = l.id);
+
+-- ======================================================================
+-- F: LEFT ANTI JOIN (NOT EXISTS)
+--    Left rows whose id does NOT appear in sj_r: id 1..100000.
+--    Expected: count = 100 000.
+-- ======================================================================
+SET vector.hashjoin_spill_memory_mb = 0;
+SELECT count(*) AS c
+FROM sj_l l
+WHERE NOT EXISTS (SELECT 1 FROM sj_r r WHERE r.id = l.id);
+
+SET vector.hashjoin_spill_memory_mb = 1;
+SELECT count(*) AS c
+FROM sj_l l
+WHERE NOT EXISTS (SELECT 1 FROM sj_r r WHERE r.id = l.id);
+
+-- ======================================================================
+-- G: RIGHT SEMI / RIGHT ANTI — require ORCA.
+--    ScanFullOuterParallel is called per partition for these join types.
+--    ORCA picks RIGHT SEMI when the outer query table (sj_tiny) is much
+--    smaller than the subquery table (sj_l/sj_r) -- no force GUC exists
+--    for this on the current ORCA, the cardinality gap alone is enough.
+--
+--    Data: sj_l (200 000 rows) as the large build side.
+--          sj_tiny (1 000 rows, id 100001..101000) as the small outer.
+--    Overlap between sj_tiny and sj_l: all 1 000 rows of sj_tiny.
+-- ======================================================================
+CREATE TABLE sj_tiny (id int NOT NULL, val int) DISTRIBUTED BY (id);
+INSERT INTO sj_tiny SELECT i, i FROM generate_series(100001, 101000) i;
+ANALYZE sj_tiny;
+
+SET optimizer = on;
+
+-- G1: RIGHT SEMI — sj_tiny rows that have a match in sj_l.
+--     Expected: count = 1 000 (all sj_tiny rows; 100001..101000 ⊂ sj_l).
+SET vector.hashjoin_spill_memory_mb = 0;
+SELECT count(*) AS c
+FROM sj_tiny t
+WHERE t.id IN (SELECT id FROM sj_l);
+
+-- EXPLAIN at budget = 1: confirm this count(*)-wrapped query still routes
+-- through Right Semi + Sonic (not some other decorrelation) under spill,
+-- before trusting the count below to mean the per-partition
+-- ScanFullOuterParallel replay path actually ran.
+SET vector.hashjoin_spill_memory_mb = 1;
+EXPLAIN (VERBOSE ON, COSTS OFF)
+SELECT count(*) AS c
+FROM sj_tiny t
+WHERE t.id IN (SELECT id FROM sj_l);
+
+SELECT count(*) AS c
+FROM sj_tiny t
+WHERE t.id IN (SELECT id FROM sj_l);
+
+-- G2: RIGHT ANTI — sj_tiny rows that have NO match in sj_r.
+--     sj_r.id ∈ [100001, 300000]; sj_tiny.id ∈ [100001, 101000] ⊆ sj_r
+--     → expected: count = 0.
+SET vector.hashjoin_spill_memory_mb = 0;
+SELECT count(*) AS c
+FROM sj_tiny t
+WHERE NOT EXISTS (SELECT 1 FROM sj_r r WHERE r.id = t.id);
+
+SET vector.hashjoin_spill_memory_mb = 1;
+EXPLAIN (VERBOSE ON, COSTS OFF)
+SELECT count(*) AS c
+FROM sj_tiny t
+WHERE NOT EXISTS (SELECT 1 FROM sj_r r WHERE r.id = t.id);
+
+SELECT count(*) AS c
+FROM sj_tiny t
+WHERE NOT EXISTS (SELECT 1 FROM sj_r r WHERE r.id = t.id);
+
+SET optimizer = off;
+
+-- ======================================================================
+-- H: 3-way join, pool_threads = 4
+--    Two SonicJoin nodes spill concurrently; verifies spill-file-name
+--    isolation (plan_node_id in prefix) and thread safety.
+--    sj_l already exists (200 000 rows, val = id).
+--    sj_b: 200 000 rows, val = id * 2.
+--    sj_c: 200 000 rows, val = id * 3.
+--    All three fully overlap on id 1..200000.
+--    Expected: count = 200 000,
+--              sum = 6 × Σ(1..200000) = 120 000 600 000.
+-- ======================================================================
+CREATE TABLE sj_b (id int NOT NULL, val int) DISTRIBUTED BY (id);
+CREATE TABLE sj_c (id int NOT NULL, val int) DISTRIBUTED BY (id);
+INSERT INTO sj_b SELECT i, i * 2 FROM generate_series(1, 200000) i;
+INSERT INTO sj_c SELECT i, i * 3 FROM generate_series(1, 200000) i;
+ANALYZE sj_b;
+ANALYZE sj_c;
+
+-- Baseline: no spill.
+SET vector.hashjoin_spill_memory_mb = 0;
+SELECT count(*) AS c, sum(l.val + b.val + c.val) AS s
+FROM sj_l l
+  JOIN sj_b b USING (id)
+  JOIN sj_c c USING (id);
+
+-- Spill + concurrency.
+SET vector.hashjoin_spill_memory_mb = 1;
+SET vector.pool_threads = 4;
+SELECT count(*) AS c, sum(l.val + b.val + c.val) AS s
+FROM sj_l l
+  JOIN sj_b b USING (id)
+  JOIN sj_c c USING (id);
+
+-- ======================================================================
+-- Cleanup
+-- ======================================================================
+SET search_path = public;
+DROP SCHEMA sonic_spill CASCADE;
+RESET vector.pool_threads;
+RESET vector.hashjoin_spill_memory_mb;
+RESET optimizer;
+RESET enable_nestloop;
+RESET enable_mergejoin;
+RESET default_table_access_method;
+RESET vector.enable_sonic_hashjoin;
+RESET vector.enable_vectorization;

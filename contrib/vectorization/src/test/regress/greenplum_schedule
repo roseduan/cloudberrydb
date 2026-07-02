@@ -224,5 +224,8 @@ test: vec_sonic_hashjoin
 test: sonicagg_spill
 test: sonicagg_spill_parallel
 
+# vectorized Sonic hash join spill-to-disk correctness (all join types, concurrency)
+test: vec_sonic_hashjoin_spill
+
 # vectorized Sonic Motion Direct-Send (EXPLAIN visibility + correctness)
 test: vec_motion_direct_send
