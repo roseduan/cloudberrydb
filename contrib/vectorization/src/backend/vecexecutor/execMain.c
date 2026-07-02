@@ -4909,9 +4909,22 @@ sonic_join_supports_jointype(GArrowJoinType type)
 		case GARROW_FULL_OUTER_JOIN:
 		case GARROW_LEFT_SEMI_JOIN:
 		case GARROW_LEFT_ANTI_JOIN:
+		case GARROW_RIGHT_SEMI_JOIN:
+		case GARROW_RIGHT_ANTI_JOIN:
 			return true;
 		default:
-			/* FULL_SEMI, FULL_ANTI, LASJ_NOTIN, RIGHT_SEMI/ANTI: not supported */
+			/*
+			 * FULL_SEMI, FULL_ANTI: not implemented in sonic_join_node.cc.
+			 *
+			 * LASJ_NOTIN: intentionally excluded.  This join type implements
+			 * the SQL NOT IN semantics when the subquery column is nullable:
+			 * if any build-side row has a NULL key, the entire probe output
+			 * must be suppressed.  Sonic's LEFT_ANTI_JOIN does not model that
+			 * NULL-propagation rule, so LASJ_NOTIN falls back to the normal
+			 * Arrow hash join (hash_join_node.cc), which in turn disables
+			 * swiss_join for LASJ_NOTIN and falls back to hash_join.cc where
+			 * the full NULL semantics are implemented.
+			 */
 			return false;
 	}
 }

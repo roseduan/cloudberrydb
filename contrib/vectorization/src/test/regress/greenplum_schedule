@@ -217,6 +217,9 @@ test: limit_hashagg
 # vectorized Sonic hash agg routing (EXPLAIN visibility + correctness)
 test: vec_sonic_hashagg
 
+# vectorized Sonic hash join routing (EXPLAIN visibility + correctness)
+test: vec_sonic_hashjoin
+
 # vectorized Sonic hash agg spill-to-disk (correctness + concurrent eviction)
 test: sonicagg_spill
 test: sonicagg_spill_parallel
