@@ -2962,15 +2962,50 @@ build_join_project_options(List *hashkeys, GArrowExecuteNode *input, PlanBuildCo
 	{
 		g_autoptr(GArrowExpression) arrow_expr = NULL;
 		g_autoptr(GArrowField) field = NULL;
-		g_autoptr(GArrowDataType) result_type = NULL; 
+		g_autoptr(GArrowDataType) result_type = NULL;
 		ExprState *exprstate = (ExprState *)lfirst(l);
+		Expr	   *kexpr = exprstate->expr;
 		int prefix_maxlen = strlen(RIGHT_PREFIX);
-		char *prefix_name = palloc(prefix_maxlen + 20);
+		char *prefix_name;
+
+		result_type = PGTypeToArrow(exprType((Node *) kexpr));
+
+		/*
+		 * Diff-A (build-row slimming): when the hashkey is a plain column
+		 * reference, the passthrough loop above already emits that column
+		 * as <prefix><name>.  Point the join key at that existing column
+		 * instead of materializing a second, byte-identical joinqual_N
+		 * column.  The duplicate widened every build row by one key width
+		 * (and became dead payload), which DuckDB never does.  attname is
+		 * resolved exactly as expr_to_arrow_expression() resolves a Var at
+		 * this point (is_hashjoin_after_node is still false here), so the
+		 * reused column carries the same value the joinqual_N would have.
+		 * Any non-Var (expression) hashkey still gets a synthesized column.
+		 */
+		if (IsA(kexpr, Var) && ((Var *) kexpr)->varattno > 0)
+		{
+			Var		   *var = (Var *) kexpr;
+			const char *attname = GetSchemaName(pcontext->inputschema,
+												var->varattno, pcontext->map);
+			const char *reuse_name = GetHashJoinProjectName(pcontext, attname);
+
+			field = garrow_field_new(reuse_name, result_type);
+			if (pcontext->is_left_schema)
+			{
+				pcontext->left_hashkeys = garrow_list_append_ptr(pcontext->left_hashkeys, field);
+			}
+			else
+			{
+				pcontext->right_hashkeys = garrow_list_append_ptr(pcontext->right_hashkeys, field);
+			}
+			continue;
+		}
+
+		prefix_name = palloc(prefix_maxlen + 20);
 		/* The hashkey's projected column names are built together when building the expression */
-		arrow_expr = expr_to_arrow_expression(exprstate->expr, pcontext);
+		arrow_expr = expr_to_arrow_expression(kexpr, pcontext);
 		expressions = garrow_list_append_ptr(expressions, arrow_expr);
 		snprintf(prefix_name, prefix_maxlen + 20, "%sjoinqual_%d", pcontext->is_left_schema ? LEFT_PREFIX : RIGHT_PREFIX, i++);
-		result_type = PGTypeToArrow(exprType((Node *) exprstate->expr));
 		field = garrow_field_new(prefix_name, result_type);
 		if (pcontext->is_left_schema)
 		{
@@ -2984,7 +3019,7 @@ build_join_project_options(List *hashkeys, GArrowExecuteNode *input, PlanBuildCo
 	}
 	options = garrow_project_node_options_new(expressions,
 											  (gchar **)names,
-											  length);
+											  j);
 	pfree(names);
 	garrow_list_free_ptr(&expressions);
 	garrow_list_free_ptr(&fields);
@@ -4668,32 +4703,37 @@ to_arrow_storetype(StoreType type)
 	return GARROW_IN_MEMORY;
 }
 
+/*
+ * contains_innervar_walker - true iff the expression tree references a Var
+ * from the inner (build/right) side of the join.
+ *
+ * Used by to_arrow_jointype() to choose between Arrow's LEFT_SEMI/LEFT_ANTI
+ * (probe-only output) and the heavier FULL_SEMI/FULL_ANTI (which also carry
+ * the matched build-side payload through to the output).  A PG JOIN_SEMI /
+ * JOIN_ANTI classically outputs only outer columns, but ORCA's nested
+ * subquery pull-up can emit a semi/anti join whose targetlist references
+ * inner columns; such a join MUST use FULL_* so the inner payload survives.
+ */
 static bool
-check_innervar_walker(Node *node, void *context)
+contains_innervar_walker(Node *node, void *context)
 {
 	if (node == NULL)
-		return true;
+		return false;
 
-	switch (nodeTag(node))
+	if (IsA(node, Var))
 	{
-		case T_Var:
-		{
-			Var *var = (Var *) node;
-			if (var->varno == INNER_VAR)
-			{
-				return false;
-			}  
-		}
-		default:
-			break;
+		Var		   *var = (Var *) node;
+
+		if (var->varno == INNER_VAR)
+			return true;
 	}
-	return expression_tree_walker(node, check_innervar_walker, context);
+	return expression_tree_walker(node, contains_innervar_walker, context);
 }
 
 static GArrowJoinType
 to_arrow_jointype(JoinType type, List *targetlist, List *joinqual)
 {
-	bool no_need_right_payload = check_innervar_walker((Node *) targetlist, NULL);
+	bool no_need_right_payload = !contains_innervar_walker((Node *) targetlist, NULL);
 	switch (type)
 	{
 		case JOIN_INNER:
@@ -4801,6 +4841,186 @@ CleanupArrowSpillFiles(int code, Datum arg)
 	FreeDir(dir);
 }
 
+/*
+ * Sonic-join type gating.  These sets MUST stay a subset of what
+ * compute/exec/sonic_join_node.cc accepts (allowed_equal_key_types /
+ * allowed_types / allowed_join_types) -- a join routed to sonic that sonic
+ * cannot handle is rejected at plan build (Status::NotImplemented -> GError ->
+ * elog(ERROR)) rather than falling back, so keep these in sync when extending
+ * sonic.
+ */
+static bool
+sonic_join_supports_equal_key_type(GArrowType id)
+{
+	/* sonic_join_node.cc allowed_equal_key_types: bool + 8..64-bit ints */
+	switch (id)
+	{
+		case GARROW_TYPE_BOOLEAN:
+		case GARROW_TYPE_INT8:
+		case GARROW_TYPE_INT16:
+		case GARROW_TYPE_INT32:
+		case GARROW_TYPE_INT64:
+		case GARROW_TYPE_UINT8:
+		case GARROW_TYPE_UINT16:
+		case GARROW_TYPE_UINT32:
+		case GARROW_TYPE_UINT64:
+			return true;
+		default:
+			return false;
+	}
+}
+
+static bool
+sonic_join_supports_payload_type(GArrowType id)
+{
+	/* sonic_join_node.cc allowed_types (build/probe column types) */
+	switch (id)
+	{
+		case GARROW_TYPE_BOOLEAN:
+		case GARROW_TYPE_INT8:
+		case GARROW_TYPE_INT16:
+		case GARROW_TYPE_INT32:
+		case GARROW_TYPE_INT64:
+		case GARROW_TYPE_UINT8:
+		case GARROW_TYPE_UINT16:
+		case GARROW_TYPE_UINT32:
+		case GARROW_TYPE_UINT64:
+		case GARROW_TYPE_FLOAT:
+		case GARROW_TYPE_DOUBLE:
+		case GARROW_TYPE_NUMERIC128:
+		case GARROW_TYPE_DATE32:
+		case GARROW_TYPE_TIMESTAMP:
+		case GARROW_TYPE_STRING:
+			return true;
+		default:
+			return false;
+	}
+}
+
+static bool
+sonic_join_supports_jointype(GArrowJoinType type)
+{
+	/* sonic_join_node.cc allowed_join_types */
+	switch (type)
+	{
+		case GARROW_INNER_JOIN:
+		case GARROW_LEFT_OUTER_JOIN:
+		case GARROW_RIGHT_OUTER_JOIN:
+		case GARROW_FULL_OUTER_JOIN:
+		case GARROW_LEFT_SEMI_JOIN:
+		case GARROW_LEFT_ANTI_JOIN:
+			return true;
+		default:
+			/* FULL_SEMI, FULL_ANTI, LASJ_NOTIN, RIGHT_SEMI/ANTI: not supported */
+			return false;
+	}
+}
+
+/* true iff every GArrowField in `fields` has a type accepted by `pred` */
+static bool
+sonic_join_all_fields_supported(GList *fields, bool (*pred)(GArrowType))
+{
+	for (GList *lc = fields; lc != NULL; lc = lc->next)
+	{
+		GArrowField *field = (GArrowField *) lc->data;
+		g_autoptr(GArrowDataType) dt = garrow_field_get_data_type(field);
+
+		if (!pred(garrow_data_type_get_id(dt)))
+			return false;
+	}
+	return true;
+}
+
+/*
+ * sonic_join_filter_supported - true iff `joinqual` is a residual join filter
+ * that Arrow's Sonic join can evaluate.
+ *
+ * Sonic (sonic_join_node.cc CheckFilters) accepts only a SINGLE comparison
+ * between two top-level columns, one from each side of the join.  A filter
+ * routed to sonic that it cannot handle is rejected at plan build with an
+ * ERROR rather than falling back, so we mirror that whitelist here and
+ * conservatively restrict the compared columns to integer types (enough for
+ * the residual `<>` in TPC-H q21; widen as sonic is exercised on more types).
+ * A NIL joinqual means no residual filter, which is always fine.
+ */
+static bool
+sonic_join_filter_supported(List *joinqual)
+{
+	OpExpr	   *op;
+	Var		   *lvar;
+	Var		   *rvar;
+	char	   *opname;
+	Oid			argtype;
+
+	if (joinqual == NIL)
+		return true;
+	/* sonic builds and_kleene() for >1 clause, which it cannot evaluate */
+	if (list_length(joinqual) != 1)
+		return false;
+	if (!IsA(linitial(joinqual), OpExpr))
+		return false;
+	op = (OpExpr *) linitial(joinqual);
+	if (list_length(op->args) != 2)
+		return false;
+
+	/* operator must be one of sonic's allowed_not_equal_operators */
+	opname = get_opname(op->opno);
+	if (opname == NULL)
+		return false;
+	if (strcmp(opname, "<>") != 0 && strcmp(opname, "<") != 0 &&
+		strcmp(opname, "<=") != 0 && strcmp(opname, ">") != 0 &&
+		strcmp(opname, ">=") != 0)
+		return false;
+
+	/* both arguments must be top-level Vars, one from each side */
+	if (!IsA(linitial(op->args), Var) || !IsA(lsecond(op->args), Var))
+		return false;
+	lvar = (Var *) linitial(op->args);
+	rvar = (Var *) lsecond(op->args);
+	if (!((lvar->varno == INNER_VAR && rvar->varno == OUTER_VAR) ||
+		  (lvar->varno == OUTER_VAR && rvar->varno == INNER_VAR)))
+		return false;
+
+	/* both sides must share an integer type sonic can compare */
+	argtype = lvar->vartype;
+	if (argtype != rvar->vartype)
+		return false;
+	if (argtype != INT2OID && argtype != INT4OID && argtype != INT8OID)
+		return false;
+
+	return true;
+}
+
+/*
+ * Decide whether this hash join can be safely executed by Arrow's Sonic join.
+ * Conservative: requires a supported join type, pure equi-join (no IS / null-
+ * aware key comparison), only a sonic-supported residual join filter (see
+ * sonic_join_filter_supported), all equi-key column types in
+ * sonic's equal-key set, and all probe/build column types in sonic's payload
+ * set.  left_keys/right_keys are the equi-key fields; left_fields/right_fields
+ * are the full probe/build input schemas (the columns sonic must materialize).
+ */
+static bool
+is_sonic_join_compatible(GArrowJoinType type, bool nonequijoin,
+						 GArrowExpression *filter, List *joinqual,
+						 GList *left_keys, GList *right_keys,
+						 GList *left_fields, GList *right_fields)
+{
+	if (!sonic_join_supports_jointype(type))
+		return false;
+	if (nonequijoin)			/* sonic only supports JoinKeyCmp::EQ */
+		return false;
+	if (filter != NULL && !sonic_join_filter_supported(joinqual))
+		return false;			/* residual filter sonic cannot evaluate */
+	if (!sonic_join_all_fields_supported(left_keys, sonic_join_supports_equal_key_type) ||
+		!sonic_join_all_fields_supported(right_keys, sonic_join_supports_equal_key_type))
+		return false;
+	if (!sonic_join_all_fields_supported(left_fields, sonic_join_supports_payload_type) ||
+		!sonic_join_all_fields_supported(right_fields, sonic_join_supports_payload_type))
+		return false;
+	return true;
+}
+
 static GArrowExecuteNode *
 BuildHashjoin(PlanBuildContext *pcontext, GArrowExecuteNode *left, GArrowExecuteNode *right, List *joinqual)
 {
@@ -4864,9 +5084,25 @@ BuildHashjoin(PlanBuildContext *pcontext, GArrowExecuteNode *left, GArrowExecute
 	if (error)
 		elog(ERROR, "Failed to create the hashjoin node, cause: %s", error->message);
 
-	hashjoin_node =
-		garrow_execute_plan_build_hash_join_node(pcontext->plan, left, right,
-												 hashjoin_options, &error);
+	if (enable_sonic_hashjoin &&
+		is_sonic_join_compatible(type, node->hj_nonequijoin, filter_expr, joinqual,
+								 pcontext->left_hashkeys, pcontext->right_hashkeys,
+								 lkeys, rkeys))
+	{
+		hashjoin_node =
+			garrow_execute_plan_build_sonic_join_node(pcontext->plan, left, right,
+													  hashjoin_options, &error);
+		vnode->method = VEC_HJ_METHOD_SONIC;
+		elog(DEBUG1, "sonic: routed hash join (plan node %d) to sonic join",
+			 node->js.ps.plan->plan_node_id);
+	}
+	else
+	{
+		hashjoin_node =
+			garrow_execute_plan_build_hash_join_node(pcontext->plan, left, right,
+													 hashjoin_options, &error);
+		vnode->method = VEC_HJ_METHOD_NORMAL;
+	}
 	if (error)
 		elog(ERROR, "Failed to create the hashjoin node, cause: %s", error->message);
 

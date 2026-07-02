@@ -337,6 +337,19 @@ _PG_init(void)
                              GUC_GPDB_NEED_SYNC,
                              NULL, NULL, NULL);
 
+    DefineCustomBoolVariable("vector.enable_sonic_hashjoin",
+                             "Route a vectorized hash join to the Sonic join "
+                             "engine when the join type, equi-key column types "
+                             "and output column types are supported. Off forces "
+                             "the normal Arrow hash join path (for A/B "
+                             "comparison).",
+                             NULL,
+                             &enable_sonic_hashjoin,
+                             false,
+                             PGC_USERSET,
+                             GUC_GPDB_NEED_SYNC,
+                             NULL, NULL, NULL);
+
     exec_simple_query_hook_prev = exec_simple_query_hook;
     exec_simple_query_hook = exec_simple_query_vec;
 

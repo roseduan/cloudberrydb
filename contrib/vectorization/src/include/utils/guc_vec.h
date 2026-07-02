@@ -77,5 +77,9 @@ extern bool enable_sonic_motion_direct_send;
  * Default on; turn off as an emergency kill switch.
  */
 extern bool enable_right_join_flip;
+/* sonic hash join: route a vectorized HashJoin to Arrow's Sonic join instead
+ * of the normal Arrow hash join, when the join type / key / payload types are
+ * supported. Off forces all hash joins onto the normal Arrow hash join path. */
+extern bool enable_sonic_hashjoin;
 
 #endif   /* GUC_VEC_H */

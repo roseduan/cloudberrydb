@@ -1923,6 +1923,45 @@ VecExplainNode(PlanState *planstate, List *ancestors,
 			break;
 	}
 
+	/*
+	 * Vec Hash Join Method: which Arrow hash-join implementation BuildHashjoin
+	 * routed this node to -- "Sonic" (sonic_join_node.cc) or "Normal" (the
+	 * legacy Arrow hash join).  Gated on es->verbose + a vectorized plan so
+	 * plain EXPLAIN stays stable; mirrors "Vec HashAgg Method".  The method is
+	 * set at ExecInit (PostBuildVecPlan), so it shows for plain EXPLAIN VERBOSE
+	 * as well as EXPLAIN (ANALYZE, VERBOSE).
+	 */
+	if (es->verbose && nodeTag(plan) == T_HashJoin &&
+		plan_is_vectorized(planstate->state))
+	{
+		VecHashJoinState *vhj = (VecHashJoinState *) planstate;
+		const char *hj_method = NULL;
+
+		switch (vhj->method)
+		{
+			case VEC_HJ_METHOD_SONIC:
+				hj_method = "Sonic";
+				break;
+			case VEC_HJ_METHOD_NORMAL:
+				hj_method = "Normal";
+				break;
+			case VEC_HJ_METHOD_UNSET:
+				break;
+		}
+
+		if (hj_method)
+		{
+			if (es->format == EXPLAIN_FORMAT_TEXT)
+			{
+				appendStringInfoSpaces(es->str, es->indent * 2);
+				appendStringInfo(es->str, "Vec Hash Join Method:  %s\n",
+								 hj_method);
+			}
+			else
+				ExplainPropertyText("Vec Hash Join Method", hj_method, es);
+		}
+	}
+
 	/* quals, sort keys, etc */
 	switch (nodeTag(plan))
 	{

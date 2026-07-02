@@ -632,6 +632,13 @@ typedef struct CdbHashVec
 
 } CdbHashVec;
 
+typedef enum VecHashJoinMethod
+{
+	VEC_HJ_METHOD_UNSET = 0,	/* not routed through BuildHashjoin */
+	VEC_HJ_METHOD_SONIC,		/* Arrow Sonic join (sonic_join_node.cc) */
+	VEC_HJ_METHOD_NORMAL		/* legacy Arrow hash join (hash_join_node.cc) */
+} VecHashJoinMethod;
+
 typedef struct VecHashJoinState
 {
 	HashJoinState base;
@@ -652,6 +659,10 @@ typedef struct VecHashJoinState
 	int left_attr_in_joinqual;
 	int right_attr_in_joinqual;
 	bool skip ;
+
+	/* Which Arrow hash-join implementation BuildHashjoin routed this node to;
+	 * surfaced as "Vec Hash Join Method: Sonic|Normal" under EXPLAIN VERBOSE. */
+	VecHashJoinMethod method;
 } VecHashJoinState;
 
 typedef struct VecHashState
