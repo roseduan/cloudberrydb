@@ -30,6 +30,14 @@
         <parquet.version>1.15.2</parquet.version>
         <!-- avro 1.11.4: CVE-2024-47561 RCE / CVE-2023-39410 -->
         <avro.version>1.11.4</avro.version>
+        <!-- netty 4.1.135: HTTP/2 Rapid Reset/MadeYouReset DoS, request smuggling, DNS
+             cache poisoning etc. (overrides transitive 4.1.101); enforced via netty-bom below -->
+        <netty.version>4.1.135.Final</netty.version>
+        <!-- jackson 2.19.4: PolymorphicTypeValidator / array-subtype allowlist bypass
+             (overrides spring-boot 2.13.5); enforced via jackson-bom below -->
+        <jackson.version>2.19.4</jackson.version>
+        <!-- zookeeper 3.9.3: resource-consumption / auth fixes (overrides transitive 3.8.4) -->
+        <zookeeper.version>3.9.3</zookeeper.version>
     </properties>
 
     <dependencies>
@@ -445,6 +453,38 @@
                 <groupId>org.apache.parquet</groupId>
                 <artifactId>parquet-jackson</artifactId>
                 <version>${parquet.version}</version>
+            </dependency>
+            <!-- netty 4.1.135: HTTP/2 Rapid Reset / MadeYouReset DoS, request smuggling,
+                 DNS cache poisoning, SNI/SslHandler over-allocation etc. (overrides the
+                 transitive 4.1.101 pulled via hadoop/grpc); stay on the API-stable 4.1.x line -->
+            <dependency>
+                <groupId>io.netty</groupId>
+                <artifactId>netty-bom</artifactId>
+                <version>${netty.version}</version>
+                <type>pom</type>
+                <scope>import</scope>
+            </dependency>
+            <!-- jackson 2.19.4: PolymorphicTypeValidator bypass / array-subtype allowlist
+                 bypass (overrides spring-boot's 2.13.5 and iceberg's 2.15.2); Jackson 2.x
+                 still targets Java 8. Does NOT affect jackson 2.9.5 shaded inside hive-exec. -->
+            <dependency>
+                <groupId>com.fasterxml.jackson</groupId>
+                <artifactId>jackson-bom</artifactId>
+                <version>${jackson.version}</version>
+                <type>pom</type>
+                <scope>import</scope>
+            </dependency>
+            <!-- zookeeper 3.9.3: uncontrolled resource consumption / auth issues
+                 (overrides the transitive 3.8.4 pulled via hadoop/hive/curator) -->
+            <dependency>
+                <groupId>org.apache.zookeeper</groupId>
+                <artifactId>zookeeper</artifactId>
+                <version>${zookeeper.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>org.apache.zookeeper</groupId>
+                <artifactId>zookeeper-jute</artifactId>
+                <version>${zookeeper.version}</version>
             </dependency>
             <dependency>
                 <groupId>org.springframework.boot</groupId>
