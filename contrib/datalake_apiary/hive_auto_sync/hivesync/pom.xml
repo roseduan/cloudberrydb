@@ -41,6 +41,18 @@
             <artifactId>log4j-slf4j-impl</artifactId>
             <version>${log4j2.version}</version>
         </dependency>
+        <!-- #381: provide org.apache.log4j.* via the PATCHED log4j2 1.x bridge. HMS 3.1.0 was
+             written against log4j 1.x, but both providers (log4j:log4j and the bundled
+             log4j-1.2-api) are excluded from hive-standalone-metastore below; re-add the bridge
+             explicitly so any org.apache.log4j.* reference resolves without reintroducing
+             vulnerable log4j 1.x. Same bridge datalake_agent gets transitively via
+             spring-boot-starter-log4j2. -->
+        <dependency>
+            <groupId>org.apache.logging.log4j</groupId>
+            <artifactId>log4j-1.2-api</artifactId>
+            <version>${log4j2.version}</version>
+            <scope>runtime</scope>
+        </dependency>
         <dependency>
             <groupId>org.apache.hive</groupId>
             <artifactId>hive-standalone-metastore</artifactId>
