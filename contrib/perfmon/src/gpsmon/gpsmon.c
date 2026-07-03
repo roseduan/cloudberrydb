@@ -965,7 +965,20 @@ static void gx_accept(SOCKET sock, short event, void* arg)
 		int n = recv(nsock, p, q - p, 0);
 		if (n == -1)
 		{
+			if (errno == EINTR)
+				continue;
 			gpmon_warningx(FLINE, APR_FROM_OS_ERROR(errno), "recv failed");
+			close(nsock);
+			return;
+		}
+		if (n == 0)
+		{
+			/*
+			 * Peer closed before finishing HELLO handshake. Without this
+			 * branch p += 0 leaves the loop spinning on EOF and pins the
+			 * CPU (see issue #864).
+			 */
+			gpmon_warning(FLINE, "peer closed before hello complete");
 			close(nsock);
 			return;
 		}
