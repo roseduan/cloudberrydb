@@ -323,20 +323,6 @@ _PG_init(void)
                              GUC_GPDB_NEED_SYNC,
                              NULL, NULL, NULL);
 
-    DefineCustomBoolVariable("vector.enable_right_join_flip",
-                             "Toggle for the RIGHT_SEMI / RIGHT_ANTI hash "
-                             "join (Mark Join) plan. When on, ORCA's cost "
-                             "model picks the flipped form per join based on "
-                             "outer/inner cardinalities. Off forces the "
-                             "LEFT_SEMI/ANTI baseline via cost=infinity "
-                             "(emergency kill switch).",
-                             NULL,
-                             &enable_right_join_flip,
-                             true,
-                             PGC_USERSET,
-                             GUC_GPDB_NEED_SYNC,
-                             NULL, NULL, NULL);
-
     DefineCustomBoolVariable("vector.enable_sonic_hashjoin",
                              "Route a vectorized hash join to the Sonic join "
                              "engine when the join type, equi-key column types "

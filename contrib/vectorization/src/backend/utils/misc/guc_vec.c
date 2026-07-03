@@ -50,5 +50,4 @@ int topk_bound_threshold = 2000;
 bool enable_topk_runtime_filter = true;
 int limit_hashagg_max_total = 1000;
 bool enable_sonic_motion_direct_send = false;
-bool enable_right_join_flip = true;
 bool enable_sonic_hashjoin = false;

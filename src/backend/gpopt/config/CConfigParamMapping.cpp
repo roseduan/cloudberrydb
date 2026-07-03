@@ -623,6 +623,20 @@ CConfigParamMapping::PackConfigParamInBitset(
 			GPOPT_DISABLE_XFORM_TF(CXform::ExfRightOuterJoin2HashJoin));
 	}
 
+	if (!optimizer_enable_right_join_flip)
+	{
+		// disable flipping semi/anti hash joins into right semi/anti hash
+		// joins (build = outer side) if the corresponding GUC is turned off
+		traceflag_bitset->ExchangeSet(GPOPT_DISABLE_XFORM_TF(
+			CXform::ExfLeftSemiJoin2RightSemiHashJoin));
+		traceflag_bitset->ExchangeSet(GPOPT_DISABLE_XFORM_TF(
+			CXform::ExfLeftAntiSemiJoin2RightAntiSemiHashJoin));
+		traceflag_bitset->ExchangeSet(GPOPT_DISABLE_XFORM_TF(
+			CXform::ExfLeftSemiJoin2ParallelRightSemiHashJoin));
+		traceflag_bitset->ExchangeSet(GPOPT_DISABLE_XFORM_TF(
+			CXform::ExfLeftAntiSemiJoin2ParallelRightAntiSemiHashJoin));
+	}
+
 	if (create_vec_plan) {
 		traceflag_bitset->ExchangeSet(EopttraceEnableWindowHashAgg);
 	}

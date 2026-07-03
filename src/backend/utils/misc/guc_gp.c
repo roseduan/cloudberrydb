@@ -381,6 +381,7 @@ bool		optimizer_force_comprehensive_join_implementation;
 bool		optimizer_enable_replicated_table;
 bool		optimizer_enable_foreign_table;
 bool		optimizer_enable_right_outer_join;
+bool		optimizer_enable_right_join_flip;
 bool		optimizer_enable_query_parameter;
 bool		optimizer_force_window_hash_agg;
 int			optimizer_agg_pds_strategy;
@@ -3419,6 +3420,17 @@ struct config_bool ConfigureNamesBool_gp[] =
 		 GUC_NOT_IN_SAMPLE
 		},
 		&optimizer_enable_right_outer_join,
+		true,
+		NULL, NULL, NULL
+	},
+	{
+		{"optimizer_enable_right_join_flip", PGC_USERSET, QUERY_TUNING_METHOD,
+		 gettext_noop("Enable Orca to flip semi/anti hash joins into right "
+					  "semi/anti hash joins that build on the smaller side."),
+		 NULL,
+		 GUC_NOT_IN_SAMPLE
+		},
+		&optimizer_enable_right_join_flip,
 		true,
 		NULL, NULL, NULL
 	},

@@ -2874,24 +2874,4 @@ gpdb::IsVectorizationEnabled(void)
 	return false;
 }
 
-// Kill-switch for RIGHT_SEMI / RIGHT_ANTI cost. Default on. When the vec
-// extension is not loaded, the GUC is absent -- treat that as the same
-// state as vectorization being off (cost = infinity) so RIGHT_SEMI is
-// never picked outside vec-engine builds.
-bool
-gpdb::IsRightJoinFlipEnabled(void)
-{
-	GP_WRAP_START;
-	{
-		const char *val = GetConfigOption("vector.enable_right_join_flip",
-										  true /* missing_ok */,
-										  false /* restrict_privileged */);
-		if (NULL == val)
-			return false;
-		return (0 == strcmp(val, "on") || 0 == strcmp(val, "true"));
-	}
-	GP_WRAP_END;
-	return false;
-}
-
 // EOF

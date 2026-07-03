@@ -455,6 +455,7 @@
 		"optimizer_enable_tablescan",
 		"optimizer_enable_foreign_table",
 		"optimizer_enable_right_outer_join",
+		"optimizer_enable_right_join_flip",
 		"optimizer_enable_query_parameter",
 		"optimizer_force_window_hash_agg",
 		"optimizer_agg_pds_strategy",

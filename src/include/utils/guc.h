@@ -562,6 +562,7 @@ extern bool optimizer_force_comprehensive_join_implementation;
 extern bool optimizer_enable_replicated_table;
 extern bool optimizer_enable_foreign_table;
 extern bool optimizer_enable_right_outer_join;
+extern bool optimizer_enable_right_join_flip;
 extern bool optimizer_enable_query_parameter;
 extern bool optimizer_force_window_hash_agg;
 extern int optimizer_agg_pds_strategy;

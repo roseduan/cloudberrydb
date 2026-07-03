@@ -11,16 +11,6 @@
 
 #include "gpdbcost/CCostModelGPDB.h"
 
-// Forward-declared gpdb wrappers used by CostRightSemi/AntiHashJoin to gate
-// RIGHT_SEMI/ANTI on vec engine enabled and on the kill-switch GUC.
-// PG headers can't be included from ORCA C++ TUs (their macros conflict with
-// the C++ stdlib), so we use the same pattern as
-// CXformLeftSemiJoin2ParallelHashJoin.cpp.
-namespace gpdb {
-	bool IsVectorizationEnabled(void);
-	bool IsRightJoinFlipEnabled(void);
-}
-
 #include <filesystem>
 #include <limits>
 #include <cmath>
@@ -1667,8 +1657,10 @@ CCostModelGPDB::CostHashJoin(CMemoryPool *mp, CExpressionHandle &exprhdl,
 //		Cost of right semi hash join (PG-style: build = outer/left, probe =
 //		inner/right, finalize emits left rows that have at least one match).
 //		Reuses CostHashJoin formula with child[0]/child[1] roles swapped, then
-//		adds a finalize-phase scan term. Returns ∞ when vec=off (Mark Join
-//		execution only supported in vec engine path -- see design M5).
+//		adds a finalize-phase scan term. The optimizer_enable_right_join_flip
+//		kill-switch is enforced upstream by disabling the RIGHT_SEMI/ANTI
+//		implementation xforms (see CConfigParamMapping), so costing only ever
+//		sees these operators when the flip is enabled.
 //
 //---------------------------------------------------------------------------
 CCost
@@ -1693,15 +1685,6 @@ CCostModelGPDB::CostRightSemiHashJoin(CMemoryPool *mp,
 					exprhdl.Pop()->Eopid() ||
 				COperator::EopPhysicalParallelRightAntiSemiHashJoin ==
 					exprhdl.Pop()->Eopid());
-
-	// GUC kill-switch: when enable_right_join_flip=off, force ∞ so ORCA
-	// falls back to LEFT_SEMI/ANTI.  The translator now swaps DXL children
-	// to produce PG-canonical layout, so both PG executor and vec engine
-	// handle RIGHT_SEMI/ANTI correctly regardless of vectorization state.
-	if (!gpdb::IsRightJoinFlipEnabled())
-	{
-		return CCost(GPOS_FP_ABS_MAX);
-	}
 
 	//
 	// RIGHT_SEMI cost: DXL child 0 (LHS) = build, DXL child 1 (RHS) =

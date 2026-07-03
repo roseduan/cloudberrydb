@@ -68,15 +68,6 @@ extern int limit_hashagg_max_total;
 /* sonic motion direct send: emit segment-tagged batches from Sonic so that a
  * downstream Redistribute Motion can route each batch without re-hashing */
 extern bool enable_sonic_motion_direct_send;
-/*
- * Toggle for RIGHT_SEMI / RIGHT_ANTI hash join (Mark Join) plan. When on,
- * ORCA's cost model picks the right-flipped form per join based on relative
- * outer/inner cardinalities (small outer + large inner with duplicates). When
- * off, CostRightSemi/AntiHashJoin returns infinity so ORCA never selects the
- * new physical operators and the planner falls back to LEFT_SEMI/ANTI.
- * Default on; turn off as an emergency kill switch.
- */
-extern bool enable_right_join_flip;
 /* sonic hash join: route a vectorized HashJoin to Arrow's Sonic join instead
  * of the normal Arrow hash join, when the join type / key / payload types are
  * supported. Off forces all hash joins onto the normal Arrow hash join path. */
