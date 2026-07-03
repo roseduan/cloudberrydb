@@ -135,6 +135,17 @@ typedef struct PlanBuildContext
 	GList *left_hashkeys;
 	GList *right_hashkeys;
 
+	/*
+	 * Build-side (Arrow right) hash-key column names, in hj_InnerHashKeys
+	 * order, recorded by build_join_project_options().  For RIGHT_SEMI /
+	 * RIGHT_ANTI the join emits only the build side, so a surviving
+	 * OUTER_VAR that is a hash key must resolve to the equal-valued build
+	 * column; this list lets expr_to_arrow_expression() look that name up
+	 * by key position instead of re-deriving it (which would have to
+	 * duplicate the Diff-A / joinqual_N naming rules).
+	 */
+	List *right_key_names;
+
 	/* nestloopjoin related */
 	bool is_nestloopjoin;
 
@@ -1283,9 +1294,19 @@ expr_to_arrow_expression(Expr *node, PlanBuildContext *pcontext)
 				 * output schema has no LEFT_PREFIX columns.  A surviving
 				 * OUTER_VAR in the targetlist can therefore only be a hash key
 				 * whose value is, by the equijoin condition, identical to the
-				 * matching inner key.  Map it to the corresponding
-				 * right_joinqual_N column that the build-side projection
-				 * already carries.
+				 * matching inner key.  Map it to the build-side column that
+				 * carries that inner key.
+				 *
+				 * The build-side projection does not name its key columns
+				 * predictably: build_join_project_options() reuses a
+				 * passthrough column (<RIGHT_PREFIX><attname>) for a plain-Var
+				 * key and only synthesizes right_joinqual_N for expression keys,
+				 * so the column name cannot be re-derived from the key position
+				 * here.  Instead we read the exact name the producer recorded in
+				 * pcontext->right_key_names, indexed by hash-key position.  The
+				 * equijoin pairs outer key i with inner key i, so the outer key
+				 * that matches this OUTER_VAR and the recorded build-side name
+				 * share the same index.
 				 */
 				if (attname == NULL && var->varno == OUTER_VAR &&
 					pcontext->is_hashjoin && pcontext->is_hashjoin_after_node &&
@@ -1307,21 +1328,22 @@ expr_to_arrow_expression(Expr *node, PlanBuildContext *pcontext)
 							if (keystate != NULL && IsA(keystate->expr, Var) &&
 								((Var *) keystate->expr)->varattno == var->varattno)
 							{
-								/*
-								 * Build-side projection names the i-th hash key
-								 * "right_joinqual_i" (see build_join_project_
-								 * options).  The equijoin guarantees this column
-								 * equals the requested probe-side key, so it is
-								 * the correct substitute in the build-only output.
-								 */
-								char	   *jq = psprintf("%sjoinqual_%d",
-													  RIGHT_PREFIX, idx);
-								g_autoptr(GArrowField) f =
-									garrow_schema_get_field_by_name(pcontext->inputschema, jq);
+								if (idx < list_length(pcontext->right_key_names))
+								{
+									char	   *keyname = (char *)
+										list_nth(pcontext->right_key_names, idx);
+									g_autoptr(GArrowField) f =
+										garrow_schema_get_field_by_name(pcontext->inputschema, keyname);
 
-								if (f != NULL)
-									attname = garrow_field_get_name(f);
-								pfree(jq);
+									/*
+									 * keyname is owned by right_key_names (freed
+									 * after BuildProject), so it stays valid for
+									 * the rest of this resolution; f is only used
+									 * to confirm the column is present.
+									 */
+									if (f != NULL)
+										attname = keyname;
+								}
 								break;
 							}
 							idx++;
@@ -1774,6 +1796,7 @@ BuildVecPlan(PlanState *planstate, VecExecuteState *estate)
 	pcontext.right_proj_schema = NULL;
 	pcontext.left_hashkeys = NULL;
 	pcontext.right_hashkeys = NULL;
+	pcontext.right_key_names = NIL;
 	pcontext.inputschema = NULL;
 	pcontext.is_case_when = false;
 	pcontext.is_assertop = false;
@@ -2155,6 +2178,9 @@ BuildJoinPlan(PlanBuildContext *pcontext, VecExecuteState *estate)
 	right_fields = garrow_schema_get_fields(pcontext->inputschema);
 	pcontext->right_in_schema = garrow_schema_new(right_fields);
 	pcontext->is_left_schema = false;
+	/* Recorded by build_join_project_options() for the build side below;
+	 * consumed by the RIGHT_SEMI/ANTI Var resolver in BuildProject(). */
+	pcontext->right_key_names = NIL;
 	right_source_node = BuildSource(pcontext);
 	right_proj_node = BuildJoinProject(arrow_right_keys, right_source_node, pcontext);
 
@@ -2211,6 +2237,8 @@ BuildJoinPlan(PlanBuildContext *pcontext, VecExecuteState *estate)
 	ARROW_FREE(GArrowSchema, &pcontext->inputschema);
 	garrow_list_free_ptr(&left_fields);
 	garrow_list_free_ptr(&right_fields);
+	list_free_deep(pcontext->right_key_names);
+	pcontext->right_key_names = NIL;
 }
 
 static void
@@ -2997,6 +3025,8 @@ build_join_project_options(List *hashkeys, GArrowExecuteNode *input, PlanBuildCo
 			else
 			{
 				pcontext->right_hashkeys = garrow_list_append_ptr(pcontext->right_hashkeys, field);
+				pcontext->right_key_names = lappend(pcontext->right_key_names,
+													pstrdup(reuse_name));
 			}
 			continue;
 		}
@@ -3014,6 +3044,8 @@ build_join_project_options(List *hashkeys, GArrowExecuteNode *input, PlanBuildCo
 		else
 		{
 			pcontext->right_hashkeys = garrow_list_append_ptr(pcontext->right_hashkeys, field);
+			pcontext->right_key_names = lappend(pcontext->right_key_names,
+												pstrdup(prefix_name));
 		}
 		names[j++] = prefix_name;
 	}
@@ -4848,6 +4880,17 @@ CleanupArrowSpillFiles(int code, Datum arg)
  * cannot handle is rejected at plan build (Status::NotImplemented -> GError ->
  * elog(ERROR)) rather than falling back, so keep these in sync when extending
  * sonic.
+ *
+ * The hard ERROR (rather than silently falling back to the normal Arrow hash
+ * join) is deliberate: it makes a mirror that has drifted out of sync with
+ * sonic_join_node.cc fail loudly instead of silently degrading, and it keeps
+ * the intentional per-type exclusions below (e.g. LASJ_NOTIN's NULL-aware
+ * semantics, which sonic does not model) as explicit, documented decisions.
+ * The trade-off is that this C-side whitelist must be maintained by hand in
+ * lockstep with the C++ side; that drift is a known maintenance cost, not a
+ * live bug.  A "try sonic, fall back on NotImplemented" design would remove the
+ * duplication but would mask real sonic build failures and drop the documented
+ * gating, so it is intentionally NOT done here.
  */
 static bool
 sonic_join_supports_equal_key_type(GArrowType id)
@@ -4873,18 +4916,17 @@ sonic_join_supports_equal_key_type(GArrowType id)
 static bool
 sonic_join_supports_payload_type(GArrowType id)
 {
-	/* sonic_join_node.cc allowed_types (build/probe column types) */
+	/*
+	 * sonic_join_node.cc allowed_types (build/probe column types) is a
+	 * superset of the equal-key set, so delegate for the shared cases and
+	 * only list the payload-only additions here.  Keeping the two predicates
+	 * in a subset relationship means an integer key type can never be
+	 * accepted as a payload but rejected as an equi-key (or vice versa).
+	 */
+	if (sonic_join_supports_equal_key_type(id))
+		return true;
 	switch (id)
 	{
-		case GARROW_TYPE_BOOLEAN:
-		case GARROW_TYPE_INT8:
-		case GARROW_TYPE_INT16:
-		case GARROW_TYPE_INT32:
-		case GARROW_TYPE_INT64:
-		case GARROW_TYPE_UINT8:
-		case GARROW_TYPE_UINT16:
-		case GARROW_TYPE_UINT32:
-		case GARROW_TYPE_UINT64:
 		case GARROW_TYPE_FLOAT:
 		case GARROW_TYPE_DOUBLE:
 		case GARROW_TYPE_NUMERIC128:
@@ -4980,10 +5022,18 @@ sonic_join_filter_supported(List *joinqual)
 	opname = get_opname(op->opno);
 	if (opname == NULL)
 		return false;
-	if (strcmp(opname, "<>") != 0 && strcmp(opname, "<") != 0 &&
-		strcmp(opname, "<=") != 0 && strcmp(opname, ">") != 0 &&
-		strcmp(opname, ">=") != 0)
-		return false;
+	{
+		/* get_opname() palloc's a copy; free it on every path below */
+		bool		op_ok = (strcmp(opname, "<>") == 0 ||
+							 strcmp(opname, "<") == 0 ||
+							 strcmp(opname, "<=") == 0 ||
+							 strcmp(opname, ">") == 0 ||
+							 strcmp(opname, ">=") == 0);
+
+		pfree(opname);
+		if (!op_ok)
+			return false;
+	}
 
 	/* both arguments must be top-level Vars, one from each side */
 	if (!IsA(linitial(op->args), Var) || !IsA(lsecond(op->args), Var))
@@ -5012,10 +5062,15 @@ sonic_join_filter_supported(List *joinqual)
  * sonic's equal-key set, and all probe/build column types in sonic's payload
  * set.  left_keys/right_keys are the equi-key fields; left_fields/right_fields
  * are the full probe/build input schemas (the columns sonic must materialize).
+ *
+ * The residual-filter gate keys off joinqual (the PG qual list) directly, not
+ * the built Arrow filter expression: joinqual is the authoritative "is there a
+ * residual join filter" source, so we never depend on the Arrow expression
+ * being non-NULL iff joinqual is non-NIL.
  */
 static bool
 is_sonic_join_compatible(GArrowJoinType type, bool nonequijoin,
-						 GArrowExpression *filter, List *joinqual,
+						 List *joinqual,
 						 GList *left_keys, GList *right_keys,
 						 GList *left_fields, GList *right_fields)
 {
@@ -5023,7 +5078,7 @@ is_sonic_join_compatible(GArrowJoinType type, bool nonequijoin,
 		return false;
 	if (nonequijoin)			/* sonic only supports JoinKeyCmp::EQ */
 		return false;
-	if (filter != NULL && !sonic_join_filter_supported(joinqual))
+	if (joinqual != NIL && !sonic_join_filter_supported(joinqual))
 		return false;			/* residual filter sonic cannot evaluate */
 	if (!sonic_join_all_fields_supported(left_keys, sonic_join_supports_equal_key_type) ||
 		!sonic_join_all_fields_supported(right_keys, sonic_join_supports_equal_key_type))
@@ -5098,7 +5153,7 @@ BuildHashjoin(PlanBuildContext *pcontext, GArrowExecuteNode *left, GArrowExecute
 		elog(ERROR, "Failed to create the hashjoin node, cause: %s", error->message);
 
 	if (enable_sonic_hashjoin &&
-		is_sonic_join_compatible(type, node->hj_nonequijoin, filter_expr, joinqual,
+		is_sonic_join_compatible(type, node->hj_nonequijoin, joinqual,
 								 pcontext->left_hashkeys, pcontext->right_hashkeys,
 								 lkeys, rkeys))
 	{

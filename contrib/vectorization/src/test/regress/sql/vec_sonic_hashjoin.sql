@@ -173,6 +173,39 @@ SELECT count(*) AS c
 FROM hj_small
 WHERE NOT EXISTS (SELECT 1 FROM hj_big WHERE hj_big.id = hj_small.id);
 
+-- E3/E4: RIGHT SEMI / RIGHT ANTI that PROJECT the outer hash key.
+--     The build side (Arrow right / inner) is the only side emitted, so the
+--     outer key hj_small.id surviving in the target list must resolve to the
+--     equal-valued build column.  build_join_project_options() reuses a
+--     passthrough column (not right_joinqual_N) for a plain-Var key, so the
+--     resolver in expr_to_arrow_expression() must read the recorded key column
+--     name by position; the earlier E1/E2 count(*) queries never exercise this
+--     because no OUTER_VAR survives into the output.  EXPLAIN first to confirm
+--     the executed shape still routes through Right Semi/Anti + Sonic.
+-- E3: RIGHT SEMI projecting outer key — 10 rows (id 991..1000).
+EXPLAIN (VERBOSE ON, COSTS OFF)
+SELECT hj_small.id
+FROM hj_small
+WHERE hj_small.id IN (SELECT id FROM hj_big)
+ORDER BY hj_small.id;
+
+SELECT hj_small.id
+FROM hj_small
+WHERE hj_small.id IN (SELECT id FROM hj_big)
+ORDER BY hj_small.id;
+
+-- E4: RIGHT ANTI projecting outer key — 10 rows (id 1001..1010).
+EXPLAIN (VERBOSE ON, COSTS OFF)
+SELECT hj_small.id
+FROM hj_small
+WHERE NOT EXISTS (SELECT 1 FROM hj_big WHERE hj_big.id = hj_small.id)
+ORDER BY hj_small.id;
+
+SELECT hj_small.id
+FROM hj_small
+WHERE NOT EXISTS (SELECT 1 FROM hj_big WHERE hj_big.id = hj_small.id)
+ORDER BY hj_small.id;
+
 SET optimizer = off;
 
 -- ------------------------------------------------------------------

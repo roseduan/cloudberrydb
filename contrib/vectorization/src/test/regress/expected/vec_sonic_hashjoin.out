@@ -340,6 +340,111 @@ WHERE NOT EXISTS (SELECT 1 FROM hj_big WHERE hj_big.id = hj_small.id);
  10
 (1 row)
 
+-- E3/E4: RIGHT SEMI / RIGHT ANTI that PROJECT the outer hash key.
+--     The build side (Arrow right / inner) is the only side emitted, so the
+--     outer key hj_small.id surviving in the target list must resolve to the
+--     equal-valued build column.  build_join_project_options() reuses a
+--     passthrough column (not right_joinqual_N) for a plain-Var key, so the
+--     resolver in expr_to_arrow_expression() must read the recorded key column
+--     name by position; the earlier E1/E2 count(*) queries never exercise this
+--     because no OUTER_VAR survives into the output.  EXPLAIN first to confirm
+--     the executed shape still routes through Right Semi/Anti + Sonic.
+-- E3: RIGHT SEMI projecting outer key — 10 rows (id 991..1000).
+EXPLAIN (VERBOSE ON, COSTS OFF)
+SELECT hj_small.id
+FROM hj_small
+WHERE hj_small.id IN (SELECT id FROM hj_big)
+ORDER BY hj_small.id;
+                          QUERY PLAN                           
+---------------------------------------------------------------
+ Vec Gather Motion 3:1  (slice1; segments: 3)
+   Output: hj_small.id
+   Merge Key: hj_small.id
+   ->  Vec Sort
+         Output: hj_small.id
+         Sort Key: hj_small.id
+         Vec Plan Merge:  1 child
+         ->  Vec Hash Right Semi Join
+               Output: hj_small.id
+               Vec Hash Join Method:  Sonic
+               Hash Cond: (hj_small.id = hj_big.id)
+               Vec Plan Merge:  2 children
+               ->  Vec Seq Scan on vec_sonic_hj.hj_big
+                     Output: hj_big.id
+               ->  Vec Hash
+                     Output: hj_small.id
+                     ->  Vec Seq Scan on vec_sonic_hj.hj_small
+                           Output: hj_small.id
+ Settings: optimizer = 'on'
+ Optimizer: GPORCA
+(20 rows)
+
+SELECT hj_small.id
+FROM hj_small
+WHERE hj_small.id IN (SELECT id FROM hj_big)
+ORDER BY hj_small.id;
+  id  
+------
+  991
+  992
+  993
+  994
+  995
+  996
+  997
+  998
+  999
+ 1000
+(10 rows)
+
+-- E4: RIGHT ANTI projecting outer key — 10 rows (id 1001..1010).
+EXPLAIN (VERBOSE ON, COSTS OFF)
+SELECT hj_small.id
+FROM hj_small
+WHERE NOT EXISTS (SELECT 1 FROM hj_big WHERE hj_big.id = hj_small.id)
+ORDER BY hj_small.id;
+                          QUERY PLAN                           
+---------------------------------------------------------------
+ Vec Gather Motion 3:1  (slice1; segments: 3)
+   Output: hj_small.id
+   Merge Key: hj_small.id
+   ->  Vec Sort
+         Output: hj_small.id
+         Sort Key: hj_small.id
+         Vec Plan Merge:  1 child
+         ->  Vec Hash Right Anti Join
+               Output: hj_small.id
+               Vec Hash Join Method:  Sonic
+               Hash Cond: (hj_small.id = hj_big.id)
+               Vec Plan Merge:  2 children
+               ->  Vec Seq Scan on vec_sonic_hj.hj_big
+                     Output: 1, hj_big.id
+               ->  Vec Hash
+                     Output: hj_small.id
+                     ->  Vec Seq Scan on vec_sonic_hj.hj_small
+                           Output: hj_small.id
+ Settings: optimizer = 'on'
+ Optimizer: GPORCA
+(20 rows)
+
+SELECT hj_small.id
+FROM hj_small
+WHERE NOT EXISTS (SELECT 1 FROM hj_big WHERE hj_big.id = hj_small.id)
+ORDER BY hj_small.id;
+  id  
+------
+ 1001
+ 1002
+ 1003
+ 1004
+ 1005
+ 1006
+ 1007
+ 1008
+ 1009
+ 1010
+(10 rows)
+
 SET optimizer = off;
 -- ------------------------------------------------------------------
 -- F) Edge cases: empty build table
