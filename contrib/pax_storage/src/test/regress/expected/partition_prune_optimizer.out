@@ -1391,7 +1391,7 @@ NOTICE:  One or more columns in the following table(s) do not have statistics: c
 HINT:  For non-partitioned tables, run analyze <table_name>(<column_list>). For partitioned tables, run analyze rootpartition <table_name>(<column_list>). See log for columns missing statistics.
                         QUERY PLAN                         
 -----------------------------------------------------------
- Gather Motion 3:1  (slice1; segments: 3)
+ Gather Motion 2:1  (slice1; segments: 2)
    ->  Dynamic Seq Scan on coercepart
          Number of partitions to scan: 1 (out of 3)
          Filter: ((a)::text = ANY ('{ab," 125"}'::text[]))
@@ -1451,7 +1451,7 @@ NOTICE:  One or more columns in the following table(s) do not have statistics: c
 HINT:  For non-partitioned tables, run analyze <table_name>(<column_list>). For partitioned tables, run analyze rootpartition <table_name>(<column_list>). See log for columns missing statistics.
                       QUERY PLAN                       
 -------------------------------------------------------
- Gather Motion 3:1  (slice1; segments: 3)
+ Gather Motion 2:1  (slice1; segments: 2)
    ->  Dynamic Seq Scan on coercepart
          Number of partitions to scan: 2 (out of 3)
          Filter: ((a)::text = ANY ('{ab,bc}'::text[]))
@@ -1499,7 +1499,7 @@ NOTICE:  One or more columns in the following table(s) do not have statistics: c
 HINT:  For non-partitioned tables, run analyze <table_name>(<column_list>). For partitioned tables, run analyze rootpartition <table_name>(<column_list>). See log for columns missing statistics.
                       QUERY PLAN                       
 -------------------------------------------------------
- Gather Motion 3:1  (slice1; segments: 3)
+ Gather Motion 2:1  (slice1; segments: 2)
    ->  Dynamic Seq Scan on coercepart
          Number of partitions to scan: 2 (out of 3)
          Filter: ((a)::text = ALL ('{ab,bc}'::text[]))
@@ -3841,7 +3841,7 @@ NOTICE:  One or more columns in the following table(s) do not have statistics: p
 HINT:  For non-partitioned tables, run analyze <table_name>(<column_list>). For partitioned tables, run analyze rootpartition <table_name>(<column_list>). See log for columns missing statistics.
                               QUERY PLAN                              
 ----------------------------------------------------------------------
- Gather Motion 3:1  (slice1; segments: 3)
+ Gather Motion 2:1  (slice1; segments: 2)
    ->  Dynamic Seq Scan on pp_arrpart
          Number of partitions to scan: 2 (out of 2)
          Filter: ((a = '{4,5}'::integer[]) OR (a = '{1}'::integer[]))
@@ -3909,7 +3909,7 @@ explain (costs off) select * from pph_arrpart where a = '{1, 2}';
 explain (costs off) select * from pph_arrpart where a in ('{4, 5}', '{1}');
                                  QUERY PLAN                                 
 ----------------------------------------------------------------------------
- Gather Motion 3:1  (slice1; segments: 3)
+ Gather Motion 2:1  (slice1; segments: 2)
    ->  Dynamic Seq Scan on pph_arrpart
          Number of partitions to scan: 2 (out of 2)
          Filter: ((a = '{4,5}'::integer[]) OR (a = '{1}'::integer[]))

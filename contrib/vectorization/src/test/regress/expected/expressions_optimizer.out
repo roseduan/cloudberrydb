@@ -420,7 +420,7 @@ GP_IGNORE:(4 rows)
 explain (costs off) select * from t1 where c1 in ('a', 'b');
 QUERY PLAN
 ___________
- Vec Gather Motion 3:1  (slice1; segments: 3)
+ Vec Gather Motion 2:1  (slice1; segments: 2)
    ->  Vec Seq Scan on t1
          Filter: (c1 = ANY ('{a,b}'::text[]))
 GP_IGNORE:(4 rows)

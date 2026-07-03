@@ -1907,7 +1907,7 @@ explain (costs off) select * from list_parted where a is not null;
 explain (costs off) select * from list_parted where a in ('ab', 'cd', 'ef');
                            QUERY PLAN                           
 ----------------------------------------------------------
- Gather Motion 3:1  (slice1; segments: 3)
+ Gather Motion 2:1  (slice1; segments: 2)
    ->  Dynamic Seq Scan on list_parted
          Number of partitions to scan: 2 (out of 3)
          Filter: ((a)::text = ANY ('{ab,cd,ef}'::text[]))
@@ -1917,7 +1917,7 @@ explain (costs off) select * from list_parted where a in ('ab', 'cd', 'ef');
 explain (costs off) select * from list_parted where a = 'ab' or a in (null, 'cd');
                             QUERY PLAN                            
 ---------------------------------------------------------------------------------------
- Gather Motion 3:1  (slice1; segments: 3)
+ Gather Motion 2:1  (slice1; segments: 2)
    ->  Dynamic Seq Scan on list_parted
          Number of partitions to scan: 1 (out of 3)
          Filter: (((a)::text = 'ab'::text) OR ((a)::text = ANY ('{NULL,cd}'::text[])))
