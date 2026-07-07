@@ -62,6 +62,13 @@ step "s1delete"	{ DELETE FROM heaptest; }
 step "s1setfreezeminage" { SET vacuum_freeze_min_age = 0; }
 step "s1vacuumfreeze" { VACUUM heaptest; }
 step "s1select" { SELECT COUNT(*) FROM heaptest; }
+# A dispatched SELECT establishes a distributed snapshot on every segment. This
+# is what runs DistributedLog_AdvanceOldestXmin() on the QEs and pushes the
+# lazily-cached DistributedLogShared->oldestXmin forward past any transaction
+# that is no longer needed. VACUUM's freeze cutoff only *reads* that cached
+# value (via DistributedLog_GetOldestXmin), so an advance must have already
+# happened before the freezing VACUUM runs.
+step "s1advancexmin" { SELECT count(*) FROM heaptest; }
 
 session "s2"
 step "s2begin" { SET Debug_print_full_dtm=on; BEGIN ISOLATION LEVEL REPEATABLE READ;
@@ -101,7 +108,14 @@ permutation "s2begin" "s1delete" "s1setfreezeminage" "s1vacuumfreeze" "s2select"
 #
 # So, its pretty simple sequence, start transaction, delete and abort. Then
 # vacuum freeze and check if xmax was freezed means set to invalidXid.
-permutation "s4begin" "s4delete" "s4abort" "s1setfreezeminage" "s1vacuumfreeze" "s2select"
+#
+# NOTE: "s1advancexmin" (a dispatched SELECT) is required between the abort and
+# the freezing VACUUM. Unlike the other permutations, this one has no other
+# distributed query in between, so without it the distributed "oldest xmin" on
+# the segments may not yet have advanced past the aborted deleter's XID by the
+# time VACUUM reads its freeze cutoff, leaving xmax unfrozen (NormalXid) and
+# making this test flaky.
+permutation "s4begin" "s4delete" "s4abort" "s1setfreezeminage" "s1advancexmin" "s1vacuumfreeze" "s2select"
 
 # Intent of this permutation is to validate xmin of tuple is not freezed
 # incorrectly just because its lower than local lowest xmin for that segment but
