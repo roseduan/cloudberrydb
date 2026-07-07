@@ -159,7 +159,11 @@ DECLARE
  100 
 (25 rows)
 
-1: SELECT * FROM gp_wait_parallel_retrieve_cursor('c1', 0);
+-- Use timeout=-1 (blocking) to reliably detect the finished state. timeout=0
+-- (nowait) creates a race: the QE sends ENDPOINT_FINISHED_ACK_MSG asynchronously
+-- after the retrieve session completes, so a non-blocking poll may fire before
+-- the NOTIFY arrives at the QD socket.
+1: SELECT * FROM gp_wait_parallel_retrieve_cursor('c1', -1);
  finished 
 ----------
  t        
@@ -426,7 +430,9 @@ DECLARE
  f        | t        | FINISHED 
 (1 row)
 
-1: SELECT * FROM gp_wait_parallel_retrieve_cursor('c2', 0);
+-- Use timeout=-1 (blocking) for the same reason as Test1: the QE's finished
+-- ACK arrives asynchronously after RETRIEVE ALL returns in the test framework.
+1: SELECT * FROM gp_wait_parallel_retrieve_cursor('c2', -1);
  finished 
 ----------
  t        
@@ -1394,3 +1400,29 @@ CLOSE
 2: END;
 END
 
+---------- Test9: Test parallel retrieve cursor auto-check
+1: drop table if exists t1;
+DROP
+1: create table t1(a int, b int);
+CREATE
+1: insert into t1 values (generate_series(1,100000), 1);
+INSERT 100000
+1: insert into t1 values (-1, 1);
+INSERT 1
+1: BEGIN;
+BEGIN
+1: DECLARE c9 PARALLEL RETRIEVE CURSOR FOR select count(*) from t1 group by sqrt(a); select count() from gp_get_endpoints();
+ count 
+-------
+ 3     
+(1 row)
+-- GP_PARALLEL_RETRIEVE_CURSOR_CHECK_TIMEOUT is 10s, we sleep 12 to check all QEs are already finished.
+1: ! sleep 12;
+
+1: SELECT endpointname,auth_token,hostname,port,state FROM gp_get_endpoints() WHERE cursorname='c9';
+ endpointname | auth_token | hostname | port | state 
+--------------+------------+----------+------+-------
+(0 rows)
+1: rollback;
+ERROR:  cannot take square root of a negative number  (seg2 slice1 127.0.1.1:7004 pid=35247)
+1q: ... <quitting>

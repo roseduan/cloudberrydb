@@ -159,7 +159,11 @@ DECLARE
  100 
 (25 rows)
 
-1: SELECT * FROM gp_wait_parallel_retrieve_cursor('c1', 0);
+-- Use timeout=-1 (blocking) to reliably detect the finished state. timeout=0
+-- (nowait) creates a race: the QE sends ENDPOINT_FINISHED_ACK_MSG asynchronously
+-- after the retrieve session completes, so a non-blocking poll may fire before
+-- the NOTIFY arrives at the QD socket.
+1: SELECT * FROM gp_wait_parallel_retrieve_cursor('c1', -1);
  finished 
 ----------
  t        
@@ -426,7 +430,9 @@ DECLARE
  f        | t        | FINISHED 
 (1 row)
 
-1: SELECT * FROM gp_wait_parallel_retrieve_cursor('c2', 0);
+-- Use timeout=-1 (blocking) for the same reason as Test1: the QE's finished
+-- ACK arrives asynchronously after RETRIEVE ALL returns in the test framework.
+1: SELECT * FROM gp_wait_parallel_retrieve_cursor('c2', -1);
  finished 
 ----------
  t        

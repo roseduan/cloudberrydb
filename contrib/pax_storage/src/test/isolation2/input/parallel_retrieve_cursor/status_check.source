@@ -14,7 +14,11 @@ insert into t1 select generate_series(1,100);
 *U: @pre_run 'set_endpoint_variable @ENDPOINT1': SELECT state FROM gp_get_segment_endpoints() WHERE endpointname='@ENDPOINT1';
 *R: @pre_run 'set_endpoint_variable @ENDPOINT1': RETRIEVE ALL FROM ENDPOINT "@ENDPOINT1";
 
-1: SELECT * FROM gp_wait_parallel_retrieve_cursor('c1', 0);
+-- Use timeout=-1 (blocking) to reliably detect the finished state. timeout=0
+-- (nowait) creates a race: the QE sends ENDPOINT_FINISHED_ACK_MSG asynchronously
+-- after the retrieve session completes, so a non-blocking poll may fire before
+-- the NOTIFY arrives at the QD socket.
+1: SELECT * FROM gp_wait_parallel_retrieve_cursor('c1', -1);
 1: CLOSE c1;
 -- check no endpoint info
 1: SELECT auth_token,state FROM gp_get_endpoints() WHERE cursorname='c1';
@@ -48,7 +52,9 @@ insert into t1 select generate_series(1,100);
 2: SELECT state FROM gp_get_endpoints() WHERE cursorname='c2';
 *U: SELECT senderpid<>-1, receiverpid<>-1, state FROM gp_get_segment_endpoints() WHERE cursorname='c2';
 
-1: SELECT * FROM gp_wait_parallel_retrieve_cursor('c2', 0);
+-- Use timeout=-1 (blocking) for the same reason as Test1: the QE's finished
+-- ACK arrives asynchronously after RETRIEVE ALL returns in the test framework.
+1: SELECT * FROM gp_wait_parallel_retrieve_cursor('c2', -1);
 1: COMMIT;
 -- check the cursor auto closed when transaction closed
 -- check no endpoint info
@@ -256,3 +262,15 @@ insert into t1 select generate_series(1,100);
 2: CLOSE c8;
 2: END;
 
+---------- Test9: Test parallel retrieve cursor auto-check
+1: drop table if exists t1;
+1: create table t1(a int, b int);
+1: insert into t1 values (generate_series(1,100000), 1);
+1: insert into t1 values (-1, 1);
+1: BEGIN;
+1: DECLARE c9 PARALLEL RETRIEVE CURSOR FOR select count(*) from t1 group by sqrt(a); select count() from gp_get_endpoints();
+-- GP_PARALLEL_RETRIEVE_CURSOR_CHECK_TIMEOUT is 10s, we sleep 12 to check all QEs are already finished.
+1: ! sleep 12;
+1: SELECT endpointname,auth_token,hostname,port,state FROM gp_get_endpoints() WHERE cursorname='c9';
+1: rollback;
+1q:
