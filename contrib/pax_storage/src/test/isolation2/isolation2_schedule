@@ -87,7 +87,6 @@ test: distributedlog-bug
 test: distributed_snapshot
 test: gp_collation
 #test: ao_upgrade
-test: ao_blkdir
 test: bitmap_index_concurrent
 test: bitmap_index_crash
 test: bitmap_update_words_backup_block

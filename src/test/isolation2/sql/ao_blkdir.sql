@@ -152,6 +152,12 @@ CREATE INDEX ao_blkdir_test_rowcount_idx ON ao_blkdir_test_rowcount(i);
 4: COMMIT;
 
 DELETE FROM ao_blkdir_test_rowcount WHERE j = 7;
+-- Run VACUUM ANALYZE twice: the first pass marks dead segments AWAITING_DROP
+-- and compacts them; the second pass guarantees the drop because its compact
+-- phase advances DistributedLogShared->oldestXmin past the first pass's
+-- L_compact, making the visible_to_all check in
+-- AppendOptimizedCollectDeadSegments() deterministically TRUE.
+VACUUM ANALYZE ao_blkdir_test_rowcount;
 VACUUM ANALYZE ao_blkdir_test_rowcount;
 
 SELECT segno, sum(row_count) AS totalrows FROM
@@ -161,6 +167,9 @@ SELECT segno, sum(tupcount) AS totalrows FROM
   gp_toolkit.__gp_aoseg('ao_blkdir_test_rowcount') WHERE segment_id = 0 GROUP BY segno;
 
 UPDATE ao_blkdir_test_rowcount SET i = i + 1;
+-- Same two-pass pattern for the second round of dead segments (segnos 1 and 2
+-- after the UPDATE).
+VACUUM ANALYZE ao_blkdir_test_rowcount;
 VACUUM ANALYZE ao_blkdir_test_rowcount;
 
 SELECT segno, sum(row_count) AS totalrows FROM
@@ -336,6 +345,12 @@ CREATE INDEX aoco_blkdir_test_rowcount_idx ON aoco_blkdir_test_rowcount(i);
 4: COMMIT;
 
 DELETE FROM aoco_blkdir_test_rowcount WHERE j = 7;
+-- Run VACUUM ANALYZE twice: the first pass marks dead segments AWAITING_DROP
+-- and compacts them; the second pass guarantees the drop because its compact
+-- phase advances DistributedLogShared->oldestXmin past the first pass's
+-- L_compact, making the visible_to_all check in
+-- AppendOptimizedCollectDeadSegments() deterministically TRUE.
+VACUUM ANALYZE aoco_blkdir_test_rowcount;
 VACUUM ANALYZE aoco_blkdir_test_rowcount;
 
 SELECT segno, columngroup_no, sum(row_count) AS totalrows FROM
@@ -345,6 +360,9 @@ SELECT segno, column_num, sum(tupcount) AS totalrows FROM
     gp_toolkit.__gp_aocsseg('aoco_blkdir_test_rowcount') WHERE segment_id = 0 GROUP BY segno, column_num;
 
 UPDATE aoco_blkdir_test_rowcount SET i = i + 1;
+-- Same two-pass pattern for the second round of dead segments (segnos 1 and 2
+-- after the UPDATE).
+VACUUM ANALYZE aoco_blkdir_test_rowcount;
 VACUUM ANALYZE aoco_blkdir_test_rowcount;
 
 SELECT segno, columngroup_no, sum(row_count) AS totalrows FROM

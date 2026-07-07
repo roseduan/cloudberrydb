@@ -428,6 +428,13 @@ COMMIT
 
 DELETE FROM ao_blkdir_test_rowcount WHERE j = 7;
 DELETE 200
+-- Run VACUUM ANALYZE twice: the first pass marks dead segments AWAITING_DROP
+-- and compacts them; the second pass guarantees the drop because its compact
+-- phase advances DistributedLogShared->oldestXmin past the first pass's
+-- L_compact, making the visible_to_all check in
+-- AppendOptimizedCollectDeadSegments() deterministically TRUE.
+VACUUM ANALYZE ao_blkdir_test_rowcount;
+VACUUM
 VACUUM ANALYZE ao_blkdir_test_rowcount;
 VACUUM
 
@@ -448,6 +455,10 @@ SELECT segno, sum(tupcount) AS totalrows FROM gp_toolkit.__gp_aoseg('ao_blkdir_t
 
 UPDATE ao_blkdir_test_rowcount SET i = i + 1;
 UPDATE 120
+-- Same two-pass pattern for the second round of dead segments (segnos 1 and 2
+-- after the UPDATE).
+VACUUM ANALYZE ao_blkdir_test_rowcount;
+VACUUM
 VACUUM ANALYZE ao_blkdir_test_rowcount;
 VACUUM
 
@@ -1093,6 +1104,13 @@ COMMIT
 
 DELETE FROM aoco_blkdir_test_rowcount WHERE j = 7;
 DELETE 200
+-- Run VACUUM ANALYZE twice: the first pass marks dead segments AWAITING_DROP
+-- and compacts them; the second pass guarantees the drop because its compact
+-- phase advances DistributedLogShared->oldestXmin past the first pass's
+-- L_compact, making the visible_to_all check in
+-- AppendOptimizedCollectDeadSegments() deterministically TRUE.
+VACUUM ANALYZE aoco_blkdir_test_rowcount;
+VACUUM
 VACUUM ANALYZE aoco_blkdir_test_rowcount;
 VACUUM
 
@@ -1119,6 +1137,10 @@ SELECT segno, column_num, sum(tupcount) AS totalrows FROM gp_toolkit.__gp_aocsse
 
 UPDATE aoco_blkdir_test_rowcount SET i = i + 1;
 UPDATE 120
+-- Same two-pass pattern for the second round of dead segments (segnos 1 and 2
+-- after the UPDATE).
+VACUUM ANALYZE aoco_blkdir_test_rowcount;
+VACUUM
 VACUUM ANALYZE aoco_blkdir_test_rowcount;
 VACUUM
 
