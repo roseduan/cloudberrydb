@@ -670,6 +670,21 @@ COrderedAggPreprocessor::PexprPreprocess(CMemoryPool *mp, CExpression *pexpr)
 	GPOS_ASSERT(nullptr != pexpr);
 
 	COperator *pop = pexpr->Pop();
+
+	// An ordered-set aggregate (percentile_cont/percentile_disc/median, i.e.
+	// EaggfunckindOrderedSet) is rewritten here into an order-sensitive
+	// gp_percentile_* aggregate fed by a Merge Gather over a Parallel Shared
+	// Scan.  The parallel shared scan does not preserve the sort order, so under
+	// a parallel plan the percentile can be computed over an unsorted stream and
+	// return a wrong (flaky) result.  Flag the query so the parallel scan xforms
+	// suppress parallel plans (keeping the correct serial path).  Done for both
+	// the scalar and the grouped cases.
+	if (COperator::EopLogicalGbAgg == pop->Eopid() &&
+		0 < (*pexpr)[1]->DeriveTotalOrderedAggs())
+	{
+		COptCtxt::PoctxtFromTLS()->SetHasOrderedAgg();
+	}
+
 	if (COperator::EopLogicalGbAgg == pop->Eopid() &&
 		0 == CLogicalGbAgg::PopConvert(pop)->Pdrgpcr()->Size() &&
 		0 < (*pexpr)[1]->DeriveTotalOrderedAggs())

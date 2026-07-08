@@ -87,6 +87,13 @@ CXformBitmapTableGet2ParallelBitmapTableScan::Exfp(CExpressionHandle &exprhdl) c
 		return CXform::ExfpNone;
 	}
 
+	// Ordered-set aggregates (percentile_cont etc.) must not run under
+	// worker-level parallelism; see COrderedAggPreprocessor::PexprPreprocess().
+	if (COptCtxt::PoctxtFromTLS()->FHasOrderedAgg())
+	{
+		return CXform::ExfpNone;
+	}
+
 	CLogicalBitmapTableGet *popGet = CLogicalBitmapTableGet::PopConvert(exprhdl.Pop());
 	CTableDescriptor *ptabdesc = popGet->Ptabdesc();
 

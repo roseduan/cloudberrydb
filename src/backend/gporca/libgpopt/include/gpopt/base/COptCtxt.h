@@ -111,6 +111,12 @@ private:
 	// the whole memo.
 	BOOL m_has_subquery_limit{false};
 
+	// does the query contain any ordered-set aggregate
+	// (percentile_cont/percentile_disc/median).  Set by
+	// COrderedAggPreprocessor::PexprPreprocess(); used by the worker-parallel
+	// xforms to keep such queries serial.
+	BOOL m_has_ordered_agg{false};
+
 	// does this plan have a direct dispatchable filter
 	CExpressionArray *m_direct_dispatchable_filters;
 
@@ -203,6 +209,12 @@ public:
 	}
 
 	void
+	SetHasOrderedAgg()
+	{
+		m_has_ordered_agg = true;
+	}
+
+	void
 	AddDirectDispatchableFilterCandidate(CExpression *filter_expression)
 	{
 		filter_expression->AddRef();
@@ -237,6 +249,12 @@ public:
 	FHasSubqueryLimit() const
 	{
 		return m_has_subquery_limit;
+	}
+
+	BOOL
+	FHasOrderedAgg() const
+	{
+		return m_has_ordered_agg;
 	}
 
 	CExpressionArray *

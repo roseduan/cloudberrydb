@@ -93,6 +93,13 @@ CXformImplementParallelSequence::Exfp(CExpressionHandle &exprhdl) const
 		return CXform::ExfpNone;
 	}
 
+	// Ordered-set aggregates (percentile_cont etc.) must not run under
+	// worker-level parallelism; see COrderedAggPreprocessor::PexprPreprocess().
+	if (COptCtxt::PoctxtFromTLS()->FHasOrderedAgg())
+	{
+		return CXform::ExfpNone;
+	}
+
 	/*
 	 * Skip parallel sequence when any child contains a Foreign Scan or a
 	 * replicated table.  Both force the corresponding CTE producer to run

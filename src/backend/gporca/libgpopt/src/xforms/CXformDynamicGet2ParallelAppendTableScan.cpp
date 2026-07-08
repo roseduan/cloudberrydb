@@ -29,6 +29,7 @@
 
 #include "gpos/base.h"
 
+#include "gpopt/base/COptCtxt.h"
 #include "gpopt/hints/CHintUtils.h"
 #include "gpopt/metadata/CTableDescriptor.h"
 #include "gpopt/operators/CLogicalDynamicGet.h"
@@ -78,6 +79,13 @@ CXformDynamicGet2ParallelAppendTableScan::Exfp(CExpressionHandle &exprhdl) const
 	// Subquery-level LIMIT lowers into a segment-local Limit, which is
 	// incompatible with worker-level parallel distribution.
 	if (COptCtxt::PoctxtFromTLS()->FHasSubqueryLimit())
+	{
+		return CXform::ExfpNone;
+	}
+
+	// Ordered-set aggregates (percentile_cont etc.) must not run under
+	// worker-level parallelism; see COrderedAggPreprocessor::PexprPreprocess().
+	if (COptCtxt::PoctxtFromTLS()->FHasOrderedAgg())
 	{
 		return CXform::ExfpNone;
 	}

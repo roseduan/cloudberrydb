@@ -94,6 +94,13 @@ CXformIndexOnlyGet2ParallelIndexOnlyScan::Exfp(
 		return CXform::ExfpNone;
 	}
 
+	// Ordered-set aggregates (percentile_cont etc.) must not run under
+	// worker-level parallelism; see COrderedAggPreprocessor::PexprPreprocess().
+	if (COptCtxt::PoctxtFromTLS()->FHasOrderedAgg())
+	{
+		return CXform::ExfpNone;
+	}
+
 	CLogicalIndexOnlyGet *popGet =
 		CLogicalIndexOnlyGet::PopConvert(exprhdl.Pop());
 	CTableDescriptor *ptabdesc = popGet->Ptabdesc();

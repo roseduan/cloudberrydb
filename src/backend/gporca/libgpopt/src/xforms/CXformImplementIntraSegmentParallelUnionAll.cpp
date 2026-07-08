@@ -67,6 +67,13 @@ CXformImplementIntraSegmentParallelUnionAll::Exfp(
 		return CXform::ExfpNone;
 	}
 
+	// Ordered-set aggregates (percentile_cont etc.) must not run under
+	// worker-level parallelism; see COrderedAggPreprocessor::PexprPreprocess().
+	if (COptCtxt::PoctxtFromTLS()->FHasOrderedAgg())
+	{
+		return CXform::ExfpNone;
+	}
+
 	/*
 	 * Check 3: Skip parallel union all when the query contains a replicated
 	 * table.  A replicated table already holds a full copy on every segment,
