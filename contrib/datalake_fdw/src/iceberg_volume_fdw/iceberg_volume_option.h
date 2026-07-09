@@ -45,6 +45,7 @@ typedef struct IcebergVolumeServerOptions
 	char *krb_service_principal;
 	char *hadoop_rpc_protection;
 	char *data_transfer_protocol;	/* "true" / "false" */
+	char *data_transfer_protection;	/* authentication / integrity / privacy */
 	char *is_ha_supported;			/* "true" / "false" */
 	char *dfs_nameservices;
 	char *dfs_ha_namenodes;

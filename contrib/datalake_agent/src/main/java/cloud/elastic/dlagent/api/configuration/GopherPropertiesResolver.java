@@ -98,6 +98,7 @@ public class GopherPropertiesResolver {
     static final String KEY_KRB_PRINCIPAL             = GOPHER_PREFIX + "krb_principal";
     static final String KEY_HADOOP_RPC_PROTECTION    = GOPHER_PREFIX + "hadoop_rpc_protection";
     static final String KEY_DATA_TRANSFER_PROTOCOL   = GOPHER_PREFIX + "data_transfer_protocol";
+    static final String KEY_DATA_TRANSFER_PROTECTION = GOPHER_PREFIX + "data_transfer_protection";
 
     private static final String UFS_TYPE_HDFS = "hdfs";
 
@@ -241,6 +242,7 @@ public class GopherPropertiesResolver {
         putIfNotBlank(props, KEY_KRB_PRINCIPAL,            volume.getKrbPrincipal());
         putIfNotBlank(props, KEY_HADOOP_RPC_PROTECTION,    volume.getHadoopRpcProtection());
         putIfNotBlank(props, KEY_DATA_TRANSFER_PROTOCOL,   volume.getDataTransferProtocol());
+        putIfNotBlank(props, KEY_DATA_TRANSFER_PROTECTION, volume.getDataTransferProtection());
 
         Boolean haSupported = volume.getIsHaSupported();
         if (haSupported != null) {

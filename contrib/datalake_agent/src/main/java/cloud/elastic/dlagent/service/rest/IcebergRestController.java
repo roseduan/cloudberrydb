@@ -2230,6 +2230,8 @@ public class IcebergRestController {
             IcebergConfigConstants.ICEBERG_VOLUME_CONFIG.HADOOP_RPC_PROTECTION)));
         setGopherHdfsKey(configuration, "data_transfer_protocol", properties.get(volKey(
             IcebergConfigConstants.ICEBERG_VOLUME_CONFIG.DATA_TRANSFER_PROTOCOL)));
+        setGopherHdfsKey(configuration, "data_transfer_protection", properties.get(volKey(
+            IcebergConfigConstants.ICEBERG_VOLUME_CONFIG.DATA_TRANSFER_PROTECTION)));
         setGopherHdfsKey(configuration, "krb_principal", properties.get(volKey(
             IcebergConfigConstants.ICEBERG_VOLUME_CONFIG.KRB_PRINCIPAL)));
         setGopherHdfsKey(configuration, "krb_server_key_file", properties.get(volKey(

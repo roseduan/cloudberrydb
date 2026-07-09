@@ -296,6 +296,12 @@ formServerCreateStmt(const char *serverName, const char *dataWrapperName, const 
 		appendStringInfo(&sqlBuf, ", data_transfer_protocol '%s'", hdfsConf->dataTransferProtocol);
 	}
 
+	// add data_transfer_protection to server if exists.
+	if (hdfsConf->dataTransferProtection)
+	{
+		appendStringInfo(&sqlBuf, ", data_transfer_protection '%s'", hdfsConf->dataTransferProtection);
+	}
+
 	// add krb_service_principal to server if exists.
 	if (hdfsConf->krbServicePrincipal)
 	{

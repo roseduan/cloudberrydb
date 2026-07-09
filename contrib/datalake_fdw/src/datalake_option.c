@@ -48,6 +48,7 @@ static const struct datalakeFdwOption valid_hdfs_server_options[] = {
 	{DATALAKE_OPTION_HDFS_KRP_PRINCIPAL_KEYTAB, ForeignServerRelationId},
 	{DATALAKE_OPTION_HDFS_HADOOP_RPC_PROTECTION, ForeignServerRelationId},
 	{DATALAKE_OPTION_HDFS_DATA_TRANSFER_PROTOCOL, ForeignServerRelationId},
+	{DATALAKE_OPTION_HDFS_DATA_TRANSFER_PROTECTION, ForeignServerRelationId},
 	{DATALAKE_OPTION_HDFS_IS_HA_SUPPORTED, ForeignServerRelationId},
 	{DATALAKE_OPTION_HDFS_DFS_NAME_SERVICES, ForeignServerRelationId},
 	{DATALAKE_OPTION_HDFS_DFS_HA_NAMENODE, ForeignServerRelationId},
@@ -814,6 +815,11 @@ void parserHdfsServerOption(dataLakeOptions *datalakeopt, List *options)
 
 		}
 
+		if (pg_strcasecmp(def->defname, DATALAKE_OPTION_HDFS_DATA_TRANSFER_PROTECTION) == 0)
+		{
+			datalakeopt->gopher->data_transfer_protection = pstrdup(defGetString(def));
+		}
+
 		if (pg_strcasecmp(def->defname, DATALAKE_OPTION_HDFS_IS_HA_SUPPORTED) == 0)
 		{
 			if (pg_strcasecmp(defGetString(def), "true") == 0)
@@ -1457,6 +1463,7 @@ void checkHdfsCombin(List *options_list, Oid catalog)
 	char* krb_principal_keytab = NULL;
 	char* hadoop_rpc_protection = NULL;
 	char* data_transfer_protocol = NULL;
+	char* data_transfer_protection = NULL;
 	bool is_ha_supported = false;
 	char* dfs_nameservices = NULL;
 	char* dfs_ha_namenodes = NULL;
@@ -1500,6 +1507,11 @@ void checkHdfsCombin(List *options_list, Oid catalog)
 		if (pg_strcasecmp(def->defname, DATALAKE_OPTION_HDFS_DATA_TRANSFER_PROTOCOL) == 0)
 		{
 			data_transfer_protocol = defGetString(def);
+		}
+
+		if (pg_strcasecmp(def->defname, DATALAKE_OPTION_HDFS_DATA_TRANSFER_PROTECTION) == 0)
+		{
+			data_transfer_protection = defGetString(def);
 		}
 
 		if (pg_strcasecmp(def->defname, DATALAKE_OPTION_HDFS_IS_HA_SUPPORTED) == 0)
@@ -1596,6 +1608,18 @@ void checkHdfsCombin(List *options_list, Oid catalog)
 					(errcode(ERRCODE_FDW_INVALID_OPTION_NAME),
 						errmsg("hdfs-ha need specify options \"dfs_client_failover_proxy_provider\".")));
 		}
+	}
+
+	if (data_transfer_protection != NULL &&
+		pg_strcasecmp(data_transfer_protection, "authentication") != 0 &&
+		pg_strcasecmp(data_transfer_protection, "integrity") != 0 &&
+		pg_strcasecmp(data_transfer_protection, "privacy") != 0)
+	{
+		ereport(ERROR,
+				(errcode(ERRCODE_FDW_INVALID_OPTION_NAME),
+					errmsg("invalid value \"%s\" for option \"data_transfer_protection\", "
+						"valid values are: authentication, integrity, privacy.",
+						data_transfer_protection)));
 	}
 }
 

@@ -233,6 +233,7 @@ public class IcebergRequestConfigParser {
         sql.setKrbPrincipalKeytab(or(sql.getKrbPrincipalKeytab(), file.getKrbPrincipalKeytab()));
         sql.setHadoopRpcProtection(or(sql.getHadoopRpcProtection(), file.getHadoopRpcProtection()));
         sql.setDataTransferProtocol(or(sql.getDataTransferProtocol(), file.getDataTransferProtocol()));
+        sql.setDataTransferProtection(or(sql.getDataTransferProtection(), file.getDataTransferProtection()));
         for (Map.Entry<String, String> extra : file.getExtraProperties().entrySet()) {
             sql.getExtraProperties().putIfAbsent(extra.getKey(), extra.getValue());
         }
@@ -309,6 +310,7 @@ public class IcebergRequestConfigParser {
         info.setKrbPrincipalKeytab(stringOrNull(body.get(IcebergConfigConstants.ICEBERG_VOLUME_CONFIG.KRB_PRINCIPAL_KEYTAB)));
         info.setHadoopRpcProtection(stringOrNull(body.get(IcebergConfigConstants.ICEBERG_VOLUME_CONFIG.HADOOP_RPC_PROTECTION)));
         info.setDataTransferProtocol(stringOrNull(body.get(IcebergConfigConstants.ICEBERG_VOLUME_CONFIG.DATA_TRANSFER_PROTOCOL)));
+        info.setDataTransferProtection(stringOrNull(body.get(IcebergConfigConstants.ICEBERG_VOLUME_CONFIG.DATA_TRANSFER_PROTECTION)));
         info.setIsHaSupported(booleanOrNull(body.get(IcebergConfigConstants.ICEBERG_VOLUME_CONFIG.IS_HA_SUPPORTED)));
         info.setDfsNameservices(stringOrNull(body.get(IcebergConfigConstants.ICEBERG_VOLUME_CONFIG.DFS_NAMESERVICES)));
         info.setDfsHaNamenodes(stringOrNull(body.get(IcebergConfigConstants.ICEBERG_VOLUME_CONFIG.DFS_HA_NAMENODES)));

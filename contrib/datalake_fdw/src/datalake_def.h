@@ -47,6 +47,7 @@
 #define DATALAKE_OPTION_HDFS_KRP_PRINCIPAL_KEYTAB "krb_principal_keytab"
 #define DATALAKE_OPTION_HDFS_HADOOP_RPC_PROTECTION "hadoop_rpc_protection"
 #define DATALAKE_OPTION_HDFS_DATA_TRANSFER_PROTOCOL "data_transfer_protocol"
+#define DATALAKE_OPTION_HDFS_DATA_TRANSFER_PROTECTION "data_transfer_protection"
 #define DATALAKE_OPTION_HDFS_IS_HA_SUPPORTED "is_ha_supported"
 #define DATALAKE_OPTION_HDFS_DFS_NAME_SERVICES "dfs_nameservices"
 #define DATALAKE_OPTION_HDFS_DFS_HA_NAMENODE "dfs_ha_namenodes"
@@ -270,6 +271,8 @@ typedef struct gopherOptions
 	char*	krb5_ccname;
 	char*	hadoop_rpc_protection;
 	bool	data_transfer_protocol;
+	/* SASL QOP for DataNode reads/writes: authentication/integrity/privacy */
+	char*	data_transfer_protection;
 	char*	hdfs_user;
 
 	/* hdfs ha config  */

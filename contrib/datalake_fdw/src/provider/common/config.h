@@ -21,6 +21,7 @@ typedef struct DatalakeHdfsConfigInfo
 	char *krbPrincipalKeytab;
 	char *hadoopRpcProtection;
 	char *dataTransferProtocol;
+	char *dataTransferProtection;
 	char *krb5CCName;
 	char *enableHa;
 	List *haEntries;

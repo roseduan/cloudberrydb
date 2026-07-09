@@ -37,6 +37,7 @@
 #define DATALAKEFDW_ICEBERG_KEY_KRB_SERVICE_PRINCIPAL    "krb_service_principal"
 #define DATALAKEFDW_ICEBERG_KEY_HADOOP_RPC_PROTECTION    "hadoop_rpc_protection"
 #define DATALAKEFDW_ICEBERG_KEY_DATA_TRANSFER_PROTOCOL   "data_transfer_protocol"
+#define DATALAKEFDW_ICEBERG_KEY_DATA_TRANSFER_PROTECTION "data_transfer_protection"
 #define DATALAKEFDW_ICEBERG_KEY_IS_HA_SUPPORTED          "is_ha_supported"
 #define DATALAKEFDW_ICEBERG_KEY_DFS_NAMESERVICES         "dfs_nameservices"
 #define DATALAKEFDW_ICEBERG_KEY_DFS_HA_NAMENODES         "dfs_ha_namenodes"

@@ -118,6 +118,7 @@ static void parseIcebergVolumeServerOptions(IcebergVolumeServerOptions *options,
         options->krb_service_principal = getStringOption(server_options, DATALAKEFDW_ICEBERG_KEY_KRB_SERVICE_PRINCIPAL);
         options->hadoop_rpc_protection = getStringOption(server_options, DATALAKEFDW_ICEBERG_KEY_HADOOP_RPC_PROTECTION);
         options->data_transfer_protocol = getStringOption(server_options, DATALAKEFDW_ICEBERG_KEY_DATA_TRANSFER_PROTOCOL);
+        options->data_transfer_protection = getStringOption(server_options, DATALAKEFDW_ICEBERG_KEY_DATA_TRANSFER_PROTECTION);
         options->is_ha_supported = getStringOption(server_options, DATALAKEFDW_ICEBERG_KEY_IS_HA_SUPPORTED);
         options->dfs_nameservices = getStringOption(server_options, DATALAKEFDW_ICEBERG_KEY_DFS_NAMESERVICES);
         options->dfs_ha_namenodes = getStringOption(server_options, DATALAKEFDW_ICEBERG_KEY_DFS_HA_NAMENODES);

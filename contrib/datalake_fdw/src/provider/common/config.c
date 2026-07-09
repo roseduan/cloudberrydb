@@ -33,6 +33,7 @@ static const config_elt configElts[] = {
 	{"krb_principal_keytab", offsetof(DatalakeHdfsConfigInfo, krbPrincipalKeytab)},
 	{"hadoop_rpc_protection", offsetof(DatalakeHdfsConfigInfo, hadoopRpcProtection)},
 	{"data_transfer_protocol", offsetof(DatalakeHdfsConfigInfo, dataTransferProtocol)},
+	{"data_transfer_protection", offsetof(DatalakeHdfsConfigInfo, dataTransferProtection)},
 	{"is_ha_supported", offsetof(DatalakeHdfsConfigInfo, enableHa)}
 };
 
@@ -277,6 +278,8 @@ datalakeGopherCreateConfig(DatalakeHdfsConfigInfo *hdfsConf)
 
 	if (hdfsConf->dataTransferProtocol && pg_strcasecmp(hdfsConf->dataTransferProtocol, "true") == 0)
 		config->data_transfer_protocol = true;
+
+	config->data_transfer_protection = hdfsConf->dataTransferProtection;
     
 	config->hdfs_ha_configs_num = list_length(hdfsConf->haEntries);
 	if (config->hdfs_ha_configs_num > 0)
@@ -323,6 +326,9 @@ datalakeGopherConfigDestroy(gopherConfig *conf)
 
 	if (conf->hadoop_rpc_protection != NULL)
 		pfree(conf->hadoop_rpc_protection);
+
+	if (conf->data_transfer_protection != NULL)
+		pfree(conf->data_transfer_protection);
 
 	if (conf->hdfs_ha_configs_num > 0)
 	{

@@ -264,6 +264,7 @@ public class SiteConfigLoader {
         info.setKrbPrincipalKeytab(asString(serverMap.get("krb_principal_keytab")));
         info.setHadoopRpcProtection(asString(serverMap.get("hadoop_rpc_protection")));
         info.setDataTransferProtocol(asString(serverMap.get("data_transfer_protocol")));
+        info.setDataTransferProtection(asString(serverMap.get("data_transfer_protection")));
         info.setUsername(asString(serverMap.get("username")));
 
         Object haFlag = serverMap.get("is_ha_supported");

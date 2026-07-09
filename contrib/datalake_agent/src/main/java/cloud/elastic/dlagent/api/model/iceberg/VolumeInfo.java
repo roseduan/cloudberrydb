@@ -87,6 +87,8 @@ public class VolumeInfo {
 
     private String hadoopRpcProtection;
     private String dataTransferProtocol;
+    /** SASL QOP for DataNode transfers: authentication / integrity / privacy. */
+    private String dataTransferProtection;
 
     /**
      * Pass-through bag for any extra keys loaded from a site file that do not

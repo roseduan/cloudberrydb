@@ -1048,6 +1048,7 @@ static agentcli_cJSON* createIcebergVolumeConfig(IcebergVolumeOptions *volumeOpt
             {DATALAKEFDW_ICEBERG_KEY_KRB_SERVICE_PRINCIPAL, volumeOpt->volume_server.krb_service_principal},
             {DATALAKEFDW_ICEBERG_KEY_HADOOP_RPC_PROTECTION, volumeOpt->volume_server.hadoop_rpc_protection},
             {DATALAKEFDW_ICEBERG_KEY_DATA_TRANSFER_PROTOCOL, volumeOpt->volume_server.data_transfer_protocol},
+            {DATALAKEFDW_ICEBERG_KEY_DATA_TRANSFER_PROTECTION, volumeOpt->volume_server.data_transfer_protection},
             {DATALAKEFDW_ICEBERG_KEY_IS_HA_SUPPORTED, volumeOpt->volume_server.is_ha_supported},
             {DATALAKEFDW_ICEBERG_KEY_DFS_NAMESERVICES, volumeOpt->volume_server.dfs_nameservices},
             {DATALAKEFDW_ICEBERG_KEY_DFS_HA_NAMENODES, volumeOpt->volume_server.dfs_ha_namenodes},

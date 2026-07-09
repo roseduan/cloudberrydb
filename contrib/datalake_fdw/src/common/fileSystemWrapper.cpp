@@ -457,6 +457,11 @@ gopherConfig* datalakeCreateGopherConfig(void *opt)
 			conf->hadoop_rpc_protection = pstrdup(options->hadoop_rpc_protection);
 		}
 
+		if (options->data_transfer_protection)
+		{
+			conf->data_transfer_protection = pstrdup(options->data_transfer_protection);
+		}
+
 		if (conf->auth_method != NULL && strcmp(conf->auth_method, "kerberos") == 0)
 		{
 			if (options->krb_principal)
@@ -732,6 +737,12 @@ void datalakeFreeGopherConfig(gopherConfig* conf)
 		{
 			pfree(conf->hadoop_rpc_protection);
 			conf->hadoop_rpc_protection = NULL;
+		}
+
+		if (conf->data_transfer_protection != NULL)
+		{
+			pfree(conf->data_transfer_protection);
+			conf->data_transfer_protection = NULL;
 		}
 
 		if ((conf->hdfs_ha_configs_num) > 0 && (conf->hdfs_ha_configs != NULL))

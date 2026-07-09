@@ -91,6 +91,7 @@ static const GopherConfigMapping gopher_config_mapping[] = {
     {"gopher.hadoop_rpc_protection", "hadoop_rpc_protection", GOPHER_TYPE_STRING, offsetof(gopherOptions, hadoop_rpc_protection)},
     {"gopher.is_ha_supported", "is_ha_supported", GOPHER_TYPE_BOOL, offsetof(gopherOptions, is_ha_supported)},
     {"gopher.data_transfer_protocol", "data_transfer_protocol", GOPHER_TYPE_BOOL, offsetof(gopherOptions, data_transfer_protocol)},
+    {"gopher.data_transfer_protection", "data_transfer_protection", GOPHER_TYPE_STRING, offsetof(gopherOptions, data_transfer_protection)},
     {"gopher.hdfs_ha_configs_num", "hdfs_ha_configs_num", GOPHER_TYPE_INT, offsetof(gopherOptions, hdfs_ha_configs_num)},
     {"gopher.hdfs_tbds_secureid", "hdfs_tbds_secureid", GOPHER_TYPE_STRING, GOPHER_FIELD_NONE},
     {"gopher.hdfs_tbds_securekey", "hdfs_tbds_securekey", GOPHER_TYPE_STRING, GOPHER_FIELD_NONE},
