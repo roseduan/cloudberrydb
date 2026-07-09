@@ -1,5 +1,5 @@
 [requires]
 orc/2.1.1@hashdata/stable
-gopher/4.0.27@hashdata/stable
+gopher/4.0.28@hashdata/stable
 parquet/19.0.1-1@hashdata/stable
-gopher-client-swig/4.0.27@hashdata/stable
+gopher-client-swig/4.0.28@hashdata/stable
