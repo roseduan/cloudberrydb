@@ -30,6 +30,9 @@
 #include "cdb/ml_ipc.h"
 #include "ic_modules.h"
 #include "ic_udp2.h"
+#include "utils/guc.h"
+
+extern bool gp_interconnect_udp2_multithread;
 
 PG_MODULE_MAGIC;
 
@@ -83,6 +86,12 @@ _PG_init(void)
 				(errcode_for_file_access(),
 				 errmsg("could not load udp2 outside process shared preload")));
 	}
+
+	DefineCustomBoolVariable("udp2.enable_multithread",
+							 "Enable udp2 multi-threaded asynchronous send (mux + send thread).",
+							 "When off (default), udp2 sends inline on the calling thread.",
+							 &gp_interconnect_udp2_multithread, false, PGC_USERSET, GUC_GPDB_NEED_SYNC,
+							 NULL, NULL, NULL);
 
 	RegisterIPCLayerImpl(&udp2_ipc_layer);
 }

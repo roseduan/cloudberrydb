@@ -39,6 +39,7 @@
  *            +----------------------+
  *-------------------------------------------------------------------------
  */
+#include <arpa/inet.h> 
 #include <chrono>
 #include <condition_variable>
 #include <mutex>
@@ -58,6 +59,7 @@ extern "C" {
 
 #include "ic_types.h"
 #include "ic_udp2.h"
+#include "../../ic_mux.h"
 
 #ifdef __cplusplus
 }
@@ -159,7 +161,9 @@ static std::condition_variable cv;
 
 CChunkTransportState *CChunkTransportStateImpl::state_ = nullptr;
 
+/* Multi thread udp manager */
 static struct mudp_manager mudp;
+static Mux *mux = nullptr; 
 
 /*
  * Identity the user of ic module by vector_engine_is_user:
@@ -202,6 +206,13 @@ static thread_local bool thread_quit = false;
 		} \
 	} while(0)
 
+typedef struct {
+	int fd;
+	UDPConn *conn;
+	int requests;
+	void *self_handler;		/* owning MuxHandler, so on_close can free it */
+} UdpMuxContext;
+
 /*=========================================================================
  * STATIC FUNCTIONS declarations
  */
@@ -224,6 +235,7 @@ static bool dispatcherAYT(void);
 static void checkQDConnectionAlive(void);
 
 static void *rxThreadFunc(void *arg);
+static void *sdThreadFunc(void *arg);
 
 static void putIntoUnackQueueRing(UnackQueueRing *uqr, ICBuffer *buf, uint64 expTime, uint64 now);
 
@@ -614,6 +626,48 @@ icBufferListInitHeadLink(ICBufferLink *link)
 	link->next = link->prev = link;
 }
 
+template <typename LockType, typename Traits>
+class GenericLockGuard
+{
+public:
+	/* sendLock/spinLock only guard state shared between the main thread and the
+	 * sd send-thread, which exists only in multithread mode
+	 * (udp2.enable_multithread=on). When the GUC is off there is no sd thread,
+	 * so skipping lock/unlock removes per-buffer overhead; the rx coordination
+	 * lock ic_control_info.lock (raw pthread) is unaffected. */
+	explicit GenericLockGuard(LockType* lock)
+		: lock_(lock), engaged_(gp_interconnect_udp2_multithread)
+	{
+		if (engaged_)
+			Traits::lock(lock_);
+	}
+
+	~GenericLockGuard() { if (engaged_) Traits::unlock(lock_); }
+
+	GenericLockGuard(const GenericLockGuard&) = delete;
+	GenericLockGuard& operator=(const GenericLockGuard&) = delete;
+
+private:
+	LockType* lock_;
+	bool engaged_;
+};
+
+struct PthreadMutexTraits
+{
+	static void lock(pthread_mutex_t* m) { pthread_mutex_lock(m); }
+
+	static void unlock(pthread_mutex_t* m) { pthread_mutex_unlock(m); }
+};
+
+struct SpinLockTraits
+{
+	static void lock(spinlock_t* s) { spinlock_lock(s); }
+
+	static void unlock(spinlock_t* s) { spinlock_unlock(s); }
+};
+
+using MutexGuard = GenericLockGuard<pthread_mutex_t, PthreadMutexTraits>;
+using SpinLockGuard = GenericLockGuard<spinlock_t, SpinLockTraits>;
 
 #if defined(USE_ASSERT_CHECKING) || defined(AMS_VERBOSE_LOGGING)
 
@@ -653,6 +707,11 @@ ICBufferList::icBufferListLog()
 void
 ICBufferList::icBufferListCheck(const char *prefix)
 {
+#ifdef ATOMICLOCK
+	SpinLockGuard slock_guard(&ic_control_info.spinLock);
+#else
+	MutexGuard lock_guard(&ic_control_info.sendLock);
+#endif
 	int len = this->len;
 	ICBufferLink *link = this->head.next;
 
@@ -723,6 +782,11 @@ ICBufferList::is_head(ICBufferLink *link)
 #ifdef USE_ASSERT_CHECKING
 	this->icBufferListCheck("ICBufferList::is_head");
 #endif
+#ifdef ATOMICLOCK
+	SpinLockGuard slock_guard(&ic_control_info.spinLock);
+#else
+	MutexGuard lock_guard(&ic_control_info.sendLock);
+#endif
 	return (link == &head);
 }
 
@@ -762,7 +826,11 @@ ICBufferList::remove(ICBuffer *buf)
 #ifdef USE_ASSERT_CHECKING
 	this->icBufferListCheck("ICBufferList::delete");
 #endif
-
+#ifdef ATOMICLOCK
+	SpinLockGuard slock_guard(&ic_control_info.spinLock);
+#else
+	MutexGuard lock_guard(&ic_control_info.sendLock);
+#endif
 	ICBufferLink *bufLink = NULL;
 
 	bufLink = (this->type == ICBufferListType_Primary ? &buf->primary : &buf->secondary);
@@ -782,12 +850,16 @@ ICBufferList::remove(ICBuffer *buf)
 ICBuffer *
 ICBufferList::pop()
 {
-	ICBuffer   *buf = NULL;
-	ICBufferLink *bufLink = NULL;
-
 #ifdef USE_ASSERT_CHECKING
 	this->icBufferListCheck("ICBufferList::pop");
 #endif
+#ifdef ATOMICLOCK
+	SpinLockGuard slock_guard(&ic_control_info.spinLock);
+#else
+	MutexGuard lock_guard(&ic_control_info.sendLock);
+#endif
+	ICBuffer   *buf = NULL;
+	ICBufferLink *bufLink = NULL;
 
 	if (this->len == 0)
 		return NULL;
@@ -811,6 +883,12 @@ ICBufferList::pop()
 void
 ICBufferList::destroy()
 {
+	/* No outer lock under ATOMICLOCK: pop() re-acquires the non-reentrant
+	 * spinLock and would self-deadlock. The sendLock path is a recursive
+	 * mutex, so re-entry via pop() is safe there. */
+#ifndef ATOMICLOCK
+	MutexGuard lock_guard(&ic_control_info.sendLock);
+#endif
 	ICBuffer   *buf = NULL;
 
 #ifdef USE_ASSERT_CHECKING
@@ -833,7 +911,11 @@ ICBufferList::append(ICBuffer *buf)
 #ifdef USE_ASSERT_CHECKING
 	this->icBufferListCheck("ICBufferList::append");
 #endif
-
+#ifdef ATOMICLOCK
+	SpinLockGuard slock_guard(&ic_control_info.spinLock);
+#else
+	MutexGuard lock_guard(&ic_control_info.sendLock);
+#endif
 	ICBufferLink *bufLink = NULL;
 
 	bufLink = (this->type == ICBufferListType_Primary ? &buf->primary : &buf->secondary);
@@ -863,7 +945,12 @@ ICBufferList::release(bool inExpirationQueue)
 	this->icBufferListCheck("ICBufferList::return");
 #endif
 	ICBuffer   *buf = NULL;
-
+	/* No outer lock under ATOMICLOCK: pop()/remove()/append() re-acquire the
+	 * non-reentrant spinLock and would self-deadlock. Recursive sendLock path
+	 * is safe. */
+#ifndef ATOMICLOCK
+	MutexGuard lock_guard(&ic_control_info.sendLock);
+#endif
 	while ((buf = this->pop()) != NULL)
 	{
 		if (inExpirationQueue)	/* the buf is in also in the expiration queue */
@@ -1098,6 +1185,7 @@ SendBufferPool::clean()
 ICBuffer *
 SendBufferPool::get(UDPConn *conn)
 {
+	MutexGuard lock_guard(&ic_control_info.sendLock);
 	ICBuffer   *ret = NULL;
 
 	ic_statistics.totalBuffers += (this->freeList.length() + this->maxCount - this->count);
@@ -1239,6 +1327,7 @@ handleRTO(mudp_manager_t mudp,
 				TransportEntry *pEntry,
 				UDPConn *triggerConn)
 {
+	MutexGuard lock_guard(&ic_control_info.sendLock);
 	/* check for expiration */
 	int                     count = 0;
 	int                     retransmits = 0;
@@ -2221,6 +2310,7 @@ setupOutgoingUDPConnection(int icid, TransportEntry *pEntry, UDPConn *conn)
 	conn->rttvar.ssthresh = UDP_INFINITE_SSTHRESH;
 	conn->rttvar.loss_count = 0;
 	conn->rttvar.karn_mode = false;
+	conn->recv_active_time = 0;
 	conn->on_rto_idx = -1;
 	Assert(conn->peer.ss_family == AF_INET || conn->peer.ss_family == AF_INET6);
 }
@@ -2801,6 +2891,7 @@ UDPConn::DeactiveConn()
 void
 UDPConn::handleAckedPacket(ICBuffer *buf, uint64 now, struct icpkthdr *pkt)
 {
+	MutexGuard lock_guard(&ic_control_info.sendLock);
 	uint64		ackTime = 0;
 	bool		bufIsHead = false; 
 	UDPConn *bufConn = NULL;
@@ -2816,7 +2907,10 @@ UDPConn::handleAckedPacket(ICBuffer *buf, uint64 now, struct icpkthdr *pkt)
 		unack_queue_ring.numOutStanding--;
 		if (this->unackQueue.length() >= 1)
 		unack_queue_ring.numSharedOutStanding--;
-
+		/* Guard against clock skew BEFORE the subtraction, else now - sentTime
+		 * underflows to a huge uint64 and corrupts the RTT estimate. */
+		if (unlikely(now < buf->sentTime))
+			now = getCurrentTime();
 		ackTime = now - buf->sentTime;
 
 		if (buf->nRetry == 0)
@@ -3022,6 +3116,7 @@ getCurrentTime(void)
 static void
 putIntoUnackQueueRing(UnackQueueRing *uqr, ICBuffer *buf, uint64 expTime, uint64 now)
 {
+	MutexGuard lock_guard(&ic_control_info.sendLock);
 	UDPConn *buffConn = static_cast<UDPConn*>(buf->conn);
 	uint64		diff = 0;
 	int			idx = 0;
@@ -3346,6 +3441,143 @@ handleDataPacket(UDPConn *conn, icpkthdr *pkt, struct sockaddr_storage *peer, so
 	}
 
 	return true;
+}
+
+static int udp_on_write(void *mux, int fd, void *ud)
+{
+	MutexGuard lock_guard(&ic_control_info.sendLock);
+	UdpMuxContext *ctx = (UdpMuxContext*)ud;
+	UDPConn *conn = ctx->conn;
+	Mux *mux_ = static_cast<Mux *>(mux);
+
+	if (!mux_ || !conn || mux_->stop_flag)
+		return MUX_CB_OK;
+
+	if (conn->capacity == 0 && mux_->init_ready && conn->unackQueue.length() == 0 && conn->sndQueue.length() > 0)
+		conn->sendBuffers();
+	else
+	{
+		mux_->init_ready = true;
+		return MUX_CB_OK;
+	}
+
+	ctx->requests++;
+	return MUX_CB_OK;
+}
+
+/*
+ * NB: these mux handlers are registered with MUX_EVENT_NONE and only ever have
+ * MUX_EVENT_WRITE enabled (see mux_mod below). The read side of the socket is
+ * drained by the main interconnect receive thread, NOT here, so udp_on_read is
+ * never armed for level-triggered read events and cannot busy-spin. It only
+ * records activity time if ever invoked.
+ */
+static int udp_on_read(void *mux, int fd, void *ud)
+{
+	if (!mux)
+		return MUX_CB_OK;
+
+	UdpMuxContext *ctx = (UdpMuxContext*)ud;
+	UDPConn *conn = ctx->conn;
+	MutexGuard lock_guard(&ic_control_info.sendLock);
+	if (!conn || static_cast<Mux *>(mux)->stop_flag)
+		return MUX_CB_OK;
+	conn->recv_active_time = getCurrentTime();
+	return MUX_CB_OK;
+}
+
+/* Free per-fd mux context and its handler when the fd is removed from the mux. */
+static int udp_on_close(void *mux, int fd, void *ud)
+{
+	UdpMuxContext *ctx = (UdpMuxContext*)ud;
+	if (ctx)
+	{
+		free(ctx->self_handler);
+		free(ctx);
+	}
+	return MUX_CB_OK;
+}
+                   
+static void *
+sdThreadFunc(void* arg)
+{
+	TransportEntry  *pEntry = static_cast<TransportEntry*>(arg);
+	{
+		MutexGuard lock_guard(&ic_control_info.sendLock);
+		if (!mux)
+		{
+			mux = mux_create(MUX_BACKEND_POLL);
+			if (!mux)
+			{
+				LOG(LOG_ERROR, "Failed to create Mux backend");
+				return nullptr;
+			}
+		}
+		else
+		{
+			LOG(LOG_ERROR, "Mux backend already initialized");
+			return nullptr;
+		}
+
+		for (int i = 0; i < pEntry->numConns; ++i)
+		{
+			UDPConn* conn = pEntry->conns_[i].get();
+			if (!conn)
+				continue;
+
+			int fd = pEntry->txfd;
+			if (fd < 0)
+				continue;
+
+			struct sockaddr_in addr {};
+			socklen_t len = sizeof(addr);
+
+			if (getsockname(fd, reinterpret_cast<struct sockaddr*>(&addr), &len) == 0)
+			{
+				char ip[INET_ADDRSTRLEN] = { 0 };
+				inet_ntop(AF_INET, &addr.sin_addr, ip, sizeof(ip));
+			}
+			else
+			{
+				LOG(WARNING, "Conn[%d] fd=%d getsockname() failed", i, fd);
+			}
+	
+			UdpMuxContext *ctx = (UdpMuxContext*)calloc(1, sizeof(UdpMuxContext));
+			if (!ctx)
+				continue;
+			ctx->fd = fd;
+			ctx->conn = conn;
+			ctx->requests = 0;
+
+			MuxHandler *handler = (MuxHandler*)calloc(1, sizeof(MuxHandler));
+			if (!handler)
+			{
+				free(ctx);
+				continue;
+			}
+			ctx->self_handler = handler;
+			handler->userdata = ctx;
+			handler->events = MUX_EVENT_NONE;
+			handler->on_read = udp_on_read;
+			handler->on_write = udp_on_write;
+			handler->on_error = NULL;
+			handler->on_close = udp_on_close;	/* frees ctx + handler on removal */
+
+			if (mux_add(mux, fd, handler->events, handler) != 0)
+			{
+				LOG(LOG_ERROR, "Failed to register fd=%d in Mux", fd);
+				free(ctx);
+				free(handler);
+			}
+		}
+	}
+
+	mux_run(mux, 50);
+	MutexGuard lock_guard(&ic_control_info.sendLock);
+	mux_destroy(mux);
+	mux = nullptr;
+
+	return nullptr;
 }
 
 /*
@@ -3918,6 +4150,7 @@ cleanupStartupCache()
 static void
 dumpUnackQueueRing(const char *fname)
 {
+	MutexGuard lock_guard(&ic_control_info.sendLock);
 	FILE	   *ofile = fopen(fname, "w+");
 	int			i;
 
@@ -4280,6 +4513,7 @@ UDPConn::handleStop()
 					entry_->motNodeId, this->route, this->conn_info.seq);
 
 	/* place it into the send queue */
+	MutexGuard lock_guard(&ic_control_info.sendLock);
 	this->prepareXmit();
 	this->sndQueue.append(this->curBuff);
 	this->curBuff = NULL;
@@ -4324,6 +4558,7 @@ UDPConn::sendBuffers()
 
 		if (session_param.Gp_interconnect_fc_method == INTERCONNECT_FC_METHOD_LOSS_IC || session_param.Gp_interconnect_fc_method == INTERCONNECT_FC_METHOD_LOSS_ADVANCE_IC)
 		{
+			MutexGuard lock_guard(&ic_control_info.sendLock);
 			if (this->unackQueue.length() > 0 &&
 				unack_queue_ring.numSharedOutStanding >= (snd_control_info.cwnd - snd_control_info.minCwnd))
 			break;
@@ -4333,6 +4568,7 @@ UDPConn::sendBuffers()
 		if (this->state == mcsSetupOutgoingConnection && this->unackQueue.length() >= 1)
 			break;
 
+		MutexGuard lock_guard(&ic_control_info.sendLock);
 		buf = this->sndQueue.pop();
 
 		uint64		now = getCurrentTime();
@@ -4347,6 +4583,7 @@ UDPConn::sendBuffers()
 
 		if (session_param.Gp_interconnect_fc_method == INTERCONNECT_FC_METHOD_LOSS_IC || session_param.Gp_interconnect_fc_method == INTERCONNECT_FC_METHOD_LOSS_ADVANCE_IC)
 		{
+			MutexGuard lock_guard(&ic_control_info.sendLock);
 			unack_queue_ring.numOutStanding++;
 			if (this->unackQueue.length() > 1)
 				unack_queue_ring.numSharedOutStanding++;
@@ -4460,7 +4697,7 @@ UDPConn::handleAckForDisorderPkt(icpkthdr *pkt)
 	ICBufferLink *link = NULL;
 	ICBuffer   *buf = NULL;
 	ICBufferLink *next = NULL;
-	uint64		now = getCurrentTime();
+	uint64		now = recv_active_time == 0 ? getCurrentTime() : recv_active_time;
 	uint32	   *curLostPktSeq = 0;
 	int			lostPktCnt = 0;
 	static uint32 times = 0;
@@ -4525,6 +4762,7 @@ UDPConn::handleAckForDisorderPkt(icpkthdr *pkt)
 			buf->nRetry++;
 			if (session_param.Gp_interconnect_fc_method == INTERCONNECT_FC_METHOD_LOSS_IC || session_param.Gp_interconnect_fc_method == INTERCONNECT_FC_METHOD_LOSS_ADVANCE_IC)
 			{
+				MutexGuard lock_guard(&ic_control_info.sendLock);
 				ICBufferList *alist = &unack_queue_ring.slots[buf->unackQueueRingSlot];
 				buf = alist->remove(buf);
 				putIntoUnackQueueRing(&unack_queue_ring, buf,
@@ -4599,7 +4837,7 @@ UDPConn::handleAckForDuplicatePkt(icpkthdr *pkt)
 	ICBufferLink *link = NULL;
 	ICBuffer   *buf = NULL;
 	ICBufferLink *next = NULL;
-	uint64		now = getCurrentTime();
+	uint64		now = recv_active_time == 0 ? getCurrentTime() : recv_active_time;
 	bool		shouldSendBuffers = false;
 
 #ifdef AMS_VERBOSE_LOGGING
@@ -4705,12 +4943,11 @@ UDPConn::checkNetworkTimeout(ICBuffer *buf, uint64 now, bool *networkTimeoutIsLo
 void
 UDPConn::checkExpiration(ICChunkTransportState *transportStates, uint64 now)
 {
+	MutexGuard lock_guard(&ic_control_info.sendLock);
 	/* check for expiration */
 	int	count = 0;
 	int	retransmits = 0;
 	UDPConn *currBuffConn = NULL;
-
-	Assert(unack_queue_ring.currentTime != 0);
 
 	if (unlikely(session_param.Gp_interconnect_fc_method == INTERCONNECT_FC_METHOD_LOSS_TIMER_IC))
 	{
@@ -4955,7 +5192,6 @@ void
 UDPConn::checkDeadlock()
 {
 	uint64		deadlockCheckTime;
-
 	if (this->unackQueue.length() == 0 && this->capacity == 0 && this->sndQueue.length() > 0)
 	{
 		/* we must have received some acks before deadlock occurs. */
@@ -5106,6 +5342,7 @@ UDPConn::checkExceptions(int retry, int timeout)
 int
 UDPConn::computeTimeout(int retry)
 {
+	MutexGuard lock_guard(&ic_control_info.sendLock);
 	int32_t rtoMs = 0;
 
 	rtoMs = this->rttvar.rto / 1000;
@@ -5172,9 +5409,12 @@ UDPConn::Send(DataBlock *data)
 	ic_statistics.capacityCountingTime++;
 
 	/* try to send it */
-	this->prepareXmit();
-	this->sndQueue.append(this->curBuff);
-	this->sendBuffers();
+	{
+		MutexGuard lock_guard(&ic_control_info.sendLock);
+		this->prepareXmit();
+		this->sndQueue.append(this->curBuff);
+		this->sendBuffers();
+	}
 
 	/* get a new buffer */
 	this->curBuff = NULL;
@@ -5190,8 +5430,12 @@ UDPConn::Send(DataBlock *data)
 	ic_control_info.lastPacketSendTime = 0;
 	this->deadlockCheckBeginTime = now;
 
-	while (doCheckExpiration || (this->curBuff = snd_buffer_pool.get(this)) == NULL)
+	while (doCheckExpiration || this->curBuff == NULL)
 	{
+		MutexGuard lock_guard(&ic_control_info.sendLock);
+		if (mux != nullptr)
+			mux_mod(mux, this->entry_->txfd, MUX_EVENT_WRITE);
+		this->curBuff = snd_buffer_pool.get(this);
 		int timeout = (doCheckExpiration ? 0 : this->computeTimeout(retry));
 
 		if (this->entry_->pollAcks(timeout))
@@ -5206,7 +5450,9 @@ UDPConn::Send(DataBlock *data)
 				 */
 				gotStops = true;
 			}
+			this->recv_active_time = 0;
 		}
+
 		this->checkExceptions(retry++, timeout);
 		doCheckExpiration = false;
 
@@ -5357,6 +5603,7 @@ TransportEntry::aggregateStatistics()
 bool
 TransportEntry::handleAcks(bool need_flush)
 {
+	MutexGuard lock_guard(&ic_control_info.sendLock);
 	bool		ret = false;
 	UDPConn *ackConn = NULL;
 	int			n;
@@ -5441,9 +5688,9 @@ TransportEntry::handleAcks(bool need_flush)
 			ic_statistics.recvAckNum++;
 
 			uint64 now = getCurrentTime();
-
 			ackConn->deadlockCheckBeginTime = now;
-
+			now = ackConn->recv_active_time == 0 ? now : ackConn->recv_active_time;
+			ackConn->recv_active_time = 0;
 			/*
 			 * We simply disregard pkt losses (NAK) due to process start race
 			 * (that is, sender is started earlier than receiver. rx
@@ -5575,6 +5822,12 @@ TransportEntry::handleAcks(bool need_flush)
 		}
 	}
 
+	/*
+	 * (Removed an unreachable `ackConn->recv_active_time = 0;` here: the for(;;)
+	 * loop above only exits via `return ret` on EWOULDBLOCK or by throwing, so
+	 * this point is never reached and ackConn is out of scope anyway. The
+	 * activity time is reset in the reachable paths that need it.)
+	 */
 	return ret;
 }
 
@@ -5697,6 +5950,7 @@ TransportEntry::MakeRecvEntry(CChunkTransportStateImpl *state,
 		if (cdbProc->valid)
 		{
 			conn->cdbProc = cdbProc;
+			conn->capacity = 0;
 
 			expectedTotalIncoming++;
 
@@ -5753,6 +6007,7 @@ TransportEntry::MakeRecvEntry(CChunkTransportStateImpl *state,
 			conn->rttvar.ssthresh = UDP_INFINITE_SSTHRESH;
 			conn->rttvar.loss_count = 0;
 			conn->rttvar.karn_mode = false;
+			conn->recv_active_time = 0;
 			conn->on_rto_idx = -1;
 			ic_control_info.connHtab.add(conn);
 
@@ -5843,13 +6098,38 @@ TransportEntry::MakeSendEntry(CChunkTransportStateImpl *state,
 		}
 	}
 
+	pthread_attr_t t_atts;
+	pthread_attr_init(&t_atts);
+
+	pthread_attr_setstacksize(&t_atts, Max(PTHREAD_STACK_MIN, (128 * 1024)));
+	TransportEntry* raw = pEntry.get();
+	/* sendLock/spinLock are global; POSIX makes re-init of a live mutex UB and
+	 * MakeSendEntry runs once per query, so initialize them only once. */
+	static bool ic_send_sync_inited = false;
+	if (!ic_send_sync_inited)
+	{
+		pthread_mutexattr_t attr;
+		pthread_mutexattr_init(&attr);
+		pthread_mutexattr_settype(&attr, PTHREAD_MUTEX_RECURSIVE);
+		pthread_mutex_init(&ic_control_info.sendLock, &attr);
+		pthread_mutexattr_destroy(&attr);
+		spinlock_init(&ic_control_info.spinLock);
+		ic_send_sync_inited = true;
+	}
+	if (gp_interconnect_udp2_multithread)
+	{
+		int rc = pthread_create(&ic_control_info.sendHandle, &t_atts, sdThreadFunc, raw);
+		if (rc != 0)
+			LOG(LOG_ERROR, "Failed to create send thread: error %d", rc);
+	}
+	
 	if (session_param.gp_log_interconnect >= GPVARS_VERBOSITY_DEBUG_IC)
 	{
 		LOG(DEBUG1, "SetupUDPInterconnect will activate "
 					"%d outgoing, %d expect outgoing routes for ic_instancce_id %d.",
 					outgoing_count, expectedTotalOutgoing, icid);
 	}
-
+	pthread_attr_destroy(&t_atts);
 	return pEntry;
 }
 
@@ -6451,10 +6731,6 @@ CChunkTransportStateImpl::CreateSendEntries(ICSliceTable *sliceTable)
 	std::unique_ptr<TransportEntry> pEntry =
 		TransportEntry::MakeSendEntry(this, sliceTable->ic_instance_id, sendSlice, recvSlice);
 
-	pEntry->txfd   = ICSenderSocket;
-	pEntry->txport = ICSenderPort;
-	pEntry->txfd_family = ICSenderFamily;
-
 	snd_control_info.minCwnd = snd_control_info.cwnd;
 	snd_control_info.ssthresh = snd_buffer_pool.maxCount;
 
@@ -6547,6 +6823,7 @@ CChunkTransportStateImpl::DestroyRecvEntries(bool *isReceiver)
 				ic_free(conn->curBuff);
 				conn->curBuff = NULL;
 			}
+			conn = NULL;
 		} // for conn
 
 		Assert(!pEntry->conns);
@@ -6570,6 +6847,7 @@ computeNetworkStatistics(uint64 value, uint64 *min, uint64 *max, double *sum)
 void
 CChunkTransportStateImpl::DestroySendEntries()
 {
+	MutexGuard lock_guard(&ic_control_info.sendLock);
 	ICExecSlice *mySlice = &this->sliceTable->slices[this->sliceId];
 	if (mySlice->parentIndex == -1)
 		return;
@@ -6644,7 +6922,9 @@ CChunkTransportStateImpl::DestroySendEntries()
 			ic_free(conn->curBuff);
 			conn->curBuff = NULL;
 		}
+		conn = NULL;
 	}
+
 	avgRtt = avgRtt / pEntry->numConns;
 	avgDev = avgDev / pEntry->numConns;
 
@@ -6758,6 +7038,17 @@ CChunkTransportStateImpl::TeardownUDP(bool hasErrors)
 {
 	try {
 		CChunkTransportStateImpl::state_ = nullptr;
+		/* Set stop_flag before teardown() frees the connections. The send
+		 * thread's mux callbacks take sendLock (as does DestroySendEntries),
+		 * so once stop_flag is set under sendLock before the free, any later
+		 * callback observes it and bails instead of dereferencing a freed
+		 * UDPConn. Avoids the use-after-free without a lock-order-sensitive
+		 * pthread_join. */
+		{
+			MutexGuard lock_guard(&ic_control_info.sendLock);
+			if (mux)
+				mux->stop_flag  = true;
+		}
 		this->teardown(hasErrors);
 		delete this;
 		Assert(pthread_mutex_unlock(&ic_control_info.lock) != 0);
@@ -6821,7 +7112,11 @@ CChunkTransportStateImpl::SendEOS(int motNodeID, DataBlock *data)
 	if (session_param.gp_log_interconnect >= GPVARS_VERBOSITY_DEBUG_IC)
 		LOG(DEBUG1, "Interconnect seg%d slice%d sending end-of-stream to slice%d",
 					global_param.segindex, motNodeID, pEntry->recvSlice->sliceIndex);
-
+	{
+		MutexGuard lock_guard(&ic_control_info.sendLock);
+		if (mux)
+			mux->stop_flag  = true;
+	}
 	/*
 	 * we want to add our tcItem onto each of the outgoing buffers -- this is
 	 * guaranteed to leave things in a state where a flush is *required*.
@@ -6832,6 +7127,7 @@ CChunkTransportStateImpl::SendEOS(int motNodeID, DataBlock *data)
 
 	uint64		now = getCurrentTime();
 
+	MutexGuard lock_guard(&ic_control_info.sendLock);
 	/* now flush all of the buffers. */
 	for (int i = 0; i < pEntry->numConns; i++)
 	{
@@ -6882,7 +7178,6 @@ CChunkTransportStateImpl::SendEOS(int motNodeID, DataBlock *data)
 			{
 				retry = 0;
 				ic_control_info.lastPacketSendTime = 0;
-
 				/* wait until this queue is emptied */
 				while (conn->unackQueue.length() > 0 ||
 					   conn->sndQueue.length() > 0)

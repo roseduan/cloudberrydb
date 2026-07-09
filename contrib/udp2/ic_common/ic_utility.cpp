@@ -54,6 +54,9 @@ GlobalMotionLayerIPCParam global_param =
 	 NULL, /* checkCancelOnQDCallback */
 	 };
 
+/* GUC: enable udp2 multi-threaded async send (mux + send thread); default off */
+extern "C" { bool gp_interconnect_udp2_multithread = false; }
+
 SessionMotionLayerIPCParam session_param =
 	{4,    /* Gp_interconnect_queue_depth */
 	 2,    /* Gp_interconnect_snd_queue_depth */

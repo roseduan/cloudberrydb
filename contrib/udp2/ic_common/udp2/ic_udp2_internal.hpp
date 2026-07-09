@@ -800,6 +800,9 @@ struct SendControlInfo
 typedef struct ICGlobalControlInfo ICGlobalControlInfo;
 struct ICGlobalControlInfo
 {
+	pthread_t       sendHandle;
+	pthread_mutex_t sendLock;
+	spinlock_t spinLock;
 	/* The background thread handle. */
 	pthread_t	threadHandle;
 
@@ -1070,8 +1073,11 @@ struct UDPConn : public MotionConn
 public:
 	/* send side queue for packets to be sent */
 	ICBufferList sndQueue;
-	int			capacity;
-
+#ifdef ATOMICLOCK
+	atomic_uint	capacity;
+#else
+	int		capacity;
+#endif
 	/* seq already sent */
 	uint32		sentSeq;
 
@@ -1142,6 +1148,7 @@ public:
 	struct udp_send_vars sndvar;
 
 	TransportEntry *entry_;
+	uint64 recv_active_time;
 
 public:
 	UDPConn(TransportEntry *entry);

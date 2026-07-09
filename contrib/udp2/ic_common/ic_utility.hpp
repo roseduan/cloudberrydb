@@ -124,6 +124,7 @@ typedef enum GpVars_Interconnect_Address_Type_IC
  */
 extern GlobalMotionLayerIPCParam global_param;
 extern SessionMotionLayerIPCParam session_param;
+extern "C" { extern bool gp_interconnect_udp2_multithread; }
 
 /*
  * logger stuff

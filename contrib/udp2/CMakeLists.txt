@@ -69,6 +69,7 @@ link_directories(${CMAKE_INSTALL_PREFIX}/lib/postgresql/)
 set(UDP2_SOURCES
     ic_udp2.c
     ic_modules.c
+    ic_mux.c
 )
 
 # Create the udp2 shared library
@@ -107,5 +108,6 @@ install(TARGETS udp2
 install(FILES
     "${CMAKE_CURRENT_SOURCE_DIR}/ic_udp2.h"
     "${CMAKE_CURRENT_SOURCE_DIR}/ic_modules.h"
+    "${CMAKE_CURRENT_SOURCE_DIR}/ic_mux.h"
     DESTINATION "${CMAKE_INSTALL_PREFIX}/include/postgresql/"
 )
