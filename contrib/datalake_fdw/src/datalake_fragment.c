@@ -369,6 +369,8 @@ convert_iceberg_hudi_options(dataLakeOptions *options)
 		appendStringInfo(&buf, " query_type=%s", options->query_type);
 	if (options->metadata_table_enable)
 		appendStringInfo(&buf, " metadata_table_enable=%s", options->metadata_table_enable);
+	else if (FORMAT_IS_HUDI(options->format))
+		appendStringInfoString(&buf, " metadata_table_enable=false");
 
 	if (options->client_id)
 		appendStringInfo(&buf, " client_id=%s", options->client_id);

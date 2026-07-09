@@ -288,7 +288,7 @@ public class RequestContext {
 
     public boolean isMetadataTableEnabled() {
         if (metadataTableEnabled == null) {
-            return true;
+            return false;
         }
 
         if (metadataTableEnabled.toLowerCase().equals("true")) {

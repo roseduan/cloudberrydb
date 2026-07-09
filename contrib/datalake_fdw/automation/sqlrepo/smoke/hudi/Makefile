@@ -6,6 +6,7 @@ include $(PGXS)
 AUTOMATION_DIR = $(shell cd ../../.. && pwd)
 HUDI_PREPARE_SMOKE = $(AUTOMATION_DIR)/prepare/prepare_hudi/hudi_smoke.sql
 HUDI_PREPARE_COV = $(AUTOMATION_DIR)/prepare/prepare_hudi/hudi_coverage.sql
+HUDI_PREPARE_METADATA = $(AUTOMATION_DIR)/prepare/prepare_hudi/hudi_metadata_mdt.sql
 
 # Spark configuration
 SPARK_SQL ?= spark-sql
@@ -36,7 +37,7 @@ SPARK_CONF = \
 	--conf spark.hadoop.dfs.client.block.write.replace-datanode-on-failure.enable=false \
 	--conf spark.hadoop.dfs.replication=1
 
-REGRESS = hudi_smoke hudi_coverage hudi_btree_merger
+REGRESS = hudi_smoke hudi_coverage hudi_btree_merger hudi_metadata_mdt
 PGPORT ?= 7000
 export PGPORT
 
@@ -50,8 +51,8 @@ ensure-conf:
 	fi; \
 	for dir in $$DATADIRS; do \
 		echo "  Deploying to $$dir"; \
-		printf 'default: paa_cluster\n\npaa_cluster:\n    hdfs_namenodes: $(HDFS_NAMENODE)\n    hdfs_port: $(HDFS_PORT)\n    hdfs_auth_method: simple\n    hadoop_rpc_protection: authentication\n\nhive_cluster:\n    hdfs_namenodes: $(HDFS_NAMENODE)\n    hdfs_port: $(HDFS_PORT)\n    hdfs_auth_method: simple\n    hadoop_rpc_protection: authentication\n' > "$$dir/gphdfs.conf"; \
-		printf 'hive_cluster:\n    url: thrift://$(HIVE_METASTORE_HOST):$(HIVE_METASTORE_PORT)\n    auth_method: simple\n' > "$$dir/gphive.conf"; \
+		printf 'default: paa_cluster\n\npaa_cluster:\n    hdfs_namenodes: $(HDFS_NAMENODE)\n    hdfs_port: $(HDFS_PORT)\n    hdfs_namenode_host: $(HDFS_NAMENODE)\n    hdfs_namenode_port: $(HDFS_PORT)\n    hdfs_auth_method: simple\n    hadoop_rpc_protection: authentication\n\nhive_cluster:\n    hdfs_namenodes: $(HDFS_NAMENODE)\n    hdfs_port: $(HDFS_PORT)\n    hdfs_namenode_host: $(HDFS_NAMENODE)\n    hdfs_namenode_port: $(HDFS_PORT)\n    hdfs_auth_method: simple\n    hadoop_rpc_protection: authentication\n' > "$$dir/gphdfs.conf"; \
+		printf 'hive_cluster:\n    url: thrift://$(HIVE_METASTORE_HOST):$(HIVE_METASTORE_PORT)\n    uris: thrift://$(HIVE_METASTORE_HOST):$(HIVE_METASTORE_PORT)\n    auth_method: simple\n' > "$$dir/gphive.conf"; \
 	done
 
 installcheck: ensure-conf
@@ -68,6 +69,24 @@ installcheck: ensure-conf
 		{ echo "ERROR: Failed to prepare Hudi coverage data"; exit 1; }; \
 	else \
 		echo "WARNING: Hudi coverage prepare SQL not found, skipping"; \
+	fi
+	@if [ -f "$(HUDI_PREPARE_METADATA)" ]; then \
+		echo "=== Preparing Hudi metadata table regression data ==="; \
+		metadata_log=$$(mktemp /tmp/hudi_metadata_prepare.XXXXXX); \
+		if $(SPARK_SQL) $(SPARK_CONF) -f "$(HUDI_PREPARE_METADATA)" > "$$metadata_log" 2>&1; then \
+			cat "$$metadata_log"; \
+		elif grep -E 'NoSuchMethodError|getReadStatistics' "$$metadata_log" > /dev/null; then \
+			cat "$$metadata_log"; \
+			echo "NOTICE: Hudi metadata prepare reproduced expected getReadStatistics failure; continuing to FDW regression"; \
+		else \
+			cat "$$metadata_log"; \
+			echo "ERROR: Failed to prepare Hudi metadata regression data"; \
+			rm -f "$$metadata_log"; \
+			exit 1; \
+		fi; \
+		rm -f "$$metadata_log"; \
+	else \
+		echo "ERROR: Hudi metadata regression prepare SQL not found at $(HUDI_PREPARE_METADATA)"; exit 1; \
 	fi
 	@echo "=== Running pg_regress tests ==="
 	$(pg_regress_installcheck) $(REGRESS)

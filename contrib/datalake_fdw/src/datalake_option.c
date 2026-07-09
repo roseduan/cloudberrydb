@@ -634,6 +634,9 @@ dataLakeOptions *datalakeGetOptions(Oid foreigntableid)
 		configurePolarisOptions(opt);
 	}
 
+	if (FORMAT_IS_HUDI(opt->format) && opt->metadata_table_enable == NULL)
+		opt->metadata_table_enable = pstrdup("false");
+
 	return opt;
 }
 
