@@ -299,7 +299,7 @@ formServerCreateStmt(const char *serverName, const char *dataWrapperName, const 
 	// add data_transfer_protection to server if exists.
 	if (hdfsConf->dataTransferProtection)
 	{
-		appendStringInfo(&sqlBuf, ", data_transfer_protection '%s'", hdfsConf->dataTransferProtection);
+		appendStringInfo(&sqlBuf, ", data_transfer_protection %s", quote_literal_cstr(hdfsConf->dataTransferProtection));
 	}
 
 	// add krb_service_principal to server if exists.
