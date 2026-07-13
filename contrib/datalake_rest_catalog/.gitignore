@@ -1,0 +1,5 @@
+target/
+**/.venv/
+*.log
+.DS_Store
+deploy/*.env

@@ -1058,6 +1058,11 @@ PGAC_ARG_BOOL(enable, datalake, no,
 AC_MSG_RESULT([checking whether to build with preload datalake ... $enable_datalake])
 AC_SUBST(enable_datalake)
 
+# datalake rest catalog gateway (Java REST service; requires JDK11+)
+PGAC_ARG_BOOL(enable, datalake-rest-catalog, no,
+              [build the read-only Iceberg REST catalog gateway (requires JDK11+)])
+AC_SUBST(enable_datalake_rest_catalog)
+
 #
 # dfs-tablespace preload
 #

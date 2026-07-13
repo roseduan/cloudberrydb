@@ -1,0 +1,12 @@
+# datalake_rest_catalog gateway — hardened HBA (sub-project C, P0-1/P0-2).
+# pg_hba is FIRST-MATCH-WINS. Place these lines ABOVE any broad catch-all that could
+# match the gateway path — not just `trust`, but also any generic `md5`/`password`/`scram`
+# `host all all <cidr>` line (e.g. a prior e2e leftover). If a broader line for the same
+# source appears first, it shadows these and the hardening is silently lost. Then reload:
+# `pg_ctl reload` / `gpstop -u`.
+# Force password auth for the gateway's own host so no role can be reached passwordless.
+# Replace 127.0.0.1/32 with the gateway host if it runs off-box.
+host    all    iceberg_authenticator    127.0.0.1/32    scram-sha-256
+host    all    iceberg_reader           127.0.0.1/32    scram-sha-256
+# Explicitly deny superuser login from the gateway path (defense in depth):
+# gpadmin trust lines MUST NOT cover the gateway source, or AuthPreflight will abort startup.

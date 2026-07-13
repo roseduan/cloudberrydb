@@ -759,6 +759,7 @@ enable_time_series
 enable_perfmon
 enable_gophermeta
 enable_dfs_tablespace
+enable_datalake_rest_catalog
 enable_datalake
 enable_vectorization
 enable_pax
@@ -927,6 +928,7 @@ enable_preload_ic_module
 enable_pax
 enable_vectorization
 enable_datalake
+enable_datalake_rest_catalog
 enable_dfs_tablespace
 enable_gophermeta
 enable_perfmon
@@ -1671,6 +1673,9 @@ Optional Features:
   --enable-pax            enable PAX support
   --enable-vectorization  enable vectorization support
   --enable-datalake       enable preload datalake
+  --enable-datalake-rest-catalog
+                          build the read-only Iceberg REST catalog gateway
+                          (requires JDK11+)
   --enable-dfs-tablespace enable preload dfs-tablespace
   --enable-gophermeta     enable preload gophermeta
   --enable-perfmon        enable perfmon support
@@ -10983,6 +10988,31 @@ fi
 
 { $as_echo "$as_me:${as_lineno-$LINENO}: result: checking whether to build with preload datalake ... $enable_datalake" >&5
 $as_echo "checking whether to build with preload datalake ... $enable_datalake" >&6; }
+
+
+# datalake rest catalog gateway (Java REST service; requires JDK11+)
+
+
+# Check whether --enable-datalake-rest-catalog was given.
+if test "${enable_datalake_rest_catalog+set}" = set; then :
+  enableval=$enable_datalake_rest_catalog;
+  case $enableval in
+    yes)
+      :
+      ;;
+    no)
+      :
+      ;;
+    *)
+      as_fn_error $? "no argument expected for --enable-datalake-rest-catalog option" "$LINENO" 5
+      ;;
+  esac
+
+else
+  enable_datalake_rest_catalog=no
+
+fi
+
 
 
 #

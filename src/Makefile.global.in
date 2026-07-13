@@ -238,6 +238,7 @@ enable_pax		= @enable_pax@
 enable_vbf		= @enable_vbf@
 enable_time_series	= @enable_time_series@
 enable_datalake     = @enable_datalake@
+enable_datalake_rest_catalog = @enable_datalake_rest_catalog@
 enable_dfs_tablespace     = @enable_dfs_tablespace@
 enable_gophermeta   = @enable_gophermeta@
 enable_link_postgres_with_shared  = @enable_link_postgres_with_shared@

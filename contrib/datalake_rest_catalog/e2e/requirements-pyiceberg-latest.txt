@@ -1,0 +1,20 @@
+# Latest available PyIceberg on the team's pypi mirror (nexus.hashdata.dev) as of
+# 2026-07-08 -- verified by probing the index (`pip install pyiceberg==99.99.99` to force
+# pip to print all known versions); 0.11.1 is the newest non-prerelease release.
+#
+# Pinned narrowly (==) rather than a range: this file backs a permanent regression test
+# (test_pyiceberg_latest.py) whose whole point is pinning a *specific* "latest" version so
+# a future PyIceberg release doesn't silently change behavior underneath the test. Bump this
+# pin deliberately when a newer PyIceberg is released and re-validate.
+#
+# Requires Python >= 3.9 (PyIceberg 0.11 dropped 3.8). Use run_pyiceberg_latest.sh, which
+# creates its own venv against python3.10 (present in the lightning-382 dev container at
+# /usr/local/python-3.10.16/bin) rather than the system python3.8.
+pyiceberg[s3fs,pyarrow]==0.11.1
+
+# Pin pyarrow explicitly: the mirror (nexus.hashdata.dev) only has a cached prebuilt
+# manylinux_aarch64 wheel up through 20.0.0 for this Python/arch combo; letting pip pick
+# pyiceberg's default (newer) pyarrow constraint falls back to a from-source sdist build,
+# which fails in this container (no vendored/system Apache Arrow C++ for CMake to find).
+# 20.0.0 is verified compatible with pyiceberg 0.11.1 (2026-07-08 session).
+pyarrow==20.0.0

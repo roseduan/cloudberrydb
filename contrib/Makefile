@@ -134,6 +134,12 @@ else
 ALWAYS_SUBDIRS += datalake_fdw hive_connector datalake_proxy datalake_agent datalake_apiary
 endif
 
+ifeq ($(enable_datalake_rest_catalog),yes)
+SUBDIRS += datalake_rest_catalog
+else
+ALWAYS_SUBDIRS += datalake_rest_catalog
+endif
+
 ifeq ($(enable_perfmon), yes)
 SUBDIRS += perfmon
 else
