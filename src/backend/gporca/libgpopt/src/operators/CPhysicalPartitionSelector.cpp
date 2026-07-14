@@ -14,6 +14,7 @@
 #include "gpos/base.h"
 
 #include "gpopt/base/CColRef.h"
+#include "gpopt/base/CCostContext.h"
 #include "gpopt/base/CDistributionSpecAny.h"
 #include "gpopt/base/CDrvdPropCtxtPlan.h"
 #include "gpopt/base/CUtils.h"
@@ -404,16 +405,39 @@ CPhysicalPartitionSelector::EpetOrder(CExpressionHandle &,	// exprhdl,
 //---------------------------------------------------------------------------
 BOOL
 CPhysicalPartitionSelector::FValidContext(
-	CMemoryPool *,  // mp
-	COptimizationContext *poc,
-	COptimizationContextArray *) const
+	CMemoryPool *,	// mp
+	COptimizationContext *,	 // poc
+	COptimizationContextArray *pdrgpocChild) const
 {
-	// Regular hash join should reject WorkerRandom distributions from children.
-	// Only ParallelHashJoin can handle WorkerRandom distributions.
-	ULONG ulParallelWorkers = CUtils::UlExtractWorkersFromGroup(poc->Pgroup());
-
-	if (ulParallelWorkers > 1)
-		return false;
+	/*
+	 * The serial partition selector cannot sit on a worker-level child
+	 * (that pairing belongs to CPhysicalParallelPartitionSelector), but
+	 * that must be judged against the child plan CHOSEN FOR THIS CONTEXT,
+	 * not against the group structure.  The previous group-level check
+	 * (CUtils::UlExtractWorkersFromGroup(poc->Pgroup()) > 1) invalidated
+	 * the serial selector in every context of a group as soon as any
+	 * parallel-scan alternative existed anywhere in the group -- which is
+	 * always the case in parallel mode.  That made every partition
+	 * propagation (propagator) context unsatisfiable, so co-located joins
+	 * that rely on dynamic partition elimination could never be costed and
+	 * plans degraded to redistributing the fact table with all partitions
+	 * scanned.
+	 */
+	if (nullptr != pdrgpocChild && 1 == pdrgpocChild->Size())
+	{
+		CCostContext *pccBest = (*pdrgpocChild)[0]->PccBest();
+		if (nullptr != pccBest)
+		{
+			CDistributionSpec::EDistributionType edt =
+				pccBest->Pdpplan()->Pds()->Edt();
+			if (CDistributionSpec::EdtWorkerRandom == edt ||
+				CDistributionSpec::EdtHashedWorker == edt ||
+				CDistributionSpec::EdtReplicatedWorkers == edt)
+			{
+				return false;
+			}
+		}
+	}
 
 	return true;
 }
