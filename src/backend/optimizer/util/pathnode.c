@@ -3333,7 +3333,17 @@ create_tablefuncscan_path(PlannerInfo *root, RelOptInfo *rel,
 	pathnode->parallel_safe = rel->consider_parallel;
 	pathnode->parallel_workers = 0;
 	pathnode->pathkeys = NIL;	/* result is always unordered */
-	CdbPathLocus_MakeGeneral(&pathnode->locus);
+
+	/*
+	 * CDB: If the table function's input expressions refer to values
+	 * supplied by an outer query, they must be evaluated in the slice the
+	 * enclosing SubPlan runs in; such params cannot pass through a Motion.
+	 */
+	if (contains_outer_params((Node *) planner_rt_fetch(rel->relid, root)->tablefunc,
+							  root))
+		CdbPathLocus_MakeOuterQuery(&pathnode->locus);
+	else
+		CdbPathLocus_MakeGeneral(&pathnode->locus);
 
 	cost_tablefuncscan(pathnode, root, rel, pathnode->param_info);
 
@@ -3365,9 +3375,15 @@ create_valuesscan_path(PlannerInfo *root, RelOptInfo *rel,
 	/*
 	 * CDB: If VALUES list contains mutable functions, evaluate it on entry db.
 	 * Otherwise let it be evaluated in the same slice as its parent operator.
+	 *
+	 * If the VALUES list refers to values supplied by an outer query, it
+	 * must be evaluated in the slice the enclosing SubPlan runs in; such
+	 * params cannot pass through a Motion.
 	 */
 	Assert(rte->rtekind == RTE_VALUES);
-	if (contain_mutable_functions((Node *)rte->values_lists))
+	if (contains_outer_params((Node *) rte->values_lists, root))
+		CdbPathLocus_MakeOuterQuery(&pathnode->locus);
+	else if (contain_mutable_functions((Node *)rte->values_lists))
 		CdbPathLocus_MakeEntry(&pathnode->locus);
 	else
 	{

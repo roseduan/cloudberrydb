@@ -244,49 +244,59 @@ IsSubqueryCorrelated(Query *sq)
 }
 
 /*
- * Check multi-level correlated subquery in Postgres legacy planner
+ * Check multi-level correlated subquery in the Postgres-based planner.
  *
- * We could support one-level correlated subquery by adding
- * broadcast + result(param filter). For multi-level scenario
- * we should prevent planner from adding another motion above
- * result node which is from one-level correlated subquery.
+ * A correlated Var reference whose value crosses a single SubPlan boundary
+ * is supported: the planner keeps every node that consumes the resulting
+ * PARAM_EXEC param in the slice the SubPlan is evaluated in, so the param
+ * never has to pass through a Motion.  See the OuterQuery locus machinery:
+ * bring_to_outer_query(), set_subquery_pathlist() and
+ * cdbpath_motion_for_join().
  *
- * In this function, firstly we find the top root which refer
- * to Param, then check table distribution below current root
- * Not support if any distributed table exist.
+ * But when the reference crosses more than one SubPlan boundary, the param
+ * would have to be passed onwards into a SubPlan (or InitPlan) nested
+ * inside another SubPlan.  That is not supported: the inner subplan can be
+ * classified as an InitPlan, because its params do not appear in the
+ * immediate parent's plan_params, and an InitPlan executes in separate
+ * slices that cannot see the param value, silently returning wrong results
+ * (github issue #12054).  Error out in that case if distributed tables are
+ * involved; queries touching only catalog tables execute entirely on the
+ * QD and remain safe.
  */
 void
 check_multi_subquery_correlated(PlannerInfo *root, Var *var)
 {
-	int levelsup;
+	Index		levelsup;
+	int			nboundaries = 0;
+	bool		has_distributed = false;
 
 	if (Gp_role != GP_ROLE_DISPATCH)
 		return;
 	if (var->varlevelsup <= 1)
 		return;
 
+	/*
+	 * Walk up from the query level that consumes the Var to the level just
+	 * below the one that supplies its value, counting SubPlan boundaries
+	 * and looking for distributed relations.
+	 */
 	for (levelsup = var->varlevelsup; levelsup > 0; levelsup--)
 	{
-		PlannerInfo *parent_root = root->parent_root;
+		if (root->config->is_subplan_root)
+			nboundaries++;
+		if (!has_distributed &&
+			QueryHasDistributedRelation(root->parse, true))
+			has_distributed = true;
 
-		if (parent_root == NULL)
+		if (root->parent_root == NULL)
 			elog(ERROR, "not found parent root when checking skip-level correlations");
-
-		/*
-		 * Only check sublink not include subquery
-		 */
-		if(parent_root->parse->hasSubLinks &&
-			QueryHasDistributedRelation(root->parse, parent_root->is_correlated_subplan))
-		{
-			ereport(ERROR,
-					errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-			 		errmsg("correlated subquery with skip-level correlations is not supported"));
-		}
-
 		root = root->parent_root;
 	}
 
-	return;
+	if (nboundaries > 1 && has_distributed)
+		ereport(ERROR,
+				errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+				errmsg("correlated subquery with skip-level correlations is not supported"));
 }
 
 /*
@@ -375,6 +385,7 @@ make_subplan(PlannerInfo *root, Query *orig_subquery,
 	if (Gp_role == GP_ROLE_DISPATCH)
 	{
 		config->is_under_subplan = true;
+		config->is_subplan_root = true;
 
 		/*
 		 * Disable CTE sharing in subplan.

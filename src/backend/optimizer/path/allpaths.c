@@ -2636,6 +2636,21 @@ set_subquery_pathlist(PlannerInfo *root, RelOptInfo *rel,
 		else
 			locus = cdbpathlocus_from_subquery(root, rel, subpath);
 
+		/*
+		 * If the subquery's target list refers to values supplied by a query
+		 * above the current one (PARAM_EXEC params that cross a SubPlan
+		 * boundary), this subquery scan can only be evaluated in the slice
+		 * that the enclosing SubPlan runs in: such param values cannot be
+		 * shipped through a Motion.  Force OuterQuery locus so that any join
+		 * above brings the other side to the outer query's slice, like
+		 * create_functionscan_path() does for correlated FunctionScans and
+		 * bring_to_outer_query() does for base relations with correlated
+		 * quals.
+		 */
+		if (!CdbPathLocus_IsOuterQuery(locus) &&
+			contains_outer_params((Node *) subpath->pathtarget->exprs, root))
+			CdbPathLocus_MakeOuterQuery(&locus);
+
 		/* Convert subpath's pathkeys to outer representation */
 		pathkeys = convert_subquery_pathkeys(root,
 											 rel,
@@ -2680,6 +2695,14 @@ set_subquery_pathlist(PlannerInfo *root, RelOptInfo *rel,
 				CdbPathLocus_MakeStrewn(&locus, getgpsegmentCount(), subpath->parallel_workers);
 			else
 				locus = cdbpathlocus_from_subquery(root, rel, subpath);
+
+			/*
+			 * Partial paths cannot be evaluated in the outer query's slice,
+			 * so skip subpaths that refer to values supplied by an outer
+			 * query; the non-partial paths above already cover them.
+			 */
+			if (contains_outer_params((Node *) subpath->pathtarget->exprs, root))
+				continue;
 
 			/* Convert subpath's pathkeys to outer representation */
 			pathkeys = convert_subquery_pathkeys(root,

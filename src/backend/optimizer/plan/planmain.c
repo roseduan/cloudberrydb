@@ -357,6 +357,8 @@ PlannerConfig *DefaultPlannerConfig(void)
 
 	c1->is_under_subplan = false;
 
+	c1->is_subplan_root = false;
+
 	c1->force_singleQE = false;
 
 	c1->may_rescan = false;
@@ -373,5 +375,12 @@ CopyPlannerConfig(const PlannerConfig *c1)
 	PlannerConfig *c2 = (PlannerConfig *) palloc(sizeof(PlannerConfig));
 
 	memcpy(c2, c1, sizeof(PlannerConfig));
+
+	/*
+	 * is_subplan_root marks exactly one query level and must not be
+	 * inherited by subqueries planned below it; make_subplan() sets it
+	 * explicitly after copying.
+	 */
+	c2->is_subplan_root = false;
 	return c2;
 }

@@ -867,6 +867,72 @@ DROP TABLE skip_correlated_t2;
 DROP TABLE skip_correlated_t3;
 DROP TABLE skip_correlated_t4;
 
+--------------------------------------------------------------------------------
+-- Skip-level correlated Var that crosses a single SubPlan boundary, consumed
+-- in a FROM-subquery's target list (a set-returning function over the outer
+-- param).  The Postgres-based planner supports this by anchoring every node
+-- that consumes the param to the OuterQuery locus, so the param never has to
+-- pass through a Motion.  It used to be rejected with "correlated subquery
+-- with skip-level correlations is not supported".
+--------------------------------------------------------------------------------
+create table skip1_sh(id int, ctn text) distributed by (id);
+create table skip1_rule(rid text, rnm text) distributed by (rid);
+insert into skip1_sh values (1,'a,b'),(2,'b,c');
+insert into skip1_rule values ('a','Alpha'),('b',null),('c','Gamma');
+analyze skip1_sh;
+analyze skip1_rule;
+
+set optimizer to off;
+
+explain (costs off)
+select id,
+  (select string_agg(rul_nm, ',' order by rid)
+   from (select coalesce(rnm, rid) as rul_nm, rid
+         from skip1_rule t1
+         join (select unnest(string_to_array(sh.ctn, ','))) t2(c)
+           on t1.rid = t2.c) t) as rule_ctrl
+from skip1_sh sh
+order by id;
+
+select id,
+  (select string_agg(rul_nm, ',' order by rid)
+   from (select coalesce(rnm, rid) as rul_nm, rid
+         from skip1_rule t1
+         join (select unnest(string_to_array(sh.ctn, ','))) t2(c)
+           on t1.rid = t2.c) t) as rule_ctrl
+from skip1_sh sh
+order by id;
+
+-- A volatile function in the derived table's target list prevents subquery
+-- pull-up; this shape used to bypass the skip-level check and produce an
+-- invalid plan that evaluated the correlated param below a Motion, crashing
+-- the segments with SIGSEGV.
+create function skip1_vol(t text) returns text language plpgsql as
+$$ begin return t; end $$;
+
+select id,
+  (select string_agg(rul_nm, ',' order by rid)
+   from (select coalesce(skip1_vol(rnm), rid) as rul_nm, rid
+         from skip1_rule t1
+         join (select unnest(string_to_array(sh.ctn, ','))) t2(c)
+           on t1.rid = t2.c) t) as rule_ctrl
+from skip1_sh sh
+order by id;
+
+-- A reference crossing two SubPlan boundaries is still unsupported: the
+-- param would have to be passed into a SubPlan nested inside another
+-- SubPlan, which can be misclassified as an InitPlan and return wrong
+-- results (github issue #12054).
+select
+  ( select min(t1.rid) from skip1_rule t1
+    where t1.rnm = (select rnm from skip1_rule t2 where t2.rid = sh.ctn) ) as m
+from skip1_sh sh;
+
+reset optimizer;
+drop function skip1_vol(text);
+drop table skip1_sh;
+drop table skip1_rule;
+
 -- ----------------------------------------------------------------------
 -- Test: teardown.sql
 -- ----------------------------------------------------------------------
