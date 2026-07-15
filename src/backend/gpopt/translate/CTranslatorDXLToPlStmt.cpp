@@ -5710,6 +5710,22 @@ CTranslatorDXLToPlStmt::TranslateDXLParallelCTEProducerToParallelSharedScan(
 		plan->plan_rows = ceil(plan->plan_rows / parallel_workers);
 	}
 
+	// A duplicate-sensitive motion in the producer subtree folds to a Result +
+	// one-time filter and creates no sending slice, so the folded subtree's
+	// parallel degree never reaches the slice.  Propagate it here, before
+	// descending, so this parallel shared scan and the parallel ops below it
+	// actually run with workers instead of degrading to serial.  Only the
+	// parallel CTE producer reaches this path; gang-type rule mirrors
+	// TranslateDXLMotion.
+	PlanSlice *cur_slice = m_dxl_to_plstmt_context->GetCurrentSlice();
+	if (parallel_workers > 1 && cur_slice->parallel_workers <= 1 &&
+		(cur_slice->gangType == GANGTYPE_PRIMARY_READER ||
+		 cur_slice->gangType == GANGTYPE_PRIMARY_WRITER ||
+		 cur_slice->gangType == GANGTYPE_SINGLETON_READER))
+	{
+		cur_slice->parallel_workers = parallel_workers;
+	}
+
 	// translate child plan
 	CDXLNode *project_list_dxlnode = (*cte_producer_dxlnode)[0];
 	CDXLNode *child_dxlnode = (*cte_producer_dxlnode)[1];
