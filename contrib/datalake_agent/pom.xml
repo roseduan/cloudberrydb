@@ -38,6 +38,12 @@
         <jackson.version>2.19.4</jackson.version>
         <!-- zookeeper 3.9.3: resource-consumption / auth fixes (overrides transitive 3.8.4) -->
         <zookeeper.version>3.9.3</zookeeper.version>
+        <!-- aircompressor 0.27: CVE-2024-36114 (overrides iceberg-core's transitive 0.24) -->
+        <aircompressor.version>0.27</aircompressor.version>
+        <!-- ant 1.10.15: CVE-2020-11979 (overrides hive-common's transitive 1.9.1) -->
+        <ant.version>1.10.15</ant.version>
+        <!-- bcprov-jdk18on 1.85: bump to latest (overrides hadoop-common's transitive 1.82) -->
+        <bcprov.version>1.85</bcprov.version>
     </properties>
 
     <dependencies>
@@ -485,6 +491,29 @@
                 <groupId>org.apache.zookeeper</groupId>
                 <artifactId>zookeeper-jute</artifactId>
                 <version>${zookeeper.version}</version>
+            </dependency>
+            <!-- aircompressor 0.27: CVE-2024-36114 (transitive via iceberg-core) -->
+            <dependency>
+                <groupId>io.airlift</groupId>
+                <artifactId>aircompressor</artifactId>
+                <version>${aircompressor.version}</version>
+            </dependency>
+            <!-- ant 1.10.15: CVE-2020-11979 (transitive via hive-common) -->
+            <dependency>
+                <groupId>org.apache.ant</groupId>
+                <artifactId>ant</artifactId>
+                <version>${ant.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>org.apache.ant</groupId>
+                <artifactId>ant-launcher</artifactId>
+                <version>${ant.version}</version>
+            </dependency>
+            <!-- bcprov-jdk18on 1.85: bump to latest (transitive via hadoop-common) -->
+            <dependency>
+                <groupId>org.bouncycastle</groupId>
+                <artifactId>bcprov-jdk18on</artifactId>
+                <version>${bcprov.version}</version>
             </dependency>
             <dependency>
                 <groupId>org.springframework.boot</groupId>
