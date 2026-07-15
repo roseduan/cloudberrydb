@@ -210,6 +210,10 @@ test: sum_bigint
 test: window_hashagg_spill
 test: window_hashagg_spill_parallel
 
+# vectorized WindowHashAgg with a COMPUTED-output aggregate (numeric sum/avg)
+# and zero input rows (issue 394)
+test: window_hashagg_empty_partition
+
 # vectorized HashJoin spill (multi-join collision, thread-safety, replay correctness)
 test: hashjoin_spill
 
