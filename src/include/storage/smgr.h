@@ -238,6 +238,9 @@ extern PGDLLIMPORT file_truncate_hook_type file_truncate_hook;
 typedef void (*file_unlink_hook_type)(RelFileNodeBackend rnode);
 extern PGDLLIMPORT file_unlink_hook_type file_unlink_hook;
 
+typedef void (*file_close_hook_type)(RelFileNodeBackend rnode);
+extern PGDLLIMPORT file_close_hook_type file_close_hook;
+
 /*
  * This hook is used to get the smgr implementation id of the relation for extension.
  * If the hook is not set, the default smgr implementation id is SMGR_MD.

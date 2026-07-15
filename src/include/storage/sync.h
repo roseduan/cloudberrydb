@@ -51,11 +51,15 @@ typedef enum SyncRequestHandler
  */
 typedef struct FileTag
 {
-	int16		handler;		/* SyncRequestHandler value, saving space */
-	int16		forknum;		/* ForkNumber, saving space */
-	RelFileNode rnode;
-	uint32		segno;
+	SyncRequestHandler	handler;		/* owning sync handler */
+	ForkNumber			forknum;		/* full-width to fit extension forks */
+	RelFileNode			rnode;
+	uint32				segno;
 } FileTag;
+
+StaticAssertDecl(sizeof(FileTag) == 24,
+				"FileTag layout change requires audit of HASH_BLOBS keying "
+				"in sync.c and every INIT_FILETAG memset call site");
 
 #define INIT_FILETAG(a,xx_rnode,xx_forknum,xx_segno,xx_handler)	\
 ( \

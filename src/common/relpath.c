@@ -22,6 +22,10 @@
 #include "common/relpath.h"
 #include "storage/backendid.h"
 
+#ifndef FRONTEND
+relpath_hook_type relpath_hook = NULL;
+#endif
+
 
 /*
  * Lookup table of fork name by fork number.
@@ -150,6 +154,15 @@ GetRelationPath(Oid dbNode, Oid spcNode, Oid relNode,
 				int backendId, ForkNumber forkNumber)
 {
 	char	   *path;
+
+#ifndef FRONTEND
+	if (relpath_hook)
+	{
+		path = relpath_hook(dbNode, spcNode, relNode, backendId, forkNumber);
+		if (path)
+			return path;
+	}
+#endif
 
 	if (spcNode == GLOBALTABLESPACE_OID)
 	{

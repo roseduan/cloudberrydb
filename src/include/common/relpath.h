@@ -70,6 +70,13 @@ typedef enum ForkNumber
 
 extern const char *const forkNames[];
 
+#ifndef FRONTEND
+/* Hook for overriding relation path generation */
+typedef char *(*relpath_hook_type) (Oid dbNode, Oid spcNode, Oid relNode,
+									int backendId, ForkNumber forkNumber);
+extern PGDLLIMPORT relpath_hook_type relpath_hook;
+#endif
+
 extern ForkNumber forkname_to_number(const char *forkName);
 extern int	forkname_chars(const char *str, ForkNumber *fork);
 

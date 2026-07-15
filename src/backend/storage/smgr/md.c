@@ -1439,7 +1439,8 @@ mdsyncfiletag(const FileTag *ftag, char *path)
 				save_errno;
 
 	/* See if we already have the file open, or need to open it. */
-	if (ftag->segno < reln->md_num_open_segs[ftag->forknum])
+	if (ftag->forknum <= MAX_FORKNUM &&
+		ftag->segno < reln->md_num_open_segs[ftag->forknum])
 	{
 		file = reln->md_seg_fds[ftag->forknum][ftag->segno].mdfd_vfd;
 		strlcpy(path, FilePathName(file), MAXPGPATH);

@@ -48,6 +48,7 @@ file_create_hook_type file_create_hook = NULL;
 file_extend_hook_type file_extend_hook = NULL;
 file_truncate_hook_type file_truncate_hook = NULL;
 file_unlink_hook_type file_unlink_hook = NULL;
+file_close_hook_type file_close_hook = NULL;
 
 smgr_get_impl_hook_type smgr_get_impl_hook = NULL;
 
@@ -403,6 +404,7 @@ smgrclose(SMgrRelation reln)
 {
 	SMgrRelation *owner;
 	ForkNumber	forknum;
+	RelFileNodeBackend rnode = reln->smgr_rnode;
 
 	for (forknum = 0; forknum <= MAX_FORKNUM; forknum++)
 		(*reln->smgr).smgr_close(reln, forknum);
@@ -423,6 +425,9 @@ smgrclose(SMgrRelation reln)
 	 */
 	if (owner)
 		*owner = NULL;
+
+	if (file_close_hook)
+		(*file_close_hook) (rnode);
 }
 
 /*
@@ -641,10 +646,13 @@ smgrextend(SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum,
 	 * value isn't as expected, just invalidate it so the next call asks the
 	 * kernel.
 	 */
-	if (reln->smgr_cached_nblocks[forknum] == blocknum)
-		reln->smgr_cached_nblocks[forknum] = blocknum + 1;
-	else
-		reln->smgr_cached_nblocks[forknum] = InvalidBlockNumber;
+	if (forknum <= MAX_FORKNUM)
+	{
+		if (reln->smgr_cached_nblocks[forknum] == blocknum)
+			reln->smgr_cached_nblocks[forknum] = blocknum + 1;
+		else
+			reln->smgr_cached_nblocks[forknum] = InvalidBlockNumber;
+	}
 
 	if (file_extend_hook)
 		(*file_extend_hook)(reln->smgr_rnode);
@@ -730,7 +738,8 @@ smgrnblocks(SMgrRelation reln, ForkNumber forknum)
 
 	result = (*reln->smgr).smgr_nblocks(reln, forknum);
 
-	reln->smgr_cached_nblocks[forknum] = result;
+	if (forknum <= MAX_FORKNUM)
+		reln->smgr_cached_nblocks[forknum] = result;
 
 	return result;
 }
@@ -749,8 +758,11 @@ smgrnblocks_cached(SMgrRelation reln, ForkNumber forknum)
 	 * For now, we only use cached values in recovery due to lack of a shared
 	 * invalidation mechanism for changes in file size.
 	 */
-	if (InRecovery && reln->smgr_cached_nblocks[forknum] != InvalidBlockNumber)
-		return reln->smgr_cached_nblocks[forknum];
+	if (forknum <= MAX_FORKNUM)
+	{
+		if (InRecovery && reln->smgr_cached_nblocks[forknum] != InvalidBlockNumber)
+			return reln->smgr_cached_nblocks[forknum];
+	}
 
 	return InvalidBlockNumber;
 }
@@ -792,7 +804,8 @@ smgrtruncate(SMgrRelation reln, ForkNumber *forknum, int nforks, BlockNumber *nb
 	for (i = 0; i < nforks; i++)
 	{
 		/* Make the cached size is invalid if we encounter an error. */
-		reln->smgr_cached_nblocks[forknum[i]] = InvalidBlockNumber;
+		if (forknum[i] <= MAX_FORKNUM)
+			reln->smgr_cached_nblocks[forknum[i]] = InvalidBlockNumber;
 
 		(*reln->smgr).smgr_truncate(reln, forknum[i], nblocks[i]);
 
@@ -803,7 +816,8 @@ smgrtruncate(SMgrRelation reln, ForkNumber *forknum, int nforks, BlockNumber *nb
 		 * smgr_vm_nblocks, and these ones too at the next command boundary.
 		 * But these ensure they aren't outright wrong until then.
 		 */
-		reln->smgr_cached_nblocks[forknum[i]] = nblocks[i];
+		if (forknum[i] <= MAX_FORKNUM)
+			reln->smgr_cached_nblocks[forknum[i]] = nblocks[i];
 	}
 	if (file_truncate_hook)
 		(*file_truncate_hook)(reln->smgr_rnode);
