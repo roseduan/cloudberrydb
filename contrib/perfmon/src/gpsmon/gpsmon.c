@@ -1506,16 +1506,29 @@ void gx_main(int port, apr_int64_t signature)
 	/* set up our log files */
 	if (opt.log_dir)
 	{
-		mkdir(opt.log_dir, S_IRWXU | S_IRWXG);
+		/*
+		 * Create the whole log directory path, not just its last component:
+		 * gpsmon starts over a fresh ssh session, so intermediate directories
+		 * (e.g. <datadir>/gpperfmon) may not exist yet.
+		 */
+		gpmon_recursive_mkdir(opt.log_dir);
 
 		if (0 != chdir(opt.log_dir))
 		{
-			/* Invalid dir for log file, try home dir */
+			/*
+			 * Could not enter the requested log directory.  Fall back to
+			 * $HOME, but make the fallback visible rather than silently
+			 * scattering gpsmon.*.log files into the home directory.
+			 */
 			char *home_dir = NULL;
-			if (0 == apr_env_get(&home_dir, "HOME", gx.pool))
+			gpmon_warningx(FLINE, APR_FROM_OS_ERROR(errno),
+						   "cannot enter log directory '%s', falling back to $HOME",
+						   opt.log_dir);
+			if (0 == apr_env_get(&home_dir, "HOME", gx.pool) && home_dir)
 			{
-				if (home_dir)
-					chdir(home_dir);
+				if (0 != chdir(home_dir))
+					gpmon_warningx(FLINE, APR_FROM_OS_ERROR(errno),
+								   "cannot enter home directory '%s'", home_dir);
 			}
 		}
 	}

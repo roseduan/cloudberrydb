@@ -1107,7 +1107,20 @@ static int read_conf_file(char *conffile)
 	opt.min_query_time = min_query_time;
 	opt.harvest_interval = 120;
 	opt.max_log_size = 0;
-	opt.log_dir = strdup(DEFAULT_GPMMON_LOGDIR);
+	/*
+	 * Default the log location to an absolute path under the coordinator
+	 * data directory.  gpsmon is launched over a fresh ssh session whose
+	 * working directory is $HOME, so a relative default (gpperfmon/logs)
+	 * would fail gpsmon's chdir() and silently drop its logs into $HOME.
+	 * ax.master_data_directory is populated by getconfig() before every
+	 * read_conf_file() call, so it is safe to anchor the default here.
+	 */
+	{
+		char default_log_dir[MAXPATHLEN + 1] = { 0 };
+		snprintf(default_log_dir, MAXPATHLEN, "%s/%s",
+				 ax.master_data_directory, DEFAULT_GPMMON_LOGDIR);
+		opt.log_dir = strdup(default_log_dir);
+	}
 	opt.max_disk_space_messages_per_interval = MAX_MESSAGES_PER_INTERVAL;
 	opt.disk_space_interval = (60*MINIMUM_MESSAGE_INTERVAL);
 	opt.partition_age = 0;
