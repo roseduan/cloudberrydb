@@ -1,3 +1,6 @@
+# Cluster used when a gphdfs:// LOCATION does not specify hdfs_cluster_name.
+default: paa_cluster
+
 paa_cluster:
     hdfs_namenodes: ${HDFS_NAMENODE}
     hdfs_port: ${HDFS_PORT}

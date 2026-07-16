@@ -1,0 +1,33 @@
+-- Test 10: Default HDFS cluster
+-- Purpose: a gphdfs:// external table that omits hdfs_cluster_name resolves
+-- the cluster from the top-level "default" key in gphdfs.conf.
+-- Test 1: omit hdfs_cluster_name -> use gphdfs.conf "default" (paa_cluster)
+DROP EXTERNAL TABLE IF EXISTS test_default_read;
+NOTICE:  foreign table "test_default_read" does not exist, skipping
+CREATE READABLE EXTERNAL TABLE test_default_read(id int, col text, col2 decimal(10,2))
+LOCATION('gphdfs://test/basic/text/simple')
+FORMAT 'text';
+NOTICE:  external table syntax will be deprecated in the future HashData version, please use foreign table instead.
+SELECT * FROM test_default_read ORDER BY id LIMIT 5;
+ id |   col   | col2  
+----+---------+-------
+  1 | alice   | 10.50
+  2 | bob     | 20.75
+  3 | charlie | 30.00
+  4 | diana   | 40.25
+  5 | eve     | 50.50
+(5 rows)
+
+SELECT COUNT(*) FROM test_default_read;
+ count 
+-------
+    10
+(1 row)
+
+DROP EXTERNAL TABLE test_default_read;
+-- Test 2: an explicitly named but unknown cluster must still fail to resolve a
+-- server; the default is only used when no cluster name is given.
+CREATE READABLE EXTERNAL TABLE test_unknown_cluster(id int, col text, col2 decimal(10,2))
+LOCATION('gphdfs://test/basic/text/simple hdfs_cluster_name=no_such_cluster')
+FORMAT 'text';
+ERROR:  cannot find foreign server

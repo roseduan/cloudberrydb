@@ -160,6 +160,72 @@ datalakeFormKrbCCName(DatalakeHdfsConfigInfo *config)
 	config->gopherPath = pstrdup(gopherPath);
 }
 
+/*
+ * datalakeGetDefaultHdfsCluster
+ *
+ * Read the optional top-level "default" key from gphdfs.conf, which names the
+ * fallback HDFS cluster to use when an external table's LOCATION does not
+ * specify hdfs_cluster_name.  Return a palloc'd copy of the cluster name, or
+ * NULL when the file cannot be opened, has no "default" key, or that key's
+ * value is not a scalar.  A missing or unreadable file is intentionally not an
+ * error here: absence of a default just means there is no fallback cluster.
+ */
+char *
+datalakeGetDefaultHdfsCluster(const char *configFile)
+{
+	FILE             *fp;
+	yaml_parser_t     parser;
+	yaml_document_t   document;
+	yaml_node_t      *root;
+	yaml_node_pair_t *tnp;
+	char             *result = NULL;
+
+	fp = fopen(configFile, "rb");
+	if (fp == NULL)
+		return NULL;
+
+	if (!yaml_parser_initialize(&parser))
+	{
+		fclose(fp);
+		return NULL;
+	}
+
+	yaml_parser_set_input_file(&parser, fp);
+	if (!yaml_parser_load(&parser, &document))
+	{
+		yaml_parser_delete(&parser);
+		fclose(fp);
+		return NULL;
+	}
+	fclose(fp);
+
+	root = yaml_document_get_root_node(&document);
+	if (root != NULL && root->type == YAML_MAPPING_NODE)
+	{
+		for (tnp = root->data.mapping.pairs.start; tnp < root->data.mapping.pairs.top; tnp++)
+		{
+			yaml_node_t *key = yaml_document_get_node(&document, tnp->key);
+			yaml_node_t *value;
+
+			if (key == NULL || key->type != YAML_SCALAR_NODE)
+				continue;
+			if (pg_strcasecmp((const char *) key->data.scalar.value, "default") != 0)
+				continue;
+
+			value = yaml_document_get_node(&document, tnp->value);
+			if (value != NULL && value->type == YAML_SCALAR_NODE)
+				result = pnstrdup((const char *) value->data.scalar.value,
+								  value->data.scalar.length);
+			break;
+		}
+	}
+
+	yaml_document_delete(&document);
+	yaml_parser_delete(&parser);
+
+	return result;
+}
+
 DatalakeHdfsConfigInfo *
 datalakeParseHdfsConfig(const char *configFile, const char *serverName)
 {

@@ -362,6 +362,14 @@ parseHdfsConf(const char *configFile, bool isFullMode)
 
 		hci->name = pnstrdup((const char *)node->data.scalar.value, node->data.scalar.length);
 
+		/*
+		 * Skip the reserved top-level "default" key, a scalar naming the
+		 * fallback cluster for callers that omit the cluster name.  It is not
+		 * a cluster section, so it has no mapping value.
+		 */
+		if (pg_strcasecmp(hci->name, "default") == 0)
+			continue;
+
 		server = yaml_document_get_node(&document, tnp->value);
 		if (server->type != YAML_MAPPING_NODE)
 			elog(ERROR, "failed to parse \"%s\": server node of \"%s\" must be mapping node",

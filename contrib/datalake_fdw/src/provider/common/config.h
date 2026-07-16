@@ -29,6 +29,7 @@ typedef struct DatalakeHdfsConfigInfo
 
 // DatalakeHdfsConfigInfo *parseConf(const char *configFile, const char *serverName);
 DatalakeHdfsConfigInfo *datalakeParseHdfsConfig(const char *configFile, const char *serverName);
+char *datalakeGetDefaultHdfsCluster(const char *configFile);
 void datalakeFormKrbCCName(DatalakeHdfsConfigInfo *config);
 gopherConfig *datalakeGopherCreateConfig(DatalakeHdfsConfigInfo *hdfsConf);
 void datalakeGopherConfigDestroy(gopherConfig *conf);

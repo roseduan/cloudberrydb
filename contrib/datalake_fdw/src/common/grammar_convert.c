@@ -681,6 +681,12 @@ ConvertExternalTableStmt(CreateExternalStmt *createExtStmt)
 					(IS_DATALAKE_PROTOCOL(uri->customprotocol) || IS_HDFS_PROTOCOL(uri->customprotocol)))
 			{
 				char *hdfs_cluster_name = get_opt_oss(url, "hdfs_cluster_name");
+				/*
+				 * When the LOCATION does not specify a cluster name, fall back
+				 * to the optional top-level "default" key in gphdfs.conf.
+				 */
+				if (hdfs_cluster_name == NULL)
+					hdfs_cluster_name = datalakeGetDefaultHdfsCluster("gphdfs.conf");
 				if (hdfs_cluster_name)
 				{
 					DatalakeHdfsConfigInfo *hdfs = datalakeParseHdfsConfig("gphdfs.conf", hdfs_cluster_name);

@@ -10,7 +10,8 @@ HDFS_PREPARE_SQL = $(AUTOMATION_DIR)/prepare/prepare_hdfs/hdfs_smoke.sql
 export HADOOP_CONF_DIR = $(AUTOMATION_DIR)/tools/conf/hadoop
 
 REGRESS = 01_connection 02_text_basic 03_parquet_basic 04_orc_basic \
-          05_partition_basic 07_avro_basic 08_datatypes 09_edge_cases 06_cleanup
+          05_partition_basic 07_avro_basic 08_datatypes 09_edge_cases \
+          10_default_cluster 06_cleanup
 
 # HDFS test data must be pre-loaded before running tests.
 # From the HOST, run:
