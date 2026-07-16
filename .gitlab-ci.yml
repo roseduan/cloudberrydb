@@ -54,7 +54,11 @@ variables:
   variables:
     GIT_SUBMODULE_STRATEGY: "normal"
     GIT_DEPTH: 1
-    DATABASE_CONFIG_EXTRA_OPTIONS: "--enable-coverage"
+    # --enable-datalake-rest-catalog builds the Iceberg REST gateway uber-jar as a dist artifact
+    # so the smoke job can consume it (the test runner has no Maven). The gateway pom now declares
+    # the internal Nexus repositories (mirroring contrib/datalake_agent), so its deps resolve in CI
+    # instead of reaching unreachable external repos (the earlier build break). See issue #382.
+    DATABASE_CONFIG_EXTRA_OPTIONS: "--enable-coverage --enable-datalake-rest-catalog"
   cache:
     - key: cache-${CI_PROJECT_ID}-${ARCH}
       paths:
@@ -542,6 +546,180 @@ test_datalake_smoke:
 
   after_script: |
     cd ${CI_PROJECT_DIR} && docker compose -f services/datalake-test-env.yml down -v || true
+  rules:
+    - !reference [ .common-rules ]
+  artifacts:
+    <<: *artifacts
+
+test_datalake_rest_catalog_smoke:
+  stage: test
+  extends: .common
+  <<: *cache-only-pull
+  script: |
+    trap 'test -e /tmp/.debugging && tmux new-session -d -s debug && tmux wait-for done' EXIT
+
+    env
+    set -euxo pipefail
+
+    # Smoke test for the datalake_rest_catalog REST gateway (issue #382): bring up
+    # MinIO + a single-node cluster, write a builtin Iceberg table (sales.orders),
+    # start the gateway, and prove an unmodified external client (latest PyIceberg,
+    # over the gateway's default HTTPS on :8443) reads the 3 seeded rows back.
+    # Thin CI wrapper over the committed e2e assets; no new test logic.
+    #
+    # The cluster/gateway/seed/read section runs as the non-root 'gpadmin' user because
+    # gpinitsystem / gpstart / gpstop refuse to run as root (this CI runner is root).
+    export ENV=release
+    DB="${CI_PROJECT_DIR}/database"
+    DRC="${DB}/contrib/datalake_rest_catalog"
+    MINIO_IMG=docker.hashdata.dev/minio/minio:latest
+    MC_IMG=docker.hashdata.dev/minio/mc:latest
+
+    # --- 1. MinIO on localhost:9000, bucket 'warehouse' (matches seed_builtin.sql) [root] ---
+    docker rm -f drc-smoke-minio >/dev/null 2>&1 || true
+    docker run -d --name drc-smoke-minio -p 9000:9000 \
+      -e MINIO_ROOT_USER=minioadmin -e MINIO_ROOT_PASSWORD=minioadmin \
+      "${MINIO_IMG}" server /data
+    for i in $(seq 1 30); do
+      curl -sf http://localhost:9000/minio/health/live >/dev/null 2>&1 && break || sleep 1
+    done
+    docker run --rm --network host --entrypoint sh "${MC_IMG}" -c \
+      "mc alias set l http://localhost:9000 minioadmin minioadmin && mc mb -p l/warehouse"
+
+    # --- 2. Product env; locate the gateway jar (built by the pipeline because the build config
+    #        enables --enable-datalake-rest-catalog). The read section below fails fast if it is
+    #        absent (e.g. build_develop didn't run) rather than trying to build it on this runner,
+    #        which has no Maven.
+    . "${CI_PROJECT_DIR}/dist/database/cloudberry-env.sh"
+    JARDIR="$(pg_config --pkglibdir)/java"
+
+    # --- 3. Hand the cluster/gateway/seed/read off to gpadmin (non-root) --------------------
+    mkdir -p /home/gpadmin && chown gpadmin:gpadmin /home/gpadmin
+    chown -R gpadmin:gpadmin "${DB}/gpAux/gpdemo"
+    # gpinitsystem/gpstart PING_HOST use ping for host-reachability, but the k8s CI pod lacks
+    # CAP_NET_RAW so non-root ping fails ("socket: Operation not permitted"). Shim ping/ping6 to
+    # exit 0 (PING_HOST only checks the exit code; the single-host demo is trivially reachable).
+    mkdir -p /tmp/drc-shim
+    printf '#!/bin/sh\nexit 0\n' > /tmp/drc-shim/ping
+    cp /tmp/drc-shim/ping /tmp/drc-shim/ping6
+    chmod 755 /tmp/drc-shim/ping /tmp/drc-shim/ping6
+    cat > /tmp/drc_smoke_body.sh <<'BODY'
+    set -euxo pipefail
+    export ENV=release
+    export DRC_JAVA_HOME=/opt/jdk17
+    export PATH="/tmp/drc-shim:/opt/jdk17/bin:${PATH}"
+    DB="${CI_PROJECT_DIR}/database"
+    DRC="${DB}/contrib/datalake_rest_catalog"
+    . "${CI_PROJECT_DIR}/dist/database/cloudberry-env.sh"
+
+    # 3a. single-node demo cluster (coordinator on default PORT_BASE=7000)
+    make -C "${DB}" create-demo-cluster
+    . "${DB}/gpAux/gpdemo/gpdemo-env.sh"
+    # gateway reads pg.jdbcUrl; point it at the actual coordinator port (don't assume 7000).
+    export PG_JDBCURL="jdbc:postgresql://localhost:${PGPORT}/postgres?ssl=false"
+
+    # 4. hardening: reader role -> authenticator -> scram pg_hba (order matters).
+    #    create_authenticator.sql GRANTs iceberg_reader (so it must exist first);
+    #    rest_catalog_authz.sql (bundled in the seed) RAISEs unless iceberg_authenticator
+    #    exists. PGOPTIONS forces scram-sha-256 verifiers for the scram pg_hba lines.
+    AUTH_PW="drc_auth_${CI_PIPELINE_ID:-0}"
+    SCRAM="PGOPTIONS=-c password_encryption=scram-sha-256"
+    env "${SCRAM}" psql -p "${PGPORT}" -v ON_ERROR_STOP=1 postgres \
+      -c "CREATE ROLE iceberg_reader LOGIN PASSWORD 'reader_pw';"
+    env "${SCRAM}" psql -p "${PGPORT}" -v ON_ERROR_STOP=1 postgres \
+      -v pw="${AUTH_PW}" -f "${DRC}/security/create_authenticator.sql"
+    # pg_hba is first-match-wins -> prepend the scram fragment above the demo's trust lines.
+    HBA="${COORDINATOR_DATA_DIRECTORY:-${MASTER_DATA_DIRECTORY}}/pg_hba.conf"
+    cat "${DRC}/security/pg_hba.rest_catalog.fragment" "${HBA}" > "${HBA}.drc" && mv "${HBA}.drc" "${HBA}"
+    gpstop -u
+
+    # 5. write the builtin Iceberg table: sales.orders (3 rows) + authz layer.
+    #    (The gateway itself is started by the main script below, inside the JDK-bearing
+    #    engine-tester image -- this CI runner has no JDK17, and gpinit/psql above don't need one.)
+    export S3_ACCESS_KEY_ID=minioadmin S3_SECRET_ACCESS_KEY=minioadmin
+    env "${SCRAM}" psql -p "${PGPORT}" -v ON_ERROR_STOP=1 -d postgres \
+      -v authz_sql="${DRC}/security/rest_catalog_authz.sql" \
+      -f "${DRC}/e2e/seed_builtin.sql"
+
+    # 6. cluster + hardening + seed are up; the gateway + four-engine read run after this
+    #    body returns (main script), in the engine-tester container over --network host.
+    echo "drc_smoke_body: cluster + hardening + seed ready on :${PGPORT} (gateway starts next)"
+    BODY
+    chown gpadmin:gpadmin /tmp/drc_smoke_body.sh
+    runuser -u gpadmin -- env HOME=/home/gpadmin \
+      CI_PROJECT_DIR="${CI_PROJECT_DIR}" CI_PIPELINE_ID="${CI_PIPELINE_ID:-0}" \
+      bash /tmp/drc_smoke_body.sh
+
+    # --- 4. gateway + four-engine read, inside the engine-tester image ----------------------
+    # This CI runner has no JDK, so the Java gateway runs INSIDE the tester image (which has one),
+    # and so do the four Iceberg clients. This runner's docker daemon can't see the job pod's
+    # filesystem, so bind mounts of job paths don't work (MinIO above only used -p/--network host);
+    # we `docker cp` the jar + e2e assets into the container instead. --network host lets the
+    # gateway reach PG:${PGPORT} + MinIO:9000 on the runner and serve HTTPS :8443. Override the
+    # image with the ENGINE_TESTER_IMAGE CI/CD variable; unset falls back to the current tag,
+    # explicit-empty forces the skip path below.
+    ENGINE_TESTER_IMAGE="${ENGINE_TESTER_IMAGE-docker.hashdata.dev/hashdata-releng/datalake-test:rest-test-20260714}"
+    if [ -z "${ENGINE_TESTER_IMAGE}" ]; then
+      echo "ENGINE_TESTER_IMAGE empty: runner has no JDK to run the gateway and no engine runtimes;"
+      echo "nothing to validate -- set ENGINE_TESTER_IMAGE to the tester image. Skipping."
+      exit 0
+    fi
+    # A missing image would otherwise surface as a cryptic `docker create ... manifest not found`.
+    # Turn it into the documented graceful skip so the job stays green until the image is pushed.
+    if ! docker image inspect "${ENGINE_TESTER_IMAGE}" >/dev/null 2>&1 \
+       && ! docker pull "${ENGINE_TESTER_IMAGE}" >/dev/null 2>&1; then
+      echo "engine-tester image ${ENGINE_TESTER_IMAGE} not available in the registry;"
+      echo "skipping smoke -- push the image or set ENGINE_TESTER_IMAGE to an available one."
+      exit 0
+    fi
+
+    GW_JAR="${JARDIR}/datalake-rest-catalog-1.0.0.jar"
+    [ -f "${GW_JAR}" ] || { echo "ERROR: gateway jar not found at ${GW_JAR} (build cache missing it?)"; exit 1; }
+    . "${DB}/gpAux/gpdemo/gpdemo-env.sh" 2>/dev/null || true
+    PGPORT="${PGPORT:-7000}"
+    AUTH_PW="drc_auth_${CI_PIPELINE_ID:-0}"
+
+    # 4a. gateway: create -> cp jar in -> start, so the jar is present before `java -jar` runs.
+    #     Foreground java => container lifetime == gateway. --entrypoint java resolves java on
+    #     PATH (system JDK or /opt/jdk17). Same env contract as ctl.sh (S3 creds, authenticator
+    #     password, JDBC url). HTTPS self-signed cert on :8443 generated at startup.
+    docker rm -f drc-gateway >/dev/null 2>&1 || true
+    docker create --name drc-gateway --network host \
+      -e S3_ACCESS_KEY_ID=minioadmin -e S3_SECRET_ACCESS_KEY=minioadmin \
+      -e PG_AUTHENTICATOR_PASSWORD="${AUTH_PW}" \
+      -e PG_JDBCURL="jdbc:postgresql://localhost:${PGPORT}/postgres?ssl=false" \
+      --entrypoint java "${ENGINE_TESTER_IMAGE}" -jar /tmp/drc-gateway.jar
+    docker cp "${GW_JAR}" drc-gateway:/tmp/drc-gateway.jar
+    docker start drc-gateway
+    echo "waiting for gateway :8443 ..."
+    gw_ok=""
+    for i in $(seq 1 60); do
+      curl -sfk https://localhost:8443/v1/config >/dev/null 2>&1 && { gw_ok=1; break; }
+      docker ps -q -f name=drc-gateway -f status=running | grep -q . \
+        || { echo "gateway container exited early; log:"; docker logs --tail 60 drc-gateway 2>&1 || true; break; }
+      sleep 2
+    done
+    [ -n "${gw_ok}" ] || { echo "ERROR: gateway not ready on :8443; log:"; docker logs --tail 80 drc-gateway 2>&1 || true; exit 1; }
+    echo "gateway up on :8443"
+
+    # 4b. four-engine read: cp the e2e assets into the SAME container and exec run_engines.sh there
+    #     (reaches the gateway on localhost:8443 + MinIO on :9000 in the shared netns).
+    docker cp "${DRC}/e2e" drc-gateway:/drc-e2e
+    docker exec \
+      -e http_proxy -e https_proxy -e no_proxy -e HTTP_PROXY -e HTTPS_PROXY -e NO_PROXY \
+      drc-gateway bash /drc-e2e/smoke/run_engines.sh pyiceberg spark trino duckdb
+  after_script: |
+    # Stop the gateway container; the reads ran in a --rm container (self-cleaning).
+    docker rm -f drc-gateway >/dev/null 2>&1 || true
+    # Teardown also runs as gpadmin (gpstop/destroy-demo-cluster refuse root); MinIO is root.
+    runuser -u gpadmin -- env HOME=/home/gpadmin CI_PROJECT_DIR="${CI_PROJECT_DIR}" \
+      DRC_JAVA_HOME=/opt/jdk17 bash -c '
+        export PATH="/tmp/drc-shim:${PATH}";
+        DRC="${CI_PROJECT_DIR}/database/contrib/datalake_rest_catalog";
+        "${DRC}/bin/datalake_rest_catalog_ctl.sh" stop || true;
+        . "${CI_PROJECT_DIR}/dist/database/cloudberry-env.sh" 2>/dev/null || true;
+        make -C "${CI_PROJECT_DIR}/database" destroy-demo-cluster || true' || true
+    docker rm -f drc-smoke-minio || true
   rules:
     - !reference [ .common-rules ]
   artifacts:

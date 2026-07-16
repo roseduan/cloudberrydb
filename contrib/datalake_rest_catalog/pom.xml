@@ -82,6 +82,26 @@
     <dependency><groupId>org.assertj</groupId><artifactId>assertj-core</artifactId><version>3.26.3</version><scope>test</scope></dependency>
   </dependencies>
 
+  <!-- Resolve dependencies from the internal Nexus mirror (same as contrib/datalake_agent).
+       Without this the CI build reaches unreachable external repos (glassfish/spring/java.net)
+       and fails to resolve deps like com.zaxxer.hikari; Nexus proxies Maven Central. -->
+  <repositories>
+    <repository>
+      <id>nexus-releases</id>
+      <name>HashData Releases</name>
+      <url>https://nexus.hashdata.dev/repository/maven-hosted/</url>
+      <releases><enabled>true</enabled></releases>
+      <snapshots><enabled>false</enabled></snapshots>
+    </repository>
+    <repository>
+      <id>nexus-snapshots</id>
+      <name>HashData Snapshots</name>
+      <url>https://nexus.hashdata.dev/repository/maven-snapshot-hosted/</url>
+      <releases><enabled>false</enabled></releases>
+      <snapshots><enabled>true</enabled><updatePolicy>daily</updatePolicy></snapshots>
+    </repository>
+  </repositories>
+
   <build>
     <finalName>datalake-rest-catalog-1.0.0</finalName>
     <plugins>
