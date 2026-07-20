@@ -1117,7 +1117,7 @@ static int read_conf_file(char *conffile)
 	 */
 	{
 		char default_log_dir[MAXPATHLEN + 1] = { 0 };
-		snprintf(default_log_dir, MAXPATHLEN, "%s/%s",
+		snprintf(default_log_dir, sizeof(default_log_dir), "%s/%s",
 				 ax.master_data_directory, DEFAULT_GPMMON_LOGDIR);
 		opt.log_dir = strdup(default_log_dir);
 	}
