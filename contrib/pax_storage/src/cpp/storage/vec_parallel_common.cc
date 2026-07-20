@@ -116,7 +116,12 @@ bool PaxFragmentInterface::OpenFile() {
 
   auto desc = scan_desc_.get();
 
-  auto op = desc->Iterator()->Next();
+  // NextMicroPartition() returns empty both when the micro-partition list is
+  // exhausted and when desc has already been released (e.g. the whole scan
+  // is being torn down early while this fragment's thread is still in
+  // flight); either way, "no more micro-partitions" is the correct response
+  // here rather than crashing on the previous two-step Iterator()->Next().
+  auto op = desc->NextMicroPartition();
   if (!op) return false;
 
   auto file_system = desc->GetFileSystem();
@@ -261,7 +266,13 @@ arrow::Status ParallelScanDesc::Initialize(Relation relation,
   it.Release();
 
   num_micro_partitions_ = static_cast<int>(result.size());
-  iterator_ = std::make_unique<ParallelIteratorImpl<std::shared_ptr<MicroPartitionInfoProvider>>>(std::move(result));
+  {
+    // Runs before any fragment/worker thread exists (see DatasetInterface::
+    // Initialize's "called in main thread" contract), so this lock is just
+    // for symmetry with Release()/NextMicroPartition, not a real race guard.
+    std::unique_lock<std::shared_mutex> lock(iterator_mutex_);
+    iterator_ = std::make_unique<ParallelIteratorImpl<std::shared_ptr<MicroPartitionInfoProvider>>>(std::move(result));
+  }
 
   return arrow::Status::OK();
 }
@@ -273,7 +284,14 @@ void ParallelScanDesc::Release() {
     pax_filter_->LogStatistics();
   }
   relation_ = nullptr;
-  iterator_ = nullptr;
+  {
+    // Exclusive lock: must not null this out while another fragment thread
+    // is inside NextMicroPartition() (see the race this fixes, described on
+    // NextMicroPartition's declaration and in
+    // research-2026-07-13-pax-parallel-scan-iterator-race.md).
+    std::unique_lock<std::shared_mutex> lock(iterator_mutex_);
+    iterator_ = nullptr;
+  }
 }
 
 ParallelScanDesc::FragmentIteratorInternal::FragmentIteratorInternal(

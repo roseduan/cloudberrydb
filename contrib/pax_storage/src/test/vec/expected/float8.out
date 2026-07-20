@@ -658,7 +658,7 @@ UPDATE FLOAT8_TBL
    SET f1 = FLOAT8_TBL.f1 * '-1'
    WHERE FLOAT8_TBL.f1 > '0.0';
 SELECT f.f1 * '1e200' from FLOAT8_TBL f;
-ERROR:  Execute plan for garrow_record_batch_reader_read_next error: [record-batch-reader][read-next]: Invalid: overflow. (execMain.c:2076)  (seg1 slice1 127.0.0.1:7003 pid=31053) (execMain.c:2076)
+ERROR:  Read error: [record-batch-reader][read-next]: Invalid: overflow. (execMain.c:2076)  (seg1 slice1 127.0.0.1:7003 pid=31053) (execMain.c:2076)
 SELECT f.f1 ^ '1e200' from FLOAT8_TBL f;
 ERROR:  value out of range: overflow
 SELECT 0 ^ 0 + 0 ^ 1 + 0 ^ 0.0 + 0 ^ 0.5;
@@ -674,7 +674,7 @@ ERROR:  cannot take logarithm of a negative number
 SELECT exp(f.f1) from FLOAT8_TBL f;
 ERROR:  value out of range: underflow
 SELECT f.f1 / '0.0' from FLOAT8_TBL f;
-ERROR:  Execute plan for garrow_record_batch_reader_read_next error: [record-batch-reader][read-next]: Invalid: divide by zero. (execMain.c:2076)  (seg1 slice1 127.0.0.1:7003 pid=31053) (execMain.c:2076)
+ERROR:  Read error: [record-batch-reader][read-next]: Invalid: divide by zero. (execMain.c:2076)  (seg1 slice1 127.0.0.1:7003 pid=31053) (execMain.c:2076)
 SELECT f1 FROM FLOAT8_TBL;
           f1           
 -----------------------

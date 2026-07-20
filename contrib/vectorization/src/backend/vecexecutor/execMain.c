@@ -12,6 +12,7 @@
  */
 #include "arrow-glib/record-batch.h"
 #include "arrow-dataset-glib/scanner.h"
+#include "arrow-glib/compute.h"
 #include "postgres.h"
 
 #include "catalog/pg_operator_d.h"
@@ -30,6 +31,7 @@
 #include "utils/tuptable_vec.h"
 #include "utils/vecfuncs.h"
 #include "utils/vecsort.h"
+#include "executor/nodeSubplan.h"
 #include "vecexecutor/execslot.h"
 #include "vecexecutor/executor.h"
 #include "vecexecutor/vec_motion_direct_send.h"
@@ -176,6 +178,13 @@ typedef struct PlanBuildContext
 
 	/* parallel scan relation schema */
 	bool parallel_scan;
+	/*
+	 * Set by BuildSource() / the ShareScan consumer path when this plan
+	 * gets a source driven from the PG side (callback SourceNode or
+	 * SharedSourceNode).  Copied to estate->has_callback_source, where
+	 * it vetoes push_pipeline execution; see that field for why.
+	 */
+	bool has_callback_source;
 	Index table_oid;
 	Index am_oid;
 	GArrowSchema* relation_schema;
@@ -244,6 +253,8 @@ static GArrowExpression *build_literal_expression(Datum datum, bool isnull, Oid 
 static void BuildMaterializePlan(PlanBuildContext *pcontext, VecExecuteState *estate);
 static GArrowStoreType to_arrow_storetype(StoreType type);
 static void BuildShareScanPlan(PlanBuildContext *pcontext, VecExecuteState *estate);
+static bool HasPaxScanInSubtree(PlanState *planstate);
+static bool CanUsePushPipeline(PlanBuildContext *pcontext);
 
 static int plan_num = 0;
 
@@ -259,6 +270,77 @@ build_materialize_file_name()
 	TempTablespacePath(ts_path, tblspcOid);
 	snprintf(file_name, PATH_MAX - 1, "%s/%s_%d_%d_%s.%s.%d", ts_path, VECPATH, gp_session_id, gp_command_count, "vec", "materialize", MyProcPid);
 	return file_name;
+}
+
+static bool
+CanUsePushPipeline(PlanBuildContext *pcontext)
+{
+	/*
+	 * push_pipeline uses Plain SinkNode + PushGenerator backpressure.
+	 * Requires thread-safe source nodes so they can run on the thread
+	 * pool while the main thread reads from SinkNode's PushGenerator.
+	 *
+	 * Thread-safe sources:
+	 * - ScanNode (PAX): Arrow-native parallel scan, no PG callbacks.
+	 * - SharedSourceNode (ShareScan consumer): reads from shared
+	 *   memory / unix socket via ConsumePacket(), no PG callbacks.
+	 *   Supports PauseProducing/ResumeProducing for backpressure.
+	 *
+	 * NOT thread-safe: SourceNode callbacks (ExecProcNode uses PG
+	 * globals like CurrentMemoryContext). These use pipeline mode
+	 * (single-threaded) or batch mode instead.
+	 */
+	/*
+	 * SharedSourceNode (ShareScan consumer) is thread-safe but cannot
+	 * use push_pipeline yet: its RunConsumeLoop blocks waiting for the
+	 * SharedScan producer to write data.  In push_pipeline, start()
+	 * returns immediately (async), but the slice's Motion output may
+	 * be needed by other slices — causing cross-slice deadlocks.
+	 * Batch mode (start+wait) preserves correct inter-slice ordering.
+	 * TODO: enable after implementing Arrow-native Motion operator.
+	 */
+	/*
+	 * Exclude plans that use callback SourceNode instead of Arrow
+	 * ScanNode.  HashJoin, NestLoopJoin, Materialize, ShareScan,
+	 * and Append plans call BuildSource() which creates a callback
+	 * SourceNode that invokes PG's ExecProcNode — not thread-safe
+	 * for thread pool execution.  These must use batch mode.
+	 */
+	if (pcontext->is_hashjoin || pcontext->is_nestloopjoin ||
+		pcontext->is_materialize || pcontext->is_sharescan ||
+		pcontext->is_append)
+		return false;
+
+	return pcontext->parallel_scan && enable_vec_pipeline;
+}
+
+/*
+ * Check if any child in the plan subtree contains a PAX scan,
+ * indicated by push_pipeline=true in its VecExecuteState.
+ * Children are built before parents, so their state is ready.
+ */
+static bool
+HasPaxScanInSubtree(PlanState *planstate)
+{
+	VecExecuteState *vest;
+
+	if (planstate == NULL)
+		return false;
+
+	/*
+	 * Do not cross Motion nodes — children below Motion execute in
+	 * a different process (segment).  Their VecExecuteState reflects
+	 * the segment's execution mode, not the coordinator's.
+	 */
+	if (IsA(planstate, MotionState))
+		return false;
+
+	vest = GetVecExecuteState(planstate);
+	if (vest && vest->push_pipeline)
+		return true;
+
+	return HasPaxScanInSubtree(planstate->lefttree) ||
+		HasPaxScanInSubtree(planstate->righttree);
 }
 
 static PlanState *
@@ -1517,6 +1599,13 @@ expr_to_arrow_expression(Expr *node, PlanBuildContext *pcontext)
 				Param* param = (Param *) node;
 				ExprContext* exprcontext = pcontext->planstate->ps_ExprContext;
 				ParamExecData *prm = &(exprcontext->ecxt_param_exec_vals[param->paramid]);
+				if (prm->execPlan != NULL)
+				{
+					/* Parameter not evaluated yet, so go do it */
+					ExecSetParamPlan(prm->execPlan, exprcontext, NULL);
+					/* ExecSetParamPlan should have processed this param... */
+					Assert(prm->execPlan == NULL);
+				}
 				if (param->paramtype == NUMERICOID && prm->value == (Datum) 0)
 					prm->value = NumericGetDatum(int64_to_numeric(0));
 				expr = build_literal_expression(prm->value,
@@ -1682,6 +1771,13 @@ BuildShareScanPlan(PlanBuildContext *pcontext, VecExecuteState *estate)
 		if (error)
 			elog(ERROR, "build share consumer node fail caused by %s", error->message);
 
+		/*
+		 * SharedSourceNode's RunConsumeLoop relies on the yield protocol
+		 * (or a blocking wait for a separate reader thread) to survive
+		 * SinkNode backpressure -- same constraint as callback sources.
+		 */
+		pcontext->has_callback_source = true;
+
 		BuildSink(share_exec_node, estate, pcontext);
 	}
 }
@@ -1804,6 +1900,7 @@ BuildVecPlan(PlanState *planstate, VecExecuteState *estate)
 	pcontext.not_and_whenexpr = NULL;
 	pcontext.case_when_type = InvalidOid;
 	pcontext.parallel_scan = false;
+	pcontext.has_callback_source = false;
 	pcontext.is_append = false;
 	pcontext.append_filed_index = 0;
 	pcontext.is_materialize = false;
@@ -1890,8 +1987,6 @@ BuildVecPlan(PlanState *planstate, VecExecuteState *estate)
 			pcontext.chunk_size = 0;
 			pcontext.store_type = IN_SINGLE;
 			pcontext.cdb_strict = vmatstate->cdb_strict;
-			pcontext.pipeline = false;
-			pcontext.sinktype = Plain;
 		}
 		break;
 		case T_ShareInputScanState:
@@ -1998,20 +2093,47 @@ BuildVecPlan(PlanState *planstate, VecExecuteState *estate)
 			elog(ERROR, "Build arrow plan from (%d) type is not support yet.",
 					nodeTag(planstate->plan));
 	}
-	if (pcontext.parallel_scan)
+	/*
+	 * Execution mode selection:
+	 * 1. push_pipeline: PAX ScanNode async in thread pool + backpressure
+	 * 2. pipeline: ConsumingSinkNode pull-based, single-threaded, for
+	 *    SourceNode callback plans (CBDB code must stay on main thread)
+	 * 3. batch: start + wait (fallback)
+	 */
+	/* Non-scan top nodes inherit parallel_scan from child PAX scans */
+	if (!pcontext.parallel_scan && enable_vec_pipeline)
+		pcontext.parallel_scan = HasPaxScanInSubtree(planstate);
+
+	if (CanUsePushPipeline(&pcontext))
 	{
 		pcontext.sinktype = Plain;
 		pcontext.pipeline = false;
 	}
 
-	if (pool_threads > 0 && support_parallel)
-	/* switch thread on, all plan go threads*/
+	/*
+	 * Thread pool allocation:
+	 * - push_pipeline plans (PAX ScanNode): need thread pool for async
+	 *   scan fragment tasks.  Default to pool_threads or 4.
+	 * - Non-push_pipeline plans (HashJoin, Agg, etc.): use pool_threads
+	 *   for Arrow-internal parallelism (parallel hash build/probe).
+	 *   Note: garrow_execute_context_new uses the global CPU thread
+	 *   pool (GetCpuThreadPool) with SetCapacity(nthreads).  Each
+	 *   MPPEXEC process has its own pool, so total threads across all
+	 *   processes = MPPEXEC_count × pool_threads.  Tune pool_threads
+	 *   to balance parallelism vs memory (e.g., Q4 with 43 MPPEXEC:
+	 *   pool_threads=4 → 24GB/3min OOM; pool_threads=2 → ~15GB OK).
+	 */
+	if (CanUsePushPipeline(&pcontext))
 	{
-	 	estate->exectx = garrow_execute_context_new(pool_threads);
-	 	pcontext.plan = garrow_execute_plan_new_with_context(estate->exectx, &error);
+		int nthreads = pool_threads > 0 ? pool_threads : 4;
+		estate->exectx = garrow_execute_context_new(nthreads);
+		pcontext.plan = garrow_execute_plan_new_with_context(estate->exectx, &error);
 	}
-	
-	/* build plan sequentially */
+	else if (pool_threads > 0 && support_parallel)
+	{
+		estate->exectx = garrow_execute_context_new(pool_threads);
+		pcontext.plan = garrow_execute_plan_new_with_context(estate->exectx, &error);
+	}
 	else
 	{
 		pcontext.plan = garrow_execute_plan_new(&error);
@@ -2039,9 +2161,17 @@ BuildVecPlan(PlanState *planstate, VecExecuteState *estate)
 		pcontext.is_left_schema = true;
 		if (pcontext.is_append)
 			curnode = BuildAppendPlan(&pcontext, estate);
-		else 
+		else
 		{
-			if (pcontext.parallel_scan)
+			/*
+			 * BuildScanNode for PAX tables: Arrow-native parallel
+			 * scan with cooperative backpressure (pause/resume via
+			 * PauseProducing/ResumeProducing).
+			 *
+			 * BuildSource for non-PAX: callback-based, one batch
+			 * per ExecProcNode call.
+			 */
+			if (pcontext.parallel_scan && IsA(planstate, SeqScanState))
 				curnode = BuildScanNode(&pcontext);
 			else
 				curnode = BuildSource(&pcontext);
@@ -2094,6 +2224,10 @@ BuildVecPlan(PlanState *planstate, VecExecuteState *estate)
 
 	/* read from result queue for consuming sink */
 	estate->pipeline = pcontext.pipeline;
+	estate->push_pipeline = CanUsePushPipeline(&pcontext);
+	estate->has_callback_source = pcontext.has_callback_source;
+	if (enable_vec_pipeline && !estate->push_pipeline && !estate->pipeline)
+		elog(DEBUG1, "Backpressure: yield mode (not push_pipeline)");
 	if (pcontext.pipeline)
 		estate->resqueue = NIL;
 	else
@@ -2335,10 +2469,71 @@ ExecuteVecPlan(VecExecuteState *estate)
 	g_autoptr(GArrowRecordBatch) batch = NULL;
 	g_autoptr(GError) error = NULL;
 
-	if (estate->pipeline)
+	/*
+	 * Build deferred by PostBuildVecPlan(): exec params referenced by this
+	 * node were still pending at ExecInitNode time.  They have been
+	 * evaluated by now (preprocess_initplans() ran before local execution
+	 * starts; utility mode evaluates through ExecSetParamPlan() inside
+	 * expr_to_arrow_expression), so build the Arrow plan here.
+	 */
+	if (estate->plan == NULL && estate->build_deferred)
+		PostBuildVecPlan(estate->deferred_ps, estate);
+
+	/*
+	 * push_pipeline assumes every source in the plan produces asynchronously
+	 * on the thread pool (PAX ScanNode) so that start() can return and this
+	 * thread becomes the sink reader.  A callback SourceNode however runs
+	 * its whole legacy Loop inline during start(): its generator (PG
+	 * ExecProcNode) completes futures synchronously.  Once SinkNode
+	 * backpressure pauses it, the source blocks in pause_cv_.wait on this
+	 * very thread -- the only thread that could drain the sink and resume
+	 * it -- deadlocking the process (TPC-DS Q78: Result top node over a
+	 * HashJoin with an un-merged Motion bridge classified push_pipeline
+	 * because a PAX scan sits deeper in the same fragment).  Demote such
+	 * plans to yield mode, where sources yield on pause and this thread
+	 * interleaves reads with ContinueYieldedSources.
+	 */
+	if (!estate->started && estate->push_pipeline &&
+		estate->has_callback_source)
+	{
+		elog(DEBUG1, "BP: demote push_pipeline to yield mode pid=%d plan=%d",
+			 MyProcPid, garrow_execute_plan_get_id(estate->plan));
+		estate->push_pipeline = false;
+	}
+
+	if (estate->push_pipeline)
+	{
+		/*
+		 * Push-pipeline: ScanNode multi-threaded → SinkNode with backpressure.
+		 *
+		 * Call start() to kick off ScanNode threads (do NOT call wait()).
+		 * ScanNode threads push batches into SinkNode's PushGenerator queue.
+		 * Backpressure is automatic: when queue exceeds high watermark, the
+		 * AsyncToggle calls PauseProducing → ScanNode threads block in
+		 * WaitIfPaused(). When we read from the reader and queue drops below
+		 * low watermark, ResumeProducing unblocks the scan threads.
+		 */
+		if (!estate->started)
+		{
+			bool isok;
+			isok = garrow_execute_plan_start(estate->plan, &error);
+			if (!isok || error)
+				elog(ERROR, "Start push-pipeline plan error: %s.",
+					 error ? error->message : "unknown");
+			estate->started = true;
+		}
+
+		batch = garrow_record_batch_reader_read_next(estate->reader, &error);
+		if (error)
+			elog(ERROR, "Push-pipeline read error: %s.", error->message);
+
+		return ExecStoreBatch(estate->slot, batch);
+	}
+	else if (estate->pipeline)
 	{
 		while (true)
 		{
+			/* Return queued batches first */
 			if (list_length(estate->resqueue) > 0)
 			{
 				batch = (GArrowRecordBatch *)linitial(estate->resqueue);
@@ -2346,12 +2541,14 @@ ExecuteVecPlan(VecExecuteState *estate)
 				return ExecStoreBatch(estate->slot, batch);
 			}
 
+			/* Start or continue producing */
 			if (!estate->started)
 			{
 				bool isok;
 				isok = garrow_execute_plan_pipeline_start(estate->plan, &error);
 				if (!isok || error)
-					elog(ERROR, "Start execution plan error: %s.", error->message);
+					elog(ERROR, "Start execution plan error: %s.",
+						 error ? error->message : "unknown");
 				estate->started = true;
 			}
 			else
@@ -2364,24 +2561,140 @@ ExecuteVecPlan(VecExecuteState *estate)
 			}
 		}
 	}
-	else
+	else if (enable_vec_pipeline)
 	{
+		/*
+		 * Yield mode with backpressure.  Single-threaded by design, so it
+		 * does not require a thread pool (estate->exectx may be NULL, e.g.
+		 * pool_threads=0 or support_parallel=false plans).  It MUST cover
+		 * every plan that can have SinkNode backpressure armed: BuildSink
+		 * arms it whenever enable_vec_pipeline is on, and the batch-mode
+		 * start+wait below cannot answer a backpressure pause (nobody
+		 * reads the sink until wait() returns), which self-deadlocks just
+		 * like the push_pipeline misclassification above.
+		 *
+		 * SourceNode's RunYieldLoop processes batches synchronously
+		 * (one at a time) through the pipeline.  When SinkNode bp
+		 * triggers PauseProducing, the SourceNode yields (returns).
+		 * We read available batches from PushGenerator, then call
+		 * ContinueYieldedSources to resume.
+		 *
+		 * This gives memory-bounded execution: at any moment, only
+		 * a few batches are in-flight between SourceNode and SinkNode.
+		 * Unlike async mode (Loop+executor->Submit) which submits
+		 * batches to thread pool without waiting, yield mode processes
+		 * each batch fully before producing the next.
+		 *
+		 * Combined with SinkNode backpressure (set in BuildSink),
+		 * this prevents OOM from push model data accumulation.
+		 */
 		if (!estate->started)
 		{
 			bool isok;
+			elog(DEBUG1, "BP: yield mode START pid=%d plan=%d node=%d",
+				 MyProcPid,
+				 garrow_execute_plan_get_id(estate->plan),
+				 nodeTag(estate->slot->tts_ops));
+			garrow_execute_plan_enable_source_yield(estate->plan);
 			isok = garrow_execute_plan_start(estate->plan, &error);
 			if (!isok || error)
-				elog(ERROR, "Start plan for vector plan error: %s.", error->message);
+				elog(ERROR, "Start plan error: %s.",
+					 error ? error->message : "unknown");
+			estate->started = true;
+			estate->yield_remaining =
+				garrow_execute_plan_get_yielded_batch_count(estate->plan);
+		}
+
+		/*
+		 * Yield mode flow:
+		 * 1. SourceNode produces batches synchronously via RunYieldLoop
+		 * 2. After yield_batch_limit batches, it yields (returns)
+		 * 3. We read those batches from SinkNode PushGenerator queue
+		 * 4. When all read, we call ContinueYieldedSources to resume
+		 * 5. Repeat until SourceNode finishes all data
+		 *
+		 * yield_remaining is the SinkNode PushGenerator queue depth
+		 * (garrow_execute_plan_get_yielded_batch_count), so read_next is
+		 * only called when a batch is actually queued and thus never
+		 * blocks on an empty queue.  When the depth is 0 we resume the
+		 * yielded source instead of reading — this is what keeps a
+		 * blocking operator (HashAgg/HashJoin build) between source and
+		 * sink from deadlocking the single yield thread.
+		 */
+		if (estate->yield_remaining > 0)
+		{
+			batch = garrow_record_batch_reader_read_next(estate->reader,
+														 &error);
+			if (error)
+				elog(ERROR, "Read error: %s.", error->message);
+			estate->yield_remaining--;
+			return ExecStoreBatch(estate->slot, batch);
+		}
+
+		while (garrow_execute_plan_has_yielded_source(estate->plan))
+		{
+			bool isok;
+			isok = garrow_execute_plan_continue_yielded(
+						estate->plan, &error);
+			if (!isok || error)
+				elog(ERROR, "Continue yielded error: %s.",
+					 error ? error->message : "unknown");
+			estate->yield_remaining =
+				garrow_execute_plan_get_yielded_batch_count(estate->plan);
+			if (estate->yield_remaining > 0)
+			{
+				batch = garrow_record_batch_reader_read_next(
+							estate->reader, &error);
+				if (error)
+					elog(ERROR, "Read error: %s.", error->message);
+				estate->yield_remaining--;
+				return ExecStoreBatch(estate->slot, batch);
+			}
+			/*
+			 * yield_remaining == 0: blocking operator (e.g. HashJoin
+			 * build phase) consumed all batches without producing
+			 * output to SinkNode.  Continue yielding to feed more
+			 * data to the blocking operator until it starts producing.
+			 */
+		}
+
+		/* Source finished: read remaining batches from queue */
+		batch = garrow_record_batch_reader_read_next(estate->reader,
+													 &error);
+		if (error)
+			elog(ERROR, "Read error: %s.", error->message);
+		return ExecStoreBatch(estate->slot, batch);
+	}
+	else
+	{
+		/*
+		 * Pure batch mode: backpressure disabled (enable_vec_pipeline=off,
+		 * so BuildSink never armed the SinkNode toggle).  Safe to
+		 * start+wait only under that premise: sources run to completion
+		 * on the calling thread and a pause that nobody could answer can
+		 * never be requested.
+		 */
+		if (!estate->started)
+		{
+			bool isok;
+			elog(DEBUG1, "BP: batch mode START pid=%d plan=%d",
+				 MyProcPid,
+				 garrow_execute_plan_get_id(estate->plan));
+			isok = garrow_execute_plan_start(estate->plan, &error);
+			if (!isok || error)
+				elog(ERROR, "Start plan for vector plan error: %s.",
+					 error ? error->message : "unknown");
 			isok = garrow_execute_plan_wait(estate->plan, &error);
 			if (!isok || error)
-				elog(ERROR, "Execute plan for vector plan error: %s.", error->message);
+				elog(ERROR, "Execute plan for vector plan error: %s.",
+					 error ? error->message : "unknown");
 			estate->started = true;
 		}
 
-		batch = garrow_record_batch_reader_read_next(estate->reader, &error);
+		batch = garrow_record_batch_reader_read_next(estate->reader,
+													 &error);
 		if (error)
-			elog(ERROR, "Execute plan for garrow_record_batch_reader_read_next error: %s.", error->message);
-
+			elog(ERROR, "Read error: %s.", error->message);
 		return ExecStoreBatch(estate->slot, batch);
 	}
 	pg_unreachable();
@@ -2452,6 +2765,35 @@ BuildSink(GArrowExecuteNode *input, VecExecuteState *estate, PlanBuildContext *p
 		case Plain:
 		{
 			options = garrow_sink_node_options_new();
+			if (enable_vec_pipeline && backpressure_memory_mb > 0)
+			{
+				/*
+				 * Memory-based backpressure on SinkNode for ALL plans
+				 * with backpressure enabled.
+				 *
+				 * For push_pipeline plans: controls ScanNode's async
+				 * output via PushGenerator toggle.
+				 *
+				 * For yield-mode plans (non-push_pipeline with thread
+				 * pool): SinkNode bp PauseProducing propagates through
+				 * the Arrow node chain to Dataset ScanNode, which
+				 * responds with cooperative pause (saves scan state,
+				 * releases thread to pool).  ResumeProducing re-submits
+				 * paused scan task when PushGenerator queue drains.
+				 * This prevents ScanNode from producing unbounded data
+				 * (Q4: 480M rows store_sales → 1.7GB/proc without bp).
+				 *
+				 * For callback SourceNode: bp PauseProducing → yield
+				 * in RunYieldLoop.  yield_remaining may be 0 if bp
+				 * triggers before batches reach SinkNode (HashJoin
+				 * build absorbs them).  The while loop in ExecuteVecPlan
+				 * handles this by re-continuing until data appears.
+				 */
+				int64 memory_budget = (int64)backpressure_memory_mb *
+									  1024 * 1024;
+				garrow_sink_node_options_set_backpressure(options,
+					memory_budget);
+			}
 			sink = garrow_execute_plan_build_sink_node(pcontext->plan,
 																 input,
 																 options,
@@ -2736,6 +3078,13 @@ BuildSource(PlanBuildContext *pcontext)
 															   &error);
 	if (error)
 		elog(ERROR, "Failed to create source node, cause: %s.", error->message);
+
+	/*
+	 * This source pulls batches from PG's ExecProcNode on the calling
+	 * thread; it cannot run under push_pipeline (start-only, no
+	 * interleaved reads).  Flags the estate for demotion to yield mode.
+	 */
+	pcontext->has_callback_source = true;
 
 	return garrow_move_ptr(source);
 }
@@ -5835,6 +6184,71 @@ MergeArrowNodeToPlanStateFromSource(List **arrow_node_to_planstate, VecExecuteSt
 	}
 }
 
+/*
+ * exec_param_walker
+ *    Report whether an expression tree references a PARAM_EXEC param.
+ */
+static bool
+exec_param_walker(Node *node, void *context)
+{
+	if (node == NULL)
+		return false;
+	if (IsA(node, Param))
+		return ((Param *) node)->paramkind == PARAM_EXEC;
+	return expression_tree_walker(node, exec_param_walker, context);
+}
+
+static bool
+vecplan_refs_exec_param(PlanState *ps)
+{
+	Plan	   *plan = ps->plan;
+
+	if (exec_param_walker((Node *) plan->targetlist, NULL) ||
+		exec_param_walker((Node *) plan->qual, NULL))
+		return true;
+
+	switch (nodeTag(plan))
+	{
+		case T_Limit:
+			return exec_param_walker(((Limit *) plan)->limitOffset, NULL) ||
+				exec_param_walker(((Limit *) plan)->limitCount, NULL);
+		case T_Result:
+			return exec_param_walker(((Result *) plan)->resconstantqual, NULL);
+		case T_WindowAgg:
+			/*
+			 * Window-frame bound expressions (ROWS/RANGE BETWEEN <offset>
+			 * ...) live on the plan node, not in targetlist/qual, and can
+			 * reference a PARAM_EXEC (e.g. an initplan result), same as
+			 * Limit's offset/count above.
+			 */
+			return exec_param_walker(((WindowAgg *) plan)->startOffset, NULL) ||
+				exec_param_walker(((WindowAgg *) plan)->endOffset, NULL);
+		default:
+			break;
+	}
+	return false;
+}
+
+/*
+ * PARAM_EXEC values consumed by nodes the QD itself executes (slice 0)
+ * are not available at ExecInitNode time: initplans are evaluated later,
+ * by preprocess_initplans() at ExecutorRun time (or lazily through
+ * ExecSetParamPlan() in utility mode).  Building the Arrow plan now would
+ * bake the not-yet-set param into the expression as a bogus literal
+ * (TPC-DS Q24: HAVING sum(netpaid) > $0 silently became > 0, dropping
+ * every non-positive group).  QEs are not affected: their param values
+ * arrive with the dispatched plan before node init.
+ */
+static bool
+should_defer_vecplan_build(PlanState *ps)
+{
+	if (Gp_role == GP_ROLE_EXECUTE)
+		return false;
+	if (Gp_role == GP_ROLE_DISPATCH && ps->state->currentSliceId != 0)
+		return false;
+	return vecplan_refs_exec_param(ps);
+}
+
 void
 PostBuildVecPlan(PlanState *ps, VecExecuteState *estate)
 {
@@ -5849,6 +6263,19 @@ PostBuildVecPlan(PlanState *ps, VecExecuteState *estate)
 	ListCell *lc;
 	VecExecuteState *child_estate;
 	int i;
+
+	/*
+	 * Defer the build until the first ExecuteVecPlan() call, which runs
+	 * after the pending exec params have been evaluated.  The flag also
+	 * serves as the re-entry guard: when ExecuteVecPlan() calls back in,
+	 * build_deferred is already true and the build proceeds.
+	 */
+	if (!estate->build_deferred && should_defer_vecplan_build(ps))
+	{
+		estate->build_deferred = true;
+		estate->deferred_ps = ps;
+		return;
+	}
 
 	BuildVecPlan(ps, estate);
 
@@ -5955,6 +6382,20 @@ PostBuildVecPlan(PlanState *ps, VecExecuteState *estate)
 
 	if (child_estates == NIL)
 		return;
+
+	/*
+	 * A deferred child has no Arrow plan yet (see the build deferral at
+	 * the top).  MergeChildren pairs children positionally with the
+	 * target's source nodes and cannot drop a single child, so leave this
+	 * node entirely un-merged: BuildVecPlan() above already built bridge
+	 * sources (BuildSource -> ExecProcNode) that drive such children, and
+	 * the child builds its own plan on its first ExecuteVecPlan() call.
+	 */
+	foreach(lc, child_estates)
+	{
+		if (((VecExecuteState *) lfirst(lc))->build_deferred)
+			return;
+	}
 
 	/*
 	 * Merge child plans into target_plan.  Both branches below funnel into
@@ -6091,6 +6532,37 @@ PostBuildVecPlan(PlanState *ps, VecExecuteState *estate)
 	 * time, a regression footprint for the splice path (see explain.c).
 	 */
 	estate->merged_child_count = list_length(child_estates);
+
+	/*
+	 * MergeChildren replaced every one of this plan's bridge sources with
+	 * the corresponding child's plan content, so whether the merged plan
+	 * still contains a callback/shared source is now solely a property of
+	 * the children.  Recompute (not OR onto) the flag: a plan whose bridges
+	 * were all replaced by pure ScanNode children (e.g. Agg over a PAX
+	 * scan) must keep push_pipeline eligibility.
+	 */
+	{
+		bool		has_cb = false;
+
+		foreach(lc, child_estates)
+			has_cb |= ((VecExecuteState *) lfirst(lc))->has_callback_source;
+		estate->has_callback_source = has_cb;
+	}
+
+	/*
+	 * Disable push_pipeline on merged children.  After merge, child
+	 * ScanNodes are embedded in the parent plan; the child's original
+	 * Arrow plan is stale and must not execute independently -- its
+	 * push_pipeline would start async ScanNode threads feeding a stale
+	 * PushGenerator queue, causing OOM (Q2: 20GB in 51s).  The parent
+	 * plan now drives those ScanNodes via the merged plan.
+	 */
+	foreach(lc, child_estates)
+	{
+		VecExecuteState *merged_child = (VecExecuteState *) lfirst(lc);
+		if (merged_child && merged_child->push_pipeline)
+			merged_child->push_pipeline = false;
+	}
 
 	list_free(child_estates);
 

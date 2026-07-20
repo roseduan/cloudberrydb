@@ -261,6 +261,26 @@ _PG_init(void)
                             GUC_GPDB_NEED_SYNC,
                             NULL, NULL, NULL);
 
+    DefineCustomBoolVariable("vector.enable_vec_pipeline",
+                             "Enable pipeline execution mode for vectorized scan nodes.",
+                             NULL,
+                             &enable_vec_pipeline,
+                             false,
+                             PGC_USERSET,
+                             GUC_GPDB_NEED_SYNC,
+                             NULL, NULL, NULL);
+
+    DefineCustomIntVariable("vector.backpressure_memory_mb",
+                            "Memory budget (MB) per SinkNode queue for backpressure. "
+                            "Batch count watermarks are auto-calculated from this and schema width.",
+                            NULL,
+                            &backpressure_memory_mb,
+                            256,
+                            1, 8192,
+                            PGC_USERSET,
+                            GUC_GPDB_NEED_SYNC,
+                            NULL, NULL, NULL);
+
     DefineCustomIntVariable("vector.sonicagg_spill_memory_mb",
                             "Memory budget in MB for sonic hash-aggregate spill. "
                             "When the in-memory partition state exceeds this, "

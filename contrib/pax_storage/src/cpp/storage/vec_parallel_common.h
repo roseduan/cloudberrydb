@@ -27,6 +27,7 @@
 
 #pragma once
 
+#include <mutex>
 #include <shared_mutex>
 #include <thread>
 #include <unordered_map>
@@ -75,7 +76,23 @@ class PaxFragmentInterface;
 class ParallelScanDesc final : public std::enable_shared_from_this<ParallelScanDesc> {
  public:
   inline bool ShouldBuildCtid() const { return build_ctid_bitmap_; }
-  inline ParallelIterator<std::shared_ptr<MicroPartitionInfoProvider>> *Iterator() { return iterator_.get(); }
+
+  // Fetch the next micro-partition from the shared iterator, or an empty
+  // optional if none remain OR this desc has already been released (e.g. the
+  // whole scan is being torn down early -- via StopProducing on the owning
+  // ScanNode -- while this fragment's thread is still in flight; see
+  // research-2026-07-13-pax-parallel-scan-iterator-race.md). The null-check
+  // and the Next() call happen under the same shared-lock critical section
+  // so they are atomic with respect to Release() taking the exclusive lock
+  // on another thread: a plain "check Iterator() for null, then call
+  // ->Next() on the raw pointer" (the previous shape of this code) has a
+  // race window where Release() can null out and destroy the iterator in
+  // between the two calls, which the previous code hit as a SIGSEGV.
+  std::optional<std::shared_ptr<MicroPartitionInfoProvider>> NextMicroPartition() {
+    std::shared_lock<std::shared_mutex> lock(iterator_mutex_);
+    if (!iterator_) return std::nullopt;
+    return iterator_->Next();
+  }
   ~ParallelScanDesc() = default;
 
   arrow::Status Initialize(Relation relation,
@@ -121,6 +138,12 @@ class ParallelScanDesc final : public std::enable_shared_from_this<ParallelScanD
   std::shared_ptr<FileSystemOptions> fs_options_;
   std::shared_ptr<PaxFilter> pax_filter_;
   std::vector<int> scan_columns_;
+  // Guards iterator_'s lifecycle (assignment in Initialize(), reset to
+  // nullptr in Release()) against concurrent NextMicroPartition() calls from
+  // fragment worker threads. Next() on the pointed-to object is itself
+  // already thread-safe (atomic index), so concurrent readers only need the
+  // shared lock; Release() takes the exclusive lock to null it out.
+  std::shared_mutex iterator_mutex_;
   std::unique_ptr<ParallelIterator<std::shared_ptr<MicroPartitionInfoProvider>>> iterator_;
   std::shared_ptr<arrow::Schema> table_schema_;
   std::shared_ptr<arrow::Schema> scan_schema_;

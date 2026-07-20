@@ -40,6 +40,17 @@ typedef struct VecExecuteState
 	bool started; /* plan execution has been started */
 	TupleTableSlot *slot; /* slot for plan result*/
 	bool pipeline;
+	bool push_pipeline;	/* ScanNode push mode with backpressure */
+	/*
+	 * True when this estate's (possibly merged) Arrow plan contains a
+	 * source that must run under the yield protocol on the PG main
+	 * thread: a callback SourceNode (BuildSource, pulls ExecProcNode)
+	 * or a ShareScan consumer SharedSourceNode.  Such sources block on
+	 * SinkNode backpressure unless the main thread interleaves reads,
+	 * so ExecuteVecPlan demotes push_pipeline to yield mode when set.
+	 */
+	bool has_callback_source;
+	int yield_remaining;	/* batches available from yielded SourceNode */
 	GArrowRecordBatchReader *reader;
 	List *resqueue;
 	GArrowExecuteContext *exectx;
@@ -50,6 +61,16 @@ typedef struct VecExecuteState
 	 * "Vec Plan Merge:  N children".
 	 */
 	int merged_child_count;
+	/*
+	 * Arrow plan build was deferred by PostBuildVecPlan() because this
+	 * node's expressions reference PARAM_EXEC params that are not
+	 * evaluated yet at ExecInitNode time (initplans run later, in
+	 * preprocess_initplans() or lazily via ExecSetParamPlan()).  The
+	 * build happens on the first ExecuteVecPlan() call instead, using
+	 * deferred_ps.
+	 */
+	bool build_deferred;
+	PlanState *deferred_ps;
 } VecExecuteState;
 
 typedef struct VecSeqScanState

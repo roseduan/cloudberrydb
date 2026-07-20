@@ -51,3 +51,7 @@ bool enable_topk_runtime_filter = true;
 int limit_hashagg_max_total = 1000;
 bool enable_sonic_motion_direct_send = false;
 bool enable_sonic_hashjoin = false;
+
+/* backpressure for vectorized execution (push_pipeline / yield / SinkNode) */
+bool enable_vec_pipeline = false;
+int backpressure_memory_mb = 256;

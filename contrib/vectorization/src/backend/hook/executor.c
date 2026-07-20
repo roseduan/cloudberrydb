@@ -251,8 +251,13 @@ VecExecProcNodeGPDB(PlanState *node)
 		node->fHadSentNodeStart = true;
 	}
 
+	/*
+	 * estate->plan may still be NULL here: a build deferred by
+	 * PostBuildVecPlan() (pending exec params) only happens inside the
+	 * node's first ExecProcNodeReal call below.
+	 */
 	estate = GetVecExecuteState(node);
-	if (estate)
+	if (estate && estate->plan)
 		plan_id = garrow_execute_plan_get_id(estate->plan);
 
 	if (node->instrument && (!estate))
@@ -264,7 +269,12 @@ VecExecProcNodeGPDB(PlanState *node)
 	result = node->ExecProcNodeReal(node);
 
 	if (node->instrument && TupIsNull(result) && estate)
+	{
+		/* A deferred build got its plan (and id) during the call above. */
+		if (plan_id < 0 && estate->plan)
+			plan_id = garrow_execute_plan_get_id(estate->plan);
 		CollectTime(estate, plan_id);
+	}
 
 	if ((node->state->es_instrument & INSTRUMENT_MEMORY_DETAIL) != 0)
 	{

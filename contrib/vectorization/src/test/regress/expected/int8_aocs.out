@@ -313,7 +313,7 @@ SELECT q1, q2, q1 - q2 AS minus FROM INT8_TBL;
 (5 rows)
 
 SELECT q1, q2, q1 * q2 AS multiply FROM INT8_TBL;
-ERROR:  Execute plan for garrow_record_batch_reader_read_next error: [record-batch-reader][read-next]: Invalid: overflow. (execMain.c:2058)  (seg0 slice1 127.0.1.1:7002 pid=9596) (execMain.c:2058)
+ERROR:  Read error: [record-batch-reader][read-next]: Invalid: overflow. (execMain.c:2058)  (seg0 slice1 127.0.1.1:7002 pid=9596) (execMain.c:2058)
 SELECT q1, q2, q1 * q2 AS multiply FROM INT8_TBL
  WHERE q1 < 1000 or (q2 > 0 and q2 < 1000);
         q1        |        q2        |      multiply      
@@ -715,7 +715,7 @@ SELECT CAST(q1 AS int4) FROM int8_tbl WHERE q2 = 456;
 (1 row)
 
 SELECT CAST(q1 AS int4) FROM int8_tbl WHERE q2 <> 456;
-ERROR:  Execute plan for garrow_record_batch_reader_read_next error: [record-batch-reader][read-next]: Invalid: Integer value 4567890123456789 not in range: -2147483648 to 2147483647. (execMain.c:###)
+ERROR:  Read error: [record-batch-reader][read-next]: Invalid: Integer value 4567890123456789 not in range: -2147483648 to 2147483647. (execMain.c:###)
 SELECT CAST(q1 AS int2) FROM int8_tbl WHERE q2 = 456;
  q1  
 -----

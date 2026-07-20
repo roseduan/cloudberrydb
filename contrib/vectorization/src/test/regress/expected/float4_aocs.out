@@ -259,7 +259,7 @@ SELECT f.f1, f.f1 - '-10' AS x FROM FLOAT4_TBL f
 
 -- test divide by zero
 SELECT f.f1 / '0.0' from FLOAT4_TBL f;
-ERROR:  Execute plan for garrow_record_batch_reader_read_next error: [record-batch-reader][read-next]: Invalid: divide by zero. (execMain.c:2058)  (seg1 slice1 127.0.1.1:7003 pid=9806) (execMain.c:2058)
+ERROR:  Read error: [record-batch-reader][read-next]: Invalid: divide by zero. (execMain.c:2058)  (seg1 slice1 127.0.1.1:7003 pid=9806) (execMain.c:2058)
 SELECT * FROM FLOAT4_TBL;
       f1       
 ---------------

@@ -72,5 +72,8 @@ extern bool enable_sonic_motion_direct_send;
  * of the normal Arrow hash join, when the join type / key / payload types are
  * supported. Off forces all hash joins onto the normal Arrow hash join path. */
 extern bool enable_sonic_hashjoin;
+/* backpressure for vectorized execution (push_pipeline / yield / SinkNode) */
+extern bool enable_vec_pipeline;
+extern int backpressure_memory_mb;
 
 #endif   /* GUC_VEC_H */

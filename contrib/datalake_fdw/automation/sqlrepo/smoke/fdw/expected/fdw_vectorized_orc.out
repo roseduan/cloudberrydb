@@ -107,7 +107,7 @@ SELECT COUNT(*) FROM fdw_vec_types_r;
 (1 row)
 
 SELECT * FROM fdw_vec_types_r WHERE col_bigint <= 3 ORDER BY col_bigint NULLS LAST;
-ERROR:  Execute plan for garrow_record_batch_reader_read_next error: [record-batch-reader][read-next]: Invalid: Referenced field col_ts(att5) was timestamp[ns] but should have been timestamp[us]. (execMain.c:2234)  (seg0 slice1 127.0.0.1:7002 pid=2669729) (execMain.c:2234)
+ERROR:  Read error: [record-batch-reader][read-next]: Invalid: Referenced field col_ts(att5) was timestamp[ns] but should have been timestamp[us]. (execMain.c:2234)  (seg0 slice1 127.0.0.1:7002 pid=2669729) (execMain.c:2234)
 SELECT COUNT(*) FROM fdw_vec_types_r WHERE col_double > 0.5;
  count 
 -------
