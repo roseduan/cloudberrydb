@@ -2128,7 +2128,7 @@ ExecHashJoinInitializeDSM(HashJoinState *state, ParallelContext *pcxt)
 	 * table(s), using the plan node ID as the toc key.
 	 */
 	pstate = shm_toc_allocate(pcxt->toc, sizeof(ParallelHashJoinState));
-	shm_toc_insert(pcxt->toc, plan_node_id, pstate);
+	memset(pstate, 0, sizeof(ParallelHashJoinState));
 
 	/*
 	 * Set up the shared hash join state with no batches initially.
@@ -2165,6 +2165,20 @@ ExecHashJoinInitializeDSM(HashJoinState *state, ParallelContext *pcxt)
 
 	/* Set up the space we'll use for shared temporary files. */
 	SharedFileSetInit(&pstate->fileset, pcxt->seg);
+
+	/*
+	 * Publish the pointer only after every field is initialized.  TOC entries
+	 * are read locklessly by peer workers via shm_toc_lookup(), paired only by
+	 * the write/read barriers in shm_toc_insert()/shm_toc_lookup().  Inserting
+	 * before the Barriers were initialized let a worker on weak-memory hardware
+	 * (aarch64) observe the pointer while build_barrier still held
+	 * uninitialized shm_toc_allocate() memory, so BarrierAttach() read a
+	 * garbage static_party and tripped Assert(!barrier->static_party).
+	 * Initialize-then-publish also matches ExecHashInitializeDSM(),
+	 * ExecSequenceInitializeDSM() and ExecShareInputScanInitializeDSM().
+	 */
+	shm_toc_insert(pcxt->toc, plan_node_id, pstate);
+
 	state->worker_id = 0; /* First worker process */
 
 	/* Initialize the shared state in the hash node. */
