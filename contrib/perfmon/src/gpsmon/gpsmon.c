@@ -1510,8 +1510,13 @@ void gx_main(int port, apr_int64_t signature)
 		 * Create the whole log directory path, not just its last component:
 		 * gpsmon starts over a fresh ssh session, so intermediate directories
 		 * (e.g. <datadir>/gpperfmon) may not exist yet.
+		 *
+		 * Cast away const: opt.log_dir is declared const char * but is
+		 * populated via strdup() (see -l handling), so the storage is
+		 * mutable heap.  gpmon_recursive_mkdir() writes '\0' at each '/'
+		 * during the walk and restores it before returning.
 		 */
-		gpmon_recursive_mkdir(opt.log_dir);
+		gpmon_recursive_mkdir((char *) opt.log_dir);
 
 		if (0 != chdir(opt.log_dir))
 		{
