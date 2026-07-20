@@ -240,6 +240,33 @@
             <version>1.18.12</version>
             <scope>provided</scope>
         </dependency>
+        <!-- Parquet 1.15.2 MUST be declared before the Hive/Iceberg dependencies.
+             hive-exec-3.1.0 and iceberg-hive-runtime are shaded uber jars that embed an
+             old parquet 1.10 org.apache.parquet.schema.Type (lacking getLogicalTypeAnnotation())
+             at the original package name with no relocation, so a Maven <exclusion> cannot
+             remove them. Spring Boot's LaunchedURLClassLoader loads BOOT-INF/lib jars in
+             BOOT-INF/classpath.idx order, which mirrors dependency declaration order;
+             declaring parquet-* first lets parquet-column-1.15.2 win over the embedded
+             copies and fixes NoSuchMethodError: Type.getLogicalTypeAnnotation() on Hudi reads. -->
+        <dependency>
+            <groupId>org.apache.parquet</groupId>
+            <artifactId>parquet-column</artifactId>
+            <version>${parquet.version}</version>
+        </dependency>
+        <dependency>
+            <groupId>org.apache.parquet</groupId>
+            <artifactId>parquet-hadoop</artifactId>
+            <version>${parquet.version}</version>
+        </dependency>
+        <dependency>
+            <!-- hudi-common calls AvroSchemaConverter at runtime; parquet-avro is
+                 provided-scope in the Hudi parent BOM (not transitive), and dropping
+                 hudi-presto-bundle removed the shaded copy that used to satisfy it, so
+                 declare it explicitly to keep it in the agent fat jar. -->
+            <groupId>org.apache.parquet</groupId>
+            <artifactId>parquet-avro</artifactId>
+            <version>${parquet.version}</version>
+        </dependency>
         <dependency>
             <groupId>org.apache.hive</groupId>
             <artifactId>hive-metastore</artifactId>
@@ -337,31 +364,75 @@
             <scope>provided</scope>
         </dependency>
 
+        <!-- Slim Hudi modules instead of hudi-presto-bundle: the agent only uses
+             org.apache.hudi.common/avro/metadata/internal.schema classes (all in
+             hudi-common) plus the Hadoop input formats (hudi-hadoop-mr) for the read
+             path. The presto bundle is a shaded uber jar that embeds ancient
+             jackson-databind 2.4.0 + netty-all 4.1.65 + hbase-shaded-netty, none of
+             which are needed; dropping it removes those bundled CVEs and lets Avro/
+             Parquet resolve to the patched versions managed above. -->
         <dependency>
             <groupId>org.apache.hudi</groupId>
-            <artifactId>hudi-presto-bundle</artifactId>
+            <artifactId>hudi-common</artifactId>
             <version>${hudi.version}</version>
         </dependency>
         <dependency>
-            <groupId>org.apache.parquet</groupId>
-            <artifactId>parquet-column</artifactId>
-            <version>${parquet.version}</version>
-        </dependency>
-        <dependency>
-            <groupId>org.apache.parquet</groupId>
-            <artifactId>parquet-hadoop</artifactId>
-            <version>${parquet.version}</version>
+            <groupId>org.apache.hudi</groupId>
+            <artifactId>hudi-hadoop-mr</artifactId>
+            <version>${hudi.version}</version>
+            <exclusions>
+                <!-- hudi-hadoop-mr transitively re-pulls the hadoop-* modules;
+                     exclude the slf4j-reload4j binding on this path too, matching
+                     the direct hadoop-* dependency declarations above (keeps log4j2
+                     as the only slf4j binding). -->
+                <exclusion>
+                    <groupId>org.slf4j</groupId>
+                    <artifactId>slf4j-reload4j</artifactId>
+                </exclusion>
+            </exclusions>
         </dependency>
         <dependency>
             <groupId>org.apache.avro</groupId>
             <artifactId>avro-mapred</artifactId>
             <version>${avro.version}</version>
         </dependency>
-        <!-- https://mvnrepository.com/artifact/com.esotericsoftware/kryo -->
+        <!-- Kryo: hudi-common 0.13.0 compiles against Kryo 4's nested
+             com.esotericsoftware.kryo.Kryo$DefaultInstantiatorStrategy, which Kryo 5.x
+             removed (moved to the top-level com.esotericsoftware.kryo.util package).
+             Dropping hudi-presto-bundle removed the shaded kryo-shaded 4.0.2 it embedded,
+             and declaring plain kryo:5.3.0 here caused NoClassDefFoundError on Hudi reads.
+             Use kryo-shaded 4.0.2 — the exact artifact/version Hudi 0.13's parent BOM
+             manages (<kryo.shaded.version>4.0.2</kryo.shaded.version>). -->
         <dependency>
             <groupId>com.esotericsoftware</groupId>
-            <artifactId>kryo</artifactId>
-            <version>5.3.0</version>
+            <artifactId>kryo-shaded</artifactId>
+            <version>4.0.2</version>
+        </dependency>
+        <!-- HBase relocated third-party (shaded Guava/Protobuf): Hudi 0.13's
+             metadata-table reader parses the MDT log blocks as HBase HFiles
+             (HoodieBackedTableMetadata -> HoodieMergedLogRecordScanner ->
+             HoodieAvroHFileReader -> org.apache.hadoop.hbase.io.hfile.ReaderContextBuilder),
+             which calls org.apache.hbase.thirdparty.com.google.common.base.Preconditions
+             and reads the protobuf-encoded HFile trailer/fileinfo.
+             hbase-server (which carries the HFile classes) is pulled transitively via
+             hudi-common, but the org.apache.hbase.thirdparty:* artifacts are declared
+             on hbase-server WITHOUT a version (managed only by HBase's own parent BOM),
+             so at depth-3 (hudi-common -> hbase-server -> hbase-thirdparty) Maven cannot
+             resolve their version in this pom and drops them from the agent fat jar.
+             hudi-presto-bundle used to embed the shaded copies; declare them explicitly
+             at HBase 2.4.9's managed hbase-thirdparty.version=3.5.1 to fix:
+             NoClassDefFoundError: org/apache/hbase/thirdparty/com/google/common/base/Preconditions
+             on Hudi reads. (netty/gson thirdparty are RPC-path only; the local HFile
+             read path does not need them.) -->
+        <dependency>
+            <groupId>org.apache.hbase.thirdparty</groupId>
+            <artifactId>hbase-shaded-miscellaneous</artifactId>
+            <version>3.5.1</version>
+        </dependency>
+        <dependency>
+            <groupId>org.apache.hbase.thirdparty</groupId>
+            <artifactId>hbase-shaded-protobuf</artifactId>
+            <version>3.5.1</version>
         </dependency>
         <dependency>
             <groupId>software.amazon.awssdk</groupId>
@@ -514,6 +585,55 @@
                 <groupId>org.bouncycastle</groupId>
                 <artifactId>bcprov-jdk18on</artifactId>
                 <version>${bcprov.version}</version>
+            </dependency>
+            <!-- Align the WHOLE HBase module set to 2.4.9. hive-metastore:3.1.0 drags in
+                 hbase-client:2.0.0-alpha4 and its siblings (hbase-common, hbase-protocol,
+                 hbase-protocol-shaded, hbase-hadoop-compat, hbase-hadoop2-compat all at
+                 2.0.0-alpha4), while hudi-common pulls hbase-server:2.4.9 for reading the
+                 Hudi metadata-table (MDT) HFiles. Mixing the two majors breaks MDT reads in
+                 two ways that only surface once hudi-presto-bundle (a shaded uber jar that
+                 embedded its own relocated HBase) is dropped:
+                   1) the alpha4 *-compat jars reference the old hbase-thirdparty 1.x package
+                      org.apache.hadoop.hbase.shaded.* while the fat jar only ships
+                      hbase-shaded-miscellaneous-3.5.1 (3.x, org.apache.hbase.thirdparty.*) ->
+                      NoClassDefFoundError: .../shaded/com/google/common/cache/CacheLoader at
+                      HFile.<clinit>;
+                   2) alpha4 hbase-common's CellComparator has no static getInstance() factory
+                      (added in hbase 2.1), but the 2.4.9 FixedFileTrailer calls it ->
+                      NoSuchMethodError: CellComparator.getInstance() when reading the HFile
+                      trailer.
+                 Pin every HBase artifact to 2.4.9 so the whole graph is internally consistent
+                 with hbase-server-2.4.9. Declared before the spring-boot-dependencies import so
+                 these versions win. -->
+            <dependency>
+                <groupId>org.apache.hbase</groupId>
+                <artifactId>hbase-common</artifactId>
+                <version>2.4.9</version>
+            </dependency>
+            <dependency>
+                <groupId>org.apache.hbase</groupId>
+                <artifactId>hbase-client</artifactId>
+                <version>2.4.9</version>
+            </dependency>
+            <dependency>
+                <groupId>org.apache.hbase</groupId>
+                <artifactId>hbase-protocol</artifactId>
+                <version>2.4.9</version>
+            </dependency>
+            <dependency>
+                <groupId>org.apache.hbase</groupId>
+                <artifactId>hbase-protocol-shaded</artifactId>
+                <version>2.4.9</version>
+            </dependency>
+            <dependency>
+                <groupId>org.apache.hbase</groupId>
+                <artifactId>hbase-hadoop2-compat</artifactId>
+                <version>2.4.9</version>
+            </dependency>
+            <dependency>
+                <groupId>org.apache.hbase</groupId>
+                <artifactId>hbase-hadoop-compat</artifactId>
+                <version>2.4.9</version>
             </dependency>
             <dependency>
                 <groupId>org.springframework.boot</groupId>
