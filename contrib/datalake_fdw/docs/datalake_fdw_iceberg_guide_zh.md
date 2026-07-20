@@ -789,9 +789,22 @@ OPTIONS (
   两者均未指定时建表报错 `no foreign volume specified`
 
 **数据路径组成**（新表）：
-```
-protocol://bucket/base_path/location/namespace/tablename
-```
+
+- **内部（builtin）catalog**：一律**拍平**到 Volume 的 base_path 本身，不再追加
+  数据库 / namespace / 表名三段；同一个 Volume 下所有 builtin 表**共享**该目录，
+  Iceberg 再自动追加 `metadata/`、`data/` 子目录：
+  ```
+  protocol://bucket/base_path/{metadata,data}/…
+  ```
+  之所以安全：Iceberg 所有文件名都带 UUID（不会同名覆盖），当前 metadata 指针记在
+  系统表 `pg_iceberg_metadata`（查表不依赖目录层级），删除链路全程按 metadata 树枚举
+  具体文件路径而非"按前缀列目录"。
+  > ⚠️ 正因共享目录，**禁止**对 builtin 表跑任何"按前缀列目录再删"的维护
+  > （Iceberg `remove_orphan_files`、将来的 compaction autovacuum），否则会把同目录里
+  > 别的表的活文件当孤儿删掉；清理必须保持 metadata-tree 范围。builtin 建表也**不允许**
+  > 指定 `location`（见下表），路径完全由 Volume base_path 决定。
+- **外部 catalog（hive / polaris / hadoop / s3）**：物理路径由外部 catalog 决定，
+  通常形如 `<warehouse_location_prefix>/<namespace>/<table>/`。
 
 **CREATE ICEBERG TABLE OPTIONS 全集**：
 
@@ -800,7 +813,7 @@ protocol://bucket/base_path/location/namespace/tablename
 | `catalog` | string | 指定 Catalog（与子句 `CATALOG` 等价；二选一） |
 | `namespace` | string | 命名空间 |
 | `table` | string | 在 catalog 中暴露的表名（默认与 PG 表名一致） |
-| `location` | string | 表数据目录（相对 Volume 的 `base_path`） |
+| `location` | string | **仅外部 catalog 有意义**。builtin（内部）catalog 建表若指定该项直接报错 `location option is not allowed for builtin iceberg tables`——内部表路径固定为 Volume `base_path` 本身。 |
 | `autovacuum_enabled` | bool | 是否参与 `datalake.iceberg_autovacuum` 自动 VACUUM（默认 `true`） |
 
 > ⚠️ 未识别的 OPTION **不会报错而是被静默忽略**，注意拼写（如误写 `table_name`、`base_location` 将不生效）。
@@ -1193,7 +1206,8 @@ DROP SERVER cat_server CASCADE;  -- 级联删除所有依赖对象
 | `failed to resolve iceberg table location for relation "%s"` | catalog 拿不到表位置 | catalog 服务连通性、`location` 是否被改动、metadata 是否损坏 |
 | `failed to load iceberg table metadata for relation %u` | metadata.json 读不下来 | 检查 Volume 凭据、`base_path`；若使用对象存储确认 endpoint |
 | `external catalog "%s" returned empty table location for "%s.%s"` | catalog 返回空 location | catalog 实现 bug 或 namespace 入库异常；可用 `iceberg_toolkit.catalog_fdw` 直查 |
-| `empty iceberg table location suffix` | builtin catalog 解析出空路径 | 表名 / namespace 含特殊字符；规整后重建 |
+| `location option is not allowed for builtin iceberg tables` | builtin（内部）表建表指定了 `location` OPTION | 内部表路径固定为 Volume `base_path`，去掉 `location` 子句/选项即可；如需自定义路径改用外部 catalog |
+| `empty iceberg volume base path for builtin table` | builtin 表解析出的 Volume base_path 为空 | 检查 Volume 的 `base_path` / `bucket_name` 配置 |
 | `iceberg metadata catalog is not available on this segment` | 在 QE 上调用了 QD-only 的元数据接口 | 检查是否在 PL/pgSQL 中误用了元数据函数；改为在 QD 上执行 |
 | `foreign catalog with OID %u does not exist` | catalog 对象引用失效 | 排查是否 DROP 后未重建；`pg_foreign_catalog` 中确认存在 |
 | `foreign volume with OID %u does not exist` | volume 对象引用失效 | 同上 |

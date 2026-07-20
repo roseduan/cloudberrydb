@@ -81,52 +81,63 @@ pg_iceberg_get_builtin_volume_prefix(const char *volume_server_name,
 }
 
 static char *
-pg_iceberg_generate_builtin_location(IcebergTableInfo *table_info,
-									 const char *nameSpace,
-									 const char *tableName)
+pg_iceberg_generate_builtin_location(IcebergTableInfo *table_info)
 {
 	char	   *prefix;
-	const char *location_suffix;
-	char	   *default_suffix = NULL;
-	const char *db_name;
+	size_t		len;
 
 	Assert(table_info != NULL);
-	Assert(nameSpace != NULL);
-	Assert(tableName != NULL);
 
-	prefix = pg_iceberg_get_builtin_volume_prefix(table_info->volume_server_name,
-												  table_info->volume_name);
-
+	/*
+	 * A builtin table's storage location is derived solely from its volume
+	 * base path (see below); a user-specified location has no meaning here,
+	 * so reject it outright rather than silently ignoring it.  External
+	 * catalogs assign the location themselves and never reach this function.
+	 */
 	if (table_info->opts != NULL &&
 		table_info->opts->location != NULL &&
 		table_info->opts->location[0] != '\0')
-	{
-		location_suffix = table_info->opts->location;
-	}
-	else
-	{
-		db_name = get_database_name(MyDatabaseId);
-		if (db_name == NULL)
-			ereport(ERROR,
-					(errcode(ERRCODE_UNDEFINED_DATABASE),
-					 errmsg("failed to resolve current database name for builtin iceberg location")));
+		ereport(ERROR,
+				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+				 errmsg("location option is not allowed for builtin iceberg tables"),
+				 errhint("Builtin iceberg tables are stored under the volume base path; omit the location option.")));
 
-		default_suffix = psprintf("%s/%s/%s",
-								  db_name,
-								  nameSpace,
-								  tableName);
-		location_suffix = default_suffix;
-	}
+	/*
+	 * Flattened layout: every builtin table of a volume is stored directly
+	 * under the volume base path, with no db/namespace/table suffix, so all
+	 * builtin tables in a volume share one directory (Iceberg then appends
+	 * its own metadata/ and data/ subdirectories).
+	 *
+	 * This is safe because lookup never depends on the directory layout:
+	 * every Iceberg file name carries a UUID so a shared directory cannot
+	 * collide, the builtin catalog records each table's metadata_location in
+	 * pg_iceberg_metadata, and the deletion path always enumerates concrete
+	 * file paths from the metadata tree rather than listing a directory
+	 * prefix.
+	 *
+	 * CAUTION: because tables share a directory, never run any "list a prefix
+	 * then delete" maintenance (Iceberg remove_orphan_files, or a future
+	 * compaction autovacuum) against these tables -- it would treat other
+	 * tables' live files as orphans.  Cleanup must stay metadata-tree scoped.
+	 */
+	prefix = pg_iceberg_get_builtin_volume_prefix(table_info->volume_server_name,
+												  table_info->volume_name);
 
-	while (*location_suffix == '/')
-		location_suffix++;
+	/*
+	 * buildVolumeBasePath() always returns a trailing '/'.  Drop it: Iceberg
+	 * appends "/metadata" and "/data", and a doubled "<base>//metadata" is
+	 * read by S3/OSS as an extra empty path segment.
+	 */
+	len = strlen(prefix);
+	if (len > 0 && prefix[len - 1] == '/')
+		prefix[--len] = '\0';
 
-	if (*location_suffix == '\0')
+	if (len == 0)
 		ereport(ERROR,
 				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
-				 errmsg("empty iceberg table location suffix")));
+				 errmsg("empty iceberg volume base path for builtin table")));
 
-	return psprintf("%s%s", prefix, location_suffix);
+	return prefix;
 }
 
 static void
@@ -371,13 +382,15 @@ pg_iceberg_create_table_with_catalog(Relation rel, bool *is_internal)
 		pg_iceberg_validate_object_name(tableName, "table");
 
 		/*
-		 * For builtin catalog, we generate the storage location locally
-		 * from the volume base path.  For external catalogs (hive, polaris),
-		 * the catalog itself determines the location, so we pass NULL and
-		 * refresh afterwards to capture the catalog-assigned location.
+		 * For builtin catalog we generate the storage location locally: the
+		 * volume base path itself, shared by all builtin tables of the volume
+		 * (a user-specified location option is rejected).  For external
+		 * catalogs (hive, polaris) the catalog itself determines the
+		 * location, so we pass NULL and refresh afterwards to capture the
+		 * catalog-assigned location.
 		 */
 		if (pg_iceberg_is_builtin_catalog(table_info->catalog_server_name))
-			location = pg_iceberg_generate_builtin_location(table_info, nameSpace, tableName);
+			location = pg_iceberg_generate_builtin_location(table_info);
 
 		result = pg_iceberg_create_table(rel,
 										 catalogName,
