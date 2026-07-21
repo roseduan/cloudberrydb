@@ -41,6 +41,7 @@
 #include "vecexecutor/nodeHash.h"
 #include "vecexecutor/nodeHashjoin.h"
 #include "vecexecutor/nodeLimit.h"
+#include "vecexecutor/nodePartitionTopK.h"
 #include "vecexecutor/nodeMaterial.h"
 #include "vecexecutor/nodeMotion.h"
 #include "vecexecutor/nodeNestloop.h"
@@ -1552,6 +1553,11 @@ VecExecInitNode(Plan *node, EState *estate, int eflags)
 												 estate, eflags);
 			break;
 
+		case T_PartitionTopK:
+			result = (PlanState *) ExecInitVecPartitionTopK((PartitionTopK *) node,
+															estate, eflags);
+			break;
+
 		case T_ShareInputScan:
 			result = (PlanState *) ExecInitVecShareInputScan((ShareInputScan *) node,
 															 estate, eflags);
@@ -2049,6 +2055,10 @@ VecExecEndNode(PlanState *node)
 
 		case T_LimitState:
 			ExecEndVecLimit((LimitState *) node);
+			break;
+
+		case T_PartitionTopKState:
+			ExecEndVecPartitionTopK((PartitionTopKState *) node);
 			break;
 
 		case T_MotionState:

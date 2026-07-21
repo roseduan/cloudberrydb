@@ -36,6 +36,7 @@
 #include "utils/rel.h"
 #include "access/heapam.h"
 #include "nodes/nodes.h"
+#include "nodes/makefuncs.h"
 #include "cdb/cdbllize.h"
 #include "optimizer/walkers.h"
 #include "utils/guc.h"
@@ -275,6 +276,8 @@ generate_plan(Query *parse, const char *query_string, int cursorOptions, ParamLi
 	return result;
 }
 
+static void local_topk_pushdown(Plan *plan);
+
 PlannedStmt *
 planner_hook_wrapper(Query *parse, const char *query_string, int cursorOptions, ParamListInfo boundParams, OptimizerOptions *optimizer_options)
 {
@@ -303,7 +306,19 @@ planner_hook_wrapper(Query *parse, const char *query_string, int cursorOptions, 
 		memcpy(vec_optimizer_options, optimizer_options, sizeof(OptimizerOptions));
 	else
 		memset(vec_optimizer_options, 0, sizeof(OptimizerOptions));
-	vec_optimizer_options->create_vectorization_plan = true;
+
+	/*
+	 * create_vectorization_plan makes ORCA produce WindowHashAgg for window
+	 * functions. A hash window needs no sorted input, so ORCA never picks
+	 * the Sort + PartitionTopK + WindowAgg alternative in that mode — the
+	 * pre-filter the user explicitly asked for with
+	 * optimizer_force_partition_topk would silently disappear from vector
+	 * plans. Honour the force GUC by keeping the regular window plan shape
+	 * (Partition Top-K under an ordered WindowAgg), which the vector
+	 * executor supports as well.
+	 */
+	vec_optimizer_options->create_vectorization_plan =
+		!optimizer_force_partition_topk;
 	result = generate_plan(parse, query_string, cursorOptions, boundParams, vec_optimizer_options);
 	try_result = try_vectorize_plan(result);
 	if (try_result)
@@ -401,6 +416,15 @@ try_vectorize_plan(PlannedStmt *result)
 	plan_copy = copyObject(result->planTree);
 
 	plan_copy = (Plan *) vectorize_plan_mutator((Node *) plan_copy, NULL);
+
+	/*
+	 * Sender-side pre-filter: duplicate PartitionTopK below its Motion so
+	 * only candidate top-k rows travel the interconnect (see
+	 * local_topk_pushdown). Only relevant when the planner emitted
+	 * PartitionTopK, i.e. under optimizer_force_partition_topk.
+	 */
+	if (optimizer_force_partition_topk)
+		local_topk_pushdown(plan_copy);
 
 	vectorable = is_plan_vectorable(plan_copy, result->rtable);
 	if (!vectorable)
@@ -985,6 +1009,7 @@ is_plan_vectorable(Plan* plan, List *rtable)
 		case T_Hash:
 		case T_Material:
 		case T_ShareInputScan:
+		case T_PartitionTopK:
 			break;
 		/* All other plan node fallback */
 		default:
@@ -2063,6 +2088,117 @@ leftjoin_pull_antijoin(Node *node, PreNodeContext *context)
 		context->parent_node = node;
 
 	return plan_tree_walker(node, leftjoin_pull_antijoin, context, true);
+}
+
+/*
+ * local_topk_pushdown
+ *
+ * When a PartitionTopK sits directly above a Motion, every pre-aggregated
+ * group crosses the interconnect only to be discarded by the top-k filter
+ * on the receiving side. Insert a copy of the PartitionTopK on the sender
+ * side (below the Motion): each sender keeps at most K rows (plus rank-K
+ * ties) per partition key, which is a superset of what the global top-k
+ * can ever keep, so results are unchanged while motion traffic drops from
+ * O(groups) to O(K * partitions * senders).
+ */
+static void
+local_topk_pushdown(Plan *plan)
+{
+	if (plan == NULL)
+		return;
+
+	if (IsA(plan, PartitionTopK) &&
+		plan->lefttree && IsA(plan->lefttree, Motion))
+	{
+		PartitionTopK *gtopk = (PartitionTopK *) plan;
+		Motion	   *motion = (Motion *) plan->lefttree;
+		Plan	   *sender = motion->plan.lefttree;
+
+		if (sender != NULL && !IsA(sender, PartitionTopK))
+		{
+			PartitionTopK *ltopk = makeNode(PartitionTopK);
+			ListCell   *lc;
+			List	   *tlist = NIL;
+			AttrNumber	resno = 1;
+
+			/* pure pass-through targetlist over the sender output */
+			foreach(lc, sender->targetlist)
+			{
+				TargetEntry *te = (TargetEntry *) lfirst(lc);
+				Var		   *var = makeVarFromTargetEntry(OUTER_VAR, te);
+
+				tlist = lappend(tlist,
+								makeTargetEntry((Expr *) var, resno,
+												te->resname ? pstrdup(te->resname) : NULL,
+												false));
+				resno++;
+			}
+
+			ltopk->plan.targetlist = tlist;
+			ltopk->plan.qual = NIL;
+			ltopk->plan.lefttree = sender;
+			ltopk->plan.righttree = NULL;
+			ltopk->plan.startup_cost = sender->startup_cost;
+			ltopk->plan.total_cost = sender->total_cost;
+			ltopk->plan.plan_rows = sender->plan_rows;
+			ltopk->plan.plan_width = sender->plan_width;
+			/*
+			 * Inserted after assign_plannode_id() already ran in
+			 * generate_plan(); reusing sender->plan_node_id would give two
+			 * live nodes the same id and merge their EXPLAIN ANALYZE / GPMon
+			 * instrumentation. Leave this synthetic node untracked.
+			 */
+			ltopk->plan.plan_node_id = 0;
+			ltopk->plan.flow = copyObject(sender->flow);
+
+			/*
+			 * Motion redistributes rows without reshaping them, so the
+			 * positional column indexes of the global node apply verbatim
+			 * to the sender output.
+			 */
+			ltopk->top_k = gtopk->top_k;
+			ltopk->numPartitionCols = gtopk->numPartitionCols;
+			ltopk->partitionColIdx = (AttrNumber *)
+				palloc(sizeof(AttrNumber) * gtopk->numPartitionCols);
+			memcpy(ltopk->partitionColIdx, gtopk->partitionColIdx,
+				   sizeof(AttrNumber) * gtopk->numPartitionCols);
+			ltopk->numSortCols = gtopk->numSortCols;
+			ltopk->sortColIdx = (AttrNumber *)
+				palloc(sizeof(AttrNumber) * gtopk->numSortCols);
+			memcpy(ltopk->sortColIdx, gtopk->sortColIdx,
+				   sizeof(AttrNumber) * gtopk->numSortCols);
+			ltopk->sortOperators = (Oid *)
+				palloc(sizeof(Oid) * gtopk->numSortCols);
+			memcpy(ltopk->sortOperators, gtopk->sortOperators,
+				   sizeof(Oid) * gtopk->numSortCols);
+			ltopk->collations = (Oid *)
+				palloc(sizeof(Oid) * gtopk->numSortCols);
+			memcpy(ltopk->collations, gtopk->collations,
+				   sizeof(Oid) * gtopk->numSortCols);
+			ltopk->nullsFirst = (bool *)
+				palloc(sizeof(bool) * gtopk->numSortCols);
+			memcpy(ltopk->nullsFirst, gtopk->nullsFirst,
+				   sizeof(bool) * gtopk->numSortCols);
+
+			motion->plan.lefttree = (Plan *) ltopk;
+		}
+	}
+
+	local_topk_pushdown(plan->lefttree);
+	local_topk_pushdown(plan->righttree);
+
+	if (IsA(plan, Sequence))
+	{
+		ListCell   *lc;
+		foreach(lc, ((Sequence *) plan)->subplans)
+			local_topk_pushdown((Plan *) lfirst(lc));
+	}
+	else if (IsA(plan, Append))
+	{
+		ListCell   *lc;
+		foreach(lc, ((Append *) plan)->appendplans)
+			local_topk_pushdown((Plan *) lfirst(lc));
+	}
 }
 
 static bool

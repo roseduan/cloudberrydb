@@ -810,6 +810,7 @@ ExecSquelchNode(PlanState *node, bool force)
 		case T_BitmapOrState:
 		case T_RuntimeFilterState:
 		case T_DynamicBitmapHeapScanState:
+		case T_PartitionTopKState:
 		case T_LimitState:
 		case T_LockRowsState:
 		case T_NestLoopState:

@@ -703,4 +703,10 @@ typedef struct VecLimitState
 	VecExecuteState estate;
 } VecLimitState;
 
+typedef struct VecPartitionTopKState
+{
+	PartitionTopKState base;
+	VecExecuteState estate;
+} VecPartitionTopKState;
+
 #endif							/* VEC_EXEC_NODES_H */

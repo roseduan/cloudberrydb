@@ -776,6 +776,7 @@ ExecVecSquelchNode(PlanState *node)
 			 */
 		case T_HashState:
 		case T_LimitState:
+		case T_PartitionTopKState:
 			ExecVecSquelchNode(outerPlanState(node));
 			ExecVecSquelchNode(innerPlanState(node));
 			break;

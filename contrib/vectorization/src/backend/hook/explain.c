@@ -1320,6 +1320,16 @@ VecExplainNode(PlanState *planstate, List *ancestors,
 		case T_RuntimeFilter:
 			pname = sname = "RuntimeFilter";
 			break;
+		case T_PartitionTopK:
+			if (vec_type)
+			{
+				pname = sname = "Vec Partition Top-K";
+			}
+			else
+			{
+				pname = sname = "Partition Top-K";
+			}
+			break;
 		case T_Limit:
 			if (vec_type)
 			{

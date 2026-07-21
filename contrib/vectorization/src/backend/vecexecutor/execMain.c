@@ -249,6 +249,7 @@ static GArrowExpression *build_is_distinct_expression(DistinctExpr *dex, PlanBui
 static GArrowExpression *build_null_if_expression(NullIfExpr *dex, PlanBuildContext *pcontext);
 static GArrowExecuteNode*build_orderby_node(PlanState *planstate, GArrowExecutePlan *plan, GArrowExecuteNode *input);
 static GArrowExecuteNode*build_topk_node(PlanState *planstate, GArrowExecutePlan *plan, GArrowExecuteNode *input, int64 topk_bound);
+static GArrowExecuteNode*build_partition_topk_node(PlanState *planstate, GArrowExecutePlan *plan, GArrowExecuteNode *input);
 static GArrowExpression *build_literal_expression(Datum datum, bool isnull, Oid pg_type, int32 typmod);
 static void BuildMaterializePlan(PlanBuildContext *pcontext, VecExecuteState *estate);
 static GArrowStoreType to_arrow_storetype(StoreType type);
@@ -2071,6 +2072,14 @@ BuildVecPlan(PlanState *planstate, VecExecuteState *estate)
 					outerPlanState(planstate)->ps_ResultTupleSlot);
 		}
 		break;
+		case T_PartitionTopKState:
+		{
+			if (!outerPlanState(planstate))
+				elog(ERROR, "PartitionTopK node can't be leaf in vector plan");
+			pcontext.inputschema = GetSchemaFromSlot(
+					outerPlanState(planstate)->ps_ResultTupleSlot);
+		}
+		break;
 		case T_SequenceState:
 		{
 			SequenceState *node = castNode(SequenceState, planstate);
@@ -3287,6 +3296,15 @@ BuildProject(List *targetList, List *qualList, GArrowExecuteNode *input, PlanBui
 		garrow_store_ptr(current, sort);
 	}
 
+	if (IsA(pcontext->planstate->plan, PartitionTopK))
+	{
+		g_autoptr(GArrowExecuteNode) ptopk = NULL;
+
+		ptopk = build_partition_topk_node(pcontext->planstate, pcontext->plan,
+										  current);
+		garrow_store_ptr(current, ptopk);
+	}
+
 	return garrow_move_ptr(current);
 }
 
@@ -4298,6 +4316,73 @@ skip_topk_rf:
 
 	garrow_list_free_ptr(&sort_keys);
 	return topk_node;
+}
+
+/*
+ * Build an Arrow "partition_topk" node from a PartitionTopK plan node.
+ *
+ * Per distinct partition-key combination the Arrow node keeps every row
+ * whose rank() by the sort keys is <= top_k (ties at rank k all kept),
+ * matching the row executor's nodePartitionTopK.c semantics. It is a pure
+ * pass-through filter, so the input schema is reused unchanged.
+ */
+static GArrowExecuteNode *
+build_partition_topk_node(PlanState *planstate, GArrowExecutePlan *plan,
+						  GArrowExecuteNode *input)
+{
+	PartitionTopK *node = (PartitionTopK *) planstate->plan;
+	g_autoptr(GError) error = NULL;
+	g_autoptr(GArrowSchema) schema = NULL;
+	g_autoptr(GArrowSortOptions) sortoption = NULL;
+	g_autoptr(GArrowPartitionTopKNodeOptions) options = NULL;
+	GArrowExecuteNode *ptopk_node = NULL;
+	GList *sort_keys = NULL;
+	SortSupport sortKeys;
+	gint *partition_cols;
+	int i;
+
+	schema = garrow_execute_node_get_output_schema(input);
+
+	/* Build sort keys from the PartitionTopK plan fields */
+	sortKeys = (SortSupport) palloc0(node->numSortCols * sizeof(SortSupportData));
+	for (i = 0; i < node->numSortCols; i++)
+	{
+		SortSupport sortKey = sortKeys + i;
+
+		sortKey->ssup_cxt = CurrentMemoryContext;
+		sortKey->ssup_collation = node->collations[i];
+		sortKey->ssup_nulls_first = node->nullsFirst[i];
+		sortKey->ssup_attno = node->sortColIdx[i];
+		sortKey->abbreviate = (i == 0);
+
+		PrepareSortSupportFromOrderingOp(node->sortOperators[i], sortKey);
+	}
+	sort_keys = create_sort_keys(sortKeys, node->numSortCols, schema);
+	pfree(sortKeys);
+	sortoption = garrow_sort_options_new(sort_keys, 0, take_thread_num,
+										 two_phase_take);
+
+	/* Partition key attnos are 1-based positions in the input tuple */
+	partition_cols = (gint *) palloc(node->numPartitionCols * sizeof(gint));
+	for (i = 0; i < node->numPartitionCols; i++)
+		partition_cols[i] = node->partitionColIdx[i] - 1;
+
+	options = garrow_partition_topk_node_options_new(node->top_k, sortoption,
+													 partition_cols,
+													 node->numPartitionCols);
+	pfree(partition_cols);
+
+	ptopk_node = garrow_execute_plan_build_partition_topk_node(plan, input,
+															   options, &error);
+	if (error)
+	{
+		garrow_list_free_ptr(&sort_keys);
+		elog(ERROR, "Failed to create partition_topk node, cause: %s",
+			 error->message);
+	}
+
+	garrow_list_free_ptr(&sort_keys);
+	return ptopk_node;
 }
 
 /*
