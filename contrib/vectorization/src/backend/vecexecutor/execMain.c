@@ -4134,9 +4134,18 @@ build_orderby_node(PlanState *planstate, GArrowExecutePlan *plan,  GArrowExecute
 	schema = garrow_execute_node_get_output_schema(input);
 	nkeys = plannode->numCols;
 
-	/* sort option */
+	/*
+	 * sort option
+	 *
+	 * Use vec_sort_options_new (rather than the bare garrow_sort_options_new)
+	 * so the external-sort GUCs are honoured. A standalone Sort feeding a
+	 * sorted GroupAggregate (e.g. TPC-DS q67's ROLLUP under
+	 * optimizer_enable_hashagg=off) can otherwise accumulate the whole input
+	 * in memory here; enabling external merge-sort keeps it bounded and lets
+	 * large rollups spill to disk instead of ballooning RSS.
+	 */
 	sort_keys = build_sort_keys(planstate, schema);
-	sortoption = garrow_sort_options_new(sort_keys, partition_top_k, take_thread_num, two_phase_take);
+	sortoption = vec_sort_options_new(sort_keys, partition_top_k, take_thread_num, two_phase_take);
 	orderby_options = garrow_orderby_node_options_new(sortoption);
 	orderby_node = garrow_execute_plan_build_orderby_node(plan, input, orderby_options, &error);
 	if (error)
