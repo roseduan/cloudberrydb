@@ -132,7 +132,16 @@ HeapTupleHeaderGetCmin(HeapTupleHeader tup)
 	CommandId	cid = HeapTupleHeaderGetRawCommandId(tup);
 
 	Assert(!(tup->t_infomask & HEAP_MOVED));
-	Assert(TransactionIdIsCurrentTransactionId(HeapTupleHeaderGetXmin(tup)));
+	/*
+	 * In GPDB QE_READER processes, IsCurrentTransactionIdForReader() re-reads
+	 * writer_proc->xid from shared memory on every call.  If the writer is
+	 * concurrently aborting (e.g. due to a WITH CHECK OPTION violation), it
+	 * resets proc->xid to InvalidTransactionId before the reader receives its
+	 * cancel signal.  The caller in HeapTupleSatisfiesMVCC already verified
+	 * the condition; skip the racy re-check to avoid a spurious FATAL crash.
+	 */
+	Assert((Gp_role == GP_ROLE_EXECUTE && !Gp_is_writer) ||
+			TransactionIdIsCurrentTransactionId(HeapTupleHeaderGetXmin(tup)));
 
 	if (tup->t_infomask & HEAP_COMBOCID)
 		return GetRealCmin(cid);
@@ -152,9 +161,13 @@ HeapTupleHeaderGetCmax(HeapTupleHeader tup)
 	 * multixact we can't Assert() if we're inside a critical section. This
 	 * weakens the check, but not using GetCmax() inside one would complicate
 	 * things too much.
+	 *
+	 * Similarly, skip the check in GPDB QE_READER processes: the writer may
+	 * concurrently reset proc->xid during abort, making the check racy.
 	 */
 	Assert(CritSectionCount > 0 ||
-	  TransactionIdIsCurrentTransactionId(HeapTupleHeaderGetUpdateXid(tup)));
+			(Gp_role == GP_ROLE_EXECUTE && !Gp_is_writer) ||
+			TransactionIdIsCurrentTransactionId(HeapTupleHeaderGetUpdateXid(tup)));
 
 	if (tup->t_infomask & HEAP_COMBOCID)
 		return GetRealCmax(cid);
