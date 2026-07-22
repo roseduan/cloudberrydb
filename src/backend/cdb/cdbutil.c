@@ -51,6 +51,7 @@
 #include "cdb/cdbfts.h"
 #include "storage/ipc.h"
 #include "storage/proc.h"
+#include "storage/procarray.h"
 #include "postmaster/fts.h"
 #include "postmaster/postmaster.h"
 #include "catalog/namespace.h"
@@ -98,8 +99,6 @@ static void getAddressesForDBid(GpSegConfigEntry *c, int elevel);
 static HTAB *hostPrimaryCountHashTableInit(void);
 
 static int nextQEIdentifer(CdbComponentDatabases *cdbs);
-
-Datum gp_get_suboverflowed_backends(PG_FUNCTION_ARGS);
 
 static HTAB *segment_ip_cache_htab = NULL;
 
@@ -2005,34 +2004,7 @@ AvoidCorefileGeneration()
 #endif
 }
 
-PG_FUNCTION_INFO_V1(gp_get_suboverflowed_backends);
-/*
- * Find the backends where subtransaction overflowed.
- */
-Datum
-gp_get_suboverflowed_backends(PG_FUNCTION_ARGS)
-{
-	int 			i;
-	ArrayBuildState *astate = NULL;
-
-	LWLockAcquire(ProcArrayLock, LW_SHARED);
-	for (i = 0; i < ProcGlobal->allProcCount; i++)
-	{
-		if (ProcGlobal->subxidStates[i].overflowed)
-			astate = accumArrayResult(astate,
-									  Int32GetDatum(ProcGlobal->allProcs[i].pid),
-									  false, INT4OID, CurrentMemoryContext);
-	}
-	LWLockRelease(ProcArrayLock);
-
-	if (astate)
-		PG_RETURN_DATUM(makeArrayResult(astate,
-											CurrentMemoryContext));
-	else
-		PG_RETURN_NULL();
-}
-
-#else 
+#else
 bool am_ftshandler = false;
 
 
@@ -4220,6 +4192,14 @@ AvoidCorefileGeneration()
 #endif
 }
 
+#endif /* USE_INTERNAL_FTS */
+
+/*
+ * gp_get_suboverflowed_backends is independent of the FTS implementation, so
+ * it is defined once outside the USE_INTERNAL_FTS conditional above.
+ */
+Datum gp_get_suboverflowed_backends(PG_FUNCTION_ARGS);
+
 PG_FUNCTION_INFO_V1(gp_get_suboverflowed_backends);
 /*
  * Find the backends where subtransaction overflowed.
@@ -4227,18 +4207,23 @@ PG_FUNCTION_INFO_V1(gp_get_suboverflowed_backends);
 Datum
 gp_get_suboverflowed_backends(PG_FUNCTION_ARGS)
 {
-	int 			i;
+	int				i;
+	int				npids;
+	int			   *pids;
 	ArrayBuildState *astate = NULL;
 
-	LWLockAcquire(ProcArrayLock, LW_SHARED);
-	for (i = 0; i < ProcGlobal->allProcCount; i++)
-	{
-		if (ProcGlobal->subxidStates[i].overflowed)
-			astate = accumArrayResult(astate,
-									  Int32GetDatum(ProcGlobal->allProcs[i].pid),
-									  false, INT4OID, CurrentMemoryContext);
-	}
-	LWLockRelease(ProcArrayLock);
+	/*
+	 * ProcArrayGetSuboverflowedPids() stores at most one PID per backend, so a
+	 * buffer of allProcCount entries is always large enough.
+	 */
+	pids = (int *) palloc(ProcGlobal->allProcCount * sizeof(int));
+	npids = ProcArrayGetSuboverflowedPids(pids);
+
+	for (i = 0; i < npids; i++)
+		astate = accumArrayResult(astate,
+								  Int32GetDatum(pids[i]),
+								  false, INT4OID, CurrentMemoryContext);
+	pfree(pids);
 
 	if (astate)
 		PG_RETURN_DATUM(makeArrayResult(astate,
@@ -4246,5 +4231,3 @@ gp_get_suboverflowed_backends(PG_FUNCTION_ARGS)
 	else
 		PG_RETURN_NULL();
 }
-
-#endif /* USE_INTERNAL_FTS */

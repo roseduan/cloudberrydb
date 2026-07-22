@@ -65,6 +65,8 @@ extern TransactionId GetOldestActiveTransactionId(void);
 extern TransactionId GetOldestSafeDecodingTransactionId(bool catalogOnly);
 extern void GetReplicationHorizons(TransactionId *slot_xmin, TransactionId *catalog_xmin);
 
+extern int	ProcArrayGetSuboverflowedPids(int *pids);
+
 extern VirtualTransactionId *GetVirtualXIDsDelayingChkpt(int *nvxids);
 extern VirtualTransactionId *GetVirtualXIDsDelayingChkptEnd(int *nvxids);
 extern bool HaveVirtualXIDsDelayingChkpt(VirtualTransactionId *vxids,

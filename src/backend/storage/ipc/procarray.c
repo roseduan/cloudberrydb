@@ -4961,6 +4961,40 @@ ProcArrayGetReplicationSlotXmin(TransactionId *xmin,
 }
 
 /*
+ * ProcArrayGetSuboverflowedPids
+ *
+ * Collect the PIDs of the backends whose subtransaction cache has
+ * overflowed.  The caller must supply a buffer large enough to hold one
+ * entry per backend (allocate ProcGlobal->allProcCount entries); the number
+ * of PIDs stored is returned.
+ *
+ * Note that ProcGlobal->subxidStates[] is a dense array indexed by
+ * pgxactoff, with only arrayP->numProcs valid entries at the front, and its
+ * ordering is independent of allProcs[] (which is indexed by pgprocno).  We
+ * must therefore iterate only over the valid range and map each pgxactoff to
+ * its pgprocno via arrayP->pgprocnos[] to reach the matching PGPROC.
+ */
+int
+ProcArrayGetSuboverflowedPids(int *pids)
+{
+	ProcArrayStruct *arrayP = procArray;
+	int			count = 0;
+	int			index;
+
+	LWLockAcquire(ProcArrayLock, LW_SHARED);
+	for (index = 0; index < arrayP->numProcs; index++)
+	{
+		int			pgprocno = arrayP->pgprocnos[index];
+
+		if (ProcGlobal->subxidStates[index].overflowed)
+			pids[count++] = ProcGlobal->allProcs[pgprocno].pid;
+	}
+	LWLockRelease(ProcArrayLock);
+
+	return count;
+}
+
+/*
  * XidCacheRemoveRunningXids
  *
  * Remove a bunch of TransactionIds from the list of known-running
