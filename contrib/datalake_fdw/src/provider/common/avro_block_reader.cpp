@@ -1,6 +1,5 @@
 #include <parquet/internal/arrow/util/decimal.h>
 #include <parquet/internal/arrow/result.h>
-#include <gopher/gopher.h>
 #include "avro_block_reader.h"
 #include "common.h"
 

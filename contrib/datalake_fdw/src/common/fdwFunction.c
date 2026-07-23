@@ -1053,8 +1053,8 @@ void datalakefdw_begin_foreign_scan(ForeignScanState *node, int eflags, Datalake
 		List *random_segments = datalakeSelectRandomSegments(segmentcount, external_table_limit_segment_num);
         /* put the random segments into the list */
         foreignScan->fdw_private = list_concat(foreignScan->fdw_private, random_segments);
-		/* register resource context for gopher */
-		dataLakesstate->gopher_handle_t = gopher_registe_resource_context(/*gp_is_writer*/false);
+		/* register resource context for datalake */
+		dataLakesstate->datalake_handle_t = datalake_register_resource_context(/*gp_is_writer*/false);
         /* Set the final state */
 		node->fdw_state = (void*)dataLakesstate;
 		return;
@@ -1171,9 +1171,9 @@ void datalakefdw_end_foreign_scan(ForeignScanState *node)
 
 	if (Gp_role == GP_ROLE_DISPATCH)
 	{
-		/* release resource context for gopher */
-		cleanup_gopher_resource_context(sstate->gopher_handle_t);
-		sstate->gopher_handle_t = NULL;
+		/* release resource context for datalake */
+		cleanup_datalake_resource_context(sstate->datalake_handle_t);
+		sstate->datalake_handle_t = NULL;
 		return;
 	}
 

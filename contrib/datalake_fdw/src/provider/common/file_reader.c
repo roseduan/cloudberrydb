@@ -2,7 +2,6 @@
 #include "utils/builtins.h"
 #include "utils/memutils.h"
 #include "src/dlproxy/datalake.h"
-#include "gopher/gopher.h"
 #include "file_reader.h"
 #include "parquet_reader_c.h"
 #include "avro_block_reader_c.h"
@@ -72,7 +71,7 @@ datalakeCreateFileReader(MemoryContext mcxt,
 	{
 		case PARQUET:
 			reader->formatReader = &parquetReader;
-			parquetContext.gopherFilesystem = (gopherFS) extraArg;
+			parquetContext.fileStream = (ossFileStream) extraArg;
 			parquetContext.buffer = buffer;
 			parquetContext.quals = quals;
 			extraArg = (void *) &parquetContext;

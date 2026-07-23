@@ -5,8 +5,6 @@
 #include "src/dlproxy/datalake.h"
 #include "utils/builtins.h"
 #include "nodes/parsenodes.h"
-#include "gopher/gopher.h"
-
 #include "src/provider/common/file_reader.h"
 #include "hudi_logfile_block_reader.h"
 #include "hudi_merged_logfile_record_reader.h"
@@ -28,7 +26,7 @@ createMergedLogfileRecordReader(MemoryContext readerMcxt,
 								TupleDesc tupDesc,
 								bool *attrUsed,
 								const char *instantTime,
-								gopherFS gopherFilesystem,
+								ossFileStream fileStream,
 								List *logfiles,
 								ExternalTableMetadata *tableOptions)
 {
@@ -39,7 +37,7 @@ createMergedLogfileRecordReader(MemoryContext readerMcxt,
 	reader->columnDesc = columnDesc;
 	reader->attrUsed = attrUsed;
 	reader->instantTime = instantTime;
-	reader->gopherFilesystem = gopherFilesystem;
+	reader->fileStream = fileStream;
 	reader->readerMcxt = readerMcxt;
 
 	reader->mergerMcxt = AllocSetContextCreate(CurrentMemoryContext,
@@ -104,7 +102,7 @@ performScan(HudiMergedLogfileRecordReader *reader)
 	FileFragment *logFile = list_nth(reader->logfiles, 0);
 
 	elog(DEBUG1, "scanning log file %s", logFile->filePath);
-	curReader = createHudiLogFileReader(reader->mergerMcxt, reader->gopherFilesystem, logFile->filePath);
+	curReader = createHudiLogFileReader(reader->mergerMcxt, reader->fileStream, logFile->filePath);
 	reader->logfiles = list_delete_first(reader->logfiles);
 
 	while (true)
@@ -127,7 +125,7 @@ performScan(HudiMergedLogfileRecordReader *reader)
 			logFile = list_nth(reader->logfiles, 0);
 
 			elog(DEBUG1, "scanning log file %s", logFile->filePath);
-			curReader = createHudiLogFileReader(reader->mergerMcxt, reader->gopherFilesystem, logFile->filePath);
+			curReader = createHudiLogFileReader(reader->mergerMcxt, reader->fileStream, logFile->filePath);
 			reader->logfiles = list_delete_first(reader->logfiles);
 		}
 		else

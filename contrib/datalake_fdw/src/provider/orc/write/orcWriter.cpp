@@ -62,9 +62,7 @@ void orcWrite::createHandler(void* sstate)
 	batchHasNULL = (bool*)palloc0(sizeof(bool) * ORC_COLUMNS);
 	ResetColumnVectorBatchHasNULL();
 
-	gopherConfig* conf = datalakeCreateGopherConfig((void*)(fdwState->options->gopher));
-	fileStream = datalakeCreateFileSystem(conf);
-	datalakeFreeGopherConfig(conf);
+	fileStream = datalakeCreateFileSystem((void*)(fdwState->options->gopher));
 
 	generateOrcSchema();
 	stripeSize = std::min(fdwState->options->fileSizeLimit, (int64_t)ORC_STRIPE_SIZE);

@@ -6,7 +6,7 @@
 
 #include <parquet/api/reader.h>
 #include <parquet/internal/arrow/io/interfaces.h>
-#include <gopher/gopher.h>
+#include "src/common/fileSystemWrapper.h"
 #include "src/common/dataBufferArray.h"
 #include "base_reader.h"
 
@@ -18,7 +18,7 @@ class ParquetReader : public BaseFileReader
 private:
 	int numColumns_;
 	std::string filePath_;
-	gopherFS gopherFilesystem_;
+	ossFileStream fileStream_;
 	std::vector<int> rowGroups_;
 	std::unique_ptr<parquet::ParquetFileReader> reader_;
 	std::vector<std::shared_ptr<parquet::Scanner>> scanners_;
@@ -57,7 +57,7 @@ protected:
 	void decodeRecord();
 
 public:
-	ParquetReader(MemoryContext rowContext, char *filePath, gopherFS gopherFilesystem, dataBufferArray *buffer, List *quals);
+	ParquetReader(MemoryContext rowContext, char *filePath, ossFileStream fileStream, dataBufferArray *buffer, List *quals);
 	~ParquetReader();
 
 	void open(List *columnDesc, bool *attrUsed, int64_t startOffset, int64_t endOffset);

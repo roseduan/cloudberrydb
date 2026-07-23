@@ -1,7 +1,7 @@
 #ifndef _UTILS_H_
 #define _UTILS_H_
 
-#include "gopher/gopher.h"
+#include "src/common/fileSystemWrapper.h"
 
 #include "src/provider/common/config.h"
 #include "src/dlproxy/uriparser.h"
@@ -21,7 +21,7 @@ typedef struct DatalakeReaderInitInfo
 	List		   *datafileDesc;
 	TupleDesc		tupDesc;
 	bool		   *attrUsed;
-	gopherFS		gopherFilesystem;
+	ossFileStream	fileStream;
 	FileScanTask   *fileScanTask;
 	ExternalTableMetadata *tableOptions;
 	void		   *buffer;
@@ -98,7 +98,7 @@ typedef struct DatalakeRowReader
 	Reader					*curReader;
 	List					*datafileDesc;
 	bool					*attrUsed;
-	gopherFS				gopherFilesystem;
+	ossFileStream			fileStream;
 	MemoryContext			mcxt;
 	int						curReaderIndex;
 	int						curTaskIndex;	/* cursor into fileScanTasks; advanced
@@ -133,7 +133,7 @@ typedef struct DatalakeRowReader
 
 typedef struct DatalakeRemoteFileHandle
 {
-	gopherFS        gopherFilesystem;
+	ossFileStream   fileStream;
 	DatalakeRowReader      *reader;
 	ResourceOwner   owner;
 	struct DatalakeRemoteFileHandle *next;

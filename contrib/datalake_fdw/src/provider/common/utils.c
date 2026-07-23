@@ -9,7 +9,6 @@
 #include "utils/timestamp.h"
 #include "utils/hsearch.h"
 #include "utils/int8.h"
-#include "gopher/gopher.h"
 #include "utils.h"
 #include <curl/curl.h>
 #include "common/hashfn.h"

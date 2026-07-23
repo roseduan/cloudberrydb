@@ -3,7 +3,7 @@
 #include "parquet_reader.h"
 #include "rowgroup_filter.h"
 #include "common.h"
-#include "gopher_random_file.h"
+#include "datalake_random_file.h"
 #include "datalake_numeric.h"
 
 extern "C"
@@ -51,8 +51,8 @@ ParquetReader::rowGroupMightMatch(int rgIdx)
 	return !rowGroupExcludedByQuals(quals_, rg.get(), cols);
 }
 
-ParquetReader::ParquetReader(MemoryContext rowContext, char *filePath, gopherFS gopherFilesystem, dataBufferArray *buffer, List *quals)
-	: BaseFileReader(rowContext), numColumns_(0), filePath_(filePath), gopherFilesystem_(gopherFilesystem), buffer_(buffer), quals_(quals)
+ParquetReader::ParquetReader(MemoryContext rowContext, char *filePath, ossFileStream fileStream, dataBufferArray *buffer, List *quals)
+	: BaseFileReader(rowContext), numColumns_(0), filePath_(filePath), fileStream_(fileStream), buffer_(buffer), quals_(quals)
 {}
 
 ParquetReader::~ParquetReader()
@@ -160,7 +160,7 @@ void
 ParquetReader::open(List *columnDesc, bool *attrUsed, int64 startOffset, int64 endOffset)
 {
 	std::string filename = convertToGopherPath(filePath_);
-	reader_ = parquet::ParquetFileReader::Open(std::make_shared<GopherRandomAccessFile> (gopherFilesystem_, filename));
+	reader_ = parquet::ParquetFileReader::Open(std::make_shared<DatalakeRandomAccessFile> (fileStream_, filename));
 	metadata = reader_->metadata();
 	createMapping(columnDesc, attrUsed);
 	filterRowGroupByOffset(startOffset, endOffset);

@@ -1074,15 +1074,30 @@ AC_MSG_RESULT([checking whether to build with preload dfs-tablespace ... $enable
 AC_SUBST(enable_dfs_tablespace)
 
 #
+# Gopher storage backend support (commercial build)
+#
+# Default ON (commercial): the shipping build links the Gopher backend.
+# Use --without-gopher for the open-source build (S3 SDK + libhdfs3, no libgopher).
+#
+PGAC_ARG_BOOL(with, gopher, yes,
+              [build with Gopher storage backend support (default: yes; --without-gopher for open-source S3/HDFS build)],
+              [AC_DEFINE(USE_GOPHER, 1,
+                         [Define to 1 if building with Gopher support])])
+AC_MSG_RESULT([checking whether to build with Gopher support ... $with_gopher])
+AC_SUBST(with_gopher)
+
+#
 # gophermeta preload
-# enforce enable_gophermeta if enable_datalake is yes or enable_dfs_tablespace is yes
+# Only enabled when --with-gopher is set and datalake or dfs-tablespace is enabled
 #
 PGAC_ARG_BOOL(enable, gophermeta, no, [enable preload gophermeta],
               AC_DEFINE(USE_GOPHERMETA, 1, [Define to 1 to preload gophermeta]))
-if test "$enable_datalake" = yes || test "$enable_dfs_tablespace" = yes; then
-  enable_gophermeta=yes
-  AC_DEFINE(USE_GOPHERMETA, 1,
-                          [Define to 1 to preload gophermeta])
+if test "$with_gopher" = yes; then
+  if test "$enable_datalake" = yes || test "$enable_dfs_tablespace" = yes; then
+    enable_gophermeta=yes
+    AC_DEFINE(USE_GOPHERMETA, 1,
+                            [Define to 1 to preload gophermeta])
+  fi
 fi
 AC_MSG_RESULT([checking whether to build with preload gophermeta ... $enable_gophermeta])
 AC_SUBST(enable_gophermeta)

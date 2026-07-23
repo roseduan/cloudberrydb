@@ -93,9 +93,9 @@ public:
             flag = O_RDONLY;
         }
         datalakeOpenFile(in_, filePath_.c_str(), flag);
-        gopherFileInfo *info = datalakeGetFileInfo(in_, filePath_.c_str());
-        fileSize_ = info->mLength;
-        datalakeFreeListDir(in_, info, 1);
+        datalakeFileInfo *info = datalakeGetFileInfo(in_, filePath_.c_str());
+        fileSize_ = info->length;
+        datalakeFreeFileInfo(info, 1);
     }
 
     ~avroOssInputStream() override

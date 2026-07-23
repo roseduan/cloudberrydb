@@ -2,7 +2,6 @@
 #include "utils/builtins.h"
 #include "utils/memutils.h"
 #include "catalog/pg_type.h"
-#include "gopher/gopher.h"
 #include "src/provider/common/file_reader.h"
 #include "hudi_merged_logfile_record_reader.h"
 #include "hudi_deltalog_filter.h"
@@ -24,24 +23,43 @@ createDeltaLogFilter(MemoryContext mcxt,
 					 TupleDesc tupDesc,
 					 bool *attrUsed,
 					 Reader *dataReader,
-					 gopherFS gopherFilesystem,
+					 ossFileStream fileStream,
 					 List *deltaLogs,
 					 const char *instantTime,
 					 ExternalTableMetadata *tableOptions)
 {
 	DeltaLogFilter *filter = palloc0(sizeof(DeltaLogFilter));
+	ossFileStream   logStream = fileStream;
 
 	filter->base = methods;
 	filter->dataReader = dataReader;
 	filter->tableOptions = tableOptions;
 	filter->readLogs = false;
 	filter->nColumns = list_length(datafileDesc);
+	filter->ownedStream = NULL;
+
+	/*
+	 * Merge-on-read (dataReader != NULL): the base data-file reader and the
+	 * delta-log reader both drive the same underlying stream, whose backend
+	 * (GopherFileSystem) keeps a single open-file handle. If they shared it,
+	 * one reader's seek/read would clobber the other's file position and the
+	 * parquet scan would fail ("failed to seek file"). Give the delta-log
+	 * reader its own cloned stream so the two positions stay independent.
+	 * The log-only path (dataReader == NULL) has no such contention and reuses
+	 * the caller's stream directly.
+	 */
+	if (dataReader != NULL)
+	{
+		logStream = datalakeCloneFileStream(fileStream);
+		filter->ownedStream = logStream;
+	}
+
 	filter->deltaSet = createMergedLogfileRecordReader(mcxt,
 													   datafileDesc,
 													   tupDesc,
 													   attrUsed,
 													   instantTime,
-													   gopherFilesystem,
+													   logStream,
 													   deltaLogs,
 													   tableOptions);
 	if (dataReader == NULL)
@@ -73,6 +91,14 @@ deltaLogFilterClose(Reader *filter)
 
 	if (deltaLogFilter->deltaSet)
 		mergedLogfileRecordReaderClose(deltaLogFilter->deltaSet);
+
+	/*
+	 * Release the stream we cloned for the delta-log reader (MOR path only).
+	 * mergedLogfileRecordReaderClose() borrows but never owns the stream, so
+	 * this is the sole owner and there is no double-free.
+	 */
+	if (deltaLogFilter->ownedStream != NULL)
+		datalakeDestroyFileSystem(deltaLogFilter->ownedStream);
 
 	pfree(deltaLogFilter);
 

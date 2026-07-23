@@ -1,7 +1,6 @@
 
 #ifndef DATALAKE_PARQUETINPUTSTREAM_H
 #define DATALAKE_PARQUETINPUTSTREAM_H
-#include <gopher/gopher.h>
 #include "src/common/fileSystemWrapper.h"
 #include <parquet/internal/arrow/io/interfaces.h>
 #include <parquet/internal/arrow/result.h>

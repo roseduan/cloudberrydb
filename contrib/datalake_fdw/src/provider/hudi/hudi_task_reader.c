@@ -2,7 +2,6 @@
 #include "utils/builtins.h"
 #include "utils/memutils.h"
 #include "src/dlproxy/datalake.h"
-#include "gopher/gopher.h"
 #include "src/provider/common/file_reader.h"
 #include "hudi_merged_logfile_record_reader.h"
 #include "hudi_deltalog_filter.h"
@@ -26,7 +25,7 @@ createLogFilter(MemoryContext mcxt,
 				List *datafileDesc,
 				TupleDesc tupDesc,
 				bool *attrUsed,
-				gopherFS gopherFilesystem,
+				ossFileStream fileStream,
 				int64 datafileStart,
 				int64 dataFileLength,
 				FileFragment *dataFile,
@@ -45,7 +44,7 @@ createLogFilter(MemoryContext mcxt,
 												 tupDesc,
 												 attrUsed,
 												 filter,
-												 gopherFilesystem,
+												 fileStream,
 												 deltaLogs,
 												 instantTime,
 												 tableOptions);
@@ -54,7 +53,7 @@ createLogFilter(MemoryContext mcxt,
 
 	/* data files only */
 	filter = (Reader *) datalakeCreateFileReader(mcxt, datafileDesc, attrUsed, true,
-										 dataFile, gopherFilesystem, datafileStart,
+										 dataFile, fileStream, datafileStart,
 										 datafileStart + dataFileLength, buffer, NIL);
 
 	if (list_length(deltaLogs) == 0 || list_length(tableOptions->recordKeyFields) == 0)
@@ -68,7 +67,7 @@ createLogFilter(MemoryContext mcxt,
 										   tupDesc,
 										   attrUsed,
 										   filter,
-										   gopherFilesystem,
+										   fileStream,
 										   deltaLogs,
 										   instantTime,
 										   tableOptions);
@@ -267,7 +266,7 @@ createHudiTaskReader(void *args)
 							   info->datafileDesc,
 							   info->attrUsed);
 
-	filter = createLogFilter(info->mcxt, info->datafileDesc, info->tupDesc, info->attrUsed, info->gopherFilesystem,
+	filter = createLogFilter(info->mcxt, info->datafileDesc, info->tupDesc, info->attrUsed, info->fileStream,
 						  info->fileScanTask->start, info->fileScanTask->length,
 						  info->fileScanTask->dataFile, info->fileScanTask->deletes,
 						  info->fileScanTask->instantTime, reader->tableOptions, info->buffer);

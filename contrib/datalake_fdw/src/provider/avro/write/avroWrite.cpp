@@ -10,9 +10,7 @@ extern "C"
 void avroWrite::createHandler(void* sstate)
 {
     dataLakeFdwScanState *ss = (dataLakeFdwScanState*)sstate;
-    gopherConfig *conf = datalakeCreateGopherConfig((void*)(ss->options->gopher));
-    fileStream = datalakeCreateFileSystem(conf);
-    datalakeFreeGopherConfig(conf);
+    fileStream = datalakeCreateFileSystem((void*)(ss->options->gopher));
     std::string prefix = (char*)lfirst(list_head(ss->fragments)); 
     setOption(ss->options->compress);
     generateAvroFileName(prefix);

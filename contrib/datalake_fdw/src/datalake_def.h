@@ -12,7 +12,7 @@
 #include "cdb/cdbutil.h"
 #include "commands/copy.h"
 #include "common/exttable.h"
-#include "common/gopherresowner.h"
+#include "common/datalake_resowner.h"
 
 #include "src/provider/providerWrapper.h"
 #include "datalake_type.h"
@@ -244,7 +244,7 @@ typedef struct pg_HdfsHAConfig
     char *value;
 }pg_HdfsHAConfig;
 
-typedef struct gopherOptions
+typedef struct storageOptions
 {
 	/* Gopher config */
 	char*	worker_path;
@@ -292,7 +292,10 @@ typedef struct gopherOptions
 	/* database install dir */
 	// database_install_dir for datalake_agent load libgopherClient.so used
 	char*	database_install_dir;
-}gopherOptions;
+}storageOptions;
+
+/* Backward-compatible alias: legacy callers still reference gopherOptions. */
+typedef storageOptions gopherOptions;
 
 typedef struct hiveOptions
 {
@@ -322,7 +325,7 @@ typedef struct hiveOptions
 typedef struct dataLakeOptions
 {
 	DLProt		protocol;
-	gopherOptions* gopher;
+	storageOptions* gopher;
 	/* sync hive options */
 	hiveOptions* hiveOption;
 	char		*hive_cluster_name;
@@ -405,7 +408,7 @@ typedef struct dataLakeFdwScanState
 	dataLakeCopyState		cstate;
 	List					*selected_segments;
 	dataLakeCustomState 	customState;
-	gopher_context_handle_t *gopher_handle_t;
+	datalake_context_handle_t *datalake_handle_t;
 	TupleDesc				scan_tupdesc;
 	CmdType					cmd;
 	dataLakeModifyState		*modify_state;

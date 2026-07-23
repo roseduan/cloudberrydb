@@ -4,7 +4,6 @@
 #include "utils/lsyscache.h"
 #include "storage/fd.h"
 // #include "datalake_extension.h"
-#include "gopher/gopher.h"
 #include "hudi_btree_merger.h"
 // #include "kryo.h"
 // #include "kryo_input.h"

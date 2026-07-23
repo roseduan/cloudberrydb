@@ -114,13 +114,11 @@ void textFileRead::initializeDataStructures(dataLakeFdwScanState *ss) {
 }
 
 void textFileRead::createFileStream(dataLakeFdwScanState *ss) {
-	gopherConfig* conf = datalakeCreateGopherConfig((void*)(ss->options->gopher));
-	if (conf->cache_strategy == GOPHER_CACHE) {
+	if (ss->options->gopher->enableCache) {
 		options.enableCache = true;
 	}
 
-	fileStream = datalakeCreateFileSystem(conf);
-	datalakeFreeGopherConfig(conf);
+	fileStream = datalakeCreateFileSystem((void*)(ss->options->gopher));
 }
 
 bool textFileRead::createPolicy() {

@@ -21,7 +21,7 @@ typedef struct DatalakePositionFilter
 DatalakePositionFilter *
 datalakeCreatePositionFilter(MemoryContext readerMcxt,
 					 Reader *dataReader,
-					 gopherFS gopherFilesystem,
+					 ossFileStream fileStream,
 					 char *dataFilePath,
 					 List *deletes);
 

@@ -3,7 +3,6 @@
 
 #include <parquet/internal/arrow/io/interfaces.h>
 #include <parquet/internal/arrow/io/file.h>
-#include <gopher/gopher.h>
 #include "src/common/fileSystemWrapper.h"
 
 class gopherWriteFileSystem : public ::parquet_arrow::io::OutputStream

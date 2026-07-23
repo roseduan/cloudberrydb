@@ -1,25 +1,59 @@
+/*-------------------------------------------------------------------------
+ *
+ * fileSystemWrapper.cpp
+ *    C wrapper over the abstract FileSystem class.
+ *
+ *    Selects the concrete FileSystem implementation at compile time:
+ *    GopherFileSystem (commercial) or S3FileSystem (open-source).
+ *
+ * Portions Copyright (c) 2023-2026, HashData Technology Limited.
+ *
+ * IDENTIFICATION
+ *        contrib/datalake_fdw/src/common/fileSystemWrapper.cpp
+ *-------------------------------------------------------------------------
+ */
 extern "C" {
-#include "src/datalake_option.h"
-#include "src/datalake_def.h"
-#include "libpq/libpq-be.h"
-#include "util.h"
+#include "postgres.h"
+#include "utils/elog.h"
+#include "src/datalake_def.h"   /* for struct storageOptions */
 }
 
 #include "fileSystemWrapper.h"
 #include "fileSystem.h"
+#ifdef USE_GOPHER
+#include "gopherFileSystem.h"
+#else
+#include "backendRegistry.h"
+/*
+ * We no longer include a specific backend header here - backends
+ * register themselves via DATALAKE_REGISTER_BACKEND. The wrapper only
+ * knows the abstract FileSystem interface and the registry.
+ */
+#endif
 #include <exception>
-#include <iostream>
-#include <vector>
+#include <cstring>
+#include <memory>
 
 using Datalake::Internal::FileSystem;
 
 /*
- * GUC datalake.disable_cache_file (defined in datalake_fdw.c). Default OFF
- * (false) = caching enabled. Gates the fs-level gopher cache_strategy so the
- * GUC globally controls block caching for all datalake reads (incl. native
- * iceberg AM tables, whose volume options never set enableCache).
+ * Thread-local last-error buffer for datalakeGetLastError().
+ * Captures exception messages from the storage backend so callers
+ * can include error detail in elog() messages.
  */
-extern bool disableCacheFile;
+static __thread char lastErrorBuf[1024] = {0};
+
+static void
+setLastError(const char *msg)
+{
+	strncpy(lastErrorBuf, msg, sizeof(lastErrorBuf) - 1);
+	lastErrorBuf[sizeof(lastErrorBuf) - 1] = '\0';
+}
+#ifdef USE_GOPHER
+using Datalake::Internal::GopherFileSystem;
+#else
+using Datalake::Internal::BackendRegistry;
+#endif
 
 struct ossInternalFileStream {
 public:
@@ -41,6 +75,14 @@ public:
 
 	int type;
 
+	/*
+	 * storageOptions pointer used to create this stream; kept so
+	 * datalakeCloneFileStream() can build an independent stream with its
+	 * own FileSystem (own connection + file handle).  Points at
+	 * caller-owned options that outlive the stream (scan-scoped).
+	 */
+	void *storageOptions = NULL;
+
 private:
 	FileSystem *context;
 };
@@ -55,33 +97,122 @@ extern "C" {
         elog(ERROR, "Datalake foreign table Error, Parameter assert failed."); \
     }
 
-ossFileStream datalakeCreateFileSystem(gopherConfig *conf)
+/*
+ * datalakeCreateFileSystem - create a storage handle from storageOptions.
+ *
+ * storageOptions is a storageOptions* from datalake_def.h.
+ *
+ * Commercial (USE_GOPHER): GopherFileSystem drives all backends
+ * internally via ufsType.
+ *
+ * Open-source: BackendRegistry dispatches on the protocol string set
+ * by CREATE SERVER ... OPTIONS (protocol '...'). New backends register
+ * themselves via DATALAKE_REGISTER_BACKEND; no edit to this file is
+ * needed to add one.
+ */
+ossFileStream datalakeCreateFileSystem(void *storageOptions)
 {
 	ossInternalFileStream *fileStream = NULL;
 
 	try
 	{
-		FileSystem *file = new FileSystem();
-		file->gopherCreateHandle(conf);
-		fileStream = new ossInternalFileStream(file);
-		fileStream->type = conf->ufs_type;
+#ifdef USE_GOPHER
+		/*
+		 * Own the FileSystem via unique_ptr until it is safely handed to
+		 * the ossInternalFileStream: createHandle() may throw, and the
+		 * catch below longjmp's out of elog(ERROR); the unique_ptr frees
+		 * the object during stack unwinding so it is not leaked.
+		 */
+		std::unique_ptr<FileSystem> file(new GopherFileSystem());
+		file->createHandle(storageOptions);
+		/* Cache UFS type for getFileInfo path adjustment (HDFS = 9) */
+		GopherFileSystem *gfs = dynamic_cast<GopherFileSystem*>(file.get());
+		fileStream = new ossInternalFileStream(file.release());
+		if (gfs)
+			fileStream->type = gfs->getUfsType();
+#else
+		{
+			struct storageOptions *opts =
+				static_cast<struct storageOptions *>(storageOptions);
+			if (opts == NULL || opts->protocol == NULL)
+				throw Datalake::Internal::Error(
+					"datalakeCreateFileSystem: storageOptions or "
+					"protocol is NULL");
+
+			/* unique_ptr guards against a createHandle() throw (see above). */
+			std::unique_ptr<FileSystem> file(
+				BackendRegistry::instance().create(opts->protocol));
+			file->createHandle(storageOptions);
+			/*
+			 * Each backend reports its own UFS type via getUfsId();
+			 * cache it for datalakeGetFileInfo's path-prefix logic.
+			 */
+			int ufsId = file->getUfsId();
+			fileStream = new ossInternalFileStream(file.release());
+			fileStream->type = ufsId;
+		}
+#endif
 	}
 	catch (std::exception &e)
 	{
+		setLastError(e.what());
 		elog(ERROR, "failed to datalakeCreateFileSystem: %s", e.what());
 	}
 	catch (...)
 	{
+		setLastError("internal error");
 		elog(ERROR, "failed to datalakeCreateFileSystem: internal error");
 	}
 
+	/*
+	 * Remember the options this stream was built from so datalakeCloneFileStream()
+	 * can materialize an independent stream (own connection + file handle) later.
+	 */
+	if (fileStream != NULL)
+		fileStream->storageOptions = storageOptions;
+
 	return fileStream;
+}
+
+/*
+ * datalakeCloneFileStream - build a fresh, independent stream that talks to the
+ * same storage as `file`, using the storageOptions `file` was created from.
+ *
+ * The clone has its own FileSystem object (own connection + own single open-file
+ * handle), so a reader holding the clone can seek/read concurrently with the
+ * reader holding the original without clobbering each other's handle.  Hudi MOR
+ * needs this: the base data-file reader and the delta-log reader would otherwise
+ * share one handle and corrupt each other's file position.
+ *
+ * Returns NULL if `file` is NULL.  The caller owns the returned stream and must
+ * release it with datalakeDestroyFileSystem().
+ */
+ossFileStream datalakeCloneFileStream(ossFileStream file)
+{
+	if (file == NULL)
+		return NULL;
+
+	return datalakeCreateFileSystem(file->storageOptions);
 }
 
 int datalakeOpenFile(ossFileStream file, const char *path, int flag)
 {
 	PARAMETER_ASSERT(file != NULL && strlen(path) > 0, EINVAL);
-	int ret = file->getContext().openFile(path, flag);
+	int ret = 0;
+	try
+	{
+		ret = file->getContext().openFile(path, flag);
+	}
+	catch (std::exception &e)
+	{
+		setLastError(e.what());
+		elog(ERROR, "failed to open file \"%s\": %s", path, e.what());
+	}
+	catch (...)
+	{
+		setLastError("internal error");
+		elog(ERROR, "failed to open file \"%s\": internal error", path);
+	}
 	return ret;
 }
 
@@ -95,10 +226,12 @@ int datalakeWriteFile(ossFileStream file, void *buff, int64_t size)
 	}
 	catch (std::exception &e)
 	{
+		setLastError(e.what());
 		elog(ERROR, "failed to write: %s", e.what());
 	}
 	catch (...)
 	{
+		setLastError("internal error");
 		elog(ERROR, "failed to write: internal error");
 	}
 	return ret;
@@ -114,30 +247,42 @@ int datalakeReadFile(ossFileStream file, void *buff, int64_t size)
 	}
 	catch (std::exception &e)
 	{
+		setLastError(e.what());
 		elog(ERROR, "failed to read: %s", e.what());
 	}
 	catch (...)
 	{
+		setLastError("internal error");
 		elog(ERROR, "failed to read: internal error");
 	}
 	return ret;
 }
 
-int datalakeSeekFile(ossFileStream file, int64_t postion)
+int datalakeSeekFile(ossFileStream file, int64_t position)
 {
 	PARAMETER_ASSERT(file != NULL, EINVAL);
 	int ret = 0;
 	try
 	{
-		ret = file->getContext().seek(postion);
+		ret = file->getContext().seek(position);
 	}
 	catch (std::exception &e)
 	{
-		elog(ERROR, "failed to seek: %s", e.what());
+		/*
+		 * Return -1 (do NOT elog(ERROR)) so the caller decides how to react.
+		 * seek has legitimate "expected failure" callers: e.g. Hudi's
+		 * isBlockCorrupted() probes for EOF via logFileSeek(..., supressError)
+		 * and needs -1 back, not a longjmp.  Every caller checks the -1 return
+		 * (and re-raises via datalakeGetLastError() when it wants a hard
+		 * error), matching the pre-abstraction gopherSeek() contract.
+		 */
+		setLastError(e.what());
+		return -1;
 	}
 	catch (...)
 	{
-		elog(ERROR, "failed to seek: internal error");
+		setLastError("internal error");
+		return -1;
 	}
 	return ret;
 }
@@ -152,90 +297,88 @@ int datalakeCloseFile(ossFileStream file)
 	return ret;
 }
 
-gopherFileInfo *datalakeListDir(ossFileStream file, const char *path, int *count, int recursive)
+datalakeFileInfo *datalakeListDir(ossFileStream file, const char *path, int *count, int recursive)
 {
 	PARAMETER_ASSERT(file != NULL, EINVAL);
-    gopherFileInfo* result = NULL;
+	datalakeFileInfo* result = NULL;
 	try
 	{
 		result = file->getContext().listInfo(path, *count, recursive);
 	}
 	catch (std::exception &e)
 	{
+		setLastError(e.what());
 		elog(ERROR, "failed to list directory: %s", e.what());
 	}
 	catch (...)
 	{
+		setLastError("internal error");
 		elog(ERROR, "failed to list directory: internal error");
 	}
 
 	return result;
 }
 
-void datalakeFreeListDir(ossFileStream file, gopherFileInfo *list, int count)
+void datalakeFreeFileInfo(datalakeFileInfo *list, int count)
 {
-	if (file == NULL)
+	if (list == NULL)
 		return;
 
-	try
+	for (int i = 0; i < count; i++)
 	{
-		file->getContext().freeListInfo(list, count);
+		if (list[i].path != NULL)
+			pfree(list[i].path);
 	}
-	catch (std::exception &e)
-	{
-		elog(ERROR, "failed to exec datalakeFreeListDir(): %s", e.what());
-	}
-	catch (...)
-	{
-		elog(ERROR, "failed to exec datalakeFreeListDir(): internal error");
-	}
+	pfree(list);
 }
 
-gopherFileInfo* datalakeGetFileInfo(ossFileStream file, const char* path)
+datalakeFileInfo* datalakeGetFileInfo(ossFileStream file, const char* path)
 {
-    PARAMETER_ASSERT(file != NULL && strlen(path) > 0, EINVAL);
+	PARAMETER_ASSERT(file != NULL && strlen(path) > 0, EINVAL);
 
-    // hdfs type
-    std::string ufsPath;
-    if (file->type == 9)
-    {
-        if (path[0] != '/')
-        {
-            std::string delimite = "/";
-            ufsPath = delimite + path;
-        }
-        else
-        {
-            ufsPath = path;
-        }
-    }
-    else
-    {
-        ufsPath = path;
-    }
-
-    gopherFileInfo* result = NULL;
-    try
+	/* hdfs type: ensure path starts with / */
+	std::string ufsPath;
+	if (file->type == 9)
 	{
-        result = file->getContext().getFileInfo(ufsPath.c_str());
-    }
+		if (path[0] != '/')
+		{
+			std::string delimite = "/";
+			ufsPath = delimite + path;
+		}
+		else
+		{
+			ufsPath = path;
+		}
+	}
+	else
+	{
+		ufsPath = path;
+	}
+
+	datalakeFileInfo* result = NULL;
+	try
+	{
+		result = file->getContext().getFileInfo(ufsPath.c_str());
+	}
 	catch (std::exception &e)
 	{
-        elog(ERROR, "failed to exec datalakeGetFileInfo(): %s", e.what());
-    }
+		setLastError(e.what());
+		elog(ERROR, "failed to exec datalakeGetFileInfo(): %s", e.what());
+	}
 	catch (...)
 	{
+		setLastError("internal error");
 		elog(ERROR, "failed to exec datalakeGetFileInfo(): internal error");
 	}
-    return result;
+	return result;
 }
 
 int datalakeGetUfsId(ossFileStream file)
 {
-    if (file == NULL)
-    {
-        return 0;
-    }
+	if (file == NULL)
+	{
+		return 0;
+	}
 	int ret = 0;
 	try
 	{
@@ -243,34 +386,38 @@ int datalakeGetUfsId(ossFileStream file)
 	}
 	catch (std::exception &e)
 	{
-		elog(ERROR, "failed to exec datalakeGopherDestroyHandle(): %s", e.what());
+		setLastError(e.what());
+		elog(ERROR, "failed to exec datalakeGetUfsId(): %s", e.what());
 	}
 	catch (...)
 	{
-		elog(ERROR, "failed to exec datalakeGopherDestroyHandle(): internal error");
+		setLastError("internal error");
+		elog(ERROR, "failed to exec datalakeGetUfsId(): internal error");
 	}
 
 	return ret;
 }
 
-int datalakeGopherDestroyHandle(ossFileStream file)
+int datalakeDestroyHandle(ossFileStream file)
 {
-    if (file == NULL)
+	if (file == NULL)
 	{
-        return 0;
-    }
+		return 0;
+	}
 	int ret = 0;
 	try
 	{
-		ret = file->getContext().gopherDestroyHandle();
+		ret = file->getContext().destroyHandle();
 	}
 	catch (std::exception &e)
 	{
-		elog(ERROR, "failed to exec datalakeGopherDestroyHandle(): %s", e.what());
+		setLastError(e.what());
+		elog(ERROR, "failed to exec datalakeDestroyHandle(): %s", e.what());
 	}
 	catch (...)
 	{
-		elog(ERROR, "failed to exec datalakeGopherDestroyHandle(): internal error");
+		setLastError("internal error");
+		elog(ERROR, "failed to exec datalakeDestroyHandle(): internal error");
 	}
 
 	return ret;
@@ -296,20 +443,27 @@ void datalakeDestroyFileSystem(ossFileStream file)
 	}
 }
 
-int datalakeDeleteFileByOptions(void *gopherOpt, const char *path)
+const char *datalakeGetLastError(void)
 {
-	gopherConfig *conf = NULL;
+#ifdef USE_GOPHER
+	return gopherGetLastError();
+#else
+	return lastErrorBuf;
+#endif
+}
+
+int datalakeDeleteFileByOptions(void *storageOpt, const char *path)
+{
 	ossFileStream fs = NULL;
 	int rc = -1;
 
-	if (gopherOpt == NULL || path == NULL)
+	if (storageOpt == NULL || path == NULL)
 		return -1;
 
 	try
 	{
-		conf = datalakeCreateGopherConfig(gopherOpt);
-		fs = datalakeCreateFileSystem(conf);
-		rc = fs->getContext().deleteFile(path);   /* per-file */
+		fs = datalakeCreateFileSystem(storageOpt);
+		rc = fs->getContext().deleteFile(path);   /* per-file, virtual dispatch */
 	}
 	catch (std::exception &e)
 	{
@@ -324,449 +478,7 @@ int datalakeDeleteFileByOptions(void *gopherOpt, const char *path)
 
 	if (fs)
 		datalakeDestroyFileSystem(fs);
-	if (conf)
-		datalakeFreeGopherConfig(conf);
 	return rc;
-}
-
-void splitString(std::string inputStr, std::string delimiter, std::vector<std::string> &out)
-{
-	std::string str = inputStr + delimiter;
-	size_t pos = str.find(delimiter);
-	int step = delimiter.size();
-
-	while(pos != str.npos)
-	{
-		std::string tmp = str.substr(0, pos);
-		out.push_back(tmp);
-		str = str.substr(pos + step, str.size());
-		pos = str.find(delimiter);
-	}
-}
-
-HdfsHAConfig* getHdfsHAConfig(gopherOptions *options)
-{
-	std::vector<std::string> namenodes;
-	if (options->dfs_ha_namenodes)
-	{
-		splitString(options->dfs_ha_namenodes, ",", namenodes);
-	}
-	if (namenodes.size() == 0)
-	{
-		elog(WARNING, "Options set is_ha_supported is true, "
-		"but cannot get dfs_ha_namenodes %s please check hdfs ha config.",
-			options->dfs_ha_namenodes);
-		options->hdfs_ha_configs_num = 0;
-		return NULL;
-	}
-
-	options->hdfs_ha_configs_num = namenodes.size() + 3;
-
-	HdfsHAConfig *hdfs_ha_configs = (HdfsHAConfig*)palloc0(sizeof(HdfsHAConfig) *
-			options->hdfs_ha_configs_num);
-
-	/* ha nameservices */
-	hdfs_ha_configs[0].key = pstrdup("dfs.nameservices");
-	hdfs_ha_configs[0].value = pstrdup(options->dfs_name_services);
-
-	/* ha namenodes */
-	char buffer[1024] = {0};
-	sprintf(buffer, "dfs.ha.namenodes.%s", options->dfs_name_services);
-	hdfs_ha_configs[1].key = pstrdup(buffer);
-	hdfs_ha_configs[1].value = pstrdup(options->dfs_ha_namenodes);
-
-
-	/* dfs client */
-	sprintf(buffer, "dfs.client.failover.proxy.provider.%s", options->dfs_name_services);
-	hdfs_ha_configs[2].key = pstrdup(buffer);
-	hdfs_ha_configs[2].value = pstrdup(options->dfs_client_failover);
-
-
-	/* ha namenode rpc addr */
-	std::vector<std::string> rpc_addr;
-	if (options->dfs_ha_namenode_rpc_addr)
-	{
-		splitString(options->dfs_ha_namenode_rpc_addr, ",", rpc_addr);
-	}
-
-	if (rpc_addr.size() != namenodes.size())
-	{
-		elog(ERROR, "Invalid Config dfs.namenode.rpc-address: %s and "
-		"dfs.ha.namenodes %s , count not equal", options->dfs_ha_namenode_rpc_addr,
-			options->dfs_ha_namenodes);
-	}
-
-	int num = 0;
-	for (int i = 3; i < options->hdfs_ha_configs_num; i++)
-	{
-		sprintf(buffer, "dfs.namenode.rpc-address.%s.%s",
-			options->dfs_name_services,
-			namenodes[num].c_str());
-
-		hdfs_ha_configs[i].key = pstrdup(buffer);
-		hdfs_ha_configs[i].value = pstrdup(rpc_addr[num].c_str());
-		num++;
-	}
-
-	return hdfs_ha_configs;
-}
-
-gopherConfig* datalakeCreateGopherConfig(void *opt)
-{
-	gopherOptions *options = (gopherOptions*)opt;
-	gopherConfig* conf = (gopherConfig*)palloc0(sizeof(gopherConfig));
-	conf->connect_path = pstrdup(options->connect_path);
-	conf->connect_plasma_path = pstrdup(options->connect_plasma_path);
-	conf->worker_path = pstrdup(options->worker_path);
-	conf->master_ip = pstrdup(MyProcPort->remote_host);
-	conf->external_hdfs_list_use_master = enable_list_in_master;
-
-	if (options->enableCache || !disableCacheFile)
-	{
-		conf->cache_strategy = GOPHER_CACHE;
-	}
-	else
-	{
-		conf->cache_strategy = GOPHER_NOT_CACHE;
-	}
-
-	if (pg_strcasecmp(strConvertLow(options->gopherType), "hdfs") == 0)
-	{
-		conf->ufs_type = HDFS;
-
-		conf->port = options->hdfs_namenode_port;
-
-		if (options->hdfs_namenode_host)
-		{
-			std::vector<std::string> hostAndPort;
-			splitString(options->hdfs_namenode_host, ":", hostAndPort);
-			conf->name_node = pstrdup(hostAndPort[0].c_str());
-			if (hostAndPort.size() > 1)
-			{
-				conf->port = std::stoi(hostAndPort[1]);
-			}
-		}
-
-		if (options->hdfs_auth_method)
-		{
-			conf->auth_method = pstrdup(options->hdfs_auth_method);
-		}
-
-		if (options->hadoop_rpc_protection)
-		{
-			conf->hadoop_rpc_protection = pstrdup(options->hadoop_rpc_protection);
-		}
-
-		if (options->data_transfer_protection)
-		{
-			conf->data_transfer_protection = pstrdup(options->data_transfer_protection);
-		}
-
-		if (conf->auth_method != NULL && strcmp(conf->auth_method, "kerberos") == 0)
-		{
-			if (options->krb_principal)
-			{
-				conf->krb_principal = pstrdup(options->krb_principal);
-			}
-
-			if (options->krb_principal_keytab)
-			{
-				conf->krb_server_key_file = pstrdup(options->krb_principal_keytab);
-			}
-
-			char krb5_ccname[1024] = {0};
-			snprintf(krb5_ccname, 1024, "%s/gophermeta/krb5cc_%s", DataDir, conf->krb_principal);
-			char* krb5Str = strstr(krb5_ccname, "krb5cc");
-			int len = strlen(krb5Str);
-			for (int i = 0; i < len; i++)
-			{
-				if (!isalnum(krb5Str[i]))
-				{
-					krb5Str[i] = '_';
-				}
-			}
-			conf->krb5_ticket_cache_path = pstrdup(krb5_ccname);
-		}
-
-		if (enable_set_hdfs_user && options->hdfs_user)
-		{
-			conf->hdfs_username = pstrdup(options->hdfs_user);
-		}
-
-		conf->data_transfer_protocol = options->data_transfer_protocol;
-		conf->is_ha_supported = options->is_ha_supported;
-
-		if (options->is_ha_supported)
-		{
-			/* parser ha config */
-			conf->hdfs_ha_configs = getHdfsHAConfig(options);
-			conf->hdfs_ha_configs_num = options->hdfs_ha_configs_num;
-		}
-	}
-	else if (pg_strcasecmp(strConvertLow(options->gopherType), "ftp") == 0)
-	{
-		conf->ufs_type = FTP;
-		// ftp://host/path/to/file
-		// username
-		// password
-		conf->config = (ftpConfig *) palloc0(sizeof(ftpConfig));
-		std::string ftp_url = "ftp://";
-		ftp_url.append(options->host).append("/");
-		ftp_url.append(options->ftp_path);
-		conf->config->host = pstrdup(ftp_url.c_str());
-		conf->config->username = pstrdup(options->ftp_username);
-		conf->config->password = pstrdup(options->ftp_password);
-	}
-	else
-	{
-		if (pg_strcasecmp(strConvertLow(options->gopherType), "qs") == 0)
-		{
-			conf->ufs_type = QINGSTOR;
-		}
-		else if (pg_strcasecmp(strConvertLow(options->gopherType), "huawei") == 0)
-		{
-			conf->ufs_type = HUAWEI;
-		}
-		else if (pg_strcasecmp(strConvertLow(options->gopherType), "ks3") == 0)
-		{
-			conf->ufs_type = KSYUN;
-		}
-		else if (pg_strcasecmp(strConvertLow(options->gopherType), "cos") == 0)
-		{
-			conf->ufs_type = QCLOUD;
-		}
-		else if (pg_strcasecmp(strConvertLow(options->gopherType), "ali") == 0)
-		{
-			conf->ufs_type = OSS;
-		}
-		else if (pg_strcasecmp(strConvertLow(options->gopherType), "s3") == 0 ||
-				pg_strcasecmp(strConvertLow(options->gopherType), "s3a") == 0)
-		{
-			conf->ufs_type = S3A;
-		}
-		else if (pg_strcasecmp(strConvertLow(options->gopherType), "s3b") == 0)
-		{
-			conf->ufs_type = S3AV2;
-		}
-		else if (pg_strcasecmp(strConvertLow(options->gopherType), "azure") == 0)
-		{
-			conf->ufs_type = AZURE;
-		}
-		else if (pg_strcasecmp(strConvertLow(options->gopherType), "gcs") == 0)
-		{
-			conf->ufs_type = GCS;
-		}
-		else
-		{
-			ereport(ERROR,
-						(errcode(ERRCODE_SYNTAX_ERROR),
-						errmsg("unkonw datalake platform \"%s\"", options->gopherType)));
-		}
-
-		if (options->bucket)
-		{
-			conf->bucket = pstrdup(options->bucket);
-		}
-
-		if (options->accessKey)
-		{
-			conf->access_key = pstrdup(options->accessKey);
-		}
-
-		if (options->secretKey)
-		{
-			conf->secret_key = pstrdup(options->secretKey);
-		}
-
-		if (options->host)
-		{
-			char endpoint[1024] = {0};
-			std::string hostStr = options->host;
-
-			// Strip protocol prefix (http:// or https://)
-			if (hostStr.find("http://") == 0)
-				hostStr = hostStr.substr(7);
-			else if (hostStr.find("https://") == 0)
-				hostStr = hostStr.substr(8);
-
-			if (options->port > 0)
-			{
-				char port[100] = {0};
-				sprintf(port, "%d", options->port);
-				std::string portStr = ":" + std::string(port);
-				size_t pos = hostStr.find(portStr);
-				if (pos > 0)
-				{
-					ereport(WARNING,
-						errmsg("Please check the server options. Found port %d in the host %s. "
-						"datalake support config host and port.",
-							options->port, options->host));
-				}
-				snprintf(endpoint, 1024, "%s:%d", hostStr.c_str(), options->port);
-			}
-			else
-			{
-				snprintf(endpoint, 1024, "%s", hostStr.c_str());
-			}
-			conf->endpoint = pstrdup(endpoint);
-		}
-
-		if (options->region)
-		{
-			conf->region = pstrdup(options->region);
-		}
-
-		conf->useVirtualHost = options->useVirtualHost;
-		conf->useHttps = options->useHttps;
-		conf->useListV2 = options->useListV2;
-
-		//TODO need add debug guc values gopher_oss_liboss2_log_level and gopher_oss_log_level
-
-	}
-
-	return conf;
-}
-
-void datalakeFreeGopherConfig(gopherConfig* conf)
-{
-	if (conf)
-	{
-		if (conf->connect_path != NULL)
-		{
-			pfree(conf->connect_path);
-			conf->connect_path = NULL;
-		}
-
-		if (conf->connect_plasma_path != NULL)
-		{
-			pfree(conf->connect_plasma_path);
-			conf->connect_plasma_path = NULL;
-		}
-
-		if (conf->worker_path != NULL)
-		{
-			pfree(conf->worker_path);
-			conf->worker_path = NULL;
-		}
-
-		if (conf->bucket != NULL)
-		{
-			pfree(conf->bucket);
-			conf->bucket = NULL;
-		}
-
-		if (conf->access_key != NULL)
-		{
-			pfree(conf->access_key);
-			conf->access_key = NULL;
-		}
-
-		if (conf->secret_key != NULL)
-		{
-			pfree(conf->secret_key);
-			conf->secret_key = NULL;
-		}
-
-		if (conf->region != NULL)
-		{
-			pfree(conf->region);
-			conf->region = NULL;
-		}
-
-		if (conf->endpoint != NULL)
-		{
-			pfree(conf->endpoint);
-			conf->endpoint = NULL;
-		}
-
-		if (conf->local_path != NULL)
-		{
-			pfree(conf->local_path);
-			conf->local_path = NULL;
-		}
-
-		if (conf->name_node != NULL)
-		{
-			pfree(conf->name_node);
-			conf->name_node = NULL;
-		}
-
-		if (conf->uriPrefix != NULL)
-		{
-			pfree(conf->uriPrefix);
-			conf->uriPrefix = NULL;
-		}
-
-		if (conf->auth_method != NULL)
-		{
-			pfree(conf->auth_method);
-			conf->auth_method = NULL;
-		}
-
-		if (conf->krb_delegation_token != NULL)
-		{
-			pfree(conf->krb_delegation_token);
-			conf->krb_delegation_token = NULL;
-		}
-
-		if (conf->krb5_ticket_cache_path != NULL)
-		{
-			pfree(conf->krb5_ticket_cache_path);
-			conf->krb5_ticket_cache_path = NULL;
-		}
-
-		if (conf->krb_server_key_file != NULL)
-		{
-			pfree(conf->krb_server_key_file);
-			conf->krb_server_key_file = NULL;
-		}
-
-		if (conf->krb_principal != NULL)
-		{
-			pfree(conf->krb_principal);
-			conf->krb_principal = NULL;
-		}
-
-		if (conf->hdfs_username != NULL)
-		{
-			pfree(conf->hdfs_username);
-			conf->hdfs_username = NULL;
-		}
-
-		if (conf->hadoop_rpc_protection != NULL)
-		{
-			pfree(conf->hadoop_rpc_protection);
-			conf->hadoop_rpc_protection = NULL;
-		}
-
-		if (conf->data_transfer_protection != NULL)
-		{
-			pfree(conf->data_transfer_protection);
-			conf->data_transfer_protection = NULL;
-		}
-
-		if ((conf->hdfs_ha_configs_num) > 0 && (conf->hdfs_ha_configs != NULL))
-		{
-			for (int i = 0; i < conf->hdfs_ha_configs_num; i++)
-			{
-				if (conf->hdfs_ha_configs[i].key)
-				{
-					pfree(conf->hdfs_ha_configs[i].key);
-					conf->hdfs_ha_configs[i].key = NULL;
-				}
-				if (conf->hdfs_ha_configs[i].value)
-				{
-					pfree(conf->hdfs_ha_configs[i].value);
-					conf->hdfs_ha_configs[i].value = NULL;
-				}
-			}
-			pfree(conf->hdfs_ha_configs);
-			conf->hdfs_ha_configs = NULL;
-		}
-
-		pfree(conf);
-		conf = NULL;
-	}
 }
 
 #ifdef __cplusplus

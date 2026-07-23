@@ -2,7 +2,6 @@
 #include "utils/builtins.h"
 #include "utils/memutils.h"
 #include "src/dlproxy/datalake.h"
-#include "gopher/gopher.h"
 #include "src/provider/common/file_reader.h"
 #include "iceberg_position_filter.h"
 #include "iceberg_equality_filter.h"
@@ -48,7 +47,7 @@ createIcebergTaskReader(void *args)
 		projectRequiredColumns(info->datafileDesc, info->attrUsed, eqDeletes);
 
 	filter = (Reader *) datalakeCreateFileReader(info->mcxt, info->datafileDesc, info->attrUsed, true,
-												info->fileScanTask->dataFile, info->gopherFilesystem,
+												info->fileScanTask->dataFile, info->fileStream,
 												info->fileScanTask->start,
 												info->fileScanTask->start + info->fileScanTask->length,
 												info->buffer, info->filterQuals);
@@ -67,14 +66,14 @@ createIcebergTaskReader(void *args)
 		}
 		else
 		{
-			filter = (Reader *) datalakeCreatePositionFilter(info->mcxt, filter, info->gopherFilesystem,
+			filter = (Reader *) datalakeCreatePositionFilter(info->mcxt, filter, info->fileStream,
 													 info->fileScanTask->dataFile->filePath, posDeletes);
 		}
 	}
 
 	if (list_length(eqDeletes) > 0)
 		filter = (Reader *) datalakeCreateEqualityFilter(info->mcxt, info->datafileDesc,
-												 filter, info->gopherFilesystem, eqDeletes);
+												 filter, info->fileStream, eqDeletes);
 
 	reader->dataReader = filter;
 	return (Reader *) reader;

@@ -13,7 +13,6 @@
 #include "access/reloptions.h"
 #include "commands/defrem.h"
 #include "mb/pg_wchar.h"
-#include "gopher/gopher.h"
 #include "src/provider/common/config.h"
 
 #define fmttype_is_text(c)   (c == 't')

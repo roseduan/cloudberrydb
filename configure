@@ -719,6 +719,8 @@ with_apr_config
 with_libcurl
 with_rt
 PROTOC
+PROTOBUF_LIBS
+PROTOBUF_CFLAGS
 with_gp_stats_collector
 with_diskquota
 with_zstd
@@ -758,6 +760,7 @@ INCLUDES
 enable_time_series
 enable_perfmon
 enable_gophermeta
+with_gopher
 enable_dfs_tablespace
 enable_datalake_rest_catalog
 enable_datalake
@@ -862,7 +865,6 @@ infodir
 docdir
 oldincludedir
 includedir
-runstatedir
 localstatedir
 sharedstatedir
 sysconfdir
@@ -930,6 +932,7 @@ enable_vectorization
 enable_datalake
 enable_datalake_rest_catalog
 enable_dfs_tablespace
+with_gopher
 enable_gophermeta
 enable_perfmon
 enable_time_series
@@ -960,9 +963,9 @@ with_zlib
 with_lz4
 with_libbz2
 with_zstd
-with_expiration_date
 with_diskquota
 with_gp_stats_collector
+with_expiration_date
 with_rt
 with_libcurl
 with_apr_config
@@ -1001,6 +1004,8 @@ XML2_CFLAGS
 XML2_LIBS
 LZ4_CFLAGS
 LZ4_LIBS
+PROTOBUF_CFLAGS
+PROTOBUF_LIBS
 LDFLAGS_EX
 LDFLAGS_SL
 PERL
@@ -1047,7 +1052,6 @@ datadir='${datarootdir}'
 sysconfdir='${prefix}/etc'
 sharedstatedir='${prefix}/com'
 localstatedir='${prefix}/var'
-runstatedir='${localstatedir}/run'
 includedir='${prefix}/include'
 oldincludedir='/usr/include'
 docdir='${datarootdir}/doc/${PACKAGE_TARNAME}'
@@ -1300,15 +1304,6 @@ do
   | -silent | --silent | --silen | --sile | --sil)
     silent=yes ;;
 
-  -runstatedir | --runstatedir | --runstatedi | --runstated \
-  | --runstate | --runstat | --runsta | --runst | --runs \
-  | --run | --ru | --r)
-    ac_prev=runstatedir ;;
-  -runstatedir=* | --runstatedir=* | --runstatedi=* | --runstated=* \
-  | --runstate=* | --runstat=* | --runsta=* | --runst=* | --runs=* \
-  | --run=* | --ru=* | --r=*)
-    runstatedir=$ac_optarg ;;
-
   -sbindir | --sbindir | --sbindi | --sbind | --sbin | --sbi | --sb)
     ac_prev=sbindir ;;
   -sbindir=* | --sbindir=* | --sbindi=* | --sbind=* | --sbin=* \
@@ -1446,7 +1441,7 @@ fi
 for ac_var in	exec_prefix prefix bindir sbindir libexecdir datarootdir \
 		datadir sysconfdir sharedstatedir localstatedir includedir \
 		oldincludedir docdir infodir htmldir dvidir pdfdir psdir \
-		libdir localedir mandir runstatedir
+		libdir localedir mandir
 do
   eval ac_val=\$$ac_var
   # Remove trailing slashes.
@@ -1599,7 +1594,6 @@ Fine tuning of the installation directories:
   --sysconfdir=DIR        read-only single-machine data [PREFIX/etc]
   --sharedstatedir=DIR    modifiable architecture-independent data [PREFIX/com]
   --localstatedir=DIR     modifiable single-machine data [PREFIX/var]
-  --runstatedir=DIR       modifiable per-process data [LOCALSTATEDIR/run]
   --libdir=DIR            object code libraries [EPREFIX/lib]
   --includedir=DIR        C header files [PREFIX/include]
   --oldincludedir=DIR     C header files for non-gcc [/usr/include]
@@ -1679,7 +1673,7 @@ Optional Features:
   --enable-dfs-tablespace enable preload dfs-tablespace
   --enable-gophermeta     enable preload gophermeta
   --enable-perfmon        enable perfmon support
-  --enable-time-series    enable time_series extension
+  --disable-time-series   enable time_series extension
   --disable-thread-safety disable thread-safety in client libraries
   --enable-openssl-redirect
                           enable redirect openssl interface to internal
@@ -1705,6 +1699,8 @@ Optional Packages:
                           set WAL block size in kB [8]
   --with-CC=CMD           set compiler (deprecated)
   --with-llvm             build with LLVM based JIT support
+  --without-gopher        build with Gopher storage backend support (default:
+                          yes; --without-gopher for open-source S3/HDFS build)
   --with-icu              build with ICU support
   --with-tcl              build Tcl modules (PL/Tcl)
   --with-tclconfig=DIR    tclConfig.sh is in DIR
@@ -1734,11 +1730,11 @@ Optional Packages:
   --with-lz4              build with LZ4 support
   --without-libbz2        do not use bzip2
   --without-zstd          do not build with Zstandard
-  --with-expiration-date=DATE
-                          set database expiration date in YYYY-MM-DD format
   --with-diskquota        build with diskquota extension
   --with-gp_stats_collector
                           build with stats collector extension
+  --with-expiration-date=DATE
+                          set database expiration date in YYYY-MM-DD format
   --without-rt            do not use Realtime Library
   --without-libcurl       do not use libcurl
   --with-apr-config=PATH  path to apr-1-config utility
@@ -1775,6 +1771,10 @@ Some influential environment variables:
   XML2_LIBS   linker flags for XML2, overriding pkg-config
   LZ4_CFLAGS  C compiler flags for LZ4, overriding pkg-config
   LZ4_LIBS    linker flags for LZ4, overriding pkg-config
+  PROTOBUF_CFLAGS
+              C compiler flags for PROTOBUF, overriding pkg-config
+  PROTOBUF_LIBS
+              linker flags for PROTOBUF, overriding pkg-config
   LDFLAGS_EX  extra linker flags for linking executables only
   LDFLAGS_SL  extra linker flags for linking shared libraries only
   PERL        Perl program
@@ -11048,8 +11048,46 @@ $as_echo "checking whether to build with preload dfs-tablespace ... $enable_dfs_
 
 
 #
+# Gopher storage backend support (commercial build)
+#
+# Default ON (commercial): the shipping build links the Gopher backend.
+# Use --without-gopher for the open-source build (S3 SDK + libhdfs3, no libgopher).
+#
+
+
+
+# Check whether --with-gopher was given.
+if test "${with_gopher+set}" = set; then :
+  withval=$with_gopher;
+  case $withval in
+    yes)
+
+$as_echo "#define USE_GOPHER 1" >>confdefs.h
+
+      ;;
+    no)
+      :
+      ;;
+    *)
+      as_fn_error $? "no argument expected for --with-gopher option" "$LINENO" 5
+      ;;
+  esac
+
+else
+  with_gopher=yes
+
+$as_echo "#define USE_GOPHER 1" >>confdefs.h
+
+fi
+
+
+{ $as_echo "$as_me:${as_lineno-$LINENO}: result: checking whether to build with Gopher support ... $with_gopher" >&5
+$as_echo "checking whether to build with Gopher support ... $with_gopher" >&6; }
+
+
+#
 # gophermeta preload
-# enforce enable_gophermeta if enable_datalake is yes or enable_dfs_tablespace is yes
+# Only enabled when --with-gopher is set and datalake or dfs-tablespace is enabled
 #
 
 
@@ -11076,11 +11114,13 @@ else
 fi
 
 
-if test "$enable_datalake" = yes || test "$enable_dfs_tablespace" = yes; then
-  enable_gophermeta=yes
+if test "$with_gopher" = yes; then
+  if test "$enable_datalake" = yes || test "$enable_dfs_tablespace" = yes; then
+    enable_gophermeta=yes
 
 $as_echo "#define USE_GOPHERMETA 1" >>confdefs.h
 
+  fi
 fi
 { $as_echo "$as_me:${as_lineno-$LINENO}: result: checking whether to build with preload gophermeta ... $enable_gophermeta" >&5
 $as_echo "checking whether to build with preload gophermeta ... $enable_gophermeta" >&6; }
@@ -26381,6 +26421,7 @@ if test -n "$ac_unrecognized_opts" && test "$enable_option_checking" != no; then
   { $as_echo "$as_me:${as_lineno-$LINENO}: WARNING: unrecognized options: $ac_unrecognized_opts" >&5
 $as_echo "$as_me: WARNING: unrecognized options: $ac_unrecognized_opts" >&2;}
 fi
+
 
 # Automatically activate in-repo git hooks (pre-push coverage check, etc.)
 # so that every developer gets them after running ./configure.

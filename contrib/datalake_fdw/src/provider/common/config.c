@@ -320,6 +320,7 @@ datalakeParseHdfsConfig(const char *configFile, const char *serverName)
 	return result;
 }
 
+#ifdef USE_GOPHER
 gopherConfig *
 datalakeGopherCreateConfig(DatalakeHdfsConfigInfo *hdfsConf)
 {
@@ -346,7 +347,7 @@ datalakeGopherCreateConfig(DatalakeHdfsConfigInfo *hdfsConf)
 		config->data_transfer_protocol = true;
 
 	config->data_transfer_protection = hdfsConf->dataTransferProtection;
-    
+
 	config->hdfs_ha_configs_num = list_length(hdfsConf->haEntries);
 	if (config->hdfs_ha_configs_num > 0)
 	{
@@ -412,3 +413,4 @@ datalakeGopherConfigDestroy(gopherConfig *conf)
 
 	pfree(conf);
 }
+#endif /* USE_GOPHER */

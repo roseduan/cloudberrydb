@@ -3,7 +3,6 @@
 #include "utils/memutils.h"
 #include "utils/hsearch.h"
 #include "nodes/parsenodes.h"
-#include "gopher/gopher.h"
 #include "common/hashfn.h"
 
 #include "src/common/fileSystemWrapper.h"
@@ -49,12 +48,12 @@ createFieldDescription(TupleDesc tupleDesc)
 }
 
 static DatalakeRemoteFileHandle *
-createRemoteFileHandle(gopherFS gopherFilesystem)
+createRemoteFileHandle(ossFileStream fileStream)
 {
 	DatalakeRemoteFileHandle *result;
 
 	result = MemoryContextAlloc(TopMemoryContext, sizeof(DatalakeRemoteFileHandle));
-	result->gopherFilesystem = gopherFilesystem;
+	result->fileStream = fileStream;
 	result->reader = NULL;
 	result->prev = NULL;
 	result->next = openRemoteHandles;
@@ -79,8 +78,8 @@ destroyRemoteFileHandle(DatalakeRemoteFileHandle *handle)
 	if (handle->next)
 		handle->next->prev = handle->prev;
 
-	if (handle->gopherFilesystem)
-		gopherDisconnect(handle->gopherFilesystem);
+	if (handle->fileStream)
+		datalakeDestroyHandle(handle->fileStream);
 
 	if (handle->reader)
 		datalakeRowReaderClose(handle->reader);
@@ -163,7 +162,7 @@ datalakeCreateRowReader(MemoryContext mcxt,
 				TupleDesc tupleDesc,
 				int nTblColumn,
 				bool *attrUsed,
-				gopherFS gopherFilesystem,
+				ossFileStream fileStream,
 				List *combinedScanTasks,
 				DLTblFmt format,
 				ExternalTableMetadata *tableOptions)
@@ -200,7 +199,7 @@ datalakeCreateRowReader(MemoryContext mcxt,
 
 	reader->datafileDesc = createFieldDescription(tupleDesc);
 	reader->attrUsed = attrUsed;
-	reader->gopherFilesystem = gopherFilesystem;
+	reader->fileStream = fileStream;
 	reader->mcxt = mcxt;
 	reader->tableOptions = tableOptions;
 	reader->buffer = datalake_buffer_arr_create(tupleDesc->natts + 8);
@@ -262,7 +261,7 @@ datalakeRowReaderNext(DatalakeRowReader *reader, DatalakeInternalRecord *record)
 	if (FORMAT_IS_ICEBERG(reader->format) && !reader->deleteIndexBuilt)
 	{
 		reader->deleteIndex = icebergBuildDeleteIndex(TopMemoryContext,
-													  reader->gopherFilesystem,
+													  reader->fileStream,
 													  reader->fileScanTasks);
 		reader->deleteIndexBuilt = true;
 	}
@@ -319,7 +318,7 @@ datalakeRowReaderNext(DatalakeRowReader *reader, DatalakeInternalRecord *record)
 			initInfo.mcxt = reader->mcxt;
 			initInfo.datafileDesc = reader->datafileDesc;
 			initInfo.attrUsed = reader->attrUsed;
-			initInfo.gopherFilesystem = reader->gopherFilesystem;
+			initInfo.fileStream = reader->fileStream;
 			initInfo.fileScanTask = curTask;
 			initInfo.tableOptions = reader->tableOptions;
 			initInfo.buffer = reader->buffer;
@@ -638,24 +637,11 @@ icebergFileIndexMapInitialize(DatalakeRowReader *reader)
 	reader->fileIndexMapInitialized = true;
 }
 
-static bool
-checkInterrupt(void)
-{
-	if (!InterruptPending)
-		return false;
-
-	if (InterruptHoldoffCount != 0 || CritSectionCount != 0)
-		return false;
-
-	return true;
-}
-
 DatalakeProtocolContext *
 datalakeCreateContext(dataLakeOptions *options)
 {
 	DatalakeProtocolContext *context;
-	gopherConfig    *gopherConfig;
-	gopherFS        fs;
+	ossFileStream   stream;
 	bool            saved_disable_cache;
 
 	context = (DatalakeProtocolContext *)palloc0(sizeof(DatalakeProtocolContext));
@@ -667,32 +653,24 @@ datalakeCreateContext(dataLakeOptions *options)
 	 * (default OFF = cache on) instead of being forced on every scan.
 	 *
 	 * disableCacheFile is the live GUC-backed variable, read by other callers
-	 * later in the session (config.c, rewrLogical.cpp, gopher_random_file.cpp).
-	 * Scope the per-table override to exactly the datalakeCreateGopherConfig
+	 * later in the session (config.c, rewrLogical.cpp, datalake_random_file).
+	 * Scope the per-table override to exactly the datalakeCreateFileSystem
 	 * call below -- its only consumer on this path -- and restore the GUC
-	 * value afterwards so the override never leaks across scans.
+	 * value afterwards so the override never leaks across scans.  User-cancel
+	 * registration now happens inside GopherFileSystem::createHandle.
 	 */
 	saved_disable_cache = disableCacheFile;
 	PG_TRY();
 	{
 		if (options->cache_enabled != NULL)
 			disableCacheFile = !isCacheEnabled(options->cache_enabled);
-		gopherConfig = datalakeCreateGopherConfig((void*)(options->gopher));
+		stream = datalakeCreateFileSystem((void*)(options->gopher));
 	}
 	PG_FINALLY();
 	{
 		disableCacheFile = saved_disable_cache;
 	}
 	PG_END_TRY();
-	gopherUserCanceledCallBack(&checkInterrupt);
-
-	fs = gopherConnect(*gopherConfig);
-	if (fs == NULL)
-		ereport(ERROR,
-				(errcode(ERRCODE_INTERNAL_ERROR),
-				 errmsg("failed to connect to gopher: %s", gopherGetLastError())));
-
-	datalakeGopherConfigDestroy(gopherConfig);
 
 	if (!resownerCallbackRegistered)
 	{
@@ -700,7 +678,7 @@ datalakeCreateContext(dataLakeOptions *options)
 		resownerCallbackRegistered = true;
 	}
 
-	context->file = createRemoteFileHandle(fs);
+	context->file = createRemoteFileHandle(stream);
 
 	return context;
 }
@@ -773,7 +751,7 @@ datalakeProtocolImportStart(dataLakeFdwScanState *scanstate, DatalakeProtocolCon
 													scanstate->scan_tupdesc,
 													scanstate->rel->rd_att->natts,
 													attrUsed,
-													context->file->gopherFilesystem,
+													context->file->fileStream,
 													combinedScanTasks,
 													scanstate->options->format,
 													tableOptions);

@@ -17,7 +17,9 @@
 #include "utils/varlena.h"
 #include "utils/syscache.h"
 #include "string.h"
+#ifdef USE_GOPHER
 #include <gopher/gopher.h>
+#endif
 
 #include "src/datalake_option.h"
 #include "src/common/fileSystemWrapper.h"
@@ -101,6 +103,7 @@ hdw_GetGopherSocketPath(char *dest, size_t size)
 int
 GopherRemoveFileMetaUnderAllUfsPath(char* prefix, int mRecursive, int mForce)
 {
+#ifdef USE_GOPHER
 	char hostAddress[1024] = {0};
 	hdw_GetGopherSocketPath(hostAddress, sizeof(hostAddress));
 	gopherAdmin admin = gopherCreateAdmin(hostAddress);
@@ -127,6 +130,11 @@ GopherRemoveFileMetaUnderAllUfsPath(char* prefix, int mRecursive, int mForce)
 
 	DO_DB(elog(LOG, "GopherRemoveFileMetaUnderAllUfsPath: success"));
 	return 0;
+#else
+	/* No Gopher cache to manage in S3-only build */
+	(void)prefix; (void)mRecursive; (void)mForce;
+	return 0;
+#endif
 }
 
 Datum
@@ -238,15 +246,13 @@ GopherRemoveFileMetaUnderGphdfs(dataLakeOptions *options)
 	int mRecursive = 1;
 	int mForce = 1;
 
-	gopherConfig* conf = datalakeCreateGopherConfig((void*)options->gopher);
-	ossFileStream stream = datalakeCreateFileSystem(conf);
-	datalakeFreeGopherConfig(conf);
+	ossFileStream stream = datalakeCreateFileSystem((void*)options->gopher);
 	int ufsId = datalakeGetUfsId(stream);
 	if (ufsId < 0)
 	{
 		return -1;
 	}
-	datalakeGopherDestroyHandle(stream);
+	datalakeDestroyHandle(stream);
 	int result = 0;
 	if (PROTOCOL_IS_HDFS(options->protocol))
 	{
@@ -266,6 +272,7 @@ GopherRemoveFileMetaUnderGphdfs(dataLakeOptions *options)
 int
 GopherRemoveFileMetaUnderGphdfsUfsPath(int ufsId, char* prefix, int mRecursive, int mForce)
 {
+#ifdef USE_GOPHER
 	char hostAddress[MAXPGPATH + 1] = {0};
 	hdw_GetGopherSocketPath(hostAddress, sizeof(hostAddress));
 	gopherAdmin admin = gopherCreateAdmin(hostAddress);
@@ -285,4 +292,8 @@ GopherRemoveFileMetaUnderGphdfsUfsPath(int ufsId, char* prefix, int mRecursive, 
 
 	DO_DB(elog(LOG, "GopherRemoveFileMetaUnderGphdfsUfsPath: success"));
 	return 1;
+#else
+	(void)ufsId; (void)prefix; (void)mRecursive; (void)mForce;
+	return 0;
+#endif
 }

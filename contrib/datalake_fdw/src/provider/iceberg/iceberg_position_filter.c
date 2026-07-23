@@ -2,7 +2,6 @@
 #include "utils/builtins.h"
 #include "utils/memutils.h"
 #include "src/dlproxy/datalake.h"
-#include "gopher/gopher.h"
 #include "src/provider/common/file_reader.h"
 #include "iceberg_position_filter.h"
 #include "src/provider/common/delete_bitmap_c.h"
@@ -14,7 +13,7 @@ static bool positionFilterNext(Reader *filter, DatalakeInternalRecord *record);
 static void positionFilterClose(Reader *filter);
 static void *readPositionDeletes(MemoryContext mcxt,
 								 List *schema,
-								 gopherFS gopherFilesystem,
+								 ossFileStream fileStream,
 								 char *dataFilePath,
 								 List *deletes);
 
@@ -44,7 +43,7 @@ createPositionDeletesDescription(void)
 DatalakePositionFilter *
 datalakeCreatePositionFilter(MemoryContext readerMcxt,
 					 Reader *dataReader,
-					 gopherFS gopherFilesystem,
+					 ossFileStream fileStream,
 					 char *dataFilePath,
 					 List *deletes)
 {
@@ -62,7 +61,7 @@ datalakeCreatePositionFilter(MemoryContext readerMcxt,
 	if (totalRecords < icebergPostionDeletesThreshold)
 	{
 		elog(DEBUG1, "create in-memory position filter");
-		filter->deletesSet = readPositionDeletes(readerMcxt, posDeletesSchema, gopherFilesystem, dataFilePath, deletes);
+		filter->deletesSet = readPositionDeletes(readerMcxt, posDeletesSchema, fileStream, dataFilePath, deletes);
 		if (filter->deletesSet == NULL)
 			filter->isEmptySet = true;
 
@@ -85,7 +84,7 @@ datalakeCreatePositionFilter(MemoryContext readerMcxt,
 
 		elog(DEBUG1, "scanning position file %s", deleteFile->filePath);
 		reader = (Reader *) datalakeCreateFileReader(filter->mcxt, posDeletesSchema, attrUsed, true,
-													deleteFile, gopherFilesystem, -1, -1, NULL, NIL);
+													deleteFile, fileStream, -1, -1, NULL, NIL);
 
 		readers = lappend(readers, reader);
 	}
@@ -235,7 +234,7 @@ locationFilter(void **bitmap, char *dataFilePath, int dataFilePathLen, Datum fil
 static void *
 readPositionDeletes(MemoryContext mcxt,
 					List *posDeletesSchema,
-					gopherFS gopherFilesystem,
+					ossFileStream fileStream,
 					char *dataFilePath,
 					List *deletes)
 {
@@ -250,7 +249,7 @@ readPositionDeletes(MemoryContext mcxt,
 
 	elog(DEBUG1, "scanning position file %s", positionFile->filePath);
 	curReader = (Reader *) datalakeCreateFileReader(mcxt, posDeletesSchema, attrUsed, true,
-													positionFile, gopherFilesystem, -1, -1, NULL, NIL);
+													positionFile, fileStream, -1, -1, NULL, NIL);
 	deletes = list_delete_first(deletes);
 
 	while (true)
@@ -265,7 +264,7 @@ readPositionDeletes(MemoryContext mcxt,
 			positionFile = list_nth(deletes, 0);
 			elog(DEBUG1, "scanning position file %s", positionFile->filePath);
 			curReader = (Reader *) datalakeCreateFileReader(mcxt, posDeletesSchema, attrUsed, true,
-															positionFile, gopherFilesystem, -1, -1, NULL, NIL);
+															positionFile, fileStream, -1, -1, NULL, NIL);
 			deletes = list_delete_first(deletes);
 		}
 		else

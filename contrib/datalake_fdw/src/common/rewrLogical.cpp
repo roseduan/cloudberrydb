@@ -237,9 +237,7 @@ bool readLogical::createPolicy()
 
 ossFileStream readLogical::createFileStream()
 {
-	gopherConfig *gopherConf = datalakeCreateGopherConfig((void*)(scanstate->options->gopher));
-	ossFileStream fileStream = datalakeCreateFileSystem(gopherConf);
-	datalakeFreeGopherConfig(gopherConf);
+	ossFileStream fileStream = datalakeCreateFileSystem((void*)(scanstate->options->gopher));
 	return fileStream;
 }
 

@@ -4,7 +4,6 @@
 #include "postgres.h"
 #include "src/dlproxy/datalake.h"
 #include "utils.h"
-#include <gopher/gopher.h>
 
 typedef struct DatalakeFormatReader
 {

@@ -1,6 +1,5 @@
 #include "postgres.h"
 // #include "datalake_extension.h"
-#include "gopher/gopher.h"
 #include "hudi_hashtab_merger.h"
 #include "src/provider/common/kryo.h"
 #include "src/provider/common/kryo_input.h"

@@ -14,9 +14,7 @@ void parquetWrite::createHandler(void *sstate)
 {
 	/* parquet init */ 
 	ss = (dataLakeFdwScanState*)sstate;
-	gopherConfig* conf = datalakeCreateGopherConfig((void*)(ss->options->gopher));
-	fileStream = datalakeCreateFileSystem(conf);
-	datalakeFreeGopherConfig(conf);
+	fileStream = datalakeCreateFileSystem((void*)(ss->options->gopher));
 	prefix = (char*)lfirst(list_head(ss->fragments)); 
 	setOption(ss->options);
 	sliceIdx= 0;

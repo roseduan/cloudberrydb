@@ -2,7 +2,6 @@
 #include "utils/builtins.h"
 #include "utils/memutils.h"
 #include "src/dlproxy/datalake.h"
-#include "gopher/gopher.h"
 #include "hudi_logfile_block_reader.h"
 // #include "datalake_extension.h"
 
@@ -23,10 +22,10 @@ static char* blockTypeNames[] = {"COMMAND_BLOCK",
 static inline bool
 logFileSeek(HudiLogFileReader *reader, int64_t offset, bool supressError)
 {
-	if (gopherSeek(reader->gopherFilesystem, reader->gopherFile, offset) == -1)
+	if (datalakeSeekFile(reader->fileStream, offset) == -1)
 	{
 		if (!supressError)
-			elog(ERROR, "failed to seek hudi logfile \"%s\": %s", reader->fileName, gopherGetLastError());
+			elog(ERROR, "failed to seek hudi logfile \"%s\": %s", reader->fileName, datalakeGetLastError());
 
 		return false;
 	}
@@ -51,13 +50,12 @@ splitPath(char *uri)
 static inline void
 logFileOpen(HudiLogFileReader *reader, int flag)
 {
-	char *filePath;;
+	char *filePath;
 
 	filePath = splitPath(reader->fileName);
 
-	reader->gopherFile = gopherOpenFile(reader->gopherFilesystem, filePath, flag, BLOCK_SIZE, NULL);
-	if (reader->gopherFile == NULL)
-		elog(ERROR, "failed to open hudi logfile \"%s\": %s", reader->fileName, gopherGetLastError());
+	if (datalakeOpenFile(reader->fileStream, filePath, flag) != 0)
+		elog(ERROR, "failed to open hudi logfile \"%s\": %s", reader->fileName, datalakeGetLastError());
 
 	pfree(filePath);
 }
@@ -65,9 +63,9 @@ logFileOpen(HudiLogFileReader *reader, int flag)
 static inline int
 logFileRead(HudiLogFileReader *reader, char *buffer, int bufferSize)
 {
-	int bytesRead = gopherRead(reader->gopherFilesystem, reader->gopherFile, buffer, bufferSize);
+	int bytesRead = datalakeReadFile(reader->fileStream, buffer, bufferSize);
 	if (bytesRead == -1)
-		elog(ERROR, "failed to read hudi logfile \"%s\": %s", reader->fileName, gopherGetLastError());
+		elog(ERROR, "failed to read hudi logfile \"%s\": %s", reader->fileName, datalakeGetLastError());
 
 	reader->offset += bytesRead;
 	return bytesRead;
@@ -543,13 +541,12 @@ logBlockGetSchema(HudiLogFileBlock *block)
 }
 
 HudiLogFileReader *
-createHudiLogFileReader(MemoryContext mcxt, gopherFS gopherFilesystem, char *fileName)
+createHudiLogFileReader(MemoryContext mcxt, ossFileStream fileStream, char *fileName)
 {
 	HudiLogFileReader *reader = palloc(sizeof(HudiLogFileReader));
 
 	reader->mcxt = mcxt;
-	reader->gopherFilesystem = gopherFilesystem;
-	reader->gopherFile = NULL;
+	reader->fileStream = fileStream;
 	reader->fileName = fileName;
 	reader->offset = 0;
 
@@ -606,8 +603,7 @@ hudiLogFileClose(HudiLogFileReader *reader)
 
 	pfree(reader->fileName);
 
-	if (reader->gopherFile)
-		gopherCloseFile(reader->gopherFilesystem, reader->gopherFile, true);
+	datalakeCloseFile(reader->fileStream);
 
 	pfree(reader);
 }

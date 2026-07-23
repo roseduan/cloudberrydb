@@ -1,19 +1,65 @@
 # datalake-ext
 
-datalake-ext is foreign data wrapper for PostgreSQL. support read/write oss and hdfs storage.
+datalake-ext is a foreign data wrapper for PostgreSQL. It supports read/write access to S3-compatible object storage and HDFS, with Parquet, ORC, Avro, CSV formats and Iceberg/Hudi table formats.
 
 ## Installation
 
-datalake-ext requires `libgopher`, `libparquet`, `liborc`, `libarchive`, `libavro`, `libcurl` installed in your system. To build datalake-ext run:
-```
+### Prerequisites
+
+datalake-ext requires the following libraries installed in your system:
+
+- `libparquet`, `liborc`, `libarchive`, `libavrocpp`, `libarrow` — format libraries
+- `libcurl` (>= 7.29.0), `libyaml`, `libsnappy`, `libprotobuf`, `libssl`, `libcrypto`
+- `libavro` — https://artifactory.hashdata.xyz/artifactory/opensource-codes/avro/rpms/avrocpp-1.11.2-1.centos7_x86_64.rpm
+
+### Build modes
+
+datalake-ext supports two storage backend modes, selected at compile time:
+
+#### Open-source mode (S3 SDK — default)
+
+Uses AWS SDK C++ for direct S3 access. No proprietary dependencies required.
+
+**Additional prerequisites:**
+- AWS SDK C++ 1.11.645 with modules: `aws-cpp-sdk-s3`, `aws-cpp-sdk-core`, `aws-cpp-sdk-sts`, and CRT libraries (`aws-crt-cpp`, `aws-c-s3`, `aws-c-auth`, `aws-c-http`, `aws-c-io`, `aws-c-cal`, `aws-c-common`, `aws-checksums`, `s2n`)
+- All AWS SDK libraries should be built as static libraries (`.a`)
+
+```bash
+# Configure the open-source build (S3 SDK + libhdfs3, no libgopher).
+# --with-gopher defaults to yes (commercial), so --without-gopher is
+# REQUIRED here; --enable-datalake alone selects the Gopher backend.
+./configure --enable-datalake --without-gopher --prefix=/your/install/path
+
+# Build and install
+cd contrib/datalake_fdw
 make install
 ```
-> `libavro` https://artifactory.hashdata.xyz/artifactory/opensource-codes/avro/rpms/avrocpp-1.11.2-1.centos7_x86_64.rpm
-> 
-> `libcurl` version must be 7.29.0 or later
 
-After extension was successfully installed run in psql:
+Supports: **S3, MinIO, Aliyun OSS (S3-compatible mode)**, and other S3-compatible endpoints.
+
+#### Commercial mode (Gopher)
+
+Uses the proprietary Gopher storage abstraction layer. Requires `libgopher.so` and Gopher daemon processes.
+
+**Additional prerequisites:**
+- `libgopher` — proprietary storage library (not included in open-source distribution)
+- Gopher daemon (gopher-worker, gopher-connect, pg_gophermeta)
+
+```bash
+# Configure with Gopher support
+./configure --enable-datalake --with-gopher --prefix=/your/install/path
+
+# Build and install
+cd contrib/datalake_fdw
+make install
 ```
+
+Supports: **S3, HDFS, FTP, Aliyun OSS, Huawei OBS, Tencent COS, QingStor, KSyun** with local file caching.
+
+### Post-install
+
+After the extension is installed, run in psql:
+```sql
 CREATE EXTENSION datalake_fdw;
 ```
 
@@ -406,6 +452,26 @@ Specifies the cluster name of the gphdfs.conf. fdw table will used hdfs_cluster_
 
 Reference document for more hive-connector instructions
 https://code.hashdata.xyz/documents/dev-internals/-/blob/master/design_doc/storage/Hashdata2x3x-gphdfs%E4%BD%BF%E7%94%A8%E6%89%8B%E5%86%8C.md
+
+
+## Developer: Adding a New Storage Backend
+
+Open-source datalake_fdw uses a runtime backend registry. Adding a
+new object store or file system (Azure Blob, GCS, WebHDFS, …) is a
+three-file change with zero edits to central plumbing.
+
+See [`docs/adding-a-backend.md`](docs/adding-a-backend.md) for the
+full recipe, the `FileSystem` interface contract, and troubleshooting.
+For copy-paste-runnable local validation of your backend (HDFS + MinIO
+stack, config templates, end-to-end SQL test), see
+[`docs/testing-a-backend.md`](docs/testing-a-backend.md).
+
+In-tree reference implementations:
+- `src/common/s3FileSystem.{h,cpp}` — S3-compatible object storage via AWS SDK C++
+- `src/common/hdfsFileSystem.{h,cpp}` — HDFS via libhdfs3
+
+The `adding-a-backend.md` doc contains an inlined no-op skeleton you
+can copy as a starting point.
 
 
 

@@ -211,6 +211,7 @@ with_libbz2	= @with_libbz2@
 with_libseccomp = @with_libseccomp@
 with_apr_config	= @with_apr_config@
 with_thirdparty = @with_thirdparty@
+with_gopher	= @with_gopher@
 enable_shared	= @enable_shared@
 enable_rpath	= @enable_rpath@
 # NLS is not supported in Cloudberry, see comment documenting

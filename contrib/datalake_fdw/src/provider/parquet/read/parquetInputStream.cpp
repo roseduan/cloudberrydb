@@ -13,9 +13,9 @@ namespace Internal {
 		flag = O_RDONLY;
 	}
     datalakeOpenFile(stream_, filePath_.c_str(), flag);
-    gopherFileInfo* info = datalakeGetFileInfo(stream_, filePath_.c_str());
-    fileSize_ = info->mLength;
-    datalakeFreeListDir(stream_, info, 1);
+    datalakeFileInfo* info = datalakeGetFileInfo(stream_, filePath_.c_str());
+    fileSize_ = info->length;
+    datalakeFreeFileInfo(info, 1);
     if (fileSize_ == 0)
     {
         checkMagic = false;

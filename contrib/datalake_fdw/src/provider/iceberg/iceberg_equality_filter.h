@@ -5,8 +5,6 @@
 #include "src/dlproxy/datalake.h"
 #include "utils/hsearch.h"
 #include "src/provider/common/utils.h"
-#include <gopher/gopher.h>
-
 typedef struct DatalakeEqualityFilter
 {
 	Reader         base;
@@ -19,7 +17,7 @@ DatalakeEqualityFilter *
 datalakeCreateEqualityFilter(MemoryContext readerMcxt,
 					 List *datafileTupleDesc,
 					 Reader *dataReader,
-					 gopherFS gopherFilesystem,
+					 ossFileStream fileStream,
 					 List *deletes);
 
 #endif // ICEBERG_EQUALITY_FIlTER_H

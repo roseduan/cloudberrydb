@@ -18,7 +18,6 @@ OBJS = 	src/datalake_fdw.o \
 		src/common/dataBufferArray_c.o \
 		src/common/datalakeBuffer.o \
 		src/common/fileSystemWrapper.o \
-		src/common/fileSystem.o \
 		src/common/logicalType.o \
 		src/common/readPolicy.o \
 		src/common/rewrLogical.o \
@@ -28,7 +27,7 @@ OBJS = 	src/datalake_fdw.o \
 		src/common/random_segment.o \
 		src/common/grammar_convert.o \
 		src/common/exttable.o \
-		src/common/gopherresowner.o \
+		src/common/datalake_resowner.o \
 		src/common/parser_option.o \
 		src/dlproxy/deparse.o \
 		src/dlproxy/filters.o \
@@ -70,7 +69,7 @@ OBJS = 	src/datalake_fdw.o \
 		src/provider/archive/write/archiveFileWrite.o \
 		src/provider/archive/write/archiveWrite.o \
 		src/provider/common/config.o \
-		src/provider/common/gopher_random_file.o \
+		src/provider/common/datalake_random_file.o \
 		src/provider/common/base_reader.o \
 		src/provider/common/common.o \
 		src/provider/common/utils.o \
@@ -140,7 +139,7 @@ OBJS = 	src/datalake_fdw.o \
 # Avoid building LLVM Bitcode for datalake_fdw module.
 with_llvm = no
 
-SHLIB_LINK += -lgopher -lparquet -lorc -larchive -lavrocpp -larrow -lavro -lcurl -lyaml -lboost_iostreams -lsnappy -lprotobuf -lstdc++ -lm
+SHLIB_LINK += -lparquet -lorc -larchive -lavrocpp -larrow -lavro -lcurl -lyaml -lboost_iostreams -lsnappy -lprotobuf -lstdc++ -lm -lssl -lcrypto
 
 ifneq ($(filter distclean clean,$(MAKECMDGOALS)),)
 JANSSON_STATIC_LIBS = dummy
@@ -222,3 +221,58 @@ uninstall-data:
 
 install: install-data
 uninstall: uninstall-data
+
+# ---- Storage backend selection (after PGXS include for variable access) ----
+# Default-commercial: build the open-source backend (S3 SDK + libhdfs3) ONLY
+# when with_gopher is explicitly "no" (configure --without-gopher). Anything
+# else -- "yes" OR unset/empty -- builds the Gopher backend. An unset value
+# happens when Makefile.global comes from a mainline base predating this
+# switch; it must default to Gopher to match historical behavior (and so CI
+# images without the AWS SDK don't try to compile the S3 backend).
+ifneq ($(with_gopher),no)
+override CPPFLAGS += -DUSE_GOPHER
+OBJS += src/common/gopherFileSystem.o
+SHLIB_LINK += -lgopher
+STORAGE_BACKEND_OBJ = src/common/gopherFileSystem.o
+else
+OBJS += src/common/s3FileSystem.o
+OBJS += src/common/backendRegistry.o
+OBJS += src/common/hdfsFileSystem.o
+# AWS SDK C++ (static): high-level S3 → core → CRT C++ → C libs → crypto
+SHLIB_LINK += \
+  -Wl,--start-group \
+  -laws-cpp-sdk-s3 -laws-cpp-sdk-core -laws-cpp-sdk-sts \
+  -laws-crt-cpp -laws-c-s3 -laws-c-auth -laws-c-http \
+  -laws-c-io -laws-c-cal -laws-c-compression -laws-c-mqtt \
+  -laws-c-event-stream -laws-c-sdkutils -laws-c-common \
+  -laws-checksums -ls2n \
+  -Wl,--end-group -lpthread
+# HDFS native backend via libhdfs3
+SHLIB_LINK += -lhdfs3
+# The dlproxy/libchurl HTTP client (to the dlagent) uses libcurl, and Iceberg
+# data-file naming uses uuid_unparse from system libuuid.  The commercial build
+# resolves both transitively through -lgopher; the open-source build has no
+# gopher chain, so link them directly to keep datalake_fdw.so self-contained.
+SHLIB_LINK += -lcurl -luuid
+STORAGE_BACKEND_OBJS = src/common/s3FileSystem.o \
+                      src/common/backendRegistry.o \
+                      src/common/hdfsFileSystem.o
+endif
+
+# PGXS snapshots OBJS at include time for the .so target's prerequisites.
+# The conditional OBJS += above happens after include, so the storage backend
+# .o files are NOT in the .so's dependency list - under parallel make the
+# linker can start before they compile. Fix: explicit .so dependency AND an
+# "all" prereq (belt and suspenders).
+
+# Gopher branch sets STORAGE_BACKEND_OBJ (single file); non-Gopher branch
+# sets STORAGE_BACKEND_OBJS (list). Normalize to one variable for the
+# compile rule.
+STORAGE_BACKEND_OBJS ?= $(STORAGE_BACKEND_OBJ)
+
+datalake_fdw.so: $(STORAGE_BACKEND_OBJS)
+
+all: $(STORAGE_BACKEND_OBJS)
+
+$(STORAGE_BACKEND_OBJS): %.o: %.cpp
+	$(CXX) $(CXXFLAGS) $(CFLAGS_SL) $(CPPFLAGS) -c -o $@ $<

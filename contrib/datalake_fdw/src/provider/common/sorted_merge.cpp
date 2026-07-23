@@ -3,7 +3,6 @@ extern "C" {
 #include "postgres.h"
 #include "src/dlproxy/datalake.h"
 #include "nodes/pg_list.h"
-#include "gopher/gopher.h"
 #include "utils.h"
 }
 

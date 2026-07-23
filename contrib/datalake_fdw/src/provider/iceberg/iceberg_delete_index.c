@@ -2,7 +2,6 @@
 #include "utils/builtins.h"
 #include "utils/memutils.h"
 #include "utils/hsearch.h"
-#include "gopher/gopher.h"
 #include "src/dlproxy/datalake.h"
 #include "src/provider/common/file_reader.h"
 #include "src/provider/common/delete_bitmap_c.h"
@@ -95,7 +94,7 @@ createDeleteSchema(void)
 
 IcebergDeleteIndex *
 icebergBuildDeleteIndex(MemoryContext parentMcxt,
-						gopherFS gopherFilesystem,
+						ossFileStream fileStream,
 						List *fileScanTasks)
 {
 	List		   *uniqueDeletes;
@@ -176,7 +175,7 @@ icebergBuildDeleteIndex(MemoryContext parentMcxt,
 			FileFragment *deleteCopy = copyObject(deleteFile);
 			reader = (Reader *) datalakeCreateFileReader(indexMcxt, schema, attrUsed,
 														 true, deleteCopy,
-														 gopherFilesystem, -1, -1, NULL, NIL);
+														 fileStream, -1, -1, NULL, NIL);
 		}
 
 		while (reader->Next(reader, &record))

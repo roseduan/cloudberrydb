@@ -579,7 +579,7 @@ dataLakeOptions *datalakeGetOptions(Oid foreigntableid)
 	checkForeignDataWrapper(wrapper);
 
 	dataLakeOptions *opt = (dataLakeOptions*)palloc0(sizeof(dataLakeOptions));
-	opt->gopher = (gopherOptions*)palloc0(sizeof(gopherOptions));
+	opt->gopher = (storageOptions*)palloc0(sizeof(storageOptions));
 	opt->hiveOption = (hiveOptions*)palloc0(sizeof(hiveOptions));
 
 	char connect_path[1024] = {0};
@@ -596,8 +596,19 @@ dataLakeOptions *datalakeGetOptions(Oid foreigntableid)
 
 	opt->fileSizeLimit = 128 * 1024 * 1024;
 
-	protocol = datalakeGetProtocol(getOptionFromList(server->options, DATALAKE_OPTION_PROTOCOL));
-	opt->protocol = protocol;
+	{
+		const char *protoStr = getOptionFromList(server->options, DATALAKE_OPTION_PROTOCOL);
+		protocol = datalakeGetProtocol(protoStr);
+		opt->protocol = protocol;
+		/*
+		 * Also persist the canonical protocol string into storageOptions so
+		 * the BackendRegistry (consulted by fileSystemWrapper at query time,
+		 * including on segments) can dispatch on it. Without this, segments
+		 * saw opt->gopher->protocol = NULL because only opt->protocol (enum)
+		 * was populated by this function.
+		 */
+		opt->gopher->protocol = (protoStr ? pstrdup(protoStr) : NULL);
+	}
 
 	if (protocol == DL_HDFS_PROTOCOL)
 	{

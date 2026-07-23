@@ -7,7 +7,6 @@ extern "C"
 #include "src/datalake_def.h"
 #include "access/tupdesc.h"
 #include "utils.h"
-#include "gopher/gopher.h"
 }
 
 BaseFileReader::BaseFileReader(MemoryContext rowContext)

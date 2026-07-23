@@ -9,7 +9,7 @@ DatalakeRowReader *datalakeCreateRowReader(MemoryContext mcxt,
 						   TupleDesc tupleDesc,
 						   int nTblColumn,
 						   bool *attrUsed,
-						   gopherFS gopherFilesystem,
+						   ossFileStream fileStream,
 						   List *combinedScanTasks,
 						   DLTblFmt format,
 						   ExternalTableMetadata *tableOptions);

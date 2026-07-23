@@ -23,16 +23,16 @@ void textFileSimpleRead::open(ossFileStream ossFile, std::string fileName, readO
 	state = FILE_OPEN;
 	int ret = datalakeOpenFile(ossFile, fileName.c_str(), setStreamFlag(options));
 	if (ret < 0) {
-		elog(ERROR, "Datalake Error, open file %s failed! detail %s.", 
-			fileName.c_str(), gopherGetLastError());
+		elog(ERROR, "Datalake Error, open file %s failed! detail %s.",
+			fileName.c_str(), datalakeGetLastError());
 	}
 }
 
 int64_t textFileSimpleRead::read(void* buffer, size_t length) {
 	int size = datalakeReadFile(stream, buffer, length);
 	if (size < 0) {
-		elog(ERROR, "Datalake Error, read %lu in file %s failed! detail %s.", 
-			length, fileName.c_str(), gopherGetLastError());
+		elog(ERROR, "Datalake Error, read %lu in file %s failed! detail %s.",
+			length, fileName.c_str(), datalakeGetLastError());
 	}
 	return size;
 }
@@ -47,8 +47,8 @@ void textFileSimpleRead::close() {
 int64_t textFileSimpleRead::seek(int64_t offset) {
     int res = datalakeSeekFile(stream, offset);
 	if (res < 0) {
-		elog(ERROR, "Datalake Error, seek %ld in file %s failed! detail %s.", 
-			offset, fileName.c_str(), gopherGetLastError());
+		elog(ERROR, "Datalake Error, seek %ld in file %s failed! detail %s.",
+			offset, fileName.c_str(), datalakeGetLastError());
 	}
 	return res;
 }

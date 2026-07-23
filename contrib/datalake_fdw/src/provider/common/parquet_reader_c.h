@@ -1,7 +1,7 @@
 #ifndef PARQUET_READER_C_H
 #define PARQUET_READER_C_H
 
-#include <gopher/gopher.h>
+#include "src/common/fileSystemWrapper.h"
 
 struct List;
 struct DatalakeInternalRecord;
@@ -14,7 +14,7 @@ extern "C" {
 
 typedef struct
 {
-	gopherFS gopherFilesystem;
+	ossFileStream fileStream;
 	void *buffer;  // dataBufferArray
 	List *quals;   // WHERE-clause quals (Expr) for row-group min/max pushdown; NIL if none
 } ParquetReadContext;

@@ -15,7 +15,7 @@ typedef struct HudiMergedLogfileRecordReader
 	List	   *queuedBlocks;
 	bool	   *attrUsed;
 	const char *instantTime;
-	gopherFS	gopherFilesystem;
+	ossFileStream	fileStream;
 	MemoryContext mergerMcxt;
 	MemoryContext deleteBlockMcxt;
 	MemoryContext deleteRowMcxt;
@@ -30,7 +30,7 @@ createMergedLogfileRecordReader(MemoryContext readerMcxt,
 								TupleDesc tupDesc,
 								bool *attrUsed,
 								const char *instantTime,
-								gopherFS gopherFilesystem,
+								ossFileStream fileStream,
 								List *logfiles,
 								ExternalTableMetadata *tableOptions);
 

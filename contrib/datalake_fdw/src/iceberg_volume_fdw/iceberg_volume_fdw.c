@@ -542,6 +542,13 @@ parseVolumeOption(dataLakeOptions *opt, IcebergVolumeOptions* vopt)
 	if (vopt->volume_server.server_type)
 	{
 		opt->gopher->gopherType = pstrdup(vopt->volume_server.server_type);
+		/*
+		 * Native (non-Gopher) backends dispatch by protocol string via
+		 * BackendRegistry; the volume's server_type ("s3"/"hdfs"/...) is
+		 * the registered protocol name. Ignored by the Gopher backend,
+		 * which keys off gopherType instead.
+		 */
+		opt->gopher->protocol = pstrdup(vopt->volume_server.server_type);
 	}
 
 	if (vopt->volume_server.region)
@@ -551,7 +558,24 @@ parseVolumeOption(dataLakeOptions *opt, IcebergVolumeOptions* vopt)
 
 	if (vopt->volume_server.endpoint)
 	{
-		opt->gopher->host = pstrdup(vopt->volume_server.endpoint);
+		const char *ep = vopt->volume_server.endpoint;
+		/*
+		 * The native S3 backend builds the endpoint as scheme://host inside
+		 * createHandle(), so store host WITHOUT any scheme prefix here and
+		 * record TLS use via useHttps. The Gopher backend strips the scheme
+		 * internally, so this is safe for both build modes.
+		 */
+		if (pg_strncasecmp(ep, "https://", 8) == 0)
+		{
+			opt->gopher->useHttps = true;
+			ep += 8;
+		}
+		else if (pg_strncasecmp(ep, "http://", 7) == 0)
+		{
+			opt->gopher->useHttps = false;
+			ep += 7;
+		}
+		opt->gopher->host = pstrdup(ep);
 	}
 
 	if (vopt->volume_server.bucket_name)

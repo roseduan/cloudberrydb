@@ -2,7 +2,6 @@
 #define GOPHER_CONFIG_H
 
 #include "postgres.h"
-#include "gopher/gopher.h"
 #include "nodes/pg_list.h"
 
 typedef struct DatalakeHdfsHAConfEntry
@@ -27,11 +26,14 @@ typedef struct DatalakeHdfsConfigInfo
 	List *haEntries;
 } DatalakeHdfsConfigInfo;
 
-// DatalakeHdfsConfigInfo *parseConf(const char *configFile, const char *serverName);
 DatalakeHdfsConfigInfo *datalakeParseHdfsConfig(const char *configFile, const char *serverName);
 char *datalakeGetDefaultHdfsCluster(const char *configFile);
 void datalakeFormKrbCCName(DatalakeHdfsConfigInfo *config);
+
+#ifdef USE_GOPHER
+#include "gopher/gopher.h"
 gopherConfig *datalakeGopherCreateConfig(DatalakeHdfsConfigInfo *hdfsConf);
 void datalakeGopherConfigDestroy(gopherConfig *conf);
+#endif
 
-#endif // GOPHER_CONFIG_H
+#endif /* GOPHER_CONFIG_H */

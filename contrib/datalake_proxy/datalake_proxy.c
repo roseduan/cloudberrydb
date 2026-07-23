@@ -240,6 +240,19 @@ startProxyProcess(pid_t pid)
 	snprintf(parentPid, sizeof(parentPid), "--parent.pid=%d", pid);
 	proxyArgs[i++] = parentPid;
 
+#ifndef USE_GOPHER
+	/*
+	 * Open-source build (configure --without-gopher): no libgopher is
+	 * linked, so the agent must not select GopherFileIO -- it would try to
+	 * connect to a gopher socket that no gophermeta process provides and
+	 * fail every catalog metadata operation.  Turn gopher off on the agent
+	 * side; it then uses the S3/HDFS FileIO driven by the volume connection
+	 * info.  This overrides the gopher.enabled=true default packaged in the
+	 * agent's application.properties.
+	 */
+	proxyArgs[i++] = "--gopher.enabled=false";
+#endif
+
 	proxyArgs[i] = NULL;
 
 	execvp("java", proxyArgs);

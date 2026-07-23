@@ -9,35 +9,35 @@
 #include <uuid/uuid.h>
 
 
-static List* SerializeFragmentList(gopherFileInfo* lists, int count, int64_t *totalSize);
+static List* SerializeFragmentList(datalakeFileInfo* lists, int count, int64_t *totalSize);
 static List *get_partition_values(Relation relation, dataLakeOptions *options);
 static List *convert_iceberg_hudi_options(dataLakeOptions *options);
 static bool ignore_hidden_file(char* name);
 
 static List*
-SerializeFragmentList(gopherFileInfo* lists, int count, int64_t *totalSize)
+SerializeFragmentList(datalakeFileInfo* lists, int count, int64_t *totalSize)
 {
 	List	   *serializedFragment = NIL;
 	for (int i = 0; i < count; i++)
 	{
-		if (ignore_hidden_file(lists[i].mPath))
+		if (ignore_hidden_file(lists[i].path))
 		{
 			if (external_table_debug)
 			{
-				elog(LOG, "set guc datalake.external_table_ignore_hidden_file ignore hidden path %s", lists[i].mPath);
+				elog(LOG, "set guc datalake.external_table_ignore_hidden_file ignore hidden path %s", lists[i].path);
 			}
 			continue;
 		}
-		if (lists[i].mLength > 0)
+		if (lists[i].length > 0)
 		{
 			List *fragment = NIL;
-			fragment = lappend(fragment, makeString(pstrdup(lists[i].mPath)));
+			fragment = lappend(fragment, makeString(pstrdup(lists[i].path)));
 			char buf[20] = {0};
-			sprintf(buf, "%ld", lists[i].mLength);
+			sprintf(buf, "%ld", lists[i].length);
 			fragment = lappend(fragment, makeString(pstrdup(buf)));
 			serializedFragment = lappend(serializedFragment, fragment);
 			if (totalSize)
-				*totalSize += lists[i].mLength;
+				*totalSize += lists[i].length;
 		}
 	}
 	return serializedFragment;
@@ -47,14 +47,12 @@ List *
 datalakeGetFragmentList(dataLakeOptions *options, int64_t *totalSize)
 {
 	List *fragment = NIL;
-	gopherConfig* conf = datalakeCreateGopherConfig((void*) options->gopher);
-	ossFileStream stream = datalakeCreateFileSystem(conf);
+	ossFileStream stream = datalakeCreateFileSystem((void*) options->gopher);
 	int count = 0;
-	gopherFileInfo* lists = datalakeListDir(stream, options->prefix, &count, true);
+	datalakeFileInfo* lists = datalakeListDir(stream, options->prefix, &count, true);
 	fragment = SerializeFragmentList(lists, count, totalSize);
-	datalakeFreeListDir(stream, lists, count);
-	datalakeGopherDestroyHandle(stream);
-	datalakeFreeGopherConfig(conf);
+	datalakeFreeFileInfo(lists, count);
+	datalakeDestroyHandle(stream);
 
 	return fragment;
 }
@@ -249,36 +247,34 @@ datalakeGetNextPartitionFragmentList(dataLakeOptions *options, int64_t *totalSiz
 	}
 
 	int count = 0;
-	gopherConfig* conf = datalakeCreateGopherConfig((void*) options->gopher);
-	ossFileStream stream = datalakeCreateFileSystem(conf);
+	ossFileStream stream = datalakeCreateFileSystem((void*) options->gopher);
 
-	gopherFileInfo* lists = datalakeListDir(stream, prefix.data, &count, true);
+	datalakeFileInfo* lists = datalakeListDir(stream, prefix.data, &count, true);
 	for (int i = 0; i < count; i++)
 	{
-		if (ignore_hidden_file(lists[i].mPath))
+		if (ignore_hidden_file(lists[i].path))
 		{
 			if (external_table_debug)
 			{
-				elog(LOG, "set guc datalake.external_table_ignore_hidden_file ignore hidden path %s", lists[i].mPath);
+				elog(LOG, "set guc datalake.external_table_ignore_hidden_file ignore hidden path %s", lists[i].path);
 			}
 			continue;
 		}
-		if (lists[i].mLength > 0)
+		if (lists[i].length > 0)
 		{
 			List *fragment = NIL;
-			fragment = lappend(fragment, makeString(pstrdup(lists[i].mPath)));
+			fragment = lappend(fragment, makeString(pstrdup(lists[i].path)));
 			char buf[64] = {0};
-			sprintf(buf, "%ld", lists[i].mLength);
+			sprintf(buf, "%ld", lists[i].length);
 			fragment = lappend(fragment, makeString(pstrdup(buf)));
 			serializedFragment = lappend(serializedFragment, fragment);
 
 			if (totalSize)
-				totalSize += lists[i].mLength;
+				totalSize += lists[i].length;
 		}
 	}
-	datalakeFreeListDir(stream, lists, count);
-	datalakeGopherDestroyHandle(stream);
-	datalakeFreeGopherConfig(conf);
+	datalakeFreeFileInfo(lists, count);
+	datalakeDestroyHandle(stream);
 
 	return serializedFragment;
 }

@@ -2,7 +2,6 @@
 #define AVRO_BLOCK_READER_C_H
 
 #include "postgres.h"
-#include <gopher/gopher.h>
 
 struct List;
 struct DatalakeInternalRecord;

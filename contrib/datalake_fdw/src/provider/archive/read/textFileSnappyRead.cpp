@@ -82,7 +82,7 @@ int64_t textFileSnappyRead::fillInputBuffer(int length) {
     int nread = datalakeReadFile(stream, inputBuffer.buffer, length);
     if (nread <= 0) {
         elog(ERROR, "Datalake Error, snappy text file %s read block header 4 bytes failed! %s.",
-            path.c_str(), gopherGetLastError());
+            path.c_str(), datalakeGetLastError());
     }
     if (external_table_debug) {
         elog(LOG, "Datalake Log, read %d in file %s.", nread, path.c_str());
@@ -126,7 +126,7 @@ void textFileSnappyRead::seekIntextfile(int64_t posn) {
     int ret = datalakeSeekFile(stream, posn);
     if (ret == -1) {
         elog(ERROR, "Datalake Error, snappy text file %s seek failed! detail %s.",
-            path.c_str(), gopherGetLastError());
+            path.c_str(), datalakeGetLastError());
     }
 
     if (external_table_debug) {

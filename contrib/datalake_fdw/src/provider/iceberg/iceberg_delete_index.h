@@ -3,7 +3,7 @@
 
 #include "postgres.h"
 #include "utils/hsearch.h"
-#include "gopher/gopher.h"
+#include "src/common/fileSystemWrapper.h"
 #include "src/dlproxy/datalake.h"
 
 /*
@@ -34,7 +34,7 @@ typedef struct IcebergDeleteIndex
  */
 IcebergDeleteIndex *
 icebergBuildDeleteIndex(MemoryContext parentMcxt,
-						gopherFS gopherFilesystem,
+						ossFileStream fileStream,
 						List *fileScanTasks);
 
 /*

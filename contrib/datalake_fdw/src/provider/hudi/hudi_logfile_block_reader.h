@@ -5,13 +5,12 @@
 // #include "utils/datalake.h"
 #include "src/dlproxy/datalake.h"
 #include "src/provider/common/utils.h"
-#include <gopher/gopher.h>
+#include "src/common/fileSystemWrapper.h"
 
 typedef struct HudiLogFileReader
 {
 	MemoryContext  mcxt;
-	gopherFS       gopherFilesystem;
-	gopherFile     gopherFile;
+	ossFileStream  fileStream;
 	char          *fileName;
 	int64_t        offset;
 } HudiLogFileReader;
@@ -67,7 +66,7 @@ void freeLogBlock(HudiLogFileBlock *block);
 const char *logBlockGetInstantTime(HudiLogFileBlock *block);
 const char *logBlockGetTargetInstantTime(HudiLogFileBlock *block);
 const char *logBlockGetSchema(HudiLogFileBlock *block);
-HudiLogFileReader *createHudiLogFileReader(MemoryContext mcxt, gopherFS gopherFilesystem, char *filename);
+HudiLogFileReader *createHudiLogFileReader(MemoryContext mcxt, ossFileStream fileStream, char *filename);
 void hudiLogFileOpen(HudiLogFileReader *reader);
 bool hudiLogFileNext(HudiLogFileReader *reader, HudiLogFileBlock **logBlock);
 void hudiLogFileClose(HudiLogFileReader *reader);

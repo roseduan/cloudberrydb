@@ -1,4 +1,15 @@
-#include "gopher_random_file.h"
+/*-------------------------------------------------------------------------
+ *
+ * datalake_random_file.cpp
+ *    RandomAccessFile implementation using datalake wrapper API.
+ *
+ * Portions Copyright (c) 2023-2026, HashData Technology Limited.
+ *
+ * IDENTIFICATION
+ *        contrib/datalake_fdw/src/provider/common/datalake_random_file.cpp
+ *-------------------------------------------------------------------------
+ */
+#include "datalake_random_file.h"
 
 #include <parquet/internal/arrow/buffer.h>
 
@@ -6,6 +17,7 @@ extern "C" {
 #include "postgres.h"
 #include "access/tupdesc.h"
 #include "utils/elog.h"
+#include "src/common/fileSystemWrapper.h"
 }
 
 extern bool disableCacheFile;
@@ -13,22 +25,21 @@ extern bool disableCacheFile;
 #include "utils.h"
 
 
-GopherRandomAccessFile::GopherRandomAccessFile(gopherFS gopherFilesystem, std::string filePath)
-	: gopherFilesystem_(gopherFilesystem), filePath_(filePath)
+DatalakeRandomAccessFile::DatalakeRandomAccessFile(ossFileStream stream, std::string filePath)
+	: stream_(stream), filePath_(filePath)
 {
-	gopherFile_ = NULL;
 	fileSize_ = -1;
 	offset_ = 0;
 	isClosed_ = true;
 }
 
-GopherRandomAccessFile::~GopherRandomAccessFile() 
+DatalakeRandomAccessFile::~DatalakeRandomAccessFile()
 {
 	auto s = Close();
 }
 
 parquet_arrow::Status
-GopherRandomAccessFile::Open()
+DatalakeRandomAccessFile::Open()
 {
 	if (!isClosed_)
 		return parquet_arrow::Status::OK();
@@ -37,16 +48,15 @@ GopherRandomAccessFile::Open()
 	if (disableCacheFile)
 		flag |= O_RDTHR;
 
-	gopherFile_ = gopherOpenFile(gopherFilesystem_, filePath_.c_str(), flag, BLOCK_SIZE, NULL);
-	if (gopherFile_ == NULL)
+	if (datalakeOpenFile(stream_, filePath_.c_str(), flag) != 0)
 	{
-		std::string message = "failed to open gopher file \"" + filePath_ + "\":" + gopherGetLastError();
+		std::string message = "failed to open file \"" + filePath_ + "\"";
 		return parquet_arrow::Status(parquet_arrow::StatusCode::IOError, message.c_str());
 	}
 
-	if (gopherSeek(gopherFilesystem_, gopherFile_, 0) == -1)
+	if (datalakeSeekFile(stream_, 0) == -1)
 	{
-		std::string message = "failed to seek gopher file \"" + filePath_ + "\":" + gopherGetLastError();
+		std::string message = "failed to seek file \"" + filePath_ + "\"";
 		return parquet_arrow::Status(parquet_arrow::StatusCode::IOError, message.c_str());
 	}
 
@@ -56,40 +66,40 @@ GopherRandomAccessFile::Open()
 }
 
 parquet_arrow::Result<int64_t>
-GopherRandomAccessFile::GetSize()
+DatalakeRandomAccessFile::GetSize()
 {
 	if (isClosed_)
 	{
 		RETURN_NOT_OK(Open());
 
-		gopherFileInfo* fileInfo = gopherGetFileInfo(gopherFilesystem_, filePath_.c_str());
+		datalakeFileInfo* fileInfo = datalakeGetFileInfo(stream_, filePath_.c_str());
 		if (fileInfo == NULL)
 		{
-			std::string message = "failed to get gopher file \"" + filePath_ + "\" info:" + gopherGetLastError();
+			std::string message = "failed to get file \"" + filePath_ + "\" info";
 			return parquet_arrow::Status(parquet_arrow::StatusCode::IOError, message.c_str());
 		}
-		fileSize_ = fileInfo->mLength;
-		gopherFreeFileInfo(fileInfo, 1);
+		fileSize_ = fileInfo->length;
+		datalakeFreeFileInfo(fileInfo, 1);
 	}
 
 	return fileSize_;
 }
 
 parquet_arrow::Result<int64_t>
-GopherRandomAccessFile::ReadAt(int64_t position, int64_t nbytes, void *out)
+DatalakeRandomAccessFile::ReadAt(int64_t position, int64_t nbytes, void *out)
 {
-	if (gopherSeek(gopherFilesystem_, gopherFile_, position) == -1)
+	if (datalakeSeekFile(stream_, position) == -1)
 	{
-		std::string message = "failed to seek gopher file \"" + filePath_ + "\":" + gopherGetLastError();
+		std::string message = "failed to seek file \"" + filePath_ + "\"";
 		return parquet_arrow::Status(parquet_arrow::StatusCode::IOError, message.c_str());
 	}
 
 	offset_ = position;
 
-	int64_t bytes = gopherRead(gopherFilesystem_, gopherFile_, out, nbytes);
+	int64_t bytes = datalakeReadFile(stream_, out, nbytes);
 	if (bytes == -1)
 	{
-		std::string message = "failed to read gopher file \"" + filePath_ + "\":" + gopherGetLastError();
+		std::string message = "failed to read file \"" + filePath_ + "\"";
 		return parquet_arrow::Status(parquet_arrow::StatusCode::IOError, message.c_str());
 	}
 
@@ -98,7 +108,7 @@ GopherRandomAccessFile::ReadAt(int64_t position, int64_t nbytes, void *out)
 }
 
 parquet_arrow::Result<std::shared_ptr<parquet_arrow::Buffer>>
-GopherRandomAccessFile::ReadAt(int64_t position, int64_t nbytes)
+DatalakeRandomAccessFile::ReadAt(int64_t position, int64_t nbytes)
 {
 	PARQUET_ARROW_ASSIGN_OR_RAISE(auto buf, parquet_arrow::AllocateResizableBuffer(nbytes));
 	if (nbytes > 0)
@@ -111,12 +121,12 @@ GopherRandomAccessFile::ReadAt(int64_t position, int64_t nbytes)
 }
 
 parquet_arrow::Result<int64_t>
-GopherRandomAccessFile::Read(int64_t nbytes, void *out)
+DatalakeRandomAccessFile::Read(int64_t nbytes, void *out)
 {
-	int64_t bytes = gopherRead(gopherFilesystem_, gopherFile_, out, nbytes);
+	int64_t bytes = datalakeReadFile(stream_, out, nbytes);
 	if (bytes == -1)
 	{
-		std::string message = "failed to read gopher file \"" + filePath_ + "\":" + gopherGetLastError();
+		std::string message = "failed to read file \"" + filePath_ + "\"";
 		return parquet_arrow::Status(parquet_arrow::StatusCode::IOError, message.c_str());
 	}
 
@@ -125,7 +135,7 @@ GopherRandomAccessFile::Read(int64_t nbytes, void *out)
 }
 
 parquet_arrow::Result<std::shared_ptr<parquet_arrow::Buffer>>
-GopherRandomAccessFile::Read(int64_t nbytes)
+DatalakeRandomAccessFile::Read(int64_t nbytes)
 {
 	PARQUET_ARROW_ASSIGN_OR_RAISE(auto buf, parquet_arrow::AllocateResizableBuffer(nbytes));
 	if (nbytes > 0)
@@ -138,37 +148,37 @@ GopherRandomAccessFile::Read(int64_t nbytes)
 }
 
 parquet_arrow::Status
-GopherRandomAccessFile::Seek(int64_t position)
+DatalakeRandomAccessFile::Seek(int64_t position)
 {
-	if (gopherSeek(gopherFilesystem_, gopherFile_, position) == -1)
+	if (datalakeSeekFile(stream_, position) == -1)
 	{
-		std::string message = "failed to seek gopher file \"" + filePath_ + "\":" + gopherGetLastError();
+		std::string message = "failed to seek file \"" + filePath_ + "\"";
 		return parquet_arrow::Status(parquet_arrow::StatusCode::IOError, message.c_str());
 	}
- 
+
 	offset_ = position;
 	return parquet_arrow::Status::OK();
 }
 
 parquet_arrow::Status
-GopherRandomAccessFile::Close()
+DatalakeRandomAccessFile::Close()
 {
 	if (isClosed_)
 		return parquet_arrow::Status::OK();
 
 	isClosed_ = true;
-	gopherCloseFile(gopherFilesystem_, gopherFile_, true);
+	datalakeCloseFile(stream_);
 	return parquet_arrow::Status::OK();
 }
 
 parquet_arrow::Result<int64_t>
-GopherRandomAccessFile::Tell() const
+DatalakeRandomAccessFile::Tell() const
 {
 	return offset_;
 }
 
 bool
-GopherRandomAccessFile::closed() const
+DatalakeRandomAccessFile::closed() const
 {
 	return isClosed_;
 }

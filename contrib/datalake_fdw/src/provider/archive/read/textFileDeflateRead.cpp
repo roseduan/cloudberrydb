@@ -104,7 +104,7 @@ int64_t textFileDeflateRead::fillInputBuffer(int length) {
     int nread = datalakeReadFile(stream, inputBuffer->buffer, length);
     if (nread <= 0) {
         elog(ERROR, "Datalake Error, deflate text file %s read block header 4 bytes failed! %s.",
-            path.c_str(), gopherGetLastError());
+            path.c_str(), datalakeGetLastError());
     }
     if (external_table_debug) {
         elog(LOG, "Datalake Log, read %d in file %s.", nread, path.c_str());
