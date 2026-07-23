@@ -72,7 +72,18 @@ SignalHandlerForConfigReload(SIGNAL_ARGS)
 void
 SignalHandlerForCrashExit(SIGNAL_ARGS)
 {
-	SIMPLE_FAULT_INJECTOR("fault_in_background_writer_quickdie");
+	/*
+	 * This handler is installed as the SIGQUIT crash-exit handler for every
+	 * postmaster child, so without a guard the check below runs in all of
+	 * them (checkpointer, walwriter, walsender, launchers, ...).  The
+	 * "fault_in_background_writer_quickdie" hook is only meant for the
+	 * background writer (fts_segment_reset injects it to delay the crash
+	 * reset), so restrict it to that process.  This keeps every other
+	 * auxiliary process's crash-exit path free of the fault injector, and
+	 * makes the one-shot fault fire deterministically in the bgwriter.
+	 */
+	if (AmBackgroundWriterProcess())
+		SIMPLE_FAULT_INJECTOR("fault_in_background_writer_quickdie");
 
 	/*
 	 * We DO NOT want to run proc_exit() or atexit() callbacks -- we're here
