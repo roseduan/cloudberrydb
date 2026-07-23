@@ -66,6 +66,24 @@ Correlated-AntiSemiJoin CorrelatedAntiSemiJoin-True Correlated-LASJ-With-Outer-C
 Correlated-LASJ-With-Outer-Const Correlated-LASJ-With-Outer-Expr LeftOuter2InnerUnionAllAntiSemiJoin-Tpcds
 LASJ-Not-In-Force-Broadcast;
 
+/* PexprLojToAntiJoin: Select(inner col IS NULL) on top of a LOJ rewritten to
+   a left anti semi join (CExpressionPreprocessor::PexprLojToAntiJoin). The
+   _dont_convert_ cases pin down that the rewrite is refused whenever either
+   an ancestor still needs a column from the LOJ's inner side, or the ON
+   predicate is not null-rejecting for the tested inner column, since a left
+   anti semi join never outputs any inner-side column.
+   LOJAntiJoin_convert_outer_needs_nested_inner_col pins down a narrower case:
+   the outer LOJ is converted, but its own (unconverted) join predicate needs
+   a column produced by the inner side's nested LOJ+IS NULL pattern, so that
+   nested pattern must NOT also be converted -- otherwise the outer join
+   predicate would end up referencing a column the rewritten nested anti-join
+   no longer outputs. */
+CLojToAntiJoinTest:
+LOJAntiJoin_convert_basic LOJAntiJoin_convert_with_outer_residual LOJAntiJoin_convert_nested_stacked
+LOJAntiJoin_convert_outer_needs_nested_inner_col LOJAntiJoin_convert_q78_shape
+LOJAntiJoin_dont_convert_select_needs_inner_col LOJAntiJoin_dont_convert_orderby_needs_inner_col
+LOJAntiJoin_dont_convert_or_predicate LOJAntiJoin_dont_convert_non_strict_null_col;
+
 CPredicateTest:
 ConvertBoolConstNullToConstTableFalseFilter 
 TranslateOneTimeFilterConjunctQuals TranslateFilterDisjunctQuals TranslateFilterWithCTEAndTableScanIntoFilterAndOneTimeFilter
@@ -463,8 +481,11 @@ foreach(mdp_group IN LISTS MDP_GROUPS)
 
   string(STRIP ${mdp_group} mdp_group)
 
-  # get minidump test name
-  string(REGEX MATCH "C.+Test" test_name ${mdp_group})
+  # get minidump test name. Anchored + non-greedy up to the group's own
+  # "CxxxTest:" prefix -- a bare "C.+Test" is greedy and, once any mdp file
+  # name in the group itself contains "Test" (e.g. "...-ForeignHeap-Test"),
+  # matches all the way to that occurrence instead of stopping at the prefix.
+  string(REGEX MATCH "^C[A-Za-z0-9]+Test" test_name ${mdp_group})
 
   # get the length of "CxxxTest:"
   string(LENGTH "${test_name}:" name_len)

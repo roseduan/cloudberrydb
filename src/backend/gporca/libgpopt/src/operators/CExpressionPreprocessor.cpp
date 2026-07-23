@@ -38,6 +38,7 @@
 #include "gpopt/operators/CLogicalDynamicGet.h"
 #include "gpopt/operators/CLogicalGbAgg.h"
 #include "gpopt/operators/CLogicalInnerJoin.h"
+#include "gpopt/operators/CLogicalLeftAntiSemiJoin.h"
 #include "gpopt/operators/CLogicalLimit.h"
 #include "gpopt/operators/CLogicalNAryJoin.h"
 #include "gpopt/operators/CLogicalProject.h"
@@ -55,6 +56,7 @@
 #include "gpopt/operators/CScalarFunc.h"
 #include "gpopt/operators/CScalarIdent.h"
 #include "gpopt/operators/CScalarNAryJoinPredList.h"
+#include "gpopt/operators/CScalarNullTest.h"
 #include "gpopt/operators/CScalarProjectElement.h"
 #include "gpopt/operators/CScalarProjectList.h"
 #include "gpopt/operators/CScalarSubquery.h"
@@ -1334,7 +1336,8 @@ CExpressionPreprocessor::PexprCollapseUnionUnionAll(CMemoryPool *mp,
 // transform outer joins into inner joins
 CExpression *
 CExpressionPreprocessor::PexprOuterJoinToInnerJoin(CMemoryPool *mp,
-												   CExpression *pexpr)
+												   CExpression *pexpr,
+												   CColRefSet *pcrsReqd)
 {
 	// protect against stack overflow during recursion
 	GPOS_CHECK_STACK_SIZE;
@@ -1347,6 +1350,21 @@ CExpressionPreprocessor::PexprOuterJoinToInnerJoin(CMemoryPool *mp,
 	if (COperator::EopLogicalSelect == pop->Eopid() &&
 		COperator::EopLogicalLeftOuterJoin == (*pexpr)[0]->Pop()->Eopid())
 	{
+		// a Select whose predicate forces an inner column of the LOJ to NULL
+		// (e.g. "returns.key IS NULL") is semantically an anti-join; convert it
+		// to a left anti semi join so that ORCA does not materialize the full
+		// outer join and filter afterwards. This mirrors Postgres'
+		// reduce_outer_joins() which turns JOIN_LEFT into JOIN_ANTI.
+		if (!GPOS_FTRACE(EopttraceDisableOuterJoin2InnerJoinRewrite))
+		{
+			CExpression *pexprAntiJoin =
+				PexprLojToAntiJoin(mp, pexpr, pcrsReqd);
+			if (nullptr != pexprAntiJoin)
+			{
+				return pexprAntiJoin;
+			}
+		}
+
 		// a Select on top of LOJ can be turned into InnerJoin by normalization
 		return CNormalizer::PexprNormalize(mp, pexpr);
 	}
@@ -1369,6 +1387,20 @@ CExpressionPreprocessor::PexprOuterJoinToInnerJoin(CMemoryPool *mp,
 		{
 			CExpression *pexprChild = (*pexpr)[ul];
 			BOOL fNewChild = false;
+			CColRefSet *pcrsChildReqd = nullptr;
+			if (pexprChild->Pop()->FLogical() && nullptr != pcrsReqd)
+			{
+				// An inner join preserves each relational child's column identity.
+				// A child therefore needs the required columns that it produces,
+				// plus the columns it supplies to this join predicate. This is
+				// precise enough to carry the Q78 Select/LOJ requirement through
+				// an intervening inner join without treating an unknown set as
+				// empty.
+				pcrsChildReqd = GPOS_NEW(mp) CColRefSet(mp, *pcrsReqd);
+				pcrsChildReqd->Include(pexprScalar->DeriveUsedColumns());
+				pcrsChildReqd->Intersection(
+					pexprChild->DeriveOutputColumns());
+			}
 			if (COperator::EopLogicalLeftOuterJoin ==
 				pexprChild->Pop()->Eopid())
 			{
@@ -1378,12 +1410,18 @@ CExpressionPreprocessor::PexprOuterJoinToInnerJoin(CMemoryPool *mp,
 					CPredicateUtils::FNullRejecting(mp, pexprScalar,
 													pcrsLOJInnerOutput))
 				{
-					CExpression *pexprNewOuter =
-						PexprOuterJoinToInnerJoin(mp, (*pexprChild)[0]);
-					CExpression *pexprNewInner =
-						PexprOuterJoinToInnerJoin(mp, (*pexprChild)[1]);
-					CExpression *pexprNewScalar =
-						PexprOuterJoinToInnerJoin(mp, (*pexprChild)[2]);
+					// this LOJ has two relational children (outer, inner),
+					// so a required column of the enclosing NAry/Inner join
+					// cannot be attributed to either one without re-deriving
+					// per-child usage of the NAry predicate; pass NULL
+					// (unknown) rather than risk crediting a requirement to
+					// the wrong child
+					CExpression *pexprNewOuter = PexprOuterJoinToInnerJoin(
+						mp, (*pexprChild)[0], nullptr);
+					CExpression *pexprNewInner = PexprOuterJoinToInnerJoin(
+						mp, (*pexprChild)[1], nullptr);
+					CExpression *pexprNewScalar = PexprOuterJoinToInnerJoin(
+						mp, (*pexprChild)[2], nullptr);
 					pexprChild = CUtils::PexprLogicalJoin<CLogicalInnerJoin>(
 						mp, pexprNewOuter, pexprNewInner, pexprNewScalar);
 					fNewChild = true;
@@ -1414,8 +1452,9 @@ CExpressionPreprocessor::PexprOuterJoinToInnerJoin(CMemoryPool *mp,
 			// if the predicate between the CLogicalNAryJoin is NULL rejecting. So we need to recurse
 			// into the child and continue checking if we can convert the LOJs into inner joins.
 
-			CExpression *pexprChildNew =
-				PexprOuterJoinToInnerJoin(mp, pexprChild);
+			CExpression *pexprChildNew = PexprOuterJoinToInnerJoin(
+				mp, pexprChild, pcrsChildReqd);
+			CRefCount::SafeRelease(pcrsChildReqd);
 			if (fNewChild)
 			{
 				pexprChild->Release();
@@ -1427,16 +1466,223 @@ CExpressionPreprocessor::PexprOuterJoinToInnerJoin(CMemoryPool *mp,
 										pdrgpexprChildren);
 	}
 
-	// current operator is not an NAry-join, recursively process children
+	// current operator is not an NAry-join, recursively process children.
+	// A required column of pexpr's own output can only be credited to a
+	// child unchanged when pexpr has exactly one relational child (e.g.
+	// Select/Project/GbAgg/Limit): joins and set-ops remap or duplicate
+	// columns across multiple children, so pcrsReqd is dropped (NULL) in
+	// those shapes to avoid attributing a requirement to the wrong child.
+	ULONG ulLogicalChildren = 0;
+	for (ULONG ul = 0; ul < arity; ul++)
+	{
+		if ((*pexpr)[ul]->Pop()->FLogical())
+		{
+			ulLogicalChildren++;
+		}
+	}
+
+	CColRefSet *pcrsChildReqd = nullptr;
+	if (nullptr != pcrsReqd && 1 == ulLogicalChildren)
+	{
+		pcrsChildReqd = GPOS_NEW(mp) CColRefSet(mp, *pcrsReqd);
+		if (pop->FLogical())
+		{
+			// Include both operator-local columns and scalar-child columns.
+			CExpressionHandle exprhdl(mp);
+			exprhdl.Attach(pexpr);
+			CColRefSet *pcrsUsed = exprhdl.PcrsUsedColumns(mp);
+			pcrsChildReqd->Include(pcrsUsed);
+			pcrsUsed->Release();
+		}
+		else
+		{
+			for (ULONG ul = 0; ul < arity; ul++)
+			{
+				CExpression *pexprChild = (*pexpr)[ul];
+				if (pexprChild->Pop()->FScalar())
+				{
+					pcrsChildReqd->Include(
+						pexprChild->DeriveUsedColumns());
+				}
+			}
+		}
+	}
+
 	CExpressionArray *pdrgpexprChildren = GPOS_NEW(mp) CExpressionArray(mp);
 	for (ULONG ul = 0; ul < arity; ul++)
 	{
-		CExpression *pexprChild = PexprOuterJoinToInnerJoin(mp, (*pexpr)[ul]);
+		CExpression *pexprChildOld = (*pexpr)[ul];
+		CColRefSet *pcrsThisChildReqd =
+			pexprChildOld->Pop()->FLogical() ? pcrsChildReqd : nullptr;
+		CExpression *pexprChild = PexprOuterJoinToInnerJoin(
+			mp, pexprChildOld, pcrsThisChildReqd);
 		pdrgpexprChildren->Append(pexprChild);
+	}
+	if (nullptr != pcrsChildReqd)
+	{
+		pcrsChildReqd->Release();
 	}
 
 	pop->AddRef();
 	return GPOS_NEW(mp) CExpression(mp, pop, pdrgpexprChildren);
+}
+
+// Try to rewrite a Select on top of a left outer join into a left anti semi
+// join.  The pattern is
+//
+//     Select [ ... AND inner_col IS NULL ... ]
+//       +-- LeftOuterJoin (outer, inner, joinpred)
+//
+// which is semantically an anti-join when the join predicate is strict for
+// inner_col (i.e. a matched row can never have inner_col NULL, so the only
+// surviving rows are the non-matching ones).  This mirrors Postgres'
+// reduce_outer_joins() turning JOIN_LEFT into JOIN_ANTI, and lets ORCA avoid
+// materializing the whole outer join only to filter it afterwards.
+//
+// Returns the rewritten expression (a left anti semi join, optionally wrapped
+// in a Select carrying the residual predicates), or NULL when the pattern does
+// not apply.  The caller retains ownership of pexprSelect.
+//
+// pcrsReqd is the set of columns required of pexprSelect's output by
+// everything above it (NULL if that could not be established). A left anti
+// semi join drops the entire inner side from its output, so the rewrite is
+// only sound when no inner column is required above -- checking just this
+// Select's own residual predicate, as an earlier version of this function
+// did, is not enough: an ancestor projection can legally reference an inner
+// column that this predicate never touches (it is simply always NULL on the
+// surviving rows).
+CExpression *
+CExpressionPreprocessor::PexprLojToAntiJoin(CMemoryPool *mp,
+											CExpression *pexprSelect,
+											CColRefSet *pcrsReqd)
+{
+	GPOS_ASSERT(nullptr != pexprSelect);
+	GPOS_ASSERT(COperator::EopLogicalSelect == pexprSelect->Pop()->Eopid());
+
+	CExpression *pexprLOJ = (*pexprSelect)[0];
+	CExpression *pexprSelPred = (*pexprSelect)[1];
+	GPOS_ASSERT(COperator::EopLogicalLeftOuterJoin ==
+				pexprLOJ->Pop()->Eopid());
+
+	CExpression *pexprOuter = (*pexprLOJ)[0];
+	CExpression *pexprInner = (*pexprLOJ)[1];
+	CExpression *pexprJoinPred = (*pexprLOJ)[2];
+	CColRefSet *pcrsInner = pexprInner->DeriveOutputColumns();
+
+	// split the Select predicate into conjuncts and separate the
+	// "inner_col IS NULL" tests that trigger the anti-join from the rest
+	CExpressionArray *pdrgpexprConj =
+		CPredicateUtils::PdrgpexprConjuncts(mp, pexprSelPred);
+	CExpressionArray *pdrgpexprResidual = GPOS_NEW(mp) CExpressionArray(mp);
+	BOOL fAntiJoin = false;
+
+	const ULONG ulConj = pdrgpexprConj->Size();
+	for (ULONG ul = 0; ul < ulConj; ul++)
+	{
+		CExpression *pexprConj = (*pdrgpexprConj)[ul];
+		BOOL fTrigger = false;
+
+		// look for a bare "IS NULL" test (not wrapped in NOT) on a plain
+		// inner-side column whose NULL value is rejected by the join predicate
+		if (CUtils::FScalarNullTest(pexprConj) &&
+			CUtils::FScalarIdent((*pexprConj)[0]))
+		{
+			const CColRef *colref =
+				CScalarIdent::PopConvert((*pexprConj)[0]->Pop())->Pcr();
+			if (pcrsInner->FMember(colref))
+			{
+				CColRefSet *pcrsForcedNull = GPOS_NEW(mp) CColRefSet(mp);
+				pcrsForcedNull->Include(colref);
+				fTrigger = CPredicateUtils::FNullRejecting(mp, pexprJoinPred,
+														   pcrsForcedNull);
+				pcrsForcedNull->Release();
+			}
+		}
+
+		if (fTrigger)
+		{
+			// the IS NULL test becomes redundant once we switch to an
+			// anti-join, so drop it
+			fAntiJoin = true;
+		}
+		else
+		{
+			pexprConj->AddRef();
+			pdrgpexprResidual->Append(pexprConj);
+		}
+	}
+	pdrgpexprConj->Release();
+
+	// bail out unless we found at least one anti-join trigger, nothing above
+	// this Select requires an inner column (pcrsReqd == NULL means the
+	// caller could not establish what is required here, so we conservatively
+	// refuse), and the residual predicates only reference outer columns (a
+	// left anti semi join projects out all inner columns, so any residual
+	// reference to them would be invalid)
+	BOOL fApplies =
+		fAntiJoin && nullptr != pcrsReqd && !pcrsReqd->FIntersects(pcrsInner);
+	if (fApplies)
+	{
+		CColRefSet *pcrsResidual = GPOS_NEW(mp) CColRefSet(mp);
+		const ULONG ulResidual = pdrgpexprResidual->Size();
+		for (ULONG ul = 0; ul < ulResidual; ul++)
+		{
+			pcrsResidual->Include((*pdrgpexprResidual)[ul]->DeriveUsedColumns());
+		}
+		if (pcrsResidual->FIntersects(pcrsInner))
+		{
+			fApplies = false;
+		}
+		pcrsResidual->Release();
+	}
+
+	if (!fApplies)
+	{
+		pdrgpexprResidual->Release();
+		return nullptr;
+	}
+
+	// build the left anti semi join, recursing into the children so that any
+	// nested outer joins (including stacked anti-joins) are rewritten too.
+	// The outer child must still produce whatever this Select required from
+	// above plus whatever the (unchanged) join predicate and surviving
+	// residual predicates reference; the inner child is only ever needed for
+	// columns used by the join predicate, since the anti semi join itself no
+	// longer outputs any inner column -- if recursing into it drops one of
+	// those columns, the join predicate reused below would reference a
+	// column its own child no longer produces.
+	CColRefSet *pcrsJoinPredUsed = pexprJoinPred->DeriveUsedColumns();
+
+	CColRefSet *pcrsOuterReqd = GPOS_NEW(mp) CColRefSet(mp, *pcrsReqd);
+	pcrsOuterReqd->Include(pcrsJoinPredUsed);
+	const ULONG ulResidualUsed = pdrgpexprResidual->Size();
+	for (ULONG ul = 0; ul < ulResidualUsed; ul++)
+	{
+		pcrsOuterReqd->Include((*pdrgpexprResidual)[ul]->DeriveUsedColumns());
+	}
+	CColRefSet *pcrsInnerReqd = GPOS_NEW(mp) CColRefSet(mp, *pcrsJoinPredUsed);
+
+	CExpression *pexprNewOuter =
+		PexprOuterJoinToInnerJoin(mp, pexprOuter, pcrsOuterReqd);
+	CExpression *pexprNewInner =
+		PexprOuterJoinToInnerJoin(mp, pexprInner, pcrsInnerReqd);
+	pcrsOuterReqd->Release();
+	pcrsInnerReqd->Release();
+
+	// Q78 only needs relational-child recursion.  Do not recursively rewrite
+	// the join predicate: a scalar subquery there has no required-column
+	// context, so any LOJ-to-anti-join attempt in it is conservatively refused.
+	// Keeping the predicate unchanged makes that unsupported shape explicit.
+	pexprJoinPred->AddRef();
+	CExpression *pexprNewJoinPred = pexprJoinPred;
+	CExpression *pexprLASJ =
+		CUtils::PexprLogicalJoin<CLogicalLeftAntiSemiJoin>(
+			mp, pexprNewOuter, pexprNewInner, pexprNewJoinPred);
+
+	// wrap the surviving (outer-only) predicates in a Select, if any remain
+	CExpression *pexprResidualPred =
+		CPredicateUtils::PexprConjunction(mp, pdrgpexprResidual);
+	return CUtils::PexprSafeSelect(mp, pexprLASJ, pexprResidualPred);
 }
 
 // generate n*(n-1)/2 equality predicates, up to GPOPT_MAX_DERIVED_PREDS, between
@@ -3786,7 +4032,8 @@ CExpressionPreprocessor::PexprPreprocess(
 	pexprNormalized1->Release();
 
 	// transform outer join into inner join whenever possible
-	CExpression *pexprLOJToIJ = PexprOuterJoinToInnerJoin(mp, pexprCorrSubqPushed);
+	CExpression *pexprLOJToIJ = PexprOuterJoinToInnerJoin(
+		mp, pexprCorrSubqPushed, pcrsOutputAndOrderCols);
 	GPOS_CHECK_ABORT;
 	TRCAE_PREPROCESS_STEP(pexprLOJToIJ,
 		"Transform outer join into inner join whenever possible");

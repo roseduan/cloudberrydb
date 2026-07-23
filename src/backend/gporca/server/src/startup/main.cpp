@@ -386,19 +386,33 @@ PvExec(void *pv)
 //	These are needed for standalone testing without linking to PostgreSQL
 //---------------------------------------------------------------------------
 
-// Stub for parallel mode check
+// Stub for parallel mode check. This is the actual gate every
+// CXform*2Parallel*::Exfp() checks before considering a Parallel* physical
+// alternative (CXformGet2ParallelTableScan, CXformInnerJoin2ParallelHashJoin,
+// etc.) -- default to disabled: no existing minidump in data/dxl/minidump/
+// exercises a Parallel* operator, and the DXL parser has no handler
+// registered for any of them, so enabling this by default only makes
+// freshly-generated minidumps fail to round-trip.
 namespace gpdb {
 	bool IsParallelModeOK(void)
 	{
-		// For unittest, we enable parallel mode by default
-		return true;
+		return false;
 	}
 }
 
-// Stub GUC variables for parallel execution
-int max_parallel_workers_per_gather = 2;
-bool enable_parallel = true;
+// Stub GUC variables for parallel execution. Default to disabled: no
+// existing minidump in data/dxl/minidump/ exercises a Parallel* physical
+// operator, and enabling this by default only makes freshly-generated
+// minidumps mismatch on replay (the DXL parser has no handler registered
+// for ParallelHashJoin/ParallelTableScan).
+int max_parallel_workers_per_gather = 0;
+bool enable_parallel = false;
 double parallel_setup_cost = 1000.0;
+
+// Stub for the parallel-CTE-planning GUC referenced directly by
+// COptimizer.cpp; normally defined in guc_gp.c and linked in via the
+// postgres backend.
+int optimizer_parallel_cte_max_nested_producers = 0;
 
 //---------------------------------------------------------------------------
 //	@function:

@@ -731,6 +731,121 @@ select * from t3 join (select t1.a t1a, t1.b t1b, t1.c t1c, t2.a t2a, t2.b t2b, 
  1 | 2 | 3 |   1 |   1 |   1 |     |     |    
 (1 row)
 
+-- LOJ + "col IS NULL" is rewritten to an anti join
+-- (CExpressionPreprocessor::PexprLojToAntiJoin); only t1's row with a=1 has
+-- no match in t2, so all three queries below must return exactly that row.
+--
+-- safe: only an outer-side column is needed -> the rewrite applies
+explain (costs off) select t1.a from t1 left join t2 on (t1.a = t2.a) where t2.a is null;
+                QUERY PLAN                
+------------------------------------------
+ Gather Motion 3:1  (slice1; segments: 3)
+   ->  Hash Anti Join
+         Hash Cond: (t1.a = t2.a)
+         ->  Seq Scan on t1
+         ->  Hash
+               ->  Seq Scan on t2
+ Optimizer: GPORCA
+(7 rows)
+
+select t1.a from t1 left join t2 on (t1.a = t2.a) where t2.a is null;
+ a 
+---
+ 1
+(1 row)
+
+-- unsafe: the SELECT list still needs an inner-side column (always NULL on
+-- the surviving row, but legally part of the output) -> the rewrite must be
+-- skipped, since a left anti semi join never outputs any inner-side column
+explain (costs off) select t1.a, t2.b from t1 left join t2 on (t1.a = t2.a) where t2.a is null;
+                QUERY PLAN                
+------------------------------------------
+ Gather Motion 3:1  (slice1; segments: 3)
+   ->  Result
+         Filter: (t2.a IS NULL)
+         ->  Hash Left Join
+               Hash Cond: (t1.a = t2.a)
+               ->  Seq Scan on t1
+               ->  Hash
+                     ->  Seq Scan on t2
+ Optimizer: GPORCA
+(9 rows)
+
+select t1.a, t2.b from t1 left join t2 on (t1.a = t2.a) where t2.a is null;
+ a | b 
+---+---
+ 1 |  
+(1 row)
+
+-- unsafe: ORDER BY still needs an inner-side column -> same as above
+explain (costs off) select t1.a from t1 left join t2 on (t1.a = t2.a) where t2.a is null order by t2.b;
+                     QUERY PLAN                     
+----------------------------------------------------
+ Result
+   ->  Gather Motion 3:1  (slice1; segments: 3)
+         Merge Key: t2.b
+         ->  Sort
+               Sort Key: t2.b
+               ->  Result
+                     Filter: (t2.a IS NULL)
+                     ->  Hash Left Join
+                           Hash Cond: (t1.a = t2.a)
+                           ->  Seq Scan on t1
+                           ->  Hash
+                                 ->  Seq Scan on t2
+ Optimizer: GPORCA
+(13 rows)
+
+select t1.a from t1 left join t2 on (t1.a = t2.a) where t2.a is null order by t2.b;
+ a 
+---
+ 1
+(1 row)
+
+-- Unary logical operators can keep required columns outside scalar children.
+-- Verify that their local column dependencies prevent the LOJ-to-antijoin
+-- rewrite from dropping an inner-side column and making ORCA fall back.
+set optimizer_trace_fallback = on;
+-- CLogicalGbAgg keeps grouping columns in PcrsLocalUsed().
+select count(*) as groups
+from (
+  select t2.b
+  from t1 left join t2 on (t1.a = t2.a)
+  where t2.a is null
+  group by t2.b
+) s;
+ groups 
+--------
+      1
+(1 row)
+
+-- CLogicalLimit keeps ordering columns in PcrsLocalUsed().
+select count(*) as limited_rows
+from (
+  select t1.a
+  from t1 left join t2 on (t1.a = t2.a)
+  where t2.a is null
+  order by t2.b
+  limit 10
+) s;
+ limited_rows 
+--------------
+            1
+(1 row)
+
+-- CLogicalSequenceProject keeps window ordering columns in PcrsLocalUsed().
+select sum(rn) as row_number_sum
+from (
+  select row_number() over (order by t2.b) as rn
+  from t1 left join t2 on (t1.a = t2.a)
+  where t2.a is null
+) s;
+ row_number_sum 
+----------------
+              1
+(1 row)
+
+reset optimizer_trace_fallback;
 -- ensure plan has a filter over left outer join
 explain select * from (select t1.a t1a, t1.b t1b, t2.a t2a, t2.b t2b from t1 left join t2 on t1.a = t2.a) tt 
   join t3 on tt.t1b = t3.b 

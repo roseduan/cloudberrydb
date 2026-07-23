@@ -400,6 +400,58 @@ select * from t1 left join t2 on (t1.a = t2.a) join t3 on (t1.b = t3.b) where (t
 explain select * from t3 join (select t1.a t1a, t1.b t1b, t1.c t1c, t2.a t2a, t2.b t2b, t2.c t2c from t1 left join t2 on (t1.a = t2.a)) t on (t1a = t3.a) WHERE (t2a IS NULL OR (t1c = t3.a));
 select * from t3 join (select t1.a t1a, t1.b t1b, t1.c t1c, t2.a t2a, t2.b t2b, t2.c t2c from t1 left join t2 on (t1.a = t2.a)) t on (t1a = t3.a) WHERE (t2a IS NULL OR (t1c = t3.a));
 
+-- LOJ + "col IS NULL" is rewritten to an anti join
+-- (CExpressionPreprocessor::PexprLojToAntiJoin); only t1's row with a=1 has
+-- no match in t2, so all three queries below must return exactly that row.
+--
+-- safe: only an outer-side column is needed -> the rewrite applies
+explain (costs off) select t1.a from t1 left join t2 on (t1.a = t2.a) where t2.a is null;
+select t1.a from t1 left join t2 on (t1.a = t2.a) where t2.a is null;
+
+-- unsafe: the SELECT list still needs an inner-side column (always NULL on
+-- the surviving row, but legally part of the output) -> the rewrite must be
+-- skipped, since a left anti semi join never outputs any inner-side column
+explain (costs off) select t1.a, t2.b from t1 left join t2 on (t1.a = t2.a) where t2.a is null;
+select t1.a, t2.b from t1 left join t2 on (t1.a = t2.a) where t2.a is null;
+
+-- unsafe: ORDER BY still needs an inner-side column -> same as above
+explain (costs off) select t1.a from t1 left join t2 on (t1.a = t2.a) where t2.a is null order by t2.b;
+select t1.a from t1 left join t2 on (t1.a = t2.a) where t2.a is null order by t2.b;
+
+-- Unary logical operators can keep required columns outside scalar children.
+-- Verify that their local column dependencies prevent the LOJ-to-antijoin
+-- rewrite from dropping an inner-side column and making ORCA fall back.
+set optimizer_trace_fallback = on;
+
+-- CLogicalGbAgg keeps grouping columns in PcrsLocalUsed().
+select count(*) as groups
+from (
+  select t2.b
+  from t1 left join t2 on (t1.a = t2.a)
+  where t2.a is null
+  group by t2.b
+) s;
+
+-- CLogicalLimit keeps ordering columns in PcrsLocalUsed().
+select count(*) as limited_rows
+from (
+  select t1.a
+  from t1 left join t2 on (t1.a = t2.a)
+  where t2.a is null
+  order by t2.b
+  limit 10
+) s;
+
+-- CLogicalSequenceProject keeps window ordering columns in PcrsLocalUsed().
+select sum(rn) as row_number_sum
+from (
+  select row_number() over (order by t2.b) as rn
+  from t1 left join t2 on (t1.a = t2.a)
+  where t2.a is null
+) s;
+
+reset optimizer_trace_fallback;
+
 -- ensure plan has a filter over left outer join
 explain select * from (select t1.a t1a, t1.b t1b, t2.a t2a, t2.b t2b from t1 left join t2 on t1.a = t2.a) tt 
   join t3 on tt.t1b = t3.b 

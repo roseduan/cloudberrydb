@@ -17,7 +17,11 @@ add_library(naucrates ${srcs})
 target_link_libraries(naucrates
                       ${CMAKE_DL_LIBS}
                       gpos
-                      ${XERCES_LIBRARIES})
+                      ${XERCES_LIBRARIES}
+                      # only a static libcurl.a is available in this build
+                      # environment; pull in its own transitive deps
+                      # (per `pkg-config --libs --static libcurl`) too.
+                      curl ssl crypto z)
 
 # Prevent linker errors from undefined symbols on OSX.
 if (${CMAKE_SYSTEM_NAME} MATCHES "Darwin")

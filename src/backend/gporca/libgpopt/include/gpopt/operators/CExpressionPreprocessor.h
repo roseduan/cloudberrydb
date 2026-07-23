@@ -154,9 +154,23 @@ private:
 	static CExpression *PexprCollapseUnionUnionAll(CMemoryPool *mp,
 												   CExpression *pexpr);
 
-	// transform outer joins into inner joins whenever possible
+	// transform outer joins into inner joins whenever possible; pcrsReqd is
+	// the set of columns required of pexpr's output by everything above it,
+	// or NULL if that set could not be established for this subtree
 	static CExpression *PexprOuterJoinToInnerJoin(CMemoryPool *mp,
-												  CExpression *pexpr);
+												  CExpression *pexpr,
+												  CColRefSet *pcrsReqd);
+
+	// transform a Select("inner col IS NULL") on top of a left outer join
+	// into a left anti semi join (mirrors Postgres reduce_outer_joins);
+	// pcrsReqd is the set of columns required of pexprSelect's output by
+	// everything above it (NULL if unknown); returns NULL if the pattern
+	// does not apply, including when pcrsReqd shows an inner column of the
+	// join is still needed (a left anti semi join projects out all inner
+	// columns)
+	static CExpression *PexprLojToAntiJoin(CMemoryPool *mp,
+										   CExpression *pexprSelect,
+										   CColRefSet *pcrsReqd);
 
 	// eliminate CTE Anchors for CTEs that have zero consumers
 	static CExpression *PexprRemoveUnusedCTEs(CMemoryPool *mp,

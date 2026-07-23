@@ -136,7 +136,7 @@ CParseHandlerColStats::StartElement(const XMLCh *const element_uri,
 		if (nullptr != parsed_distinct_by_segs)
 		{
 			m_distinct_by_segs =
-				CDXLOperatorFactory::ConvertAttrValueToBool(
+				CDXLOperatorFactory::ConvertAttrValueToDouble(
 					m_parse_handler_mgr->GetDXLMemoryManager(),
 					parsed_distinct_by_segs, EdxltokenColNdvBySeg,
 					EdxltokenColumnStats);
