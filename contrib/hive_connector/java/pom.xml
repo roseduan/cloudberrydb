@@ -15,12 +15,61 @@
         <!-- CVE fixes: last Java 8 compatible patch level -->
         <hadoop.version>2.10.2</hadoop.version>            <!-- overrides 2.8.0 (EOL) -->
         <log4j2.version>2.17.2</log4j2.version>            <!-- CVE-2021-44228 Log4Shell: overrides hive's transitive 2.8.2 -->
-        <jetty.version>9.4.57.v20241219</jetty.version>    <!-- overrides hive's transitive 9.3.20 -->
+        <jetty.version>9.4.57.v20241219</jetty.version>    <!-- overrides hive's transitive 9.3.20; 9.4.60 (CVE-2026-2332) is commercial-ELS only, not on public Maven Central -->
         <avro.version>1.11.4</avro.version>                <!-- CVE-2024-47561: overrides hadoop's transitive 1.7.4 -->
+        <!-- jackson 2.21.4: the metastore-client fat jar shipped jackson-databind 2.9.5 /
+             jackson-core 2.4.0 / jackson-annotations 2.7.9 (unmanaged, dragged in via
+             hive-metastore 3.1.0 + hadoop 2.x). 2.21.4 clears the whole 2018-2020
+             deserialization CVE wave plus CVE-2026-54512/54513 (PTV / array-subtype
+             allowlist bypass); still Java 8 baseline. Enforced via jackson-bom below. -->
+        <jackson.version>2.21.4</jackson.version>
+        <!-- netty 4.1.135: fat jar shipped netty-all 4.1.12 / netty-buffer|common 4.1.17;
+             enforced via netty-bom below. The legacy netty 3.10.6 (io.netty:netty,
+             CVE-2019-20444/20445) is a SEPARATE artifact that hadoop-mapreduce-client-core
+             2.10.2 pulls in for the Hadoop 2.x IPC layer; a version bump cannot replace it
+             (different artifactId), so it is excluded explicitly on the hadoop-mapreduce-
+             client-* dependencies below. A metastore client never exercises Hadoop MR IPC. -->
+        <netty.version>4.1.135.Final</netty.version>
+        <!-- zookeeper 3.9.5: CVE-2023-44981 (old 3.4.x) + CVE-2026-24308/24281 (3.9.x);
+             overrides the transitive version pulled via hive/curator. -->
+        <zookeeper.version>3.9.5</zookeeper.version>
+        <!-- protobuf 3.25.5: CVE-2021-22569 / CVE-2024-7254 (fat jar shipped 3.3.1). -->
+        <protobuf.version>3.25.5</protobuf.version>
+        <!-- commons-collections 3.2.2: CVE-2015-7501 / CVE-2015-6420 (fat jar shipped 3.2.1). -->
+        <commons-collections.version>3.2.2</commons-collections.version>
+        <!-- jettison 1.5.4: CVE-2022-40149/45685/45693, CVE-2023-1436 (fat jar shipped 1.1). -->
+        <jettison.version>1.5.4</jettison.version>
+        <!-- commons-io 2.16.1: CVE-2024-47554 (fat jar shipped 2.5). -->
+        <commons-io.version>2.16.1</commons-io.version>
+        <!-- gson 2.10.1: CVE-2022-25647 (fat jar shipped 2.8.1). -->
+        <gson.version>2.10.1</gson.version>
+        <!-- commons-compress 1.26.1: CVE-2024-25710/26308 (fat jar shipped 1.21). -->
+        <commons-compress.version>1.26.1</commons-compress.version>
+        <!-- aircompressor 0.27: bump from the 0.10 shipped (last io.airlift release;
+             CVE-2025-67721 remains open upstream, no fixed release exists yet). -->
+        <aircompressor.version>0.27</aircompressor.version>
     </properties>
 
     <dependencyManagement>
         <dependencies>
+            <!-- ===== CVE fixes: BOM imports first (under import scope, first declaration wins) ===== -->
+            <!-- jackson 2.21.4: converge the whole jackson family (databind/core/annotations)
+                 that hive-metastore 3.1.0 + hadoop 2.x otherwise leave at 2.9.5 / 2.4.0 / 2.7.9 -->
+            <dependency>
+                <groupId>com.fasterxml.jackson</groupId>
+                <artifactId>jackson-bom</artifactId>
+                <version>${jackson.version}</version>
+                <type>pom</type>
+                <scope>import</scope>
+            </dependency>
+            <!-- netty 4.1.135: converge netty-all / netty-buffer / netty-common (shipped 4.1.12 / 4.1.17) -->
+            <dependency>
+                <groupId>io.netty</groupId>
+                <artifactId>netty-bom</artifactId>
+                <version>${netty.version}</version>
+                <type>pom</type>
+                <scope>import</scope>
+            </dependency>
             <!-- Log4Shell etc.: force the whole log4j2 family to 2.17.2 (overrides hive-standalone-metastore's 2.8.2) -->
             <dependency>
                 <groupId>org.apache.logging.log4j</groupId>
@@ -43,6 +92,96 @@
                 <artifactId>avro</artifactId>
                 <version>${avro.version}</version>
             </dependency>
+            <!-- ===== Hadoop version convergence =====
+                 The pom pins only hadoop-mapreduce-client-* to 2.10.2, but hive-metastore
+                 3.1.0 drags hadoop-common / hadoop-auth in at 2.7.1 (CVE-2021-37404,
+                 CVE-2022-26612, CVE-2022-25168 ...) and hadoop-hdfs at 2.2.0. Pin them to
+                 2.10.2 so the graph is internally consistent with the mapreduce-client deps.
+                 (The YARN server modules: resourcemanager / applicationhistoryservice /
+                 web-proxy are server-side and pulled only transitively via hive-shims-0.23
+                 at runtime scope; a metastore client never loads them, so they are excluded
+                 outright on the hive-metastore dependency below rather than pinned.) -->
+            <dependency>
+                <groupId>org.apache.hadoop</groupId>
+                <artifactId>hadoop-common</artifactId>
+                <version>${hadoop.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>org.apache.hadoop</groupId>
+                <artifactId>hadoop-auth</artifactId>
+                <version>${hadoop.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>org.apache.hadoop</groupId>
+                <artifactId>hadoop-hdfs</artifactId>
+                <version>${hadoop.version}</version>
+            </dependency>
+            <!-- hadoop-yarn-server-common (CVE-2021-33036) enters at 2.10.2 via
+                 hadoop-mapreduce-client-shuffle (compile); pin it so it can never drift back
+                 to the vulnerable 3.1.0 that hive-shims used to pull. -->
+            <dependency>
+                <groupId>org.apache.hadoop</groupId>
+                <artifactId>hadoop-yarn-server-common</artifactId>
+                <version>${hadoop.version}</version>
+            </dependency>
+            <!-- zookeeper 3.9.5: CVE-2023-44981 + CVE-2026-24308/24281 -->
+            <dependency>
+                <groupId>org.apache.zookeeper</groupId>
+                <artifactId>zookeeper</artifactId>
+                <version>${zookeeper.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>org.apache.zookeeper</groupId>
+                <artifactId>zookeeper-jute</artifactId>
+                <version>${zookeeper.version}</version>
+            </dependency>
+            <!-- commons-collections 3.2.2: CVE-2015-7501 / CVE-2015-6420 -->
+            <dependency>
+                <groupId>commons-collections</groupId>
+                <artifactId>commons-collections</artifactId>
+                <version>${commons-collections.version}</version>
+            </dependency>
+            <!-- protobuf 3.25.5: CVE-2021-22569 / CVE-2024-7254 -->
+            <dependency>
+                <groupId>com.google.protobuf</groupId>
+                <artifactId>protobuf-java</artifactId>
+                <version>${protobuf.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>com.google.protobuf</groupId>
+                <artifactId>protobuf-java-util</artifactId>
+                <version>${protobuf.version}</version>
+            </dependency>
+            <!-- jettison 1.5.4: CVE-2022-40149/45685/45693, CVE-2023-1436 -->
+            <dependency>
+                <groupId>org.codehaus.jettison</groupId>
+                <artifactId>jettison</artifactId>
+                <version>${jettison.version}</version>
+            </dependency>
+            <!-- commons-io 2.16.1: CVE-2024-47554 -->
+            <dependency>
+                <groupId>commons-io</groupId>
+                <artifactId>commons-io</artifactId>
+                <version>${commons-io.version}</version>
+            </dependency>
+            <!-- gson 2.10.1: CVE-2022-25647 -->
+            <dependency>
+                <groupId>com.google.code.gson</groupId>
+                <artifactId>gson</artifactId>
+                <version>${gson.version}</version>
+            </dependency>
+            <!-- commons-compress 1.26.1: CVE-2024-25710/26308 -->
+            <dependency>
+                <groupId>org.apache.commons</groupId>
+                <artifactId>commons-compress</artifactId>
+                <version>${commons-compress.version}</version>
+            </dependency>
+            <!-- aircompressor 0.27: bump from 0.10 (last io.airlift release) -->
+            <dependency>
+                <groupId>io.airlift</groupId>
+                <artifactId>aircompressor</artifactId>
+                <version>${aircompressor.version}</version>
+            </dependency>
         </dependencies>
     </dependencyManagement>
 
@@ -55,6 +194,23 @@
                 <exclusion>
                     <groupId>org.apache.logging.log4j</groupId>
                     <artifactId>log4j-web</artifactId>
+                </exclusion>
+                <!-- YARN server-side modules (CVE-2021-33036 etc.): pulled transitively via
+                     hive-shims -> hive-shims-0.23 (runtime), previously at Hadoop 3.1.0 while
+                     this client runs on Hadoop 2.10.2. A metastore client never loads YARN
+                     ResourceManager / ApplicationHistoryService / WebProxy classes, so drop
+                     them outright instead of shipping a cross-major-version mix. -->
+                <exclusion>
+                    <groupId>org.apache.hadoop</groupId>
+                    <artifactId>hadoop-yarn-server-resourcemanager</artifactId>
+                </exclusion>
+                <exclusion>
+                    <groupId>org.apache.hadoop</groupId>
+                    <artifactId>hadoop-yarn-server-applicationhistoryservice</artifactId>
+                </exclusion>
+                <exclusion>
+                    <groupId>org.apache.hadoop</groupId>
+                    <artifactId>hadoop-yarn-server-web-proxy</artifactId>
                 </exclusion>
                 <!-- #580: legacy Log4j 1.x (pulled via hbase-client -> hbase-common) -->
                 <exclusion>
@@ -94,6 +250,12 @@
                     <groupId>org.slf4j</groupId>
                     <artifactId>slf4j-log4j12</artifactId>
                 </exclusion>
+                <!-- netty 3.10.6 (CVE-2019-20444/20445): Hadoop 2.x IPC dep, unused by a
+                     metastore client; drop it so the fat jar ships only netty 4.1.135 -->
+                <exclusion>
+                    <groupId>io.netty</groupId>
+                    <artifactId>netty</artifactId>
+                </exclusion>
                 <!-- CVE-2019-10172: Jackson 1.x (org.codehaus.jackson, pulled via hadoop-yarn-common) -->
                 <exclusion>
                     <groupId>org.codehaus.jackson</groupId>
@@ -127,6 +289,12 @@
                     <groupId>org.slf4j</groupId>
                     <artifactId>slf4j-log4j12</artifactId>
                 </exclusion>
+                <!-- netty 3.10.6 (CVE-2019-20444/20445): Hadoop 2.x IPC dep, unused by a
+                     metastore client; drop it so the fat jar ships only netty 4.1.135 -->
+                <exclusion>
+                    <groupId>io.netty</groupId>
+                    <artifactId>netty</artifactId>
+                </exclusion>
                 <!-- CVE-2019-10172: Jackson 1.x (org.codehaus.jackson, via hadoop-yarn-common -> hadoop-common) -->
                 <exclusion>
                     <groupId>org.codehaus.jackson</groupId>
@@ -158,6 +326,12 @@
                 <exclusion>
                     <groupId>org.slf4j</groupId>
                     <artifactId>slf4j-log4j12</artifactId>
+                </exclusion>
+                <!-- netty 3.10.6 (CVE-2019-20444/20445): Hadoop 2.x IPC dep, unused by a
+                     metastore client; drop it so the fat jar ships only netty 4.1.135 -->
+                <exclusion>
+                    <groupId>io.netty</groupId>
+                    <artifactId>netty</artifactId>
                 </exclusion>
                 <!-- CVE-2019-10172: Jackson 1.x (pulled via yarn-server-common -> yarn-registry) -->
                 <exclusion>

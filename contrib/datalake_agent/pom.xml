@@ -20,8 +20,10 @@
         <!-- CVE fixes: all pinned to the last Java 8 compatible patch level -->
         <!-- spring-framework 5.3.39: CVE-2024-22243/22259/22262 etc.; enforced via spring-framework-bom below -->
         <spring-framework.version>5.3.39</spring-framework.version>
-        <!-- tomcat 9.0.107: CVE-2025-24813 RCE etc. (overrides spring-boot bom default 9.0.80) -->
-        <tomcat.version>9.0.107</tomcat.version>
+        <!-- tomcat 9.0.118: CVE-2026-41293 (HTTP/2 header validation), CVE-2026-43512
+             (Digest auth bypass), CVE-2026-43515 (AJP secret timing) — all fixed in
+             9.0.118; also carries the earlier CVE-2025-24813 RCE fix. Still Java 8. -->
+        <tomcat.version>9.0.118</tomcat.version>
         <!-- snakeyaml 2.2: CVE-2022-1471 RCE (overrides spring-boot bom default 1.30) -->
         <snakeyaml.version>2.2</snakeyaml.version>
         <!-- jetty 9.4.57: CVE-2024-22201/13009/8184/6763 (enforced via jetty-bom below) -->
@@ -33,17 +35,26 @@
         <!-- netty 4.1.135: HTTP/2 Rapid Reset/MadeYouReset DoS, request smuggling, DNS
              cache poisoning etc. (overrides transitive 4.1.101); enforced via netty-bom below -->
         <netty.version>4.1.135.Final</netty.version>
-        <!-- jackson 2.19.4: PolymorphicTypeValidator / array-subtype allowlist bypass
-             (overrides spring-boot 2.13.5); enforced via jackson-bom below -->
-        <jackson.version>2.19.4</jackson.version>
-        <!-- zookeeper 3.9.3: resource-consumption / auth fixes (overrides transitive 3.8.4) -->
-        <zookeeper.version>3.9.3</zookeeper.version>
+        <!-- jackson 2.21.4: newer PolymorphicTypeValidator bypass via generic type
+             parameters + array-subtype allowlist bypass (CVE-2026-54512 / CVE-2026-54513),
+             fixed only in 2.18.8 / 2.21.4 (the 2.19/2.20 branches were not separately
+             patched). Still Java 8 baseline. Overrides spring-boot's 2.13.5 and iceberg's
+             2.15.2; enforced via jackson-bom below. Does NOT affect the jackson 2.9.5
+             shaded inside hive-exec. -->
+        <jackson.version>2.21.4</jackson.version>
+        <!-- zookeeper 3.9.5: CVE-2026-24308 (sensitive info in client logfile) /
+             CVE-2026-24281 (ZKTrustManager PTR-fallback hostname verification), plus the
+             earlier resource-consumption / auth fixes (overrides transitive 3.8.4) -->
+        <zookeeper.version>3.9.5</zookeeper.version>
         <!-- aircompressor 0.27: CVE-2024-36114 (overrides iceberg-core's transitive 0.24) -->
         <aircompressor.version>0.27</aircompressor.version>
         <!-- ant 1.10.15: CVE-2020-11979 (overrides hive-common's transitive 1.9.1) -->
         <ant.version>1.10.15</ant.version>
         <!-- bcprov-jdk18on 1.85: bump to latest (overrides hadoop-common's transitive 1.82) -->
         <bcprov.version>1.85</bcprov.version>
+        <!-- ivy 2.5.3: CVE-2022-37865 / CVE-2022-37866 path traversal (overrides the
+             transitive 2.4.0 pulled via hive-common's `ADD JAR` support) -->
+        <ivy.version>2.5.3</ivy.version>
     </properties>
 
     <dependencies>
@@ -585,6 +596,37 @@
                 <groupId>org.bouncycastle</groupId>
                 <artifactId>bcprov-jdk18on</artifactId>
                 <version>${bcprov.version}</version>
+            </dependency>
+            <!-- ivy 2.5.3: CVE-2022-37865 / CVE-2022-37866 (transitive via hive-common) -->
+            <dependency>
+                <groupId>org.apache.ivy</groupId>
+                <artifactId>ivy</artifactId>
+                <version>${ivy.version}</version>
+            </dependency>
+            <!-- hadoop-yarn-server-* 3.4.3: CVE-2021-33036 (user-account escalation in
+                 yarn-server-common). hive-metastore/hive-exec 3.1.0 drag these YARN server
+                 modules in at 3.1.0 while the rest of Hadoop is already pinned to 3.4.3
+                 above; align them to ${hadoop.version} so the whole Hadoop graph is
+                 consistent and the CVE-fixed 3.4.3 wins. -->
+            <dependency>
+                <groupId>org.apache.hadoop</groupId>
+                <artifactId>hadoop-yarn-server-common</artifactId>
+                <version>${hadoop.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>org.apache.hadoop</groupId>
+                <artifactId>hadoop-yarn-server-applicationhistoryservice</artifactId>
+                <version>${hadoop.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>org.apache.hadoop</groupId>
+                <artifactId>hadoop-yarn-server-resourcemanager</artifactId>
+                <version>${hadoop.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>org.apache.hadoop</groupId>
+                <artifactId>hadoop-yarn-server-web-proxy</artifactId>
+                <version>${hadoop.version}</version>
             </dependency>
             <!-- Align the WHOLE HBase module set to 2.4.9. hive-metastore:3.1.0 drags in
                  hbase-client:2.0.0-alpha4 and its siblings (hbase-common, hbase-protocol,
