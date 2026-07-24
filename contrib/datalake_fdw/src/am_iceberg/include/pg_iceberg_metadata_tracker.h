@@ -104,6 +104,26 @@ typedef struct LevelHistoryEntry
 } LevelHistoryEntry;
 
 /*
+ * TrackedMetadataFile - a metadata-LAYER file (metadata.json / manifest /
+ * manifest-list avro) that the agent physically wrote to object storage for
+ * this table during the transaction.  Recorded so a ROLLBACK can delete every
+ * one of them and a COMMIT can drop the superseded (non-final) ones -- they
+ * are otherwise orphaned because the tracker only keeps the LATEST metadata
+ * location in memory (issue #399).
+ *
+ * NEVER a data/delete parquet: those are written by the C provider on the QE
+ * and cleaned via the Class 1 PendingRelDelete path.  The agent reports only
+ * metadata-layer files it newly wrote (filtered by snapshot id), so files
+ * inherited from the pre-transaction base table are never listed here.
+ */
+typedef struct TrackedMetadataFile
+{
+	char   *path;					/* object-storage path of the file */
+	char   *tree_metadata_location;	/* the metadata.json this file belongs to */
+	int		nest_level;				/* txn nesting level when written */
+} TrackedMetadataFile;
+
+/*
  * TableMetadataState - per-table metadata tracking state.
  *
  * This is the hash table entry for each tracked Iceberg table.
@@ -184,6 +204,26 @@ typedef struct TableMetadataState
 	 * instead of after every statement, avoiding O(N^2) rewrites (issue #323).
 	 */
 	bool	dirty;
+
+	/*
+	 * issue #399: metadata-layer files the agent wrote for this table this
+	 * transaction (List of TrackedMetadataFile*), plus cached credentials to
+	 * delete them.  Only populated for builtin-catalog tables (the deletion
+	 * queue and this cleanup only manage builtin files; external catalogs own
+	 * their own file lifecycle).
+	 *
+	 * cleanup_fileio_config is the dlagent fileIOConfig JSON, built ONCE while
+	 * the transaction is still healthy, so the ABORT callback can delete the
+	 * orphaned files via /v1/files/delete without touching the catalog (which
+	 * is unsafe during abort).  cleanup_volume_server / cleanup_volume_name /
+	 * cleanup_owner feed the deletion-queue enqueue of superseded files on
+	 * COMMIT.  All are allocated in the tracker memory context.
+	 */
+	List   *written_metadata_files;
+	char   *cleanup_fileio_config;
+	char   *cleanup_volume_server;
+	char   *cleanup_volume_name;
+	char   *cleanup_owner;
 } TableMetadataState;
 
 

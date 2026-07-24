@@ -51,6 +51,7 @@ import org.apache.iceberg.TableProperties;
 import org.apache.iceberg.UpdateProperties;
 import org.apache.iceberg.Schema;
 import org.apache.iceberg.Snapshot;
+import org.apache.iceberg.ManifestFile;
 import org.apache.iceberg.DeleteFile;
 import org.apache.iceberg.DataFile;
 import org.apache.iceberg.FileScanTask;
@@ -273,7 +274,7 @@ public class IcebergMetadataFetcher extends BasePlugin implements MetadataFetche
         return true;
     }
 
-    public String onlyBatchAppend() throws Exception {
+    public Map<String, Object> onlyBatchAppend() throws Exception {
         IcebergCatalog catalog = icebergClientWrapper.getIcebergCatalog(context);
         Table table = catalog.loadTable(context.getDataSource());
         healLegacyTableProperties(table);
@@ -296,7 +297,48 @@ public class IcebergMetadataFetcher extends BasePlugin implements MetadataFetche
         // Extract metadata and write metadata.json to object storage
         HasTableOperations txnTableOps = (HasTableOperations) txn.table();
         TableMetadata updatedMetadata = txnTableOps.operations().current();
-        return writeMetadataFile(table, updatedMetadata);
+        String newLocation = writeMetadataFile(table, updatedMetadata);
+        return buildWriteResult(table, updatedMetadata, newLocation);
+    }
+
+    /**
+     * Build the deferred-write response: the new metadata.json location plus the
+     * set of metadata-layer files THIS call newly wrote to object storage, so the
+     * C-side transaction tracker can clean them up on ROLLBACK (and drop the
+     * superseded intermediate ones on COMMIT) -- see issue #399.
+     *
+     * "written-metadata-files" contains ONLY metadata-layer files:
+     *   - the new metadata.json,
+     *   - this snapshot's manifest-list (snap-*.avro),
+     *   - the manifest(s) ADDED by this snapshot (filtered by snapshotId so
+     *     manifests inherited from earlier snapshots are NOT reported -- deleting
+     *     those would corrupt the base table).
+     * Data/delete parquet is deliberately excluded: it is written by the C
+     * provider and cleaned up via the Class 1 PendingRelDelete path.  Callers on
+     * COMMIT must keep every file belonging to the finally-committed metadata.json.
+     */
+    private Map<String, Object> buildWriteResult(Table table, TableMetadata updatedMetadata, String newLocation) {
+        Map<String, Object> result = new HashMap<>();
+        List<String> written = new ArrayList<>();
+        if (newLocation != null) {
+            written.add(newLocation);
+        }
+        Snapshot snap = (updatedMetadata != null) ? updatedMetadata.currentSnapshot() : null;
+        if (snap != null) {
+            if (snap.manifestListLocation() != null) {
+                written.add(snap.manifestListLocation());
+            }
+            long currentSnapshotId = snap.snapshotId();
+            for (ManifestFile mf : snap.allManifests(table.io())) {
+                Long addedBy = mf.snapshotId();
+                if (addedBy != null && addedBy.longValue() == currentSnapshotId && mf.path() != null) {
+                    written.add(mf.path());
+                }
+            }
+        }
+        result.put("metadata-location", newLocation);
+        result.put("written-metadata-files", written);
+        return result;
     }
 
 
@@ -352,7 +394,7 @@ public class IcebergMetadataFetcher extends BasePlugin implements MetadataFetche
         return true;
     }
 
-    public String rowUpdateAndReturnLocation() throws Exception {
+    public Map<String, Object> rowUpdateAndReturnLocation() throws Exception {
         IcebergCatalog catalog = icebergClientWrapper.getIcebergCatalog(context);
         Table table = catalog.loadTable(context.getDataSource());
         healLegacyTableProperties(table);
@@ -377,7 +419,8 @@ public class IcebergMetadataFetcher extends BasePlugin implements MetadataFetche
         // Extract metadata and write metadata.json to object storage
         HasTableOperations txnTableOps = (HasTableOperations) txn.table();
         TableMetadata updatedMetadata = txnTableOps.operations().current();
-        return writeMetadataFile(table, updatedMetadata);
+        String newLocation = writeMetadataFile(table, updatedMetadata);
+        return buildWriteResult(table, updatedMetadata, newLocation);
     }
 
     /**

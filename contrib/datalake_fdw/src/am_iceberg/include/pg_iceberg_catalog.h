@@ -62,12 +62,18 @@ extern char *pg_iceberg_get_rewrite_plan_with_catalog(Relation rel,
 													   int min_input_files,
 													   int target_file_size_mb);
 
+/*
+ * written_metadata_files (out, nullable): when non-NULL, set to the List of
+ * metadata-layer files the agent newly wrote, for transaction-level orphan
+ * cleanup on ROLLBACK / COMMIT (issue #399).
+ */
 extern char *pg_iceberg_modify_data_with_catalog(Relation rel,
 												 IcebergTableInfo *table_info,
 												 const char *data_locations,
 												 const char *metadata_location,
 												 bool is_internal,
-												 CmdType operation);
+												 CmdType operation,
+												 List **written_metadata_files);
 
 extern char *pg_iceberg_truncate_with_catalog(Relation rel,
 											   IcebergTableInfo *table_info,

@@ -150,6 +150,26 @@ extern char *pg_iceberg_catalog_op(Relation relation,
 									 const char *volumeName);
 
 /*
+ * Like pg_iceberg_catalog_op, but when written_metadata_files is non-NULL it
+ * is set to the List of metadata-layer files (cstrings) the agent call newly
+ * wrote to object storage, so the transaction tracker can clean them up on
+ * ROLLBACK / COMMIT (issue #399).  Set to NIL when the response has none.
+ */
+extern char *pg_iceberg_catalog_op_ex(Relation relation,
+									  IcebergCatalogOperation op,
+									  const char *catalogName,
+									  const char *nameSpace,
+									  const char *tableName,
+									  const char *data_locations,
+									  const char *metadata_location,
+									  bool is_internal,
+									  const char *catalogServer,
+									  const char *foreignCatalogName,
+									  const char *volumeServer,
+									  const char *volumeName,
+									  List **written_metadata_files);
+
+/*
  * Vacuum rewrite functions
  *
  * pg_iceberg_get_rewrite_plan:

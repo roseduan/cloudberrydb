@@ -467,29 +467,41 @@ extract_statistics_from_fdw_state(IcebergCatalogFdwState *fdwState)
 	return parse_statistics_response(fdwState->response.responseBody);
 }
 
+/*
+ * Extract the new metadata-location from a catalog-op response and, when
+ * written_out is non-NULL, also the "written-metadata-files" array (the
+ * metadata-layer files the agent newly wrote) for transaction-level orphan
+ * cleanup (issue #399).
+ */
 static char *
-extract_locations_from_fdw_state(IcebergCatalogFdwState *fdwState)
+extract_locations_and_written_from_fdw_state(IcebergCatalogFdwState *fdwState,
+											  List **written_out)
 {
 	check_fdw_execution_error(fdwState, "Failed to catalog operation");
-	return parse_metadata_location(fdwState->response.responseBody);
+	return parse_metadata_location_ex(fdwState->response.responseBody,
+									  written_out);
 }
 
 char *
-pg_iceberg_catalog_op(Relation relation,
-					  IcebergCatalogOperation op,
-					  const char *catalogName,
-					  const char *nameSpace,
-					  const char *tableName,
-					  const char *data_locations,
-					  const char *metadata_location,
-					  bool is_internal,
-					  const char *catalogServer,
-					  const char *foreignCatalogName,
-					  const char *volumeServer,
-					  const char *volumeName)
+pg_iceberg_catalog_op_ex(Relation relation,
+						 IcebergCatalogOperation op,
+						 const char *catalogName,
+						 const char *nameSpace,
+						 const char *tableName,
+						 const char *data_locations,
+						 const char *metadata_location,
+						 bool is_internal,
+						 const char *catalogServer,
+						 const char *foreignCatalogName,
+						 const char *volumeServer,
+						 const char *volumeName,
+						 List **written_metadata_files)
 {
 	IcebergCatalogFdwState *fdwState;
 	IcebergTableSchema	   *schema = NULL;
+
+	if (written_metadata_files != NULL)
+		*written_metadata_files = NIL;
 
 	if (relation != NULL)
 		schema = build_schema_from_pg_table(relation);
@@ -509,7 +521,37 @@ pg_iceberg_catalog_op(Relation relation,
 	if (schema != NULL)
 		free_schema_info(schema);
 
-	return extract_locations_from_fdw_state(fdwState);
+	return extract_locations_and_written_from_fdw_state(fdwState,
+														written_metadata_files);
+}
+
+char *
+pg_iceberg_catalog_op(Relation relation,
+					  IcebergCatalogOperation op,
+					  const char *catalogName,
+					  const char *nameSpace,
+					  const char *tableName,
+					  const char *data_locations,
+					  const char *metadata_location,
+					  bool is_internal,
+					  const char *catalogServer,
+					  const char *foreignCatalogName,
+					  const char *volumeServer,
+					  const char *volumeName)
+{
+	return pg_iceberg_catalog_op_ex(relation,
+									op,
+									catalogName,
+									nameSpace,
+									tableName,
+									data_locations,
+									metadata_location,
+									is_internal,
+									catalogServer,
+									foreignCatalogName,
+									volumeServer,
+									volumeName,
+									NULL);
 }
 
 IcebergLoadTableResult *

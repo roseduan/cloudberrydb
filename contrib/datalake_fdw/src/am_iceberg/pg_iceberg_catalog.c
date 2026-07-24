@@ -678,7 +678,8 @@ pg_iceberg_modify_data_with_catalog(Relation rel,
 									const char *data_locations,
 									const char *metadata_location,
 									bool is_internal,
-									CmdType operation)
+									CmdType operation,
+									List **written_metadata_files)
 {
 	IcebergCatalogOperation op;
 	const char *nameSpace;
@@ -718,18 +719,19 @@ pg_iceberg_modify_data_with_catalog(Relation rel,
 		catalogName = table_info->opts->catalog;
 	}
 
-	return pg_iceberg_catalog_op(rel,
-								 op,
-								 catalogName,
-								 nameSpace,
-								 tableName,
-								 data_locations,
-								 metadata_location,
-								 is_internal,
-								 table_info->catalog_server_name,
-								 table_info->catalog_name,
-								 table_info->volume_server_name,
-								 table_info->volume_name);
+	return pg_iceberg_catalog_op_ex(rel,
+									op,
+									catalogName,
+									nameSpace,
+									tableName,
+									data_locations,
+									metadata_location,
+									is_internal,
+									table_info->catalog_server_name,
+									table_info->catalog_name,
+									table_info->volume_server_name,
+									table_info->volume_name,
+									written_metadata_files);
 }
 
 /*

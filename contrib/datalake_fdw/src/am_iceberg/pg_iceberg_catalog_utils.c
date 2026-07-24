@@ -36,6 +36,15 @@ typedef struct
 	JsonLexContext *lex;
 	JsonParseState		state;
 	char		   *metadata_location;
+	/*
+	 * issue #399: the append/update response also carries a
+	 * "written-metadata-files" array listing the metadata-layer files
+	 * (metadata.json + manifest-list + manifests) this agent call newly wrote.
+	 * The transaction tracker collects them to clean up on ROLLBACK / drop the
+	 * superseded ones on COMMIT.  in_written_files brackets the array.
+	 */
+	bool			in_written_files;
+	List		   *written_files;
 } MetadataParseState;
 
 static void
@@ -44,7 +53,29 @@ metadata_object_field_start(void *state, char *fname, bool isnull)
 	MetadataParseState *s = (MetadataParseState *) state;
 
 	if (pg_strcasecmp(fname, "metadata-location") == 0)
+	{
 		s->state = PARSE_METADATA_LOCATION;
+		s->in_written_files = false;
+	}
+	else if (pg_strcasecmp(fname, "written-metadata-files") == 0)
+	{
+		s->state = PARSE_START;
+		s->in_written_files = true;
+	}
+	else
+	{
+		s->state = PARSE_START;
+		s->in_written_files = false;
+	}
+}
+
+static void
+metadata_array_end(void *state)
+{
+	MetadataParseState *s = (MetadataParseState *) state;
+
+	/* Leaving the "written-metadata-files" array (or any array). */
+	s->in_written_files = false;
 }
 
 static void
@@ -53,15 +84,26 @@ metadata_scalar(void *state, char *token, JsonTokenType tokentype)
 	MetadataParseState *s = (MetadataParseState *) state;
 
 	if (s->state == PARSE_METADATA_LOCATION && tokentype == JSON_TOKEN_STRING)
+	{
 		s->metadata_location = pstrdup(token);
+		s->state = PARSE_START;
+	}
+	else if (s->in_written_files && tokentype == JSON_TOKEN_STRING &&
+			 token != NULL && token[0] != '\0')
+	{
+		s->written_files = lappend(s->written_files, pstrdup(token));
+	}
 }
 
 /*
- * parse_metadata_location
- *		Extract 'metadata-location' from a JSON response string.
+ * parse_metadata_location_ex
+ *		Extract 'metadata-location' from a JSON response string and, when
+ *		written_files_out is non-NULL, also collect the
+ *		'written-metadata-files' array (List of palloc'd cstrings; NIL when
+ *		the field is absent).  See issue #399.
  */
 char *
-parse_metadata_location(char *json_response)
+parse_metadata_location_ex(char *json_response, List **written_files_out)
 {
 	JsonLexContext		   *lex;
 	JsonSemAction			sem;
@@ -81,6 +123,7 @@ parse_metadata_location(char *json_response)
 	memset(&sem, 0, sizeof(sem));
 	sem.semstate = &parse_state;
 	sem.object_field_start = metadata_object_field_start;
+	sem.array_end = metadata_array_end;
 	sem.scalar = metadata_scalar;
 
 	pg_parse_json_or_ereport(lex, &sem);
@@ -91,7 +134,20 @@ parse_metadata_location(char *json_response)
 	if (result == NULL)
 		elog(ERROR, "Missing 'metadata-location' field in response");
 
+	if (written_files_out != NULL)
+		*written_files_out = parse_state.written_files;
+
 	return result;
+}
+
+/*
+ * parse_metadata_location
+ *		Extract 'metadata-location' from a JSON response string.
+ */
+char *
+parse_metadata_location(char *json_response)
+{
+	return parse_metadata_location_ex(json_response, NULL);
 }
 
 /*

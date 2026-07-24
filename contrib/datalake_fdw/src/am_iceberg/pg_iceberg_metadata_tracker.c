@@ -62,15 +62,23 @@
 #include "miscadmin.h"
 #include "utils/hsearch.h"
 #include "utils/inval.h"
+#include "utils/lsyscache.h"
 #include "utils/json.h"
 #include "utils/jsonfuncs.h"
 #include "utils/memutils.h"
 #include "utils/rel.h"
 #include "utils/snapmgr.h"
+#include "utils/timestamp.h"
 
+#include "cdb/cdbvars.h"
+
+#include "../datalake_def.h"
+#include "../common/agent_cli_wrapper.h"
 #include "include/pg_iceberg_metadata_tracker.h"
 #include "include/pg_iceberg_metadata.h"
 #include "include/pg_iceberg_catalog.h"
+#include "include/pg_iceberg_av_consumer.h"
+#include "include/pg_iceberg_deletion_queue.h"
 
 /* Initial number of hash table entries */
 #define TRACKER_HASH_INITIAL_SIZE 16
@@ -130,6 +138,18 @@ static const char *tracker_commit_external_table(TableMetadataState *state,
 static void tracker_sync_local_metadata_after_external_commit(
 	TableMetadataState *state,
 	IcebergTableInfo *table_info);
+
+/* issue #399: transaction-level metadata-file orphan cleanup */
+static void tracker_note_written_metadata(TableMetadataState *state,
+										  IcebergTableInfo *table_info,
+										  List *written_files,
+										  const char *tree_metadata_location,
+										  int nest_level);
+static void tracker_agent_delete_paths(const char *fileio_config, List *paths);
+static void tracker_cleanup_metadata_on_abort(void);
+static void tracker_enqueue_superseded_metadata_on_commit(void);
+static void tracker_delete_written_files_at_level(TableMetadataState *state,
+												  int target_level);
 
 
 /* ================================================================
@@ -237,6 +257,11 @@ table_state_init(TableMetadataState *state)
 	state->data_files = NIL;
 	state->delete_files = NIL;
 	state->level_history = NIL;
+	state->written_metadata_files = NIL;
+	state->cleanup_fileio_config = NULL;
+	state->cleanup_volume_server = NULL;
+	state->cleanup_volume_name = NULL;
+	state->cleanup_owner = NULL;
 }
 
 /*
@@ -757,6 +782,14 @@ tracker_rollback_to_level(int target_level)
 		if (state->first_modified_at_level >= target_level)
 		{
 			/*
+			 * issue #399: this table is entirely new to the aborting
+			 * subtransaction, so every metadata-layer file it wrote (all at
+			 * levels >= target_level) is now orphaned.  Delete them before we
+			 * drop the state and lose the paths.
+			 */
+			tracker_delete_written_files_at_level(state, target_level);
+
+			/*
 			 * It is safe in PostgreSQL's dynahash implementation to remove the
 			 * current entry during a hash_seq_search iteration.
 			 */
@@ -769,8 +802,328 @@ tracker_rollback_to_level(int target_level)
 			 * additional changes (metadata + files) that need to be rolled back.
 			 */
 			table_state_rollback_to_level(state, target_level);
+
+			/*
+			 * issue #399: delete the metadata-layer files written at the
+			 * rolled-back levels (>= target_level); entries below stay tracked
+			 * and are handled at top-level commit/abort.
+			 */
+			tracker_delete_written_files_at_level(state, target_level);
 		}
 	}
+}
+
+
+/* ================================================================
+ *      issue #399: transaction-level metadata-file orphan cleanup
+ * ================================================================
+ */
+
+/*
+ * tracker_note_written_metadata
+ *    Record the metadata-layer files the agent just wrote for `state`, and
+ *    (once per table) cache the credentials needed to delete them on abort.
+ *
+ * Only builtin-catalog tables are tracked: the deletion queue and this cleanup
+ * manage builtin files only; external catalogs own their own file lifecycle.
+ * Called from apply_updates_with_rebase right after a successful agent write,
+ * while the transaction is still healthy (catalog access is safe here).
+ */
+static void
+tracker_note_written_metadata(TableMetadataState *state,
+							  IcebergTableInfo *table_info,
+							  List *written_files,
+							  const char *tree_metadata_location,
+							  int nest_level)
+{
+	MemoryContext oldcxt;
+	ListCell   *lc;
+
+	if (!state->is_builtin_catalog || written_files == NIL)
+		return;
+
+	/*
+	 * Build + cache the fileIOConfig once, while the transaction is still
+	 * healthy.  The ABORT callback reuses it to delete orphans without
+	 * touching the catalog (unsafe during abort).  Build in the current
+	 * (query) context, then copy the JSON into tracker_context.
+	 */
+	if (state->cleanup_fileio_config == NULL &&
+		table_info->volume_server_name != NULL &&
+		table_info->volume_name != NULL)
+	{
+		char	   *owner = GetUserNameFromId(GetUserId(), false);
+		char	   *cfg = pg_iceberg_build_fileio_config(
+			table_info->volume_server_name,
+			table_info->volume_name,
+			owner);
+
+		if (cfg != NULL)
+		{
+			oldcxt = MemoryContextSwitchTo(tracker_context);
+			state->cleanup_fileio_config = pstrdup(cfg);
+			state->cleanup_volume_server = pstrdup(table_info->volume_server_name);
+			state->cleanup_volume_name = pstrdup(table_info->volume_name);
+			state->cleanup_owner = pstrdup(owner);
+			MemoryContextSwitchTo(oldcxt);
+		}
+	}
+
+	/* Record each written metadata-layer file into tracker_context. */
+	oldcxt = MemoryContextSwitchTo(tracker_context);
+	foreach(lc, written_files)
+	{
+		const char *path = (const char *) lfirst(lc);
+		TrackedMetadataFile *tmf;
+
+		if (path == NULL || path[0] == '\0')
+			continue;
+
+		tmf = (TrackedMetadataFile *) palloc0(sizeof(TrackedMetadataFile));
+		tmf->path = pstrdup(path);
+		tmf->tree_metadata_location =
+			tree_metadata_location ? pstrdup(tree_metadata_location) : NULL;
+		tmf->nest_level = nest_level;
+		state->written_metadata_files =
+			lappend(state->written_metadata_files, tmf);
+	}
+	MemoryContextSwitchTo(oldcxt);
+}
+
+/*
+ * tracker_agent_delete_paths
+ *    Best-effort delete of metadata-layer file paths via dlagent's
+ *    /v1/files/delete (a blind single-file delete that does NOT parse the
+ *    metadata, so it never touches shared data files).  Never raises: any
+ *    per-file failure leaves the file for the orphan-file backstop.  QD-only.
+ */
+static void
+tracker_agent_delete_paths(const char *fileio_config, List *paths)
+{
+	AgentCliHandle *h = NULL;
+	ListCell   *lc;
+
+	if (fileio_config == NULL || paths == NIL)
+		return;
+	if (Gp_role != GP_ROLE_DISPATCH)
+		return;
+
+	/*
+	 * This runs from (sub)transaction ABORT callbacks, which must never let an
+	 * error escape -- an uncaught ERROR during abort escalates to PANIC.
+	 * agent_cli_wrapper_create() itself can elog(ERROR) (agent_cli_init
+	 * failure), so the whole handle lifecycle is wrapped in an outer,
+	 * best-effort PG_TRY; the inner per-file PG_TRY keeps one failed delete
+	 * from skipping the rest.  Any failure downgrades to a WARNING and the
+	 * leftover files fall to the orphan-file backstop.  (destroy() never
+	 * throws -- it only frees -- so it is safe at the tail of the TRY.)
+	 */
+	PG_TRY();
+	{
+		h = agent_cli_wrapper_create(datalake_agent_server_url,
+									 "iceberg", "files-delete");
+		foreach(lc, paths)
+		{
+			const char *path = (const char *) lfirst(lc);
+
+			if (path == NULL || path[0] == '\0')
+				continue;
+
+			PG_TRY();
+			{
+				agent_cli_wrapper_delete_file(h, path, fileio_config);
+				agent_cli_wrapper_check_exec_error_json(h,
+					"iceberg metadata orphan cleanup (#399)");
+			}
+			PG_CATCH();
+			{
+				FlushErrorState();
+				elog(WARNING,
+					 "iceberg: could not delete orphaned metadata file \"%s\"; "
+					 "left for orphan-file cleanup", path);
+			}
+			PG_END_TRY();
+		}
+
+		agent_cli_wrapper_destroy(h);
+	}
+	PG_CATCH();
+	{
+		FlushErrorState();
+		elog(WARNING,
+			 "iceberg: could not run metadata orphan cleanup "
+			 "(agent unavailable); left for orphan-file cleanup");
+	}
+	PG_END_TRY();
+}
+
+/*
+ * tracker_cleanup_metadata_on_abort
+ *    ABORT path: synchronously delete EVERY metadata-layer file the
+ *    transaction caused the agent to write.  None were committed, so all are
+ *    orphans.  Best-effort; runs before destroy_tracker() while
+ *    tracker_context is still alive.
+ */
+static void
+tracker_cleanup_metadata_on_abort(void)
+{
+	HASH_SEQ_STATUS status;
+	TableMetadataState *state;
+
+	if (tracker_table == NULL || Gp_role != GP_ROLE_DISPATCH)
+		return;
+
+	hash_seq_init(&status, tracker_table);
+	while ((state = (TableMetadataState *) hash_seq_search(&status)) != NULL)
+	{
+		List	   *paths = NIL;
+		ListCell   *lc;
+
+		if (state->written_metadata_files == NIL ||
+			state->cleanup_fileio_config == NULL)
+			continue;
+
+		foreach(lc, state->written_metadata_files)
+		{
+			TrackedMetadataFile *tmf = (TrackedMetadataFile *) lfirst(lc);
+
+			paths = lappend(paths, tmf->path);
+		}
+		tracker_agent_delete_paths(state->cleanup_fileio_config, paths);
+		list_free(paths);
+	}
+}
+
+/*
+ * tracker_enqueue_superseded_metadata_on_commit
+ *    COMMIT path: every metadata-layer file whose tree is NOT the
+ *    finally-committed metadata.json is a superseded intermediate orphan.
+ *    Enqueue them into pg_iceberg_deletion_queue as DELETION_TYPE_FILE so the
+ *    autovacuum consumer deletes them asynchronously (blind single-file
+ *    delete -- never touches shared data files).  Runs in PRE_COMMIT so the
+ *    inserts commit with the transaction.
+ *
+ * Keeps every file belonging to the final tree.  Relies on the builtin
+ * invariant (verified) that each agent append re-writes a self-contained,
+ * disjoint manifest set, so a non-final file is never referenced by the final
+ * tree.
+ */
+static void
+tracker_enqueue_superseded_metadata_on_commit(void)
+{
+	HASH_SEQ_STATUS status;
+	TableMetadataState *state;
+
+	if (tracker_table == NULL || Gp_role != GP_ROLE_DISPATCH)
+		return;
+
+	hash_seq_init(&status, tracker_table);
+	while ((state = (TableMetadataState *) hash_seq_search(&status)) != NULL)
+	{
+		ListCell   *lc;
+		const char *final_location = state->current_metadata_location;
+		char	   *qname = NULL;
+		char	   *relname;
+
+		/*
+		 * Skip tables whose credentials were never captured (e.g. the volume
+		 * server was concurrently dropped so pg_iceberg_build_fileio_config
+		 * returned NULL in tracker_note_written_metadata).  Enqueuing with NULL
+		 * volume/server/owner would produce rows the autovacuum consumer can
+		 * never resolve.  Mirrors the cleanup_fileio_config guard on the abort
+		 * path (tracker_cleanup_metadata_on_abort).
+		 */
+		if (state->written_metadata_files == NIL ||
+			state->cleanup_volume_name == NULL)
+			continue;
+
+		/*
+		 * Resolve "nspname.relname" for the deletion_queue audit column, so the
+		 * enqueued orphans are attributable to their table (same convention as
+		 * the DROP/TRUNCATE/VACUUM entries).  The table still exists at
+		 * PRE_COMMIT, so the syscache lookups are valid.
+		 */
+		relname = get_rel_name(state->relid);
+		if (relname != NULL)
+		{
+			Oid			nspoid = get_rel_namespace(state->relid);
+			char	   *nspname = OidIsValid(nspoid) ?
+				get_namespace_name(nspoid) : NULL;
+
+			if (nspname != NULL)
+				qname = psprintf("%s.%s", nspname, relname);
+			else
+				qname = relname;
+		}
+
+		foreach(lc, state->written_metadata_files)
+		{
+			TrackedMetadataFile *tmf = (TrackedMetadataFile *) lfirst(lc);
+
+			/* Keep every file belonging to the finally-committed tree. */
+			if (final_location != NULL &&
+				tmf->tree_metadata_location != NULL &&
+				strcmp(tmf->tree_metadata_location, final_location) == 0)
+				continue;
+
+			pg_iceberg_deletion_queue_insert(tmf->path,
+											 state->relid,
+											 state->cleanup_volume_name,
+											 state->cleanup_volume_server,
+											 state->cleanup_owner,
+											 qname,
+											 GetCurrentTimestamp(),
+											 DELETION_TYPE_FILE);
+		}
+	}
+}
+
+/*
+ * tracker_delete_written_files_at_level
+ *    Subtransaction ABORT helper: synchronously delete (and forget) the
+ *    metadata-layer files this table wrote at nesting levels >= target_level,
+ *    which ROLLBACK TO SAVEPOINT has just orphaned.  Entries below
+ *    target_level stay tracked and are handled at top-level commit/abort.
+ *    Best-effort.
+ */
+static void
+tracker_delete_written_files_at_level(TableMetadataState *state,
+									  int target_level)
+{
+	List	   *to_delete = NIL;
+	List	   *keep = NIL;
+	ListCell   *lc;
+	MemoryContext oldcxt;
+
+	if (state->written_metadata_files == NIL)
+		return;
+
+	/*
+	 * Build keep/to_delete in tracker_context, NOT the current context.  This
+	 * runs from the subxact-abort callback, where CurrentMemoryContext is the
+	 * aborting subtransaction's curTransactionContext -- PostgreSQL deletes
+	 * that context immediately after the callbacks return.  The `keep` list is
+	 * stored back into state->written_metadata_files and read again at
+	 * top-level commit/abort, so its cells must outlive the subtransaction.
+	 */
+	oldcxt = MemoryContextSwitchTo(tracker_context);
+	foreach(lc, state->written_metadata_files)
+	{
+		TrackedMetadataFile *tmf = (TrackedMetadataFile *) lfirst(lc);
+
+		if (tmf->nest_level >= target_level)
+			to_delete = lappend(to_delete, tmf->path);
+		else
+			keep = lappend(keep, tmf);
+	}
+	MemoryContextSwitchTo(oldcxt);
+
+	if (to_delete != NIL)
+		tracker_agent_delete_paths(state->cleanup_fileio_config, to_delete);
+
+	list_free(to_delete);
+	/* Old list cells leak into tracker_context, reclaimed at destroy_tracker. */
+	state->written_metadata_files = keep;
 }
 
 
@@ -801,6 +1154,15 @@ metadata_tracker_xact_callback(XactEvent event, void *arg)
 			 * the correct behavior (metadata changes are not persisted).
 			 */
 			tracker_commit_all();
+
+			/*
+			 * issue #399: the final metadata.json per table is now known
+			 * (current_metadata_location).  Enqueue every superseded
+			 * intermediate metadata-layer file this transaction wrote so the
+			 * autovacuum consumer deletes them asynchronously.  The inserts
+			 * commit with this transaction.
+			 */
+			tracker_enqueue_superseded_metadata_on_commit();
 			break;
 
 		case XACT_EVENT_COMMIT:
@@ -818,7 +1180,14 @@ metadata_tracker_xact_callback(XactEvent event, void *arg)
 			 * Transaction aborted: discard all tracked changes.
 			 * No catalog updates are made; the catalog retains the
 			 * original metadata locations.
+			 *
+			 * issue #399: first delete the metadata-layer files the agent
+			 * wrote for read-your-writes during this transaction -- they were
+			 * never committed and would otherwise be orphaned.  Runs before
+			 * destroy_tracker() while the tracker (paths + cached credentials)
+			 * is still alive.  Best-effort.
 			 */
+			tracker_cleanup_metadata_on_abort();
 			destroy_tracker();
 			break;
 
@@ -1482,6 +1851,8 @@ pg_iceberg_tracker_apply_updates_with_rebase(Oid relid,
 	MemoryContext oldcxt;
 	int			prev_data_count;
 	int			prev_delete_count;
+	List	   *written_files = NIL;	/* issue #399: metadata-layer files
+										 * the agent wrote this call */
 
 	state = (TableMetadataState *)
 		hash_search(tracker_table, &relid, HASH_FIND, NULL);
@@ -1581,7 +1952,8 @@ pg_iceberg_tracker_apply_updates_with_rebase(Oid relid,
 		data_locations_json,
 		latest_global_location,
 		state->is_internal,
-		cmd_type);
+		cmd_type,
+		&written_files);
 
 	/*
 	 * Step 6: Agent succeeded. Update metadata locations.
@@ -1606,6 +1978,15 @@ pg_iceberg_tracker_apply_updates_with_rebase(Oid relid,
 	state->dirty = false;
 
 	MemoryContextSwitchTo(oldcxt);
+
+	/*
+	 * issue #399: record the metadata-layer files this agent write produced
+	 * (metadata.json + manifests + manifest-list) and, once per table, cache
+	 * the credentials to delete them.  For builtin tables only; done here
+	 * while the transaction is healthy and table_info is still valid.
+	 */
+	tracker_note_written_metadata(state, table_info, written_files,
+								  state->current_metadata_location, nest_level);
 
 	pg_iceberg_free_table_info(table_info);
 	table_close(rel, AccessShareLock);

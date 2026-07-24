@@ -24,4 +24,15 @@
  */
 extern void pg_iceberg_av_consumer_init(void);
 
+/*
+ * Build the dlagent fileIOConfig JSON for (volume_server, volume, owner).
+ * Must be called with a live transaction (does catalog + syscache lookups).
+ * Returns palloc'd JSON in CurrentMemoryContext, or NULL if unresolvable.
+ * Used by the transaction tracker to cache credentials for abort-time
+ * metadata-file cleanup (issue #399).
+ */
+extern char *pg_iceberg_build_fileio_config(const char *volume_server_name,
+											 const char *volume_name,
+											 const char *owner_username);
+
 #endif /* __PG_ICEBERG_AV_CONSUMER_H__ */

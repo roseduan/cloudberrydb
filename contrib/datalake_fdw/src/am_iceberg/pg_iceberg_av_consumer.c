@@ -525,6 +525,49 @@ resolve_user_mapping_for(Oid server_oid, const char *owner_username)
     return um;
 }
 
+/* ================================================================
+ * pg_iceberg_build_fileio_config: public helper (issue #399)
+ *
+ * Build the dlagent fileIOConfig JSON for (volume_server, volume, owner) so
+ * the transaction tracker can cache it while the transaction is still healthy
+ * and reuse it to delete orphaned metadata files via /v1/files/delete on
+ * ROLLBACK -- when catalog access is no longer safe.  Requires a valid
+ * transaction/snapshot (catalog + syscache lookups).  Returns a palloc'd JSON
+ * string in CurrentMemoryContext, or NULL if the server/volume/user mapping
+ * can no longer be resolved.
+ * ================================================================
+ */
+char *
+pg_iceberg_build_fileio_config(const char *volume_server_name,
+                               const char *volume_name,
+                               const char *owner_username)
+{
+    Oid            server_oid;
+    ForeignServer *server;
+    Oid            volume_oid;
+    UserMapping   *um;
+
+    if (volume_server_name == NULL || volume_server_name[0] == '\0' ||
+        volume_name == NULL || volume_name[0] == '\0')
+        return NULL;
+
+    server_oid = get_foreign_server_oid(volume_server_name, /*missing_ok*/ true);
+    if (!OidIsValid(server_oid))
+        return NULL;
+    server = GetForeignServer(server_oid);
+
+    volume_oid = get_foreign_volume_oid(volume_name, volume_server_name,
+                                        /*missing_ok*/ true);
+    if (!OidIsValid(volume_oid))
+        return NULL;
+
+    um = resolve_user_mapping_for(server_oid, owner_username);
+    if (um == NULL)
+        return NULL;
+
+    return build_fileio_config_json(server, volume_oid, um);
+}
+
 
 /* ================================================================
  * build_fileio_config_json: serialize server.options + um.options into

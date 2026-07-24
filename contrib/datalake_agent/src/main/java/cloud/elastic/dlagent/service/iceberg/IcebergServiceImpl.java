@@ -312,20 +312,16 @@ public class IcebergServiceImpl implements IcebergService {
         // The Iceberg AM is already different
         // from the FDW approach. Therefore, we should directly call appendTable here.
         IcebergMetadataFetcher fetcher = newFetcher(context);
-        String metadataLocation = fetcher.onlyBatchAppend();
-
-        Map<String, Object> result = new HashMap<>();
-        result.put("metadata-location", metadataLocation);
-
-        return result;
+        // Returns { metadata-location, written-metadata-files } so the C-side
+        // tracker can clean up the metadata-layer files this append wrote on
+        // ROLLBACK / drop the superseded ones on COMMIT (issue #399).
+        return fetcher.onlyBatchAppend();
     }
 
     public Map<String, Object> rowUpdate(String namespace, String tableName, Map<String, String> properties, RequestContext context) throws Exception {
         IcebergMetadataFetcher fetcher = newFetcher(context);
-        String metadataLocation = fetcher.rowUpdateAndReturnLocation();
-        Map<String, Object> result = new HashMap<>();
-        result.put("metadata-location", metadataLocation);
-        return result;
+        // Returns { metadata-location, written-metadata-files } — see appendToTable / issue #399.
+        return fetcher.rowUpdateAndReturnLocation();
     }
 
     @Override
