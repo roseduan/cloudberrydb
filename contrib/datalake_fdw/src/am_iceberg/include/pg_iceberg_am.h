@@ -90,7 +90,17 @@ extern uint64 pg_iceberg_relation_size(Relation rel, ForkNumber forkNumber);
  * rel->rd_rel->reltuples directly and does not call the tableam
  * relation_estimate_size callback.  Must run on the QD only.
  */
-extern void pg_iceberg_refresh_pg_class_stats(Relation rel);
+extern BlockNumber pg_iceberg_refresh_pg_class_stats(Relation rel);
+
+/*
+ * Re-apply a metadata-derived relpages after standard ANALYZE sampling
+ * overwrote it with the dummy local heap's block count (the sampled
+ * reltuples is kept).
+ */
+extern void pg_iceberg_restore_relpages(Oid relid, BlockNumber pages);
+
+extern void pg_iceberg_snap_high_ndv_stats(Oid relid, int used_target,
+											int base_target);
 
 extern List *pg_iceberg_build_scan_am_private(Relation rel, struct PlanState *ps,
 											   int random_segment_num);

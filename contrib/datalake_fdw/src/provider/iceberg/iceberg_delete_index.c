@@ -5,6 +5,7 @@
 #include "src/dlproxy/datalake.h"
 #include "src/provider/common/file_reader.h"
 #include "src/provider/common/delete_bitmap_c.h"
+#include "src/am_iceberg/include/pg_iceberg_guc.h"
 #include "iceberg_delete_index.h"
 
 /*
@@ -195,7 +196,9 @@ icebergBuildDeleteIndex(MemoryContext parentMcxt,
 			memcpy(keybuf, path, copyLen);
 			keybuf[copyLen] = '\0';
 
-			pfree(DatumGetPointer(values[0]));
+			/* Batch text Datums point into the Parquet reader's slab. */
+			if (!datalakeFileReaderDatumOwned(reader, 0))
+				pfree(DatumGetPointer(values[0]));
 
 			/* Skip entries for data files not assigned to this segment */
 			if (hash_search(localFiles, keybuf, HASH_FIND, NULL) == NULL)

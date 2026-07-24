@@ -83,9 +83,14 @@ DROP TABLE explain_local;
 -- ============================================================
 -- Test 5: EXPLAIN ANALYZE (actually execute)
 -- ============================================================
+-- The per-segment "actual rows" of the Iceberg Scan depends on how the
+-- write distributed the parquet files across segments, so it is not stable
+-- across environments/segment counts.  We only care that EXPLAIN ANALYZE
+-- executes the plan end-to-end, so ignore the volatile plan output.
+-- start_ignore
 EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF)
 SELECT * FROM explain_test WHERE id > 0;
-
+-- end_ignore
 -- ============================================================
 -- Test 6: EXPLAIN with VERBOSE (shows column details)
 -- ============================================================

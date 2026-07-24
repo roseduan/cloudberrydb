@@ -243,26 +243,66 @@ public class IcebergServiceImpl implements IcebergService {
         return false;
     }
 
+    /**
+     * Cache of serialized fragment responses keyed by metadata location plus
+     * everything else that shapes the response (table, filter, projection).
+     *
+     * An Iceberg metadata.json is immutable: any table change commits a NEW
+     * metadata location, so a (location, filter, projection) key can never
+     * serve stale fragments — entries are evicted purely for memory reasons.
+     * This removes the per-scan loadTable + metadata.json read + manifest
+     * scan (~70ms) that otherwise dominates short scans (dimension tables).
+     */
+    private final com.github.benmanes.caffeine.cache.Cache<String, String> fragmentCache =
+            com.github.benmanes.caffeine.cache.Caffeine.newBuilder()
+                    .maximumWeight(256L * 1024 * 1024)
+                    .weigher((String k, String v) -> k.length() + v.length())
+                    .expireAfterAccess(java.time.Duration.ofHours(6))
+                    .build();
+
+    private String fragmentCacheKey(String metadataLocation, RequestContext context) {
+        StringBuilder sb = new StringBuilder(metadataLocation.length() + 128);
+        // NUL separators: a filterString may legally contain '|' (bitwise ops,
+        // regex alternation), which with a printable separator could collide
+        // with another (table, filter) pair and serve wrong fragments.
+        sb.append(metadataLocation)
+          .append('\0').append(context.getDataSource())
+          .append('\0').append(context.getFilterString() == null ? "" : context.getFilterString())
+          .append('\0');
+        if (context.getTupleDescription() != null) {
+            context.getTupleDescription().forEach(
+                c -> sb.append(c.columnName()).append(':').append(c.columnTypeName()).append(','));
+        }
+        return sb.toString();
+    }
+
     @Override
     public String getTableFragment(String namespace, String tableName, Map<String, String> properties,
             RequestContext context) throws Exception {
-        IcebergMetadataFetcher fetcher = newFetcher(context);
-
         // Check for uncommitted metadata location (deferred commit Read-Your-Own-Writes)
         String uncommittedLocation = properties != null
             ? properties.get("metadata_location")
             : null;
 
-        FragmentDescription fragmentDescription;
         if (uncommittedLocation != null && !uncommittedLocation.isEmpty()) {
+            String cacheKey = fragmentCacheKey(uncommittedLocation, context);
+            String cached = fragmentCache.getIfPresent(cacheKey);
+            if (cached != null) {
+                log.debug("Fragment cache hit for {} at {}", context.getDataSource(), uncommittedLocation);
+                return cached;
+            }
             log.debug("Scanning with uncommitted metadata location: {}", uncommittedLocation);
-            fragmentDescription = fetcher.getFragmentsByUncommittedMetadata(uncommittedLocation);
-        } else {
-            fragmentDescription = fetcher.getFragments(null);
+            IcebergMetadataFetcher fetcher = newFetcher(context);
+            FragmentDescription fragmentDescription =
+                fetcher.getFragmentsByUncommittedMetadata(uncommittedLocation);
+            String result = objectMapper.writeValueAsString(fragmentDescription);
+            fragmentCache.put(cacheKey, result);
+            return result;
         }
 
-        String result = objectMapper.writeValueAsString(fragmentDescription);
-        return result;
+        IcebergMetadataFetcher fetcher = newFetcher(context);
+        FragmentDescription fragmentDescription = fetcher.getFragments(null);
+        return objectMapper.writeValueAsString(fragmentDescription);
     }
 
     @Override

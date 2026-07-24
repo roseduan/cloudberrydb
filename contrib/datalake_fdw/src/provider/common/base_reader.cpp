@@ -46,7 +46,9 @@ void BaseFileReader::populateRecord(DatalakeInternalRecord *record)
 		else
 		{
 			isNull = false;
-			record->values[attr] = readPrimitive(typInfo, isNull);
+			record->values[attr] = supportsBatchPrimitive()
+				? readBatchPrimitive(typInfo, isNull)
+				: readPrimitive(typInfo, isNull);
 			record->nulls[attr] = isNull;
 		}
 	}

@@ -536,6 +536,36 @@ getVolumeOptions(icebergTableInfo info)
 	return opt;
 }
 
+/*
+ * Parse and validate an HDFS namenode port from a user-supplied option
+ * string.  Returns the port on success and raises an error for an empty,
+ * non-numeric, or out-of-range value.  The FDW validator
+ * (iceberg_volume_fdw_validator) is a no-op, so without this a typo such as
+ * "hdfs_port '8020x'" or a trailing ':' in hdfs_namenodes would silently
+ * become port 0 and surface later as a cryptic gopher connection error
+ * instead of an actionable message at option-parse time.
+ */
+static int
+parseHdfsNamenodePort(const char *port_str)
+{
+	char	   *endptr;
+	long		port;
+
+	if (port_str == NULL || *port_str == '\0')
+		ereport(ERROR,
+				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+				 errmsg("invalid hdfs namenode port: missing port number")));
+
+	errno = 0;
+	port = strtol(port_str, &endptr, 10);
+	if (errno != 0 || *endptr != '\0' || port <= 0 || port > 65535)
+		ereport(ERROR,
+				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+				 errmsg("invalid hdfs namenode port: \"%s\"", port_str)));
+
+	return (int) port;
+}
+
 static void
 parseVolumeOption(dataLakeOptions *opt, IcebergVolumeOptions* vopt)
 {
@@ -603,32 +633,63 @@ parseVolumeOption(dataLakeOptions *opt, IcebergVolumeOptions* vopt)
 	}
 
 	/*
-	 * HDFS volumes carry the namenode URL in the `endpoint` option.  The
-	 * gopher / hdfs writer reads it from gopher->hdfs_namenode_host and
-	 * gopher->hdfs_namenode_port; without these set, datalakeCreateGopherConfig
-	 * dereferences NULL and crashes on the first INSERT.  Default
-	 * hdfs_auth_method to "simple" so simple-auth HDFS clusters work without
-	 * extra OPTIONS.  Endpoint may be either "hdfs://host:port" (with scheme)
-	 * or just "host:port".
+	 * HDFS volumes: the segment (QE) gopher writer reads the namenode from
+	 * gopher->hdfs_namenode_host / gopher->hdfs_namenode_port.  Populate them
+	 * from the FDW-style `hdfs_namenodes` option (host, host:port, or — in HA
+	 * mode — the nameservice name), falling back to the legacy `endpoint`
+	 * ("hdfs://host:port" or "host:port") for backward compatibility.  Without
+	 * these set, datalakeCreateGopherConfig reports "Unrecognized hdfs name
+	 * node" on the first INSERT.  The auth / HA knobs mirror the regular
+	 * datalake_fdw HDFS server path (see datalake_option.c).
 	 */
 	if (vopt->volume_server.server_type != NULL &&
 		pg_strcasecmp(vopt->volume_server.server_type, "hdfs") == 0)
 	{
+		const char *namenodes = vopt->volume_server.hdfs_namenodes;
 		const char *endpoint = vopt->volume_server.endpoint;
-		if (endpoint != NULL && *endpoint != '\0')
-		{
-			const char *host_port = endpoint;
-			const char *scheme_sep = strstr(endpoint, "://");
-			if (scheme_sep != NULL)
-				host_port = scheme_sep + 3;
 
-			char *dup = pstrdup(host_port);
-			char *colon = strchr(dup, ':');
+		if (namenodes != NULL && *namenodes != '\0')
+		{
+			char	   *dup = pstrdup(namenodes);
+			char	   *colon = strrchr(dup, ':');
+
+			/*
+			 * A colon means host:port.  In HA mode the value is a bare
+			 * nameservice name (no colon): keep it as the host and take the
+			 * port from hdfs_port (default 8020).
+			 */
 			if (colon != NULL)
 			{
 				*colon = '\0';
 				opt->gopher->hdfs_namenode_host = pstrdup(dup);
-				opt->gopher->hdfs_namenode_port = atoi(colon + 1);
+				opt->gopher->hdfs_namenode_port = parseHdfsNamenodePort(colon + 1);
+			}
+			else
+			{
+				opt->gopher->hdfs_namenode_host = pstrdup(dup);
+				opt->gopher->hdfs_namenode_port =
+					(vopt->volume_server.hdfs_port != NULL)
+					? parseHdfsNamenodePort(vopt->volume_server.hdfs_port) : 8020;
+			}
+			pfree(dup);
+		}
+		else if (endpoint != NULL && *endpoint != '\0')
+		{
+			const char *host_port = endpoint;
+			const char *scheme_sep = strstr(endpoint, "://");
+			char	   *dup;
+			char	   *colon;
+
+			if (scheme_sep != NULL)
+				host_port = scheme_sep + 3;
+
+			dup = pstrdup(host_port);
+			colon = strchr(dup, ':');
+			if (colon != NULL)
+			{
+				*colon = '\0';
+				opt->gopher->hdfs_namenode_host = pstrdup(dup);
+				opt->gopher->hdfs_namenode_port = parseHdfsNamenodePort(colon + 1);
 			}
 			else
 			{
@@ -639,7 +700,48 @@ parseVolumeOption(dataLakeOptions *opt, IcebergVolumeOptions* vopt)
 			pfree(dup);
 		}
 
-		opt->gopher->hdfs_auth_method = pstrdup("simple");
+		/* auth / rpc knobs (all optional; default simple auth) */
+		if (vopt->volume_server.hdfs_auth_method != NULL)
+			opt->gopher->hdfs_auth_method =
+				pstrdup(vopt->volume_server.hdfs_auth_method);
+		else
+			opt->gopher->hdfs_auth_method = pstrdup("simple");
+
+		if (vopt->volume_server.hadoop_rpc_protection != NULL)
+			opt->gopher->hadoop_rpc_protection =
+				pstrdup(vopt->volume_server.hadoop_rpc_protection);
+		if (vopt->volume_server.krb_principal != NULL)
+			opt->gopher->krb_principal =
+				pstrdup(vopt->volume_server.krb_principal);
+		if (vopt->volume_server.krb_principal_keytab != NULL)
+			opt->gopher->krb_principal_keytab =
+				pstrdup(vopt->volume_server.krb_principal_keytab);
+		if (vopt->volume_server.data_transfer_protocol != NULL)
+			opt->gopher->data_transfer_protocol =
+				(pg_strcasecmp(vopt->volume_server.data_transfer_protocol,
+							   "true") == 0);
+
+		/* HA volumes: wire the nameservice / failover config for gopher. */
+		if (vopt->volume_server.is_ha_supported != NULL &&
+			pg_strcasecmp(vopt->volume_server.is_ha_supported, "true") == 0)
+		{
+			opt->gopher->is_ha_supported = true;
+			if (vopt->volume_server.dfs_nameservices != NULL)
+				opt->gopher->dfs_name_services =
+					pstrdup(vopt->volume_server.dfs_nameservices);
+			if (vopt->volume_server.dfs_ha_namenodes != NULL)
+				opt->gopher->dfs_ha_namenodes =
+					pstrdup(vopt->volume_server.dfs_ha_namenodes);
+			if (vopt->volume_server.dfs_namenode_rpc_address != NULL)
+				opt->gopher->dfs_ha_namenode_rpc_addr =
+					pstrdup(vopt->volume_server.dfs_namenode_rpc_address);
+			if (vopt->volume_server.dfs_client_failover_proxy_provider != NULL)
+				opt->gopher->dfs_client_failover =
+					pstrdup(vopt->volume_server.dfs_client_failover_proxy_provider);
+			if (vopt->volume_server.krb_service_principal != NULL)
+				opt->gopher->krb_service_principal =
+					pstrdup(vopt->volume_server.krb_service_principal);
+		}
 	}
 }
 

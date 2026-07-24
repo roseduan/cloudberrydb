@@ -27,6 +27,7 @@ void parquet_open(void *reader,
 				  int64_t endOffset);
 void parquet_close(void *reader);
 bool parquet_next(void *reader, DatalakeInternalRecord *record);
+bool parquet_datum_owned(void *reader, int attIdx);
 
 #ifdef __cplusplus
 }

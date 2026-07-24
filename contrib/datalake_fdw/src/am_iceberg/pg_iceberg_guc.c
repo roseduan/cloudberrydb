@@ -39,6 +39,12 @@ int pg_iceberg_max_compactions_per_vacuum = 100;
 /* Scan pushdown */
 bool pg_iceberg_enable_predicate_pushdown = true;
 
+/* Batch column read/convert in the shared Parquet reader (kill-switch) */
+bool pg_iceberg_enable_batch_read = true;
+
+/* Size-balanced scan task assignment across segments (kill-switch) */
+bool pg_iceberg_enable_balanced_scan = true;
+
 void
 pg_iceberg_init_gucs(void)
 {
@@ -47,6 +53,28 @@ pg_iceberg_init_gucs(void)
 							 "manifest-based data-file pruning.",
 							 NULL,
 							 &pg_iceberg_enable_predicate_pushdown,
+							 true,
+							 PGC_USERSET,
+							 0,
+							 NULL, NULL, NULL);
+
+	DefineCustomBoolVariable("datalake.iceberg_enable_batch_read",
+							 "Decode/convert whole columns in batches in the Parquet "
+							 "reader (amortizes per-value dispatch and decimal->numeric "
+							 "conversion).  Turn off to fall back to the per-value path.",
+							 NULL,
+							 &pg_iceberg_enable_batch_read,
+							 true,
+							 PGC_USERSET,
+							 0,
+							 NULL, NULL, NULL);
+
+	DefineCustomBoolVariable("datalake.iceberg_enable_balanced_scan",
+							 "Assign Iceberg scan tasks to segments by greedy size-based "
+							 "bin-packing instead of round-robin by combined-task index, "
+							 "evening out per-segment scan bytes.",
+							 NULL,
+							 &pg_iceberg_enable_balanced_scan,
 							 true,
 							 PGC_USERSET,
 							 0,

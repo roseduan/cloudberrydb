@@ -85,3 +85,9 @@ bool parquet_next(void *reader, DatalakeInternalRecord *record)
 	
 	return result;
 }
+
+bool
+parquet_datum_owned(void *reader, int attIdx)
+{
+	return ((BaseFileReader *) reader)->datumOwnedByReader(attIdx);
+}

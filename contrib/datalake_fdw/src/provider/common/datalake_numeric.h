@@ -175,6 +175,86 @@ int int_to_numeric_with_scale(T val, int scale, Numeric dest)
 	};
 
 	/*
+	 * Fast path for the overwhelmingly common case: DECIMAL(p<=9, s<=4)
+	 * money-style columns (TPC-DS/TPC-H use DECIMAL(7,2) throughout).  An
+	 * unscaled |val| < 10^8 with scale <= DEC_DIGITS produces at most two
+	 * integer base-10000 digits plus one fraction digit, so we can build
+	 * the digits and the short varlena header straight into dest, skipping
+	 * getPowerOf10(), the generic padding loop and the NumericVar round
+	 * trip.  The output is byte-identical to the generic path below
+	 * (same leading/trailing zero stripping, same short-header layout).
+	 * weight here is always in [-1, 1], so the short header always fits.
+	 */
+	if (scale >= 0 && scale <= DEC_DIGITS)
+	{
+		bool	is_neg = val < 0;
+		/*
+		 * Compute the magnitude in an unsigned domain wide enough for every T
+		 * (int32/int64/__int128).  Negating a signed value directly would be
+		 * undefined behaviour when val == T::min(); a wrapped result would
+		 * still look negative, pass the range guard below, and then truncate
+		 * to a wrong NUMERIC instead of falling through to the generic path.
+		 */
+		unsigned __int128 aval = is_neg ? (unsigned __int128) 0 - (unsigned __int128) val
+										: (unsigned __int128) val;
+
+		if (aval < (unsigned __int128) 100000000)
+		{
+			static constexpr uint32_t pow10[5] = {1, 10, 100, 1000, 10000};
+			uint32_t	v = (uint32_t) aval;
+			uint32_t	p = pow10[scale];
+			uint32_t	rest = v / p;
+			uint32_t	frac = v - rest * p;
+			NumericDigit d[3];
+			int			n = 0;
+			int			weight;
+
+			if (rest >= 10000)
+			{
+				d[0] = (NumericDigit) (rest / 10000);
+				d[1] = (NumericDigit) (rest % 10000);
+				n = 2;
+				weight = 1;
+				if (frac == 0 && d[1] == 0)
+					n = 1;			/* strip trailing zero digit */
+			}
+			else if (rest > 0)
+			{
+				d[0] = (NumericDigit) rest;
+				n = 1;
+				weight = 0;
+			}
+			else
+				weight = -1;		/* no integer digits */
+
+			if (frac != 0)
+				d[n++] = (NumericDigit) (frac * pow10[DEC_DIGITS - scale]);
+
+			if (n == 0)
+			{
+				weight = 0;			/* canonical zero: no digits, positive */
+				is_neg = false;
+			}
+
+			Size len = NUMERIC_HDRSZ_SHORT + n * sizeof(NumericDigit);
+
+			SET_VARSIZE(dest, len);
+			dest->choice.n_short.n_header =
+				(is_neg ? (NUMERIC_SHORT | NUMERIC_SHORT_SIGN_MASK)
+						: NUMERIC_SHORT)
+				| (scale << NUMERIC_SHORT_DSCALE_SHIFT)
+				| (weight < 0 ? NUMERIC_SHORT_WEIGHT_SIGN_MASK : 0)
+				| (weight & NUMERIC_SHORT_WEIGHT_MASK);
+
+			NumericDigit *out = NUMERIC_DIGITS(dest);
+			for (int i = 0; i < n; i++)
+				out[i] = d[i];
+
+			return (int) len;
+		}
+	}
+
+	/*
 	 * Use a stack-allocated digit buffer instead of palloc/pfree via
 	 * alloc_numeric_var/free_numeric_var.  This eliminates 4 PLT calls
 	 * (init_numeric_var, alloc_numeric_var, free_numeric_var, and the

@@ -32,6 +32,12 @@ extern int pg_iceberg_max_compactions_per_vacuum;
 /* Scan pushdown */
 extern bool pg_iceberg_enable_predicate_pushdown;
 
+/* Batch column read/convert in the shared Parquet reader (kill-switch) */
+extern bool pg_iceberg_enable_batch_read;
+
+/* Size-balanced scan task assignment across segments (kill-switch) */
+extern bool pg_iceberg_enable_balanced_scan;
+
 extern void pg_iceberg_init_gucs(void);
 
 #endif /* __PG_ICEBERG_GUC_H__ */

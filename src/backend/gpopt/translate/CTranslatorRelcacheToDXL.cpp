@@ -884,7 +884,8 @@ CTranslatorRelcacheToDXL::AddSystemColumns(CMemoryPool *mp,
 	IMDRelation::Erelstoragetype rel_storage_type = RetrieveRelStorageType(rel);
 	BOOL is_standalone_ao_table = ((rel_storage_type == IMDRelation::ErelstorageAppendOnlyRows ||
 						rel_storage_type == IMDRelation::ErelstorageAppendOnlyCols ||
-						rel_storage_type == IMDRelation::ErelstoragePAX)) &&
+						rel_storage_type == IMDRelation::ErelstoragePAX ||
+						rel_storage_type == IMDRelation::ErelstorageIceberg)) &&
 						rel->rd_rel->relkind != RELKIND_PARTITIONED_TABLE &&
 						!rel->rd_rel->relispartition;
 

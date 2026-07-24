@@ -65,11 +65,29 @@ protected:
 	std::vector<int64_t> rowPositions_;
 
 	virtual Datum readPrimitive(const TypeInfo &typInfo, bool &isNull) = 0;
+
+	/*
+	 * Batch read path.  Formats that can decode a whole column of values at
+	 * once (Parquet) override supportsBatchPrimitive() to return true and
+	 * implement readBatchPrimitive(); populateRecord() then serves values
+	 * from a per-column batch buffer instead of one NextValue() per row,
+	 * amortizing per-value dispatch and decimal->numeric conversion.  The
+	 * default forwards to readPrimitive() so non-batch formats are unaffected.
+	 */
+	virtual bool supportsBatchPrimitive() { return false; }
+	virtual Datum readBatchPrimitive(const TypeInfo &typInfo, bool &isNull)
+	{ return readPrimitive(typInfo, isNull); }
+
 	virtual bool readNextRowGroup() = 0;
 	virtual void createMapping(List *columnDesc, bool *attrUsed) = 0;
 	virtual void decodeRecord() = 0;
 
-	void populateRecord(DatalakeInternalRecord *record);
+	/*
+	 * Virtual so batch-capable readers (Parquet) can serve all columns of a
+	 * row in one fused loop; the base implementation is the generic per-column
+	 * readFn_/readPrimitive dispatch.  One virtual call per row, not per value.
+	 */
+	virtual void populateRecord(DatalakeInternalRecord *record);
 	int64 transformTimestamp(int64 timestamp, TIMEUNIT timeUnit);
 
 public:
@@ -78,6 +96,19 @@ public:
 	bool next(DatalakeInternalRecord *record);
 	virtual void open(List *columnDesc, bool *attrUsed, int64_t startOffset, int64_t endOffset) = 0;
 	virtual void close() = 0;
+
+	/*
+	 * Whether Datums this reader returns for the given record attribute
+	 * point into reader-owned memory (a batch slab) rather than into
+	 * caller-owned palloc'd chunks.  Callers must not pfree such Datums.
+	 * Row-path readers allocate per value, so the default is false.
+	 */
+	virtual bool
+	datumOwnedByReader(int attIdx) const
+	{
+		(void) attIdx;
+		return false;
+	}
 };
 
 #endif // BASE_READER_H

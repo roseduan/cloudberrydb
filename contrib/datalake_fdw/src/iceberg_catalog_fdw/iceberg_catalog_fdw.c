@@ -244,14 +244,32 @@ formatBuiltinWarehouseLocationPrefix(IcebergCatalogOptions* catalogOption, Icebe
      * This applies to all catalog types (builtin, hive, polaris) when a
      * volume is configured — the volume base path determines the warehouse.
      */
-    if (catalogOption->foreign_catalog.warehouse_location_prefix == NULL &&
-        volumeOption->volume_server.bucket_name != NULL)
+    if (catalogOption->foreign_catalog.warehouse_location_prefix == NULL)
     {
-        catalogOption->foreign_catalog.warehouse_location_prefix =
-            normalizePathComponents(
-                volumeOption->volume_server.server_type,
-                volumeOption->volume_server.bucket_name,
-                volumeOption->foreign_volume.base_path);
+        if (volumeOption->volume_server.bucket_name != NULL)
+        {
+            /* object storage: <scheme>://bucket/base_path */
+            catalogOption->foreign_catalog.warehouse_location_prefix =
+                normalizePathComponents(
+                    volumeOption->volume_server.server_type,
+                    volumeOption->volume_server.bucket_name,
+                    volumeOption->foreign_volume.base_path);
+        }
+        else if (volumeOption->volume_server.server_type != NULL &&
+                 pg_strcasecmp(volumeOption->volume_server.server_type, "hdfs") == 0)
+        {
+            /*
+             * Bucket-less backends (HDFS): there is no bucket concept, so the
+             * warehouse is the volume base path under the namenode.
+             * buildVolumeBasePath yields e.g. "hdfs:///iceberg-warehouse/",
+             * matching the location the AM layer passes on the create path;
+             * without this the append/commit path leaves the prefix NULL and
+             * the agent builds the builtin catalog with a null warehouse
+             * ("path must not be null or empty").
+             */
+            catalogOption->foreign_catalog.warehouse_location_prefix =
+                buildVolumeBasePath(volumeOption);
+        }
     }
 }
 

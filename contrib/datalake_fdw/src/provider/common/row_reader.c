@@ -16,6 +16,7 @@
 #include "src/datalake_def.h"
 
 extern bool disableCacheFile;
+extern bool pg_iceberg_enable_balanced_scan;
 
 static bool resownerCallbackRegistered;
 static DatalakeRemoteFileHandle *openRemoteHandles;
@@ -716,6 +717,102 @@ datalakeCleanupContext(DatalakeProtocolContext *context)
 	pfree(context);
 }
 
+/*
+ * qsort comparator for balanced task assignment: by length descending, then
+ * file path and split start ascending.  The tie-breakers make the order
+ * fully deterministic so every QE computes the identical assignment from
+ * the identical fragment list.
+ */
+static int
+fileScanTaskSizeCmp(const void *a, const void *b)
+{
+	const FileScanTask *ta = *(const FileScanTask *const *) a;
+	const FileScanTask *tb = *(const FileScanTask *const *) b;
+	int			cmp;
+
+	if (ta->length != tb->length)
+		return (ta->length < tb->length) ? 1 : -1;
+	cmp = strcmp(ta->dataFile->filePath, tb->dataFile->filePath);
+	if (cmp != 0)
+		return cmp;
+	if (ta->start != tb->start)
+		return (ta->start < tb->start) ? -1 : 1;
+	return 0;
+}
+
+/*
+ * datalakeBalancedLocalTasks
+ *
+ * Pick this segment's share of scan tasks by greedy LPT (longest processing
+ * time first) bin-packing on task byte length, instead of assigning the
+ * agent's combined tasks round-robin by list index.
+ *
+ * Iceberg's planTasks() bins files into combined tasks by target split size
+ * with no knowledge of the segment count, so index-modulo assignment easily
+ * leaves one segment with twice the bytes of another (locally: 6.3M vs 3.6M
+ * mean rows on store_sales, a 1.75x skew) and small tables entirely on one
+ * segment.  Scan wall time is the slowest segment's share, so the skew
+ * inflates every scan regardless of per-row cost.
+ *
+ * Every QE receives the same ordered fragment list and runs this same
+ * deterministic computation, so the shares are disjoint and complete
+ * without any coordination.  Iceberg file IDs stay globally consistent
+ * (they are derived from the full list, not the local share).
+ */
+static List *
+datalakeBalancedLocalTasks(List *fragments, int numSegments)
+{
+	int				ntasks = 0;
+	int				i;
+	ListCell	   *lco;
+	ListCell	   *lci;
+	FileScanTask  **tasks;
+	int64		   *load;
+	List		   *mine = NIL;
+
+	foreach_with_count(lco, fragments, i)
+	{
+		if (i == 0)
+			continue;			/* ExternalTableMetadata */
+		ntasks += list_length((List *) lfirst(lco));
+	}
+	if (ntasks == 0)
+		return NIL;
+
+	tasks = (FileScanTask **) palloc(ntasks * sizeof(FileScanTask *));
+	ntasks = 0;
+	foreach_with_count(lco, fragments, i)
+	{
+		if (i == 0)
+			continue;
+		foreach(lci, (List *) lfirst(lco))
+			tasks[ntasks++] = (FileScanTask *) lfirst(lci);
+	}
+
+	qsort(tasks, ntasks, sizeof(FileScanTask *), fileScanTaskSizeCmp);
+
+	load = (int64 *) palloc0(numSegments * sizeof(int64));
+	for (i = 0; i < ntasks; i++)
+	{
+		int			argmin = 0;
+		int			s;
+
+		for (s = 1; s < numSegments; s++)
+			if (load[s] < load[argmin])
+				argmin = s;
+		load[argmin] += tasks[i]->length > 0 ? tasks[i]->length : 1;
+		if (argmin == GpIdentity.segindex)
+			mine = lappend(mine, tasks[i]);
+	}
+
+	pfree(load);
+	pfree(tasks);
+
+	if (mine == NIL)
+		return NIL;
+	return list_make1(mine);
+}
+
 void
 datalakeProtocolImportStart(dataLakeFdwScanState *scanstate, DatalakeProtocolContext *context, bool *attrUsed)
 {
@@ -726,17 +823,26 @@ datalakeProtocolImportStart(dataLakeFdwScanState *scanstate, DatalakeProtocolCon
 
     ExternalTableMetadata *tableOptions = (ExternalTableMetadata *)linitial(scanstate->fragments);
 
-	foreach_with_count(lc, scanstate->fragments, i)
+	if (FORMAT_IS_ICEBERG(scanstate->options->format) &&
+		pg_iceberg_enable_balanced_scan && numSegments > 1)
 	{
-		if (i == 0) continue;
-		int idx = i - 1;
-		List *combinedScanTask = (List *) lfirst(lc);
-
-		if (GpIdentity.segindex == (idx % numSegments))
+		combinedScanTasks = datalakeBalancedLocalTasks(scanstate->fragments,
+													   numSegments);
+	}
+	else
+	{
+		foreach_with_count(lc, scanstate->fragments, i)
 		{
-			if (list_length(combinedScanTask) > 0)
+			if (i == 0) continue;
+			int idx = i - 1;
+			List *combinedScanTask = (List *) lfirst(lc);
+
+			if (GpIdentity.segindex == (idx % numSegments))
 			{
-				combinedScanTasks = lappend(combinedScanTasks, combinedScanTask);
+				if (list_length(combinedScanTask) > 0)
+				{
+					combinedScanTasks = lappend(combinedScanTasks, combinedScanTask);
+				}
 			}
 		}
 	}

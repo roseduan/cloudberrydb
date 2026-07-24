@@ -12,6 +12,13 @@ typedef struct DatalakeFormatReader
 	void (*Open) (void *reader, List *columnDesc, bool *attrUsed, int64_t beginOffset, int64_t endOffset);
 	bool (*Next) (void *reader, DatalakeInternalRecord *record);
 	void (*Close) (void *reader);
+
+	/*
+	 * Optional: whether returned Datums for the attribute point into
+	 * reader-owned memory (batch slab).  NULL means the caller owns every
+	 * returned Datum and may pfree it.
+	 */
+	bool (*DatumOwned) (void *reader, int attIdx);
 } DatalakeFormatReader;
 
 typedef struct FileReader
@@ -22,6 +29,8 @@ typedef struct FileReader
 	void         *dataReader;
 	DatalakeFormatReader *formatReader;
 } FileReader;
+
+bool datalakeFileReaderDatumOwned(Reader *reader, int attIdx);
 
 FileReader *
 datalakeCreateFileReader(MemoryContext mcxt,

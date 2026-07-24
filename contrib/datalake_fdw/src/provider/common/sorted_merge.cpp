@@ -4,6 +4,8 @@ extern "C" {
 #include "src/dlproxy/datalake.h"
 #include "nodes/pg_list.h"
 #include "utils.h"
+#include "src/am_iceberg/include/pg_iceberg_guc.h"
+#include "src/provider/common/file_reader.h"
 }
 
 SortedMerge::SortedMerge(char *filename, List *readers)
@@ -82,7 +84,9 @@ SortedMerge::filterNext(Reader *reader, int64_t *position)
 		datafileName = VARDATA_ANY(values[0]);
 
 		shouldKeep = datalakeCharSeqEquals(datafileName, datafileSize, filename_, filenameSize_);
-		pfree(DatumGetPointer(values[0]));
+		/* Batch text Datums point into the Parquet reader's slab. */
+		if (!datalakeFileReaderDatumOwned(reader, 0))
+			pfree(DatumGetPointer(values[0]));
 
 		if (shouldKeep)
 		{

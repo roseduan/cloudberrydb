@@ -231,6 +231,14 @@ int external_table_limit_segment_num;
  * past MAX_STARTUP_PACKET_LENGTH, making every gang creation fail.
  */
 bool enable_iceberg_analyze_sampling = true;
+int iceberg_analyze_statistics_target = 1000;
+/*
+ * A raised Iceberg target can expose a few sample collisions that the PAX
+ * default target would probably miss, changing a high-NDV column from unique
+ * to non-unique.  Snap those cliff cases back to the PAX verdict for plan
+ * parity while retaining the larger sample's other statistics.
+ */
+bool iceberg_analyze_snap_unique_ndv = true;
 bool enable_list_in_master;
 char *datalake_agent_server_url = NULL;
 bool skip_create_polaris_catalog;
@@ -330,6 +338,30 @@ _PG_init(void)
 							"Collect per-column statistics for Iceberg tables by sampling during ANALYZE (issue #352). When off, ANALYZE only refreshes pg_class.reltuples/relpages from metadata.",
 							NULL,
 							&enable_iceberg_analyze_sampling,
+							true,
+							PGC_USERSET,
+							0,
+							NULL,
+							NULL,
+							NULL);
+
+	DefineCustomIntVariable("datalake.iceberg_analyze_statistics_target",
+							"Minimum statistics target used for explicit Iceberg-only ANALYZE statements.",
+							"A larger target stabilizes high-NDV estimates for large Iceberg tables; zero honors default_statistics_target.",
+							&iceberg_analyze_statistics_target,
+							1000,
+							0,
+							10000,
+							PGC_USERSET,
+							0,
+							NULL,
+							NULL,
+							NULL);
+
+	DefineCustomBoolVariable("datalake.iceberg_analyze_snap_unique_ndv",
+							"Preserve PAX plan parity for high-NDV Iceberg columns when ANALYZE raises the statistics target.",
+							"Columns that the smaller session target would probably judge unique are snapped to the same unique verdict.",
+							&iceberg_analyze_snap_unique_ndv,
 							true,
 							PGC_USERSET,
 							0,
@@ -625,9 +657,14 @@ datalake_ProcessUtility(PlannedStmt *pstmt,
 				List	   *ice_relids = collect_iceberg_analyze_relids(vacstmt->rels);
 				bool		only_iceberg = (vacstmt->rels != NIL &&
 											list_length(ice_relids) == list_length(vacstmt->rels));
+				int			saved_statistics_target = default_statistics_target;
+				int			used_statistics_target = saved_statistics_target;
 				ListCell   *lc;
+				ListCell   *lc2;
 				List	   *frag_relids = NIL;
 				List	   *frag_payloads = NIL;
+				List	   *pages_relids = NIL;
+				List	   *pages_values = NIL;
 
 				/* No Iceberg tables involved: plain standard ANALYZE. */
 				if (ice_relids == NIL)
@@ -669,7 +706,15 @@ datalake_ProcessUtility(PlannedStmt *pstmt,
 						continue;
 					}
 
-					pg_iceberg_refresh_pg_class_stats(rel);
+					{
+						BlockNumber pages = pg_iceberg_refresh_pg_class_stats(rel);
+
+						pages_relids = lappend_oid(pages_relids, relid);
+						/* BlockNumber is uint32; the bit pattern round-trips
+						 * through lfirst_int/(BlockNumber) on two's-complement
+						 * platforms even for relpages > INT32_MAX (>8TB). */
+						pages_values = lappend_int(pages_values, (int32) pages);
+					}
 
 					if (enable_iceberg_analyze_sampling)
 					{
@@ -755,7 +800,63 @@ datalake_ProcessUtility(PlannedStmt *pstmt,
 												NULL);
 				}
 				list_free(ice_relids);
-				/* fall through to standard ANALYZE */
+
+				/*
+				 * Run standard ANALYZE (populates pg_statistic via QE
+				 * sampling), then restore the metadata-derived relpages its
+				 * final vac_update_relstats clobbered with the dummy local
+				 * heap's block count.  Sampled reltuples is kept.
+				 */
+				/*
+				 * Duj1 is extremely unstable when a high-NDV column has zero or
+				 * one duplicate in the sample.  At TPC-H SF1000, one duplicate
+				 * among 30k lineitem.l_orderkey samples changes stadistinct from
+				 * -1 to about 419M.  Iceberg already scans every row to build its
+				 * reservoir, so use a larger sample to stabilize NDV estimation;
+				 * the QD passes the resulting targrows explicitly to the QEs.
+				 *
+				 * Limit the implicit override to explicit Iceberg-only ANALYZE.
+				 * Mixed and database-wide ANALYZE retain standard target/cost
+				 * semantics.  An explicit higher session target always wins.
+				 */
+				if (only_iceberg &&
+					iceberg_analyze_statistics_target > default_statistics_target)
+					default_statistics_target = iceberg_analyze_statistics_target;
+				used_statistics_target = default_statistics_target;
+
+				PG_TRY();
+				{
+					if (datalake_prev_ProcessUtility)
+						(*datalake_prev_ProcessUtility) (pstmt, queryString, readOnlyTree,
+											 context, params, queryEnv,
+											 dest, qc);
+					else
+						standard_ProcessUtility(pstmt, queryString, readOnlyTree,
+										context, params, queryEnv,
+										dest, qc);
+				}
+				PG_FINALLY();
+				{
+					default_statistics_target = saved_statistics_target;
+				}
+				PG_END_TRY();
+
+				forboth(lc, pages_relids, lc2, pages_values)
+					pg_iceberg_restore_relpages(lfirst_oid(lc),
+												(BlockNumber) lfirst_int(lc2));
+
+				if (only_iceberg &&
+					used_statistics_target > saved_statistics_target &&
+					iceberg_analyze_snap_unique_ndv &&
+					Gp_role == GP_ROLE_DISPATCH)
+				{
+					foreach(lc, pages_relids)
+						pg_iceberg_snap_high_ndv_stats(lfirst_oid(lc),
+														used_statistics_target,
+														saved_statistics_target);
+				}
+
+				return;
 			}
 			break;
 		}

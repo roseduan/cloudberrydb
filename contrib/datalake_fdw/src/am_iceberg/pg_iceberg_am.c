@@ -15,11 +15,15 @@
 #include "postgres.h"
 
 #include "access/multixact.h"
+#include <math.h>
+
 #include "access/sysattr.h"
 #include "access/table.h"
 #include "access/tableam.h"
 #include "access/xact.h"
+#include "catalog/indexing.h"
 #include "catalog/oid_dispatch.h"
+#include "catalog/pg_statistic.h"
 #include "commands/vacuum.h"
 #include "libpq/libpq-int.h"
 #include "utils/guc.h"
@@ -48,6 +52,7 @@
 #include "utils/hsearch.h"
 #include "mb/pg_wchar.h"
 
+#include "utils/array.h"
 #include "utils/builtins.h"
 #include "utils/portal.h"
 #include "utils/snapmgr.h"
@@ -765,7 +770,7 @@ pg_iceberg_relation_size(Relation rel, ForkNumber forkNumber)
  * The Iceberg catalog service is only reachable from the QD; callers
  * must ensure Gp_role == GP_ROLE_DISPATCH.
  */
-void
+BlockNumber
 pg_iceberg_refresh_pg_class_stats(Relation rel)
 {
 	IcebergTableInfo	   *table_info;
@@ -833,6 +838,225 @@ pg_iceberg_refresh_pg_class_stats(Relation rel)
 	pfree(statistics);
 	pg_iceberg_free_metadata_info(metadata_info);
 	pg_iceberg_free_table_info(table_info);
+
+	return pages;
+}
+
+/*
+ * pg_iceberg_restore_relpages
+ *
+ * Standard ANALYZE sampling (which follows the metadata refresh above to
+ * populate pg_statistic) finishes with its own vac_update_relstats, whose
+ * relpages comes from the AM's dummy local storage -- i.e. 1 -- clobbering
+ * the metadata-derived value.  With relpages=1 the planners cost every
+ * Iceberg scan as nearly free, distorting plan choice across the board.
+ * Re-apply the metadata-derived pages while keeping the sampled reltuples.
+ */
+void
+pg_iceberg_restore_relpages(Oid relid, BlockNumber pages)
+{
+	Relation	rel;
+	double		tuples;
+
+	rel = try_table_open(relid, ShareUpdateExclusiveLock, false);
+	if (rel == NULL)
+		return;
+
+	tuples = rel->rd_rel->reltuples;
+
+	vac_update_relstats(rel,
+						pages,
+						tuples,
+						0,			/* num_all_visible_pages */
+						rel->rd_rel->relhasindex,
+						InvalidTransactionId,
+						InvalidMultiXactId,
+						false,		/* in_outer_xact */
+						false);		/* isvacuum */
+
+	CommandCounterIncrement();
+
+	table_close(rel, ShareUpdateExclusiveLock);
+}
+
+/*
+ * pg_iceberg_snap_high_ndv_stats
+ *
+ * Iceberg ANALYZE deliberately raises the statistics target to make most NDV
+ * estimates more stable.  Near the high-NDV end, however, Duj1 has a cliff:
+ * a PAX-sized sample can see no repeated value and report the column unique,
+ * while the larger Iceberg sample sees a handful of collision pairs and
+ * reports a materially smaller NDV.  That difference is enough to change
+ * ORCA join order and HashAgg sizing even though the two tables contain the
+ * same data.
+ *
+ * For negative stadistinct values that imply an NDV above ten percent of the
+ * table, invert the pair-dominant Duj1 approximation to estimate the number
+ * of collisions in the Iceberg sample.  Collision probability scales with
+ * the square of sample size, so project that count back to the session target
+ * used by PAX.  If the projected count is below one, preserve plan parity by
+ * recording the same unique verdict PAX would very likely have produced.
+ * Other statistics from the larger Iceberg sample remain untouched.
+ */
+void
+pg_iceberg_snap_high_ndv_stats(Oid relid, int used_target, int base_target)
+{
+	Relation	rel;
+	Relation	statrel;
+	TupleDesc	reldesc;
+	double		totalrows;
+	double		target_ratio;
+	int			i;
+
+	Assert(Gp_role == GP_ROLE_DISPATCH);
+	Assert(used_target > base_target);
+
+	rel = try_table_open(relid, AccessShareLock, false);
+	if (rel == NULL)
+		return;
+
+	totalrows = rel->rd_rel->reltuples;
+	if (totalrows <= 0)
+	{
+		table_close(rel, AccessShareLock);
+		return;
+	}
+
+	reldesc = RelationGetDescr(rel);
+	statrel = table_open(StatisticRelationId, RowExclusiveLock);
+	target_ratio = (double) base_target / (double) used_target;
+
+	for (i = 0; i < reldesc->natts; i++)
+	{
+		Form_pg_attribute attr = TupleDescAttr(reldesc, i);
+		HeapTuple	oldtuple;
+		HeapTuple	newtuple;
+		Form_pg_statistic stats;
+		Datum		values[Natts_pg_statistic];
+		bool		nulls[Natts_pg_statistic];
+		bool		replaces[Natts_pg_statistic];
+		float4		old_distinct;
+		float4		new_distinct;
+		double		sample_rows;
+		double		d_hat;
+		double		collisions;
+		double		base_collisions;
+		int			column_target;
+		int			ndv_slot;
+		int			j;
+
+		if (attr->attisdropped)
+			continue;
+
+		oldtuple = SearchSysCache3(STATRELATTINH,
+									   ObjectIdGetDatum(relid),
+									   Int16GetDatum(attr->attnum),
+									   BoolGetDatum(false));
+		if (!HeapTupleIsValid(oldtuple))
+			continue;
+
+		stats = (Form_pg_statistic) GETSTRUCT(oldtuple);
+		old_distinct = stats->stadistinct;
+		if (old_distinct <= -1.0 || old_distinct > -0.10)
+		{
+			ReleaseSysCache(oldtuple);
+			continue;
+		}
+
+		column_target = attr->attstattarget >= 0 ?
+			attr->attstattarget : used_target;
+		if (column_target <= 0)
+		{
+			ReleaseSysCache(oldtuple);
+			continue;
+		}
+
+		sample_rows = 300.0 * (double) column_target;
+		if (totalrows <= sample_rows)
+		{
+			ReleaseSysCache(oldtuple);
+			continue;
+		}
+
+		d_hat = -((double) old_distinct) * totalrows;
+		collisions = (sample_rows * sample_rows / d_hat -
+					  sample_rows * sample_rows / totalrows) / 2.0;
+		if (collisions < 0)
+			collisions = 0;
+
+		/*
+		 * A column-level statistics target overrides the session default on
+		 * both storages, so a PAX-sized sample of such a column is the same
+		 * size as ours and sees the same expected collision count.
+		 */
+		if (attr->attstattarget > 0)
+			base_collisions = collisions;
+		else
+			base_collisions = collisions * target_ratio * target_ratio;
+		if (base_collisions >= 1.0)
+		{
+			ReleaseSysCache(oldtuple);
+			continue;
+		}
+
+		memset(values, 0, sizeof(values));
+		memset(nulls, 0, sizeof(nulls));
+		memset(replaces, 0, sizeof(replaces));
+
+		/* Match compute_scalar_stats()'s nmultiple == 0 convention. */
+		new_distinct = -1.0 * (1.0 - stats->stanullfrac);
+		values[Anum_pg_statistic_stadistinct - 1] =
+			Float4GetDatum(new_distinct);
+		replaces[Anum_pg_statistic_stadistinct - 1] = true;
+
+		ndv_slot = -1;
+		for (j = 0; j < STATISTIC_NUM_SLOTS; j++)
+		{
+			if ((&stats->stakind1)[j] == STATISTIC_KIND_NDV_BY_SEGMENTS)
+			{
+				ndv_slot = j;
+				break;
+			}
+		}
+
+		if (ndv_slot >= 0)
+		{
+			Datum		ndv = Float8GetDatum(totalrows);
+			ArrayType  *ndv_array;
+
+			/*
+			 * analyze.c stores this kind as one FLOAT8 value in stavalues,
+			 * not as a stanumbers array.  The value is the SUM of per-segment
+			 * NDVs (see colNDVBySeg accumulation in analyze.c); ORCA uses it
+			 * to cost partial aggregation.  A unique column is locally unique
+			 * on every segment, so the per-segment NDVs sum to the table's
+			 * row count.  Writing a smaller value makes ORCA believe a
+			 * pre-motion partial aggregate reduces rows and pick a streaming
+			 * two-stage plan that spills massively on near-unique group keys.
+			 */
+			ndv_array = construct_array(&ndv, 1, FLOAT8OID, sizeof(float8),
+										FLOAT8PASSBYVAL, TYPALIGN_DOUBLE);
+			values[Anum_pg_statistic_stavalues1 + ndv_slot - 1] =
+				PointerGetDatum(ndv_array);
+			replaces[Anum_pg_statistic_stavalues1 + ndv_slot - 1] = true;
+		}
+
+		newtuple = heap_modify_tuple(oldtuple,
+								 RelationGetDescr(statrel),
+								 values, nulls, replaces);
+		ReleaseSysCache(oldtuple);
+		CatalogTupleUpdate(statrel, &newtuple->t_self, newtuple);
+		heap_freetuple(newtuple);
+		CommandCounterIncrement();
+
+		ereport(DEBUG1,
+				(errmsg("snapped iceberg analyze statistic for %s.%s from %.6g to unique (c=%.6g, c_base=%.6g)",
+						RelationGetRelationName(rel), NameStr(attr->attname),
+						(double) old_distinct, collisions, base_collisions)));
+	}
+
+	table_close(statrel, RowExclusiveLock);
+	table_close(rel, AccessShareLock);
 }
 
 char *
@@ -878,15 +1102,29 @@ pg_iceberg_build_sample_am_private(Relation rel)
 {
 	char			   *fragments;
 	List			   *am_private;
+	int					i;
 
 	fragments = pg_iceberg_take_analyze_fragments(RelationGetRelid(rel));
 	if (fragments == NULL)
 		return NIL;		/* no entry shipped for this relation */
 
 	am_private = parseIcebergFragmentResponse(fragments, strlen(fragments));
-	am_private = list_concat(am_private,
-							 datalakeSelectRandomSegments(getgpsegmentCount(),
-														  getgpsegmentCount()));
+
+	/*
+	 * Append an all-segments-selected trailer directly instead of calling
+	 * datalakeSelectRandomSegments(n, n).  That helper always returns all
+	 * ones for the n-of-n case anyway, but reaches it through need_random(),
+	 * whose srand(time(NULL)) reseeds the process-wide glibc random() state
+	 * (srand and srandom share state in glibc).  This runs on every QE, so
+	 * within one second every QE ends up with an identical random() stream,
+	 * and the Vitter reservoir in pg_iceberg_acquire_sample_rows -- seeded
+	 * from random() -- then picks the SAME local row positions on every
+	 * segment.  Row position correlates with value order for bulk-loaded
+	 * tables, so the merged ANALYZE sample was value-biased (skewed
+	 * histograms/MCVs, e.g. date_dim.d_year selectivity off by 2-3x).
+	 */
+	for (i = 0; i < getgpsegmentCount(); i++)
+		am_private = lappend(am_private, makeInteger(1));
 
 	pfree(fragments);
 
@@ -966,6 +1204,22 @@ pg_iceberg_acquire_sample_rows(Relation relation, int elevel,
 
 	reservoir_init_selection_state(&rstate, targrows);
 
+	/*
+	 * Defense in depth: reservoir_init_selection_state() seeds from the
+	 * process-wide random() stream, which third-party code can clobber via
+	 * srand()/srandom() (glibc shares their state).  If that happens at the
+	 * same wall-clock second on every QE, all segments draw identical
+	 * reservoir decisions, so every segment samples the same local row
+	 * positions and the merged sample becomes value-biased for bulk-loaded
+	 * tables.  Mix per-process entropy into the seed so segments always
+	 * decorrelate; W must be recomputed the same way the initializer does.
+	 */
+	sampler_random_init_state(random() ^
+							  ((long) MyProcPid << 16) ^
+							  (long) GpIdentity.segindex,
+							  rstate.randstate);
+	rstate.W = exp(-log(sampler_random_fract(rstate.randstate)) / targrows);
+
 	temp_cxt = AllocSetContextCreate(CurrentMemoryContext,
 									 "iceberg analyze sample",
 									 ALLOCSET_DEFAULT_SIZES);
@@ -979,7 +1233,6 @@ pg_iceberg_acquire_sample_rows(Relation relation, int elevel,
 
 		oldcontext = MemoryContextSwitchTo(temp_cxt);
 
-		samplerows += 1;
 		if (numrows < targrows)
 		{
 			/* First targrows rows are always included into the sample. */
@@ -987,7 +1240,11 @@ pg_iceberg_acquire_sample_rows(Relation relation, int elevel,
 		}
 		else
 		{
-			/* Vitter's algorithm; see acquire_sample_rows() in analyze.c. */
+			/*
+			 * Vitter's t is the number of rows already processed, so a new
+			 * skip count must use samplerows before this row increments it.
+			 * This matches acquire_sample_rows() in analyze.c.
+			 */
 			if (rowstoskip < 0)
 				rowstoskip = reservoir_get_next_S(&rstate, samplerows, targrows);
 
@@ -1009,6 +1266,7 @@ pg_iceberg_acquire_sample_rows(Relation relation, int elevel,
 			MemoryContextSwitchTo(anl_cxt);
 			rows[pos] = ExecCopySlotHeapTuple(slot);
 		}
+		samplerows += 1;
 
 		MemoryContextSwitchTo(oldcontext);
 		ExecClearTuple(slot);

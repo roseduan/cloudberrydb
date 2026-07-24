@@ -133,15 +133,31 @@ SELECT count(*) AS cols_when_off FROM pg_stats WHERE tablename = 'anlz_t';
 
 RESET datalake.enable_iceberg_analyze_sampling;
 -- ============================================================
--- T4: only the sampling switch is user-visible (the fragment transport is
--- an ExtensibleNode dispatch, not a GUC)
+-- T4: Iceberg uses a larger sample target for high-NDV stability.  The
+-- session default is restored after ANALYZE; fragment transport remains an
+-- internal ExtensibleNode dispatch rather than a GUC.
 -- ============================================================
 SELECT name FROM pg_settings WHERE name LIKE 'datalake.%analyze%' ORDER BY name;
-                   name                   
-------------------------------------------
+                    name                    
+--------------------------------------------
  datalake.enable_iceberg_analyze_sampling
+ datalake.iceberg_analyze_snap_unique_ndv
+ datalake.iceberg_analyze_statistics_target
+(3 rows)
+
+SET default_statistics_target = 1;
+SET datalake.iceberg_analyze_statistics_target = 10;
+ANALYZE anlz_t;
+SELECT current_setting('default_statistics_target') AS restored_target,
+       array_length(histogram_bounds, 1) AS histogram_bounds
+  FROM pg_stats WHERE tablename = 'anlz_t' AND attname = 'id';
+ restored_target | histogram_bounds 
+-----------------+------------------
+ 1               |               11
 (1 row)
 
+RESET datalake.iceberg_analyze_statistics_target;
+RESET default_statistics_target;
 -- ============================================================
 -- T5: mixed ANALYZE (Iceberg + heap) in one statement -- both are analyzed
 -- (regression for issue #352: the iceberg rel must still be sampled, and the

@@ -20,7 +20,8 @@ static DatalakeFormatReader parquetReader = {
 	create_parquet_reader,
 	parquet_open,
 	parquet_next,
-	parquet_close
+	parquet_close,
+	parquet_datum_owned
 };
 
 static DatalakeFormatReader orcReader = {
@@ -118,4 +119,21 @@ fileReaderClose(Reader *reader)
 
 	pfree(fileReader->dataFile);
 	pfree(fileReader);
+}
+
+/*
+ * Whether Datums returned for the given record attribute are owned by the
+ * underlying format reader (point into its batch slab) and therefore must
+ * not be pfree'd by the caller.  Format readers without batch support do
+ * not set DatumOwned and always hand out caller-owned palloc'd Datums.
+ */
+bool
+datalakeFileReaderDatumOwned(Reader *reader, int attIdx)
+{
+	FileReader *fileReader = (FileReader *) reader;
+
+	if (fileReader->formatReader->DatumOwned == NULL)
+		return false;
+
+	return fileReader->formatReader->DatumOwned(fileReader->dataReader, attIdx);
 }

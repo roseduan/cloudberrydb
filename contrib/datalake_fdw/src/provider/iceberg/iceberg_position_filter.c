@@ -6,6 +6,7 @@
 #include "iceberg_position_filter.h"
 #include "src/provider/common/delete_bitmap_c.h"
 #include "src/provider/common/sorted_merge_c.h"
+#include "src/am_iceberg/include/pg_iceberg_guc.h"
 
 extern int icebergPostionDeletesThreshold;
 
@@ -202,7 +203,7 @@ datalakeCreatePositionFilterFromBitmap(Reader *dataReader, void *bitmap)
 }
 
 static void
-locationFilter(void **bitmap, char *dataFilePath, int dataFilePathLen, Datum filePathField, Datum positionField)
+locationFilter(void **bitmap, char *dataFilePath, int dataFilePathLen, Datum filePathField, Datum positionField, Reader *sourceReader)
 {
 	int filePathSize = VARSIZE_ANY_EXHDR(filePathField);
 	char *filePathName = VARDATA_ANY(filePathField);
@@ -228,7 +229,9 @@ locationFilter(void **bitmap, char *dataFilePath, int dataFilePathLen, Datum fil
 		elog(DEBUG1, "locationFilter: path mismatch, position %ld NOT added", position);
 	}
 
-	pfree(DatumGetPointer(filePathField));
+	/* Batch text Datums point into the Parquet reader's slab. */
+	if (!datalakeFileReaderDatumOwned(sourceReader, 0))
+		pfree(DatumGetPointer(filePathField));
 }
 
 static void *
@@ -256,7 +259,7 @@ readPositionDeletes(MemoryContext mcxt,
 	{
 		if (curReader->Next(curReader, &record))
 		{
-			locationFilter(&result, dataFilePath, dataFilePathLen, values[0], values[1]);
+			locationFilter(&result, dataFilePath, dataFilePathLen, values[0], values[1], curReader);
 		}
 		else if (list_length(deletes) > 0)
 		{
