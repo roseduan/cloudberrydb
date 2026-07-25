@@ -118,18 +118,16 @@ BuildAvgStructType(GArrowDataType *sum_dt)
 }
 
 static GArrowDataType *
-BuildAvgStructStddevType(GArrowDataType *sum_dt)
+BuildAvgStructStddevType(GArrowDataType *sum_dt, GArrowDataType *square_dt)
 {
 	g_autoptr(GArrowField) count, sum, stddev;
 	g_autoptr(GArrowDataType) int64_dt;
 	g_autoptr(GArrowDataType) dt = NULL;
-	g_autoptr(GArrowDataType) stddev_dt = NULL;
 	GList *fields = NULL;
 	int64_dt = GARROW_DATA_TYPE(garrow_int64_data_type_new());
-	stddev_dt = GARROW_DATA_TYPE(garrow_int64_data_type_new());
 	count = garrow_field_new("count", int64_dt);
 	sum = garrow_field_new("sum", sum_dt);
-	stddev = garrow_field_new("square", stddev_dt);
+	stddev = garrow_field_new("square", square_dt);
 	fields = garrow_list_append_ptr(fields, sum);
 	fields = garrow_list_append_ptr(fields, count);
 	fields = garrow_list_append_ptr(fields, stddev);
@@ -155,9 +153,18 @@ PGTypeToArrow(Oid pg_type)
  	}
 	else if (pg_type == STDDEVOID)
 	{
-                g_autoptr(GArrowDataType) int64_dt;
-                int64_dt = GARROW_DATA_TYPE(garrow_int64_data_type_new());
-                return BuildAvgStructStddevType(int64_dt);
+		/* Widen sum/square to numeric128: an int64/uint64 Σx² wraps
+		 * around for large stddev_samp(int4) inputs (2e9-scale values
+		 * summed across enough rows), which corrupts the variance
+		 * computed downstream into a negative value and aborts in
+		 * Numeric128::Sqrt. numeric128 matches PG's own PolyNumAggState
+		 * (int128 or NumericVar) and StdDevSampNumericAggregate's
+		 * single-stage accumulator, neither of which hit this overflow. */
+		g_autoptr(GArrowDataType) numeric128_dt;
+		g_autoptr(GArrowDataType) numeric128_dt2;
+		numeric128_dt = GARROW_DATA_TYPE(garrow_numeric128_data_type_new());
+		numeric128_dt2 = GARROW_DATA_TYPE(garrow_numeric128_data_type_new());
+		return BuildAvgStructStddevType(numeric128_dt, numeric128_dt2);
 	}
 	/* Fixme: Numeric is not support now. */
 	switch (pg_type)

@@ -1,0 +1,495 @@
+-- Regression test for vectorizing the AGGSPLIT_INTERMEDIATE aggregate
+-- split.  ORCA emits a three-stage plan (local pre-aggregate ->
+-- intermediate combine -> final) whose middle HashAgg node is
+-- AGGSPLIT_INTERMEDIATE when a DISTINCT aggregate is mixed with a plain
+-- aggregate and the cost model prefers pre-deduplicating before the
+-- redistribute (a randomly-distributed table with enough rows makes
+-- this the winning plan over the cheaper two-stage GROUP BY(g,k)
+-- rewrite, which only needs INITIAL_SERIAL/FINAL_DESERIAL and was
+-- already supported).  Coverage:
+--   contrib/vectorization/src/backend/optimizer/planner_vec.c
+--     (is_aggsplit_vectorable gating is_expr_vectorable; agg_trans_mutator
+--      rewriting the INTERMEDIATE node's result type)
+--   contrib/vectorization/src/backend/utils/arrow/fmgr.c
+--     (ArrowAggFmgr.combinefn: reused finalfn for count/sum(int)/min/max,
+--      avg_combine for avg(numeric)/sum(numeric)/avg(int8) [numeric128],
+--      avg(int2)/avg(int4) [int64] and avg(float8) [double];
+--      stddev_avg_combine for stddev_samp(int4) [Struct3 numeric128])
+--   contrib/vectorization/src/backend/vecexecutor/execMain.c
+--     (new_agg_info dispatch on combinefn; is_sonic_compatible's
+--      hash_avg_combine / hash_avg_combine_stddev gates)
+--   contrib/apache-arrow/arrow (Sonic AvgCombine{Numeric128,Int,Double,
+--      Stddev}Aggregate; sonic picks the Struct2 variant from the
+--      partial's sum type, Struct3 is stddev-only)
+--
+-- Before this feature, new_agg_info() had no AGGSPLIT_INTERMEDIATE
+-- branch and hit elog(ERROR, "doesn't support aggsplit: %d", ...) for
+-- exactly this plan shape, hard-failing queries like TPC-DS Q16/Q28/Q94.
+SET vector.enable_vectorization = on;
+SET default_table_access_method = pax;
+DROP SCHEMA IF EXISTS vec_aggsplit CASCADE;
+NOTICE:  schema "vec_aggsplit" does not exist, skipping
+CREATE SCHEMA vec_aggsplit;
+SET search_path = vec_aggsplit;
+-- Randomly distributed (not by g or k): this is what makes the
+-- three-stage plan cost-competitive: pre-deduplicating (g, k) locally
+-- before redistributing on g cuts the redistribute volume.
+CREATE TABLE si (
+    g  int,
+    k  bigint,
+    n  numeric(18,2),
+    i8 bigint,
+    i4 int,
+    i2 smallint,
+    f8 float8
+) DISTRIBUTED RANDOMLY;
+INSERT INTO si SELECT
+    i % 5,
+    i % 997,
+    (i % 5)::numeric,
+    (i % 5)::bigint,
+    (i % 5),
+    (i % 5)::smallint,
+    (i % 5)::float8
+FROM generate_series(1, 200000) i;
+ANALYZE si;
+-- ------------------------------------------------------------------
+-- A) Aggregates with a combinefn vectorize the AGGSPLIT_INTERMEDIATE
+--    middle stage.
+-- ------------------------------------------------------------------
+-- A1) avg(numeric) mixed with count(DISTINCT k) forces ORCA's 3-stage
+--     split.  The middle "Vec Partial Vec HashAggregate" node is
+--     AGGSPLIT_INTERMEDIATE, mapped by fmgr.c to avg_combine ->
+--     AvgCombineNumeric128Aggregate in Sonic.  All three HashAgg nodes
+--     route to Sonic.
+EXPLAIN (VERBOSE ON, COSTS OFF)
+SELECT g, count(DISTINCT k), avg(n) FROM si GROUP BY g;
+                                 QUERY PLAN                                 
+----------------------------------------------------------------------------
+ Vec Gather Motion 3:1  (slice1; segments: 3)
+   Output: g, (count(k)), (avg(n))
+   ->  Vec Finalize Vec HashAggregate
+         Output: g, count(k), avg(n)
+         Group Key: si.g
+         Vec HashAgg Method:  Sonic
+         ->  Vec Redistribute Motion 3:3  (slice2; segments: 3)
+               Output: g, k, (PARTIAL avg(n))
+               Hash Key: g
+               ->  Vec Partial Vec HashAggregate
+                     Output: g, k, PARTIAL avg(n)
+                     Group Key: si.g, si.k
+                     Vec HashAgg Method:  Sonic
+                     ->  Vec Redistribute Motion 3:3  (slice3; segments: 3)
+                           Output: g, k, (PARTIAL avg(n))
+                           Hash Key: g, k
+                           ->  Vec Streaming Vec Partial Vec HashAggregate
+                                 Output: g, k, PARTIAL avg(n)
+                                 Group Key: si.g, si.k
+                                 Vec HashAgg Method:  Sonic
+                                 Vec Plan Merge:  1 child
+                                 ->  Vec Seq Scan on vec_aggsplit.si
+                                       Output: g, k, n
+ Optimizer: GPORCA
+(24 rows)
+
+-- A2) sum(numeric) shares the same avg_combine mapping: avg and sum
+--     share the struct<numeric128, count> partial and only differ at
+--     the final stage.
+EXPLAIN (VERBOSE ON, COSTS OFF)
+SELECT g, count(DISTINCT k), sum(n) FROM si GROUP BY g;
+                                 QUERY PLAN                                 
+----------------------------------------------------------------------------
+ Vec Gather Motion 3:1  (slice1; segments: 3)
+   Output: g, (count(k)), (sum(n))
+   ->  Vec Finalize Vec HashAggregate
+         Output: g, count(k), sum(n)
+         Group Key: si.g
+         Vec HashAgg Method:  Sonic
+         ->  Vec Redistribute Motion 3:3  (slice2; segments: 3)
+               Output: g, k, (PARTIAL sum(n))
+               Hash Key: g
+               ->  Vec Partial Vec HashAggregate
+                     Output: g, k, PARTIAL sum(n)
+                     Group Key: si.g, si.k
+                     Vec HashAgg Method:  Sonic
+                     ->  Vec Redistribute Motion 3:3  (slice3; segments: 3)
+                           Output: g, k, (PARTIAL sum(n))
+                           Hash Key: g, k
+                           ->  Vec Streaming Vec Partial Vec HashAggregate
+                                 Output: g, k, PARTIAL sum(n)
+                                 Group Key: si.g, si.k
+                                 Vec HashAgg Method:  Sonic
+                                 Vec Plan Merge:  1 child
+                                 ->  Vec Seq Scan on vec_aggsplit.si
+                                       Output: g, k, n
+ Optimizer: GPORCA
+(24 rows)
+
+-- A3) sum(int8) / min(int8) / max(int8) reuse their finalfn as the
+--     combine (partial representation == final representation), so the
+--     AGGSPLIT_INTERMEDIATE node vectorizes without a dedicated combine
+--     kernel.
+EXPLAIN (VERBOSE ON, COSTS OFF)
+SELECT g, count(DISTINCT k), sum(i8), min(i8), max(i8) FROM si GROUP BY g;
+                                           QUERY PLAN                                            
+-------------------------------------------------------------------------------------------------
+ Vec Gather Motion 3:1  (slice1; segments: 3)
+   Output: g, (count(k)), (sum(i8)), (min(i8)), (max(i8))
+   ->  Vec Finalize Vec HashAggregate
+         Output: g, count(k), sum(i8), min(i8), max(i8)
+         Group Key: si.g
+         Vec HashAgg Method:  Sonic
+         ->  Vec Redistribute Motion 3:3  (slice2; segments: 3)
+               Output: g, k, (PARTIAL sum(i8)), (PARTIAL min(i8)), (PARTIAL max(i8))
+               Hash Key: g
+               ->  Vec Partial Vec HashAggregate
+                     Output: g, k, PARTIAL sum(i8), PARTIAL min(i8), PARTIAL max(i8)
+                     Group Key: si.g, si.k
+                     Vec HashAgg Method:  Sonic
+                     ->  Vec Redistribute Motion 3:3  (slice3; segments: 3)
+                           Output: g, k, (PARTIAL sum(i8)), (PARTIAL min(i8)), (PARTIAL max(i8))
+                           Hash Key: g, k
+                           ->  Vec Streaming Vec Partial Vec HashAggregate
+                                 Output: g, k, PARTIAL sum(i8), PARTIAL min(i8), PARTIAL max(i8)
+                                 Group Key: si.g, si.k
+                                 Vec HashAgg Method:  Sonic
+                                 Vec Plan Merge:  1 child
+                                 ->  Vec Seq Scan on vec_aggsplit.si
+                                       Output: g, k, i8
+ Optimizer: GPORCA
+(24 rows)
+
+-- A4) avg(int2) / avg(int4) map avg_combine to the int64-sum variant
+--     (AvgCombineIntAggregate); avg(float8) to the double-sum variant
+--     (AvgCombineDoubleAggregate).  Their partial (struct<int64|double,
+--     count>) already matches the two-stage partial, so the three-stage
+--     middle combine vectorizes.  All three HashAgg nodes route to Sonic.
+EXPLAIN (VERBOSE ON, COSTS OFF)
+SELECT g, count(DISTINCT k), avg(i4) FROM si GROUP BY g;
+                                 QUERY PLAN                                 
+----------------------------------------------------------------------------
+ Vec Gather Motion 3:1  (slice1; segments: 3)
+   Output: g, (count(k)), (avg(i4))
+   ->  Vec Finalize Vec HashAggregate
+         Output: g, count(k), avg(i4)
+         Group Key: si.g
+         Vec HashAgg Method:  Sonic
+         ->  Vec Redistribute Motion 3:3  (slice2; segments: 3)
+               Output: g, k, (PARTIAL avg(i4))
+               Hash Key: g
+               ->  Vec Partial Vec HashAggregate
+                     Output: g, k, PARTIAL avg(i4)
+                     Group Key: si.g, si.k
+                     Vec HashAgg Method:  Sonic
+                     ->  Vec Redistribute Motion 3:3  (slice3; segments: 3)
+                           Output: g, k, (PARTIAL avg(i4))
+                           Hash Key: g, k
+                           ->  Vec Streaming Vec Partial Vec HashAggregate
+                                 Output: g, k, PARTIAL avg(i4)
+                                 Group Key: si.g, si.k
+                                 Vec HashAgg Method:  Sonic
+                                 Vec Plan Merge:  1 child
+                                 ->  Vec Seq Scan on vec_aggsplit.si
+                                       Output: g, k, i4
+ Optimizer: GPORCA
+(24 rows)
+
+EXPLAIN (VERBOSE ON, COSTS OFF)
+SELECT g, count(DISTINCT k), avg(i2) FROM si GROUP BY g;
+                                 QUERY PLAN                                 
+----------------------------------------------------------------------------
+ Vec Gather Motion 3:1  (slice1; segments: 3)
+   Output: g, (count(k)), (avg(i2))
+   ->  Vec Finalize Vec HashAggregate
+         Output: g, count(k), avg(i2)
+         Group Key: si.g
+         Vec HashAgg Method:  Sonic
+         ->  Vec Redistribute Motion 3:3  (slice2; segments: 3)
+               Output: g, k, (PARTIAL avg(i2))
+               Hash Key: g
+               ->  Vec Partial Vec HashAggregate
+                     Output: g, k, PARTIAL avg(i2)
+                     Group Key: si.g, si.k
+                     Vec HashAgg Method:  Sonic
+                     ->  Vec Redistribute Motion 3:3  (slice3; segments: 3)
+                           Output: g, k, (PARTIAL avg(i2))
+                           Hash Key: g, k
+                           ->  Vec Streaming Vec Partial Vec HashAggregate
+                                 Output: g, k, PARTIAL avg(i2)
+                                 Group Key: si.g, si.k
+                                 Vec HashAgg Method:  Sonic
+                                 Vec Plan Merge:  1 child
+                                 ->  Vec Seq Scan on vec_aggsplit.si
+                                       Output: g, k, i2
+ Optimizer: GPORCA
+(24 rows)
+
+EXPLAIN (VERBOSE ON, COSTS OFF)
+SELECT g, count(DISTINCT k), avg(f8) FROM si GROUP BY g;
+                                 QUERY PLAN                                 
+----------------------------------------------------------------------------
+ Vec Gather Motion 3:1  (slice1; segments: 3)
+   Output: g, (count(k)), (avg(f8))
+   ->  Vec Finalize Vec HashAggregate
+         Output: g, count(k), avg(f8)
+         Group Key: si.g
+         Vec HashAgg Method:  Sonic
+         ->  Vec Redistribute Motion 3:3  (slice2; segments: 3)
+               Output: g, k, (PARTIAL avg(f8))
+               Hash Key: g
+               ->  Vec Partial Vec HashAggregate
+                     Output: g, k, PARTIAL avg(f8)
+                     Group Key: si.g, si.k
+                     Vec HashAgg Method:  Sonic
+                     ->  Vec Redistribute Motion 3:3  (slice3; segments: 3)
+                           Output: g, k, (PARTIAL avg(f8))
+                           Hash Key: g, k
+                           ->  Vec Streaming Vec Partial Vec HashAggregate
+                                 Output: g, k, PARTIAL avg(f8)
+                                 Group Key: si.g, si.k
+                                 Vec HashAgg Method:  Sonic
+                                 Vec Plan Merge:  1 child
+                                 ->  Vec Seq Scan on vec_aggsplit.si
+                                       Output: g, k, f8
+ Optimizer: GPORCA
+(24 rows)
+
+-- A5) avg(int8)'s partial is widened to numeric128 (to avoid int64
+--     overflow), the same partial shape as avg(numeric)/sum(numeric), so
+--     it reuses AvgCombineNumeric128Aggregate -- no dedicated int8 combine
+--     kernel needed.  All three HashAgg nodes route to Sonic.
+EXPLAIN (VERBOSE ON, COSTS OFF)
+SELECT g, count(DISTINCT k), avg(i8) FROM si GROUP BY g;
+                                 QUERY PLAN                                 
+----------------------------------------------------------------------------
+ Vec Gather Motion 3:1  (slice1; segments: 3)
+   Output: g, (count(k)), (avg(i8))
+   ->  Vec Finalize Vec HashAggregate
+         Output: g, count(k), avg(i8)
+         Group Key: si.g
+         Vec HashAgg Method:  Sonic
+         ->  Vec Redistribute Motion 3:3  (slice2; segments: 3)
+               Output: g, k, (PARTIAL avg(i8))
+               Hash Key: g
+               ->  Vec Partial Vec HashAggregate
+                     Output: g, k, PARTIAL avg(i8)
+                     Group Key: si.g, si.k
+                     Vec HashAgg Method:  Sonic
+                     ->  Vec Redistribute Motion 3:3  (slice3; segments: 3)
+                           Output: g, k, (PARTIAL avg(i8))
+                           Hash Key: g, k
+                           ->  Vec Streaming Vec Partial Vec HashAggregate
+                                 Output: g, k, PARTIAL avg(i8)
+                                 Group Key: si.g, si.k
+                                 Vec HashAgg Method:  Sonic
+                                 Vec Plan Merge:  1 child
+                                 ->  Vec Seq Scan on vec_aggsplit.si
+                                       Output: g, k, i8
+ Optimizer: GPORCA
+(24 rows)
+
+-- A6) stddev_samp(int4) maps avg_combine to a Struct3 combine
+--     (AvgCombineStddevAggregate): its partial (struct<numeric128 sum,
+--     int64 count, numeric128 square>) is widened from a naive int64/uint64
+--     Sigma-x/Sigma-x^2 accumulator that overflows for large int4 values --
+--     see AvgTransStddevAggregate's class comment for the crash this
+--     fixes. This is the HASH-aggregate (AGG_HASHED) path: a
+--     hash-based three-stage plan routes through Sonic end to end.
+CREATE TABLE si_std (g int, k bigint, vi int) DISTRIBUTED RANDOMLY;
+INSERT INTO si_std SELECT i % 5, i % 997, i % 17 FROM generate_series(1, 200000) i;
+ANALYZE si_std;
+EXPLAIN (VERBOSE ON, COSTS OFF)
+SELECT g, count(DISTINCT k), stddev_samp(vi) FROM si_std GROUP BY g;
+                                 QUERY PLAN                                 
+----------------------------------------------------------------------------
+ Vec Gather Motion 3:1  (slice1; segments: 3)
+   Output: g, (count(k)), (stddev_samp(vi))
+   ->  Vec Finalize Vec HashAggregate
+         Output: g, count(k), stddev_samp(vi)
+         Group Key: si_std.g
+         Vec HashAgg Method:  Sonic
+         ->  Vec Redistribute Motion 3:3  (slice2; segments: 3)
+               Output: g, k, (PARTIAL stddev_samp(vi))
+               Hash Key: g
+               ->  Vec Partial Vec HashAggregate
+                     Output: g, k, PARTIAL stddev_samp(vi)
+                     Group Key: si_std.g, si_std.k
+                     Vec HashAgg Method:  Sonic
+                     ->  Vec Redistribute Motion 3:3  (slice3; segments: 3)
+                           Output: g, k, (PARTIAL stddev_samp(vi))
+                           Hash Key: g, k
+                           ->  Vec Streaming Vec Partial Vec HashAggregate
+                                 Output: g, k, PARTIAL stddev_samp(vi)
+                                 Group Key: si_std.g, si_std.k
+                                 Vec HashAgg Method:  Sonic
+                                 Vec Plan Merge:  1 child
+                                 ->  Vec Seq Scan on vec_aggsplit.si_std
+                                       Output: g, k, vi
+ Optimizer: GPORCA
+(24 rows)
+
+-- Correctness: vectorized vs non-vectorized must match.
+SELECT g, count(DISTINCT k) AS c, stddev_samp(vi)::numeric(20,6) AS a
+FROM si_std GROUP BY g ORDER BY g;
+ g |  c  |    a     
+---+-----+----------
+ 0 | 997 | 4.898939
+ 1 | 997 | 4.899038
+ 2 | 997 | 4.899010
+ 3 | 997 | 4.898977
+ 4 | 997 | 4.898939
+(5 rows)
+
+SET vector.enable_vectorization = off;
+SELECT g, count(DISTINCT k) AS c, stddev_samp(vi)::numeric(20,6) AS a
+FROM si_std GROUP BY g ORDER BY g;
+ g |  c  |    a     
+---+-----+----------
+ 0 | 997 | 4.898939
+ 1 | 997 | 4.899038
+ 2 | 997 | 4.899010
+ 3 | 997 | 4.898977
+ 4 | 997 | 4.898939
+(5 rows)
+
+SET vector.enable_vectorization = on;
+-- ------------------------------------------------------------------
+-- B) AGG_SORTED (sort-based GroupAggregate) stddev_samp support.  Its
+--    ordered-mode final aggregate consumes the same 3-field Numeric128
+--    partial as the hash path.  The Numeric128 variance calculation must
+--    cancel before dividing, so this also covers a hash-partial +
+--    redistribute + sort-final plan.
+-- ------------------------------------------------------------------
+CREATE TABLE si_lowcard (g int, vi int) DISTRIBUTED RANDOMLY;
+INSERT INTO si_lowcard SELECT i % 3, i % 17 FROM generate_series(1, 50000) i;
+ANALYZE si_lowcard;
+-- Low group-key cardinality (3 groups) makes ORCA cost-prefer a sort-based
+-- GroupAggregate over a hash-based one for this plain GROUP BY (no DISTINCT
+-- needed to reach AGG_SORTED).  The plan must remain vectorized.
+EXPLAIN (COSTS OFF) SELECT g, stddev_samp(vi) FROM si_lowcard GROUP BY g;
+                              QUERY PLAN                              
+----------------------------------------------------------------------
+ Vec Gather Motion 3:1  (slice1; segments: 3)
+   ->  Vec Finalize Vec GroupAggregate
+         Group Key: g
+         ->  Vec Sort
+               Sort Key: g
+               ->  Vec Redistribute Motion 3:3  (slice2; segments: 3)
+                     Hash Key: g
+                     ->  Vec Streaming Vec Partial Vec HashAggregate
+                           Group Key: g
+                           ->  Vec Seq Scan on si_lowcard
+ Optimizer: GPORCA
+(11 rows)
+
+-- Correctness: vectorized and row-engine results must match.
+SELECT g, stddev_samp(vi)::numeric(20,4) AS a
+FROM si_lowcard GROUP BY g ORDER BY g;
+ g |   a    
+---+--------
+ 0 | 4.8991
+ 1 | 4.8993
+ 2 | 4.8992
+(3 rows)
+
+SET vector.enable_vectorization = off;
+SELECT g, stddev_samp(vi)::numeric(20,4) AS a
+FROM si_lowcard GROUP BY g ORDER BY g;
+ g |   a    
+---+--------
+ 0 | 4.8991
+ 1 | 4.8993
+ 2 | 4.8992
+(3 rows)
+
+SET vector.enable_vectorization = on;
+-- B2) The same ordered-mode path with stddev_samp only in HAVING.
+EXPLAIN (COSTS OFF) SELECT g FROM si_lowcard GROUP BY g HAVING stddev_samp(vi) > 0;
+                                 QUERY PLAN                                 
+----------------------------------------------------------------------------
+ Vec Gather Motion 3:1  (slice1; segments: 3)
+   ->  Vec Result
+         Filter: ((stddev_samp(vi)) > '0'::numeric)
+         ->  Vec Finalize Vec GroupAggregate
+               Group Key: g
+               ->  Vec Sort
+                     Sort Key: g
+                     ->  Vec Redistribute Motion 3:3  (slice2; segments: 3)
+                           Hash Key: g
+                           ->  Vec Streaming Vec Partial Vec HashAggregate
+                                 Group Key: g
+                                 ->  Vec Seq Scan on si_lowcard
+ Optimizer: GPORCA
+(13 rows)
+
+SELECT g FROM si_lowcard GROUP BY g HAVING stddev_samp(vi) > 0 ORDER BY g;
+ g 
+---
+ 0
+ 1
+ 2
+(3 rows)
+
+-- ------------------------------------------------------------------
+-- C) Correctness: vectorized AGGSPLIT_INTERMEDIATE results must match
+--    the non-vectorized reference.
+-- ------------------------------------------------------------------
+SELECT g,
+       count(DISTINCT k)      AS c,
+       sum(n)                 AS s_n,
+       avg(n)::numeric(20,4)  AS a_n,
+       sum(i8)                AS s_i,
+       min(i8)                AS mn_i,
+       max(i8)                AS mx_i,
+       avg(i8)::numeric(20,4) AS a_i8,
+       avg(i4)::numeric(20,4) AS a_i4,
+       avg(i2)::numeric(20,4) AS a_i2,
+       avg(f8)                AS a_f8
+FROM si
+GROUP BY g
+ORDER BY g;
+ g |  c  |    s_n    |  a_n   |  s_i   | mn_i | mx_i |  a_i8  |  a_i4  |  a_i2  | a_f8 
+---+-----+-----------+--------+--------+------+------+--------+--------+--------+------
+ 0 | 997 |      0.00 | 0.0000 |      0 |    0 |    0 | 0.0000 | 0.0000 | 0.0000 |    0
+ 1 | 997 |  40000.00 | 1.0000 |  40000 |    1 |    1 | 1.0000 | 1.0000 | 1.0000 |    1
+ 2 | 997 |  80000.00 | 2.0000 |  80000 |    2 |    2 | 2.0000 | 2.0000 | 2.0000 |    2
+ 3 | 997 | 120000.00 | 3.0000 | 120000 |    3 |    3 | 3.0000 | 3.0000 | 3.0000 |    3
+ 4 | 997 | 160000.00 | 4.0000 | 160000 |    4 |    4 | 4.0000 | 4.0000 | 4.0000 |    4
+(5 rows)
+
+SET vector.enable_vectorization = off;
+SELECT g,
+       count(DISTINCT k)      AS c,
+       sum(n)                 AS s_n,
+       avg(n)::numeric(20,4)  AS a_n,
+       sum(i8)                AS s_i,
+       min(i8)                AS mn_i,
+       max(i8)                AS mx_i,
+       avg(i8)::numeric(20,4) AS a_i8,
+       avg(i4)::numeric(20,4) AS a_i4,
+       avg(i2)::numeric(20,4) AS a_i2,
+       avg(f8)                AS a_f8
+FROM si
+GROUP BY g
+ORDER BY g;
+ g |  c  |    s_n    |  a_n   |  s_i   | mn_i | mx_i |  a_i8  |  a_i4  |  a_i2  | a_f8 
+---+-----+-----------+--------+--------+------+------+--------+--------+--------+------
+ 0 | 997 |      0.00 | 0.0000 |      0 |    0 |    0 | 0.0000 | 0.0000 | 0.0000 |    0
+ 1 | 997 |  40000.00 | 1.0000 |  40000 |    1 |    1 | 1.0000 | 1.0000 | 1.0000 |    1
+ 2 | 997 |  80000.00 | 2.0000 |  80000 |    2 |    2 | 2.0000 | 2.0000 | 2.0000 |    2
+ 3 | 997 | 120000.00 | 3.0000 | 120000 |    3 |    3 | 3.0000 | 3.0000 | 3.0000 |    3
+ 4 | 997 | 160000.00 | 4.0000 | 160000 |    4 |    4 | 4.0000 | 4.0000 | 4.0000 |    4
+(5 rows)
+
+SET vector.enable_vectorization = on;
+-- ------------------------------------------------------------------
+-- Cleanup.
+-- ------------------------------------------------------------------
+SET search_path = public;
+DROP SCHEMA vec_aggsplit CASCADE;
+NOTICE:  drop cascades to 3 other objects
+DETAIL:  drop cascades to table vec_aggsplit.si
+drop cascades to table vec_aggsplit.si_std
+drop cascades to table vec_aggsplit.si_lowcard
+RESET default_table_access_method;
+RESET vector.enable_vectorization;

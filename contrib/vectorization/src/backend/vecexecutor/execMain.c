@@ -1650,6 +1650,8 @@ new_agg_info(Aggref *aggref, int aggno, PlanBuildContext *pcontext)
 		table = get_arrow_agg_functable(fmgr->transfn);
 	else if (aggref->aggsplit == AGGSPLIT_SIMPLE)
 		table = get_arrow_agg_functable(fmgr->simplefn);
+	else if (aggref->aggsplit == AGGSPLIT_INTERMEDIATE && fmgr->combinefn)
+		table = get_arrow_agg_functable(fmgr->combinefn);
 	else
 		elog(ERROR, "doesn't support aggsplit: %d", aggref->aggsplit);
 
@@ -4644,6 +4646,29 @@ is_sonic_compatible(List *aggInfos, PlanBuildContext *pcontext)
 			if (agginfo->aggref->aggfnoid != F_SUM_NUMERIC)
 				return false;
 		}
+		else if (strcmp(fn, "hash_avg_combine") == 0)
+		{
+			/*
+			 * Three-stage middle combine (AGGSPLIT_INTERMEDIATE) over a
+			 * struct<sum, count> partial: merge partials and re-emit the struct
+			 * without finalizing.  sonic selects the combine variant from the
+			 * partial's sum-field type, so gate on the exact aggfnoids fmgr.c
+			 * maps to avg_combine and whose partial type sonic implements:
+			 *   F_AVG_NUMERIC / F_SUM_NUMERIC / F_AVG_INT8 -> numeric128
+			 *     (avg(int8)'s partial is widened to numeric128 to avoid int64
+			 *     overflow, so it reuses the same combine as avg(numeric)),
+			 *   F_AVG_INT4 / F_AVG_INT2                    -> int64,
+			 *   F_AVG_FLOAT8                                -> double.
+			 * Any other combinefn mapping falls back to normal mode rather than
+			 * reaching a sonic variant that does not exist.
+			 */
+			Oid combinefnoid = agginfo->aggref->aggfnoid;
+			if (combinefnoid != F_AVG_NUMERIC && combinefnoid != F_SUM_NUMERIC &&
+				combinefnoid != F_AVG_INT8 &&
+				combinefnoid != F_AVG_INT4 && combinefnoid != F_AVG_INT2 &&
+				combinefnoid != F_AVG_FLOAT8)
+				return false;
+		}
 		else if (strcmp(fn, "hash_stddev_numeric") == 0)
 		{
 			/* Single-stage STDDEV_SAMP(int4) -> numeric128
@@ -4663,6 +4688,15 @@ is_sonic_compatible(List *aggInfos, PlanBuildContext *pcontext)
 		{
 			/* Two-stage STDDEV_SAMP final over struct<sum,count,square>
 			 * (AvgFinalStddevAggregate). Only STDDEV_SAMP(int4) produces
+			 * this partial, so no input-type check is needed here; sonic's
+			 * MakeAggregateFunctions validates the 3-field struct shape. */
+		}
+		else if (strcmp(fn, "hash_avg_combine_stddev") == 0)
+		{
+			/* Three-stage middle combine (AGGSPLIT_INTERMEDIATE) over a
+			 * struct<sum,count,square> partial: merge partials and re-emit
+			 * the struct without finalizing (no variance/sqrt --
+			 * AvgCombineStddevAggregate). Only STDDEV_SAMP(int4) produces
 			 * this partial, so no input-type check is needed here; sonic's
 			 * MakeAggregateFunctions validates the 3-field struct shape. */
 		}
@@ -5585,8 +5619,13 @@ BuildHashjoin(PlanBuildContext *pcontext, GArrowExecuteNode *left, GArrowExecute
 				 "%s_%s_%d_%d", PG_TEMP_FILE_PREFIX, VEC_SPILL_FILE_PREFIX, MyProcPid, node->js.ps.plan->plan_node_id);
 
 		hashjoin_options =
+			/*
+			 * Disable Arrow Acero's internal Bloom filter. In the vectorized MPP Hash
+			 * Join path, it has been measured to add overhead; GPDB Runtime Bloom Filter
+			 * uses a separate mechanism and is unaffected.
+			 */
 			garrow_hash_join_node_options_new(type, pcontext->left_hashkeys, pcontext->right_hashkeys, keycmps, filter_expr,
-											  "", "", false,
+											  "", "", true,
 											  (gint64)hashjoin_spill_memory_mb * 1024 * 1024,
 											  spill_dir,
 											  spill_file_prefix,

@@ -140,37 +140,51 @@ const FuncTable arrow_func_tables[] = {ARROW_FMGR};
  * to fill funcName and fnoid.
  * SQL: select aggfnoid from pg_aggregate where aggfnoid = 2147; 
  */
+/*
+ * The 6th column (combinefn) is the Arrow function used for the middle stage of
+ * a three-stage aggregate (AGGSPLIT_INTERMEDIATE): combine partial states and
+ * re-emit a partial state without finalizing.  For aggregates whose partial
+ * state equals the final representation (count, sum of int/float, min, max) the
+ * combine is identical to the finalfn, so we reuse it.  Struct-state aggregates
+ * map to avg_combine, which merges a struct<sum, count> partial and re-emits it;
+ * sonic picks the variant from the sum-field type: avg(numeric)/sum(numeric)/
+ * avg(int8) are numeric128 (avg(int8)'s partial is widened to numeric128 to
+ * avoid int64 overflow, so it reuses the same combine as avg(numeric)),
+ * avg(int2)/avg(int4) are int64, avg(float8) is double.  stddev_samp(int4)'s
+ * partial has a third child (struct<sum, count, square>, Struct3) and so gets
+ * its own dedicated stddev_avg_combine -> hash_avg_combine_stddev mapping.
+ */
 const ArrowAggFmgr arrow_agg_fmgr_builtins[] = {
-        { "min", F_MIN_INT2, "min", "min", "min"},
-        { "min", F_MIN_INT4, "min", "min", "min"},
-        { "min", F_MIN_INT8, "min", "min", "min"},
-        { "min", F_MIN_DATE, "min", "min", "min"},
-        { "min", F_MIN_TEXT, "min", "min", "min"},
-        { "min", F_MIN_NUMERIC, "min", "min", "min"},
-        { "max", F_MAX_INT2, "max", "max", "max"},
-        { "max", F_MAX_INT4, "max", "max", "max"},
-        { "max", F_MAX_INT8, "max", "max", "max"},
-        { "max", F_MAX_DATE, "max", "max", "max"},
-        { "max", F_MAX_NUMERIC, "max", "max", "max"},
-        { "sum", F_SUM_INT2, "sum", "sum", "sum"},
-        { "sum", F_SUM_INT4, "sum", "sum", "sum"},
-        { "sum", F_SUM_INT8, "sum_64", "sum", "sum_64"},
-        { "sum", F_SUM_NUMERIC, "avg_trans", "sum_final", "sum"},
-        { "count", F_COUNT_ANY, "count", "sum", "count"},
-        { "count", F_COUNT_, "count", "sum", "count"},
-        { "avg", F_AVG_INT8, "avg_trans", "avg_final", "mean_numeric"},
-        { "avg", F_AVG_INT4, "avg_trans", "avg_final", "mean_numeric"},
-        { "avg", F_AVG_INT2, "avg_trans", "avg_final", "mean_numeric"},
+	{ "min", F_MIN_INT2, "min", "min", "min", "min"},
+	{ "min", F_MIN_INT4, "min", "min", "min", "min"},
+	{ "min", F_MIN_INT8, "min", "min", "min", "min"},
+	{ "min", F_MIN_DATE, "min", "min", "min", "min"},
+	{ "min", F_MIN_TEXT, "min", "min", "min", "min"},
+	{ "min", F_MIN_NUMERIC, "min", "min", "min", "min"},
+	{ "max", F_MAX_INT2, "max", "max", "max", "max"},
+	{ "max", F_MAX_INT4, "max", "max", "max", "max"},
+	{ "max", F_MAX_INT8, "max", "max", "max", "max"},
+	{ "max", F_MAX_DATE, "max", "max", "max", "max"},
+	{ "max", F_MAX_NUMERIC, "max", "max", "max", "max"},
+	{ "sum", F_SUM_INT2, "sum", "sum", "sum", "sum"},
+	{ "sum", F_SUM_INT4, "sum", "sum", "sum", "sum"},
+	{ "sum", F_SUM_INT8, "sum_64", "sum", "sum_64", "sum"},
+	{ "sum", F_SUM_NUMERIC, "avg_trans", "sum_final", "sum", "avg_combine"},
+	{ "count", F_COUNT_ANY, "count", "sum", "count", "sum"},
+	{ "count", F_COUNT_, "count", "sum", "count", "sum"},
+	{ "avg", F_AVG_INT8, "avg_trans", "avg_final", "mean_numeric", "avg_combine"},
+	{ "avg", F_AVG_INT4, "avg_trans", "avg_final", "mean_numeric", "avg_combine"},
+	{ "avg", F_AVG_INT2, "avg_trans", "avg_final", "mean_numeric", "avg_combine"},
         /* float8 */
-        { "avg", F_AVG_FLOAT8, "avg_trans", "avg_final", "mean"},
-        { "stddev", F_STDDEV_SAMP_INT4, "stddev_avg_trans", "stddev_avg_final", "stddev_numeric"},
-        { "min", F_MIN_FLOAT8, "min", "min", "min"},
-        { "max", F_MAX_FLOAT8, "max", "max", "max"},
-        { "sum", F_SUM_FLOAT8, "sum", "sum", "sum"},
+	{ "avg", F_AVG_FLOAT8, "avg_trans", "avg_final", "mean", "avg_combine"},
+	{ "stddev", F_STDDEV_SAMP_INT4, "stddev_avg_trans", "stddev_avg_final", "stddev_numeric", "stddev_avg_combine"},
+	{ "min", F_MIN_FLOAT8, "min", "min", "min", "min"},
+	{ "max", F_MAX_FLOAT8, "max", "max", "max", "max"},
+	{ "sum", F_SUM_FLOAT8, "sum", "sum", "sum", "sum"},
         /* windowagg func */
-        { "rank", F_RANK_, NULL, NULL, "windowagg_rank"},
-        { "row_number", F_ROW_NUMBER, NULL, NULL, "windowagg_row_number"},
-        { "avg", F_AVG_NUMERIC, "avg_trans", "avg_final", "mean_numeric"},
+	{ "rank", F_RANK_, NULL, NULL, "windowagg_rank", NULL},
+	{ "row_number", F_ROW_NUMBER, NULL, NULL, "windowagg_row_number", NULL},
+	{ "avg", F_AVG_NUMERIC, "avg_trans", "avg_final", "mean_numeric", "avg_combine"},
 };
 
 const AggFuncTable arrow_agg_func_tables[] = {
@@ -183,11 +197,13 @@ const AggFuncTable arrow_agg_func_tables[] = {
 	{ "avg_trans", "hash_avg_trans", "avg_trans", "avg_trans", build_empty},
 	{ "avg_final", "hash_avg_final", "avg_final", "avg_final", build_empty},
 	{ "sum_final", "hash_sum_final", "sum_final", "sum_final", build_empty},
+	{ "avg_combine", "hash_avg_combine", "avg_combine", "avg_combine", build_empty},
 	/* windowagg func */
 	{ "windowagg_rank", NULL, NULL, NULL, build_empty},
 	{ "windowagg_row_number", NULL, NULL, NULL, build_empty},
 	{ "stddev_avg_trans", "hash_avg_trans_stddev", "stddev_avg_trans", "stddev_avg_trans", build_empty},
 	{ "stddev_avg_final", "hash_avg_final_stddev", "stddev_avg_final", "stddev_avg_final", build_empty},
+	{ "stddev_avg_combine", "hash_avg_combine_stddev", "stddev_avg_combine", "stddev_avg_combine", build_empty},
 	{ "mean", "hash_mean", "hash_mean", "hash_mean", build_empty},
         { "mean_numeric", "hash_mean_numeric", "hash_mean_numeric", "hash_mean_numeric", build_empty},
 	{ "stddev_numeric", "hash_stddev_numeric", "hash_stddev_numeric", "hash_stddev_numeric", build_sample_stddev_options},

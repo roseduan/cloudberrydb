@@ -160,6 +160,32 @@ is_aggfn_vectorable(Oid aggfnOid)
 }
 
 /*
+ * Whether an aggregate's split can be built by the vectorized executor.  This
+ * must stay in lock-step with new_agg_info() in vecexecutor/execMain.c.  The
+ * SIMPLE / INITIAL_SERIAL / FINAL_DESERIAL splits are always supported; the
+ * three-stage middle split (AGGSPLIT_INTERMEDIATE) is only supported for
+ * aggregates that provide a combinefn (see arrow_agg_fmgr_builtins).
+ */
+static bool
+is_aggsplit_vectorable(Aggref *aggref)
+{
+	const ArrowAggFmgr *fmgr;
+
+	switch (aggref->aggsplit)
+	{
+		case AGGSPLIT_SIMPLE:
+		case AGGSPLIT_INITIAL_SERIAL:
+		case AGGSPLIT_FINAL_DESERIAL:
+			return true;
+		case AGGSPLIT_INTERMEDIATE:
+			fmgr = get_arrow_agg_fmgr(aggref->aggfnoid);
+			return fmgr != NULL && fmgr->combinefn != NULL;
+		default:
+			return false;
+	}
+}
+
+/*
  * Fixme: These types may appear in targetlist as intermediate type, but we
  * don't support the scan of this types. So we work around.
  * Remove this after all scanning type supported.
@@ -599,6 +625,19 @@ is_expr_vectorable(Expr* expr, void *context)
 					if(aggref->aggfilter != NULL)
 					{
 						FALLBACK_LOG("agg filter not support");
+						return false;
+					}
+					/*
+					 * Mixing a DISTINCT aggregate with a plain aggregate makes
+					 * ORCA emit a three-stage plan whose middle Agg is
+					 * AGGSPLIT_INTERMEDIATE.  new_agg_info can only build it for
+					 * aggregates with a combinefn; otherwise fall back to the
+					 * non-vectorized plan here rather than erroring out at
+					 * execution time.
+					 */
+					if (!is_aggsplit_vectorable(aggref))
+					{
+						FALLBACK_LOG("aggsplit %d not support", aggref->aggsplit);
 						return false;
 					}
 				}
@@ -1051,7 +1090,15 @@ agg_trans_mutator(Node *node, void *context)
 		case T_Aggref:
 		{
 			Aggref *aggref = (Aggref *) node;
-			if (aggref->aggsplit != AGGSPLIT_INITIAL_SERIAL)
+			/*
+			 * Both the partial (INITIAL_SERIAL) and the three-stage middle
+			 * (INTERMEDIATE) node output a partial state, so their result type
+			 * must be rewritten to the Arrow partial type (struct-encoded
+			 * bytea / numeric).  The final (FINAL_DESERIAL) node keeps the true
+			 * result type and is left untouched.
+			 */
+			if (aggref->aggsplit != AGGSPLIT_INITIAL_SERIAL &&
+				aggref->aggsplit != AGGSPLIT_INTERMEDIATE)
 				return node;
 			switch (aggref->aggfnoid)
 			{

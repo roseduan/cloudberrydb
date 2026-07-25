@@ -224,6 +224,11 @@ test: limit_hashagg
 # vectorized Sonic hash agg routing (EXPLAIN visibility + correctness)
 test: vec_sonic_hashagg
 
+# vectorized AGGSPLIT_INTERMEDIATE combine (three-stage DQA plan; TPC-DS
+# Q16/Q28/Q94 regression coverage) + graceful fallback for aggregates
+# without a combinefn
+test: vec_aggsplit_intermediate
+
 # vectorized Sonic hash join routing (EXPLAIN visibility + correctness)
 test: vec_sonic_hashjoin
 

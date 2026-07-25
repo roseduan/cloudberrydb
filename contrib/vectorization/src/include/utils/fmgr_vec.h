@@ -67,6 +67,10 @@ typedef struct ArrowAggFmgr
 	const char *transfn; /* Arrow aggregation transfn*/
 	const char *finalfn; /* Arrow aggregation finalfn*/
 	const char *simplefn; /* Arrow aggregation for AGGSPLIT_SIMPLE */
+	const char *combinefn; /* Arrow aggregation for AGGSPLIT_INTERMEDIATE;
+							* NULL if the intermediate combine is not supported
+							* (e.g. window functions like rank/row_number that
+							* have no partial-combine semantics). */
 } ArrowAggFmgr;
 
 typedef struct FuncTable
