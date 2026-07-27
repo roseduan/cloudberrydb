@@ -91,7 +91,7 @@ FrozenXid|InvalidXid|9|9
 (10 rows)
 
 
-starting permutation: s2begin s1insert s1setfreezeminage s1vacuumfreeze s2select s1select s2abort s2select s3select s1vacuumfreeze s2select s3select
+starting permutation: s2begin s1insert s1setfreezeminage s1advancexmin s1vacuumfreeze s2select s1select s2abort s2select s3select s1vacuumfreeze s2select s3select
 step s2begin: SET Debug_print_full_dtm=on; BEGIN ISOLATION LEVEL REPEATABLE READ;
 		 SELECT 123 AS "establish snapshot";
 establish snapshot
@@ -101,6 +101,12 @@ establish snapshot
 
 step s1insert: SET Debug_print_full_dtm=on; INSERT INTO heaptest SELECT i, i FROM generate_series(10, 19) i;
 step s1setfreezeminage: SET vacuum_freeze_min_age = 0;
+step s1advancexmin: SELECT count(*) FROM heaptest;
+count
+-----
+   20
+(1 row)
+
 step s1vacuumfreeze: VACUUM heaptest;
 step s2select: 
     SELECT * from show_heaptest_content ORDER BY i;

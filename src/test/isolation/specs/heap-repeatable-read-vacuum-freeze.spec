@@ -132,4 +132,16 @@ permutation "s4begin" "s4delete" "s4abort" "s1setfreezeminage" "s1advancexmin" "
 # additional tuples after vacuum freeze. Also, make sure relfrozenxid in
 # pg_class after vacuum freeze is not set to freezelimit locally but actually
 # reflects the lowest xmin it was able to freeze till.
-permutation "s2begin" "s1insert" "s1setfreezeminage" "s1vacuumfreeze" "s2select" "s1select" "s2abort" "s2select" "s3select" "s1vacuumfreeze" "s2select" "s3select"
+#
+# NOTE: "s1advancexmin" (a dispatched SELECT) is required before the first
+# freezing VACUUM here for the same reason as in the s4abort permutation above.
+# The pre-existing rows (0..9), inserted by setup before session 2's snapshot,
+# must be frozen by this VACUUM. That freeze relies on the distributed "oldest
+# xmin" on the segments having advanced past the setup transaction's XID, but
+# VACUUM only *reads* that lazily-cached value. Without a dispatched query to
+# advance it first, the cutoff may still sit at/below the setup XID and leave
+# rows 0..9 unfrozen (NormalXid), making this test flaky. The newly inserted
+# rows (10..19) are unaffected: their XID is newer than session 2's still-open
+# snapshot, so the oldest xmin cannot advance past them and they correctly stay
+# unfrozen until session 2 aborts.
+permutation "s2begin" "s1insert" "s1setfreezeminage" "s1advancexmin" "s1vacuumfreeze" "s2select" "s1select" "s2abort" "s2select" "s3select" "s1vacuumfreeze" "s2select" "s3select"
