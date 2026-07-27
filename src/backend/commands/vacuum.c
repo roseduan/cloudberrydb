@@ -2244,6 +2244,7 @@ vac_truncate_clog(TransactionId frozenXID,
 	 */
 	if (frozenAlreadyWrapped)
 	{
+		LWLockRelease(WrapLimitsVacuumLock);
 		ereport(WARNING,
 				(errmsg("some databases have not been vacuumed in over 2 billion transactions"),
 				 errdetail("You might have already suffered transaction-wraparound data loss.")));
@@ -2252,7 +2253,10 @@ vac_truncate_clog(TransactionId frozenXID,
 
 	/* chicken out if data is bogus in any other way */
 	if (bogus)
+	{
+		LWLockRelease(WrapLimitsVacuumLock);
 		return;
+	}
 
 	/*
 	 * Advance the oldest value for commit timestamps before truncating, so
