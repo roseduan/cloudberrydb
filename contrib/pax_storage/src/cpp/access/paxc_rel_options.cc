@@ -177,6 +177,28 @@ bytea *paxc_default_rel_options(Datum reloptions, char /*relkind*/,
   PAX_COPY_STR_OPT(rdopts, storage_format);
   PAX_COPY_STR_OPT(rdopts, compress_type);
   PAX_COPY_STR_OPT(rdopts, cluster_type);
+
+  /*
+   * Cross-option validation (e.g. "compresslevel must come with a real
+   * compresstype").  Until now this only ran when options arrived via
+   * per-column ENCODING clauses (see paxc_validate_single_column_encoding_clauses)
+   * — table-level WITH (...) reached this function without it, letting
+   * invalid combinations land in pg_class.reloptions and then in
+   * pg_attribute_encoding (which PAX populates from the table-level
+   * options at CREATE TABLE time).  pg_dump later emits those attoptions
+   * as explicit COLUMN ENCODING clauses, which DO get validated on
+   * restore, so the dump fails to round-trip ("compresslevel=5 should
+   * setting is not work for current encoding").
+   *
+   * Run the same validator here when this is a real DDL parse
+   * (validate==true) so the two entry points agree.  validate==false is
+   * used when reading an existing relation's options from the catalog;
+   * we don't want to reject a relation that survived earlier validation
+   * (or pre-fix tolerant validation).
+   */
+  if (validate)
+    paxc_validate_rel_option((PaxOptions *)rdopts);
+
   return rdopts;
 }
 
