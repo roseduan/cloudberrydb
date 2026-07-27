@@ -95,6 +95,21 @@
                     <groupId>org.slf4j</groupId>
                     <artifactId>slf4j-log4j12</artifactId>
                 </exclusion>
+                <!-- #381: drop the real Log4j 1.x impl (reload4j) and its SLF4J binding, both
+                     pulled transitively via hadoop-common 2.10.2. reload4j exposes the same
+                     org.apache.log4j.* classes as the log4j-1.2-api bridge declared above, so
+                     leaving it in makes the active provider depend on fat-jar classpath ordering;
+                     slf4j-reload4j is a second SLF4J binding competing with log4j-slf4j-impl.
+                     Excluding both makes the log4j2 bridge the sole org.apache.log4j.* provider
+                     and log4j-slf4j-impl the sole SLF4J binding, with no reliance on jar order. -->
+                <exclusion>
+                    <groupId>ch.qos.reload4j</groupId>
+                    <artifactId>reload4j</artifactId>
+                </exclusion>
+                <exclusion>
+                    <groupId>org.slf4j</groupId>
+                    <artifactId>slf4j-reload4j</artifactId>
+                </exclusion>
                 <!-- CVE-2019-10172:Jackson 1.x(org.codehaus.jackson) -->
                 <exclusion>
                     <groupId>org.codehaus.jackson</groupId>
@@ -134,7 +149,9 @@
 
     <build>
         <plugins>
-            <!-- #580 guard: ban legacy Log4j 1.x (log4j:log4j) from creeping back in transitively -->
+            <!-- #580/#381 guard: ban real Log4j 1.x impls (log4j:log4j and ch.qos.reload4j:reload4j)
+                 from creeping back in transitively; org.apache.log4j.* must come only from the
+                 patched log4j-1.2-api bridge. -->
             <plugin>
                 <groupId>org.apache.maven.plugins</groupId>
                 <artifactId>maven-enforcer-plugin</artifactId>
@@ -150,8 +167,9 @@
                                 <bannedDependencies>
                                     <excludes>
                                         <exclude>log4j:log4j</exclude>
+                                        <exclude>ch.qos.reload4j:reload4j</exclude>
                                     </excludes>
-                                    <message>Legacy Log4j 1.x (log4j:log4j) is excluded; do not reintroduce it (see #580).</message>
+                                    <message>Legacy Log4j 1.x impls (log4j:log4j, ch.qos.reload4j:reload4j) are excluded; org.apache.log4j.* must resolve via the patched log4j-1.2-api bridge only (see #580, #381).</message>
                                 </bannedDependencies>
                             </rules>
                             <fail>true</fail>
