@@ -165,11 +165,11 @@ _PG_init(void)
 	DefineCustomIntVariable("pg_gophermeta.gopher_plasma_size_mb",
 							"The Plasma L1 shared-memory read cache footprint "
 							"in MB of GopherMeta process.",
-							"0 disables the cache, -1 falls back to gopher.xml, "
-							"a positive value enables it with that footprint.",
+							"0 disables the cache, a positive value enables it "
+							"with that footprint.",
 							&gopher_plasma_size_mb,
 							0,
-							-1, INT_MAX,
+							0, INT_MAX,
 							PGC_POSTMASTER,
 							GUC_UNIT_MB,
 							NULL,
