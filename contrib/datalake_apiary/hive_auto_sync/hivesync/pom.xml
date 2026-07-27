@@ -149,9 +149,10 @@
 
     <build>
         <plugins>
-            <!-- #580/#381 guard: ban real Log4j 1.x impls (log4j:log4j and ch.qos.reload4j:reload4j)
-                 from creeping back in transitively; org.apache.log4j.* must come only from the
-                 patched log4j-1.2-api bridge. -->
+            <!-- #580/#381 guard: ban the real Log4j 1.x impls (log4j:log4j, ch.qos.reload4j:reload4j)
+                 and reload4j's SLF4J binding (org.slf4j:slf4j-reload4j) from creeping back in
+                 transitively via any path; org.apache.log4j.* must come only from the patched
+                 log4j-1.2-api bridge, and log4j-slf4j-impl must stay the sole SLF4J binding. -->
             <plugin>
                 <groupId>org.apache.maven.plugins</groupId>
                 <artifactId>maven-enforcer-plugin</artifactId>
@@ -168,8 +169,9 @@
                                     <excludes>
                                         <exclude>log4j:log4j</exclude>
                                         <exclude>ch.qos.reload4j:reload4j</exclude>
+                                        <exclude>org.slf4j:slf4j-reload4j</exclude>
                                     </excludes>
-                                    <message>Legacy Log4j 1.x impls (log4j:log4j, ch.qos.reload4j:reload4j) are excluded; org.apache.log4j.* must resolve via the patched log4j-1.2-api bridge only (see #580, #381).</message>
+                                    <message>Legacy Log4j 1.x impls (log4j:log4j, ch.qos.reload4j:reload4j) and reload4j's SLF4J binding (org.slf4j:slf4j-reload4j) are excluded; org.apache.log4j.* must resolve via the patched log4j-1.2-api bridge only, with log4j-slf4j-impl as the sole SLF4J binding (see #580, #381).</message>
                                 </bannedDependencies>
                             </rules>
                             <fail>true</fail>
