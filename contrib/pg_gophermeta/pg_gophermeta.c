@@ -83,6 +83,7 @@ static void GetGopherServerOssLogLevel(gopherOssServerConfig* ossConfig);
 /* GUC variables */
 static bool register_gophermeta = true;
 static int gopher_local_capacity_mb = 1024000;
+static int gopher_plasma_size_mb = 0;
 static char *gopher_oss_log_level = NULL;
 static char *gopher_oss_liboss2_log_level = NULL;
 static bool gopher_connect_hdfs_disable_getstate = false;
@@ -154,6 +155,26 @@ _PG_init(void)
 							 NULL,
 							 NULL,
 							 NULL);
+
+	/*
+	 * The Plasma L1 footprint is consumed once, when the GopherMeta worker
+	 * builds its store, so a reload cannot change it.  Keep the cache off by
+	 * default: it is backed by /dev/shm, whose ceiling defaults to half of
+	 * RAM, and a footprint larger than that ceiling aborts the worker.
+	 */
+	DefineCustomIntVariable("pg_gophermeta.gopher_plasma_size_mb",
+							"The Plasma L1 shared-memory read cache footprint "
+							"in MB of GopherMeta process.",
+							"0 disables the cache, -1 falls back to gopher.xml, "
+							"a positive value enables it with that footprint.",
+							&gopher_plasma_size_mb,
+							0,
+							-1, INT_MAX,
+							PGC_POSTMASTER,
+							GUC_UNIT_MB,
+							NULL,
+							NULL,
+							NULL);
 
 	DefineCustomBoolVariable("pg_gophermeta.gopher_connect_hdfs_disable_getstate",
 							"Close the collection of cluster information when connecting to HDFS.",
@@ -388,10 +409,18 @@ gophermeta_main(Datum main_arg)
 	int64 capacity = (int64)gopher_local_capacity_mb * 1024 * 1024;
 	int64 blockSize = (int64)gopher_local_blocksize_mb * 1024 * 1024;
 	/* Start Gopher Meta store service, it's an forever loop to response meta requests. */
-	elog(LOG, "GopherMeta workDir = %s, gopher_local_capacity_mb=%d, capacity = %ld",
-		workDir, gopher_local_capacity_mb, capacity);
+	elog(LOG, "GopherMeta workDir = %s, gopher_local_capacity_mb=%d, capacity = %ld, "
+		"gopher_plasma_size_mb=%d",
+		workDir, gopher_local_capacity_mb, capacity, gopher_plasma_size_mb);
 
-	gopherOssServerConfig ossConfig;
+	/*
+	 * Zero the whole struct before filling it in.  Gopher appends fields to
+	 * gopherOssServerConfig from time to time, and a field this extension
+	 * never assigns has to read as zero rather than as whatever the stack
+	 * happened to hold -- plasmaSizeMb below is exactly such a field, and
+	 * garbage in it switches the Plasma cache on with a bogus footprint.
+	 */
+	gopherOssServerConfig ossConfig = {0};
 	ossConfig.mCapacity = capacity;
 	ossConfig.blockSize = blockSize;
 	ossConfig.socketPath = NULL;
@@ -403,6 +432,7 @@ gophermeta_main(Datum main_arg)
 	ossConfig.hdfsHashConnectRouter = gopher_hash_connect_hdfs_router;
 	ossConfig.segmentIdx = GpIdentity.segindex;
 	ossConfig.hdfs_list_connect_master_port = gopher_master_port;
+	ossConfig.plasmaSizeMb = gopher_plasma_size_mb;
 	GetGopherServerOssLogLevel(&ossConfig);
 
 	rc = gopherStartServer(workDir, &ossConfig, NULL, GOPHER_SERVER_WARNING, false);
@@ -480,8 +510,19 @@ ReqShutdownHandler(SIGNAL_ARGS)
 static void
 GopherSigHupHandler(SIGNAL_ARGS)
 {
+	int			save_errno = errno;
+	gopherOption updateOptions = {0};
+
 	ProcessConfigFile(PGC_SIGHUP);
-	gopherOption updateOptions;
-	updateOptions.capacity = gopher_local_capacity_mb * 1024 * 1024;
+
+	/*
+	 * The cast is required: gopher_local_capacity_mb accepts values whose
+	 * product with 1024 * 1024 overflows a 32-bit int, and the wrapped result
+	 * is silently handed to Gopher.  The default of 1024000 wraps to exactly
+	 * zero, which Gopher discards, so this path never worked at all.
+	 */
+	updateOptions.capacity = (int64) gopher_local_capacity_mb * 1024 * 1024;
 	gopherUpdateGopherOption(&updateOptions);
+
+	errno = save_errno;
 }
