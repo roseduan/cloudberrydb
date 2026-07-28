@@ -1,5 +1,4 @@
 # Cloudberry-specific tests
-test: filter gpctas gpdist gpdist_opclasses gpdist_legacy_opclasses matrix sublink table_functions olap_setup complex opclass_ddl explain_format information_schema guc_env_var gp_explain distributed_transactions olap_plans misc_jiras gp_copy_dtx
 #
 # The order of the tests is fairly random, but there are a couple of things
 # to consider when placing a new test:
@@ -29,8 +28,10 @@ test: copy_eol
 # might not happen if other backends are holding transactions open, preventing
 # vacuum from removing dead tuples. And run gp_toolkit early to make some log
 # file related tests (like gp_log_system, etc) faster.
+test: disable_autovacuum
 test: gp_toolkit
 test: python_processed64bit
+test: enable_autovacuum
 
 test: log_guc
 # enable query metrics cluster GUC
@@ -53,7 +54,7 @@ test: leastsquares decode_expr bitmapscan bitmapscan_ao case_gp limit_gp percent
 test: gpcopy
 
 test: orca_groupingsets_fallbacks orca_static_pruning
-test: filter gpctas gpdist gpdist_opclasses gpdist_legacy_opclasses matrix sublink table_functions olap_setup complex explain_format information_schema guc_env_var gp_explain distributed_transactions olap_plans misc_jiras gp_copy_dtx
+test: filter gpctas gpdist gpdist_opclasses gpdist_legacy_opclasses matrix sublink table_functions olap_setup complex opclass_ddl explain_format information_schema guc_env_var gp_explain distributed_transactions olap_plans misc_jiras gp_copy_dtx
 # below test(s) inject faults so each of them need to be in a separate group
 test: guc_gp
 # ignore_reason: pax toast is different from heap, the test case is already included in pax_schudule
@@ -143,6 +144,7 @@ test: ic
 
 test: resource_queue
 test: resource_queue_function
+test: disable_autovacuum
 # Check for shmem leak for instrumentation slots before gpdb restart
 # 'partition_locking' gets confused if other backends run concurrently and
 # hold locks.
@@ -153,9 +155,9 @@ test: resource_queue_stat
 test: pg_stat
 # test: qp_misc_rio [not support TupleFetchRowVersion] 
 test: bfv_partition
-test: pgstat_qd_tabstat
 # dispatch should always run seperately from other cases.
 test: dispatch
+test: enable_autovacuum
 # these have been covered by cbdb icw_test, so ignore them
 #test: resource_group
 #test: resource_group_cpuset
@@ -242,6 +244,7 @@ test: uao_dml/uao_dml_cursor_row uao_dml/uao_dml_select_row uao_dml/uao_dml_curs
 # should always be below disable_autovacuum, don't change the order.
 # table_select_invisible must run after disable_autovacuum (it uses VACUUM)
 # and must not run concurrently with other gp_select_invisible tests.
+test: disable_autovacuum
 test: table_select_invisible
 test: uao_dml/table_select_invisible_row uao_dml/table_select_invisible_column
 test: uao_ddl/analyze_ao_table_every_dml_row uao_ddl/analyze_ao_table_every_dml_column
@@ -266,6 +269,7 @@ test: freeze_aux_tables
 # Check for shmem leak for instrumentation slots
 # check autostats
 test: autostats
+test: enable_autovacuum
 
 test: AOCO_Compression AORO_Compression table_statistics
 test: session_reset
