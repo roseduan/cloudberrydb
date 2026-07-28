@@ -788,14 +788,45 @@ public class IcebergUtilities {
         }
     }
 
-    public DeleteFile transPosDeleteFromGpdb(Fragment gpdbFile) {
+    /**
+     * Build the manifest entry for a position-delete file.
+     *
+     * Unlike data files, the Metrics here are not just a planning optimization.
+     * Iceberg 1.3.0 has no DeleteFile.referencedDataFile(), so DeleteFileIndex
+     * decides whether a position-delete file applies to a given data file solely
+     * by comparing that data file's path against the delete file's file_path
+     * column bounds (DeleteFileIndex.canContainPosDeletesForFile).  When no bounds
+     * are recorded it returns true unconditionally, so every delete file gets
+     * attached to every sequence-eligible data file -- an O(data files x delete
+     * files) fan-out.  On a table with only 2910 data files and 2176 delete files
+     * that produced 3.25M pairs and blew dlagent's heap (issue #407).
+     *
+     * The writer already makes each delete parquet file-scoped (a single distinct
+     * file_path value, see iceberg_posdel_write.cpp), so lower == upper == that one
+     * data file path and the range check degenerates to an exact match.
+     *
+     * MetricsConfig.forPositionDelete() is required rather than the table's normal
+     * config: the default metrics mode is truncate(16), and data file paths share a
+     * long common prefix, so truncated bounds would be identical across every
+     * delete file and prune nothing.  forPositionDelete() pins file_path and pos to
+     * Full.
+     */
+    public DeleteFile transPosDeleteFromGpdb(Fragment gpdbFile,
+                                             org.apache.iceberg.io.FileIO io,
+                                             org.apache.iceberg.MetricsConfig metricsConfig) {
         GpdbFragmentMetadata metadata = (GpdbFragmentMetadata) gpdbFile.getMetadata();
-        return FileMetadata.deleteFileBuilder(PartitionSpec.unpartitioned())
-                           .withPath(gpdbFile.getSourceName())
-                           .withFormat(metadata.getFileFormat())
-                           .withFileSizeInBytes(metadata.getFileSize())
-                           .withRecordCount(metadata.getRowCount())
-                           .ofPositionDeletes()
-                           .build();
+        FileMetadata.Builder builder =
+                FileMetadata.deleteFileBuilder(PartitionSpec.unpartitioned())
+                            .withPath(gpdbFile.getSourceName())
+                            .withFormat(metadata.getFileFormat())
+                            .withFileSizeInBytes(metadata.getFileSize())
+                            .withRecordCount(metadata.getRowCount())
+                            .ofPositionDeletes();
+        org.apache.iceberg.Metrics metrics =
+                computeParquetMetrics(io, metricsConfig, gpdbFile.getSourceName(), metadata.getFileFormat());
+        if (metrics != null) {
+            builder.withMetrics(metrics);
+        }
+        return builder.build();
     }
 }

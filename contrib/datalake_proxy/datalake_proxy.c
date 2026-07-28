@@ -58,6 +58,13 @@
 
 PG_MODULE_MAGIC;
 
+/*
+ * Exit status the JVM uses for -XX:+ExitOnOutOfMemoryError (HotSpot calls
+ * os::exit(3) from report_java_out_of_memory).  Worth naming: that path writes
+ * no hs_err file, dumps no core and runs no shutdown hook, so an OOM death is
+ * indistinguishable from an external SIGKILL unless we decode the status.
+ */
+#define DLAGENT_EXIT_OOM 3
 
 /* Module load */
 void _PG_init(void);
@@ -68,6 +75,7 @@ static void datalake_proxy_start_worker(void);
 static void startProxyProcess(pid_t pid);
 static void DataLakeProxyLoop(pid_t pid);
 static void DataLakeQuickdie(SIGNAL_ARGS);
+static void reportProxyExit(int status);
 
 bool IsUnderMasterDispatchMode(void);
 
@@ -260,6 +268,38 @@ startProxyProcess(pid_t pid)
 	ereport(ERROR, (errmsg("could not start proxy process: %m")));
 }
 
+/*
+ * Say why the dlagent child died.
+ *
+ * Without this the only trace of an out-of-memory death is the JVM's own
+ * "Terminating due to java.lang.OutOfMemoryError" on stdout, which the syslogger
+ * files under "3rd party error log" -- not in the agent's log, where anyone
+ * investigating looks first.  Combined with the absent hs_err/core (see
+ * DLAGENT_EXIT_OOM) that made issue #407 look like an external kill.
+ */
+static void
+reportProxyExit(int status)
+{
+	if (WIFEXITED(status))
+	{
+		int			code = WEXITSTATUS(status);
+
+		if (code == DLAGENT_EXIT_OOM)
+			ereport(LOG,
+					(errmsg("dlagent exited because the Java heap was exhausted"),
+					 errdetail("The agent JVM runs with -XX:+ExitOnOutOfMemoryError and exits with status %d on the first OutOfMemoryError, leaving no stack trace, hs_err file or core dump.",
+							   DLAGENT_EXIT_OOM),
+					 errhint("Raise datalake_proxy.dlagent_memory_limit (currently %d MB).",
+							 dlagent_memory_limit)));
+		else
+			ereport(LOG,
+					(errmsg("dlagent exited with status %d", code)));
+	}
+	else if (WIFSIGNALED(status))
+		ereport(LOG,
+				(errmsg("dlagent was terminated by signal %d", WTERMSIG(status))));
+}
+
 static void
 DataLakeProxyLoop(pid_t pid)
 {
@@ -267,6 +307,9 @@ DataLakeProxyLoop(pid_t pid)
 
 	while (true)
 	{
+		pid_t		reaped;
+		int			status = 0;
+
 		if (gotSIG)
 		{
 			gotSIG = false;
@@ -274,8 +317,14 @@ DataLakeProxyLoop(pid_t pid)
 			proc_exit(1);
 		}
 
-		if (waitpid(pid, NULL, WNOHANG) != 0)
+		reaped = waitpid(pid, &status, WNOHANG);
+		if (reaped != 0)
+		{
+			/* status is only meaningful when we actually reaped the child */
+			if (reaped > 0)
+				reportProxyExit(status);
 			proc_exit(1);
+		}
 
 		rc = WaitLatch(&MyProc->procLatch,
 					   WL_LATCH_SET | WL_TIMEOUT | WL_POSTMASTER_DEATH,

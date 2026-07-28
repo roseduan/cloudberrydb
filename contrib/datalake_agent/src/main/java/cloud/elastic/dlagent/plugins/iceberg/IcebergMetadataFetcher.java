@@ -410,7 +410,8 @@ public class IcebergMetadataFetcher extends BasePlugin implements MetadataFetche
                 DataFile dataFile = icebergUtilities.transFileFromGpdb(fragment, table.io(), org.apache.iceberg.MetricsConfig.forTable(table));
                 rowDelta.addRows(dataFile);
             } else if (meta.getContentType() == GpdbFragmentMetadata.ContentType.POSITION_DELETE) {
-                DeleteFile deleteFile = icebergUtilities.transPosDeleteFromGpdb(fragment);
+                DeleteFile deleteFile = icebergUtilities.transPosDeleteFromGpdb(
+                        fragment, table.io(), org.apache.iceberg.MetricsConfig.forPositionDelete(table));
                 rowDelta.addDeletes(deleteFile);
             }
         }
@@ -660,7 +661,8 @@ public class IcebergMetadataFetcher extends BasePlugin implements MetadataFetche
                 DataFile dataFile = icebergUtilities.transFileFromGpdb(fragment, table.io(), org.apache.iceberg.MetricsConfig.forTable(table));
                 rowDelta.addRows(dataFile);
             } else if (meta.getContentType() == GpdbFragmentMetadata.ContentType.POSITION_DELETE) {
-                DeleteFile deleteFile = icebergUtilities.transPosDeleteFromGpdb(fragment);
+                DeleteFile deleteFile = icebergUtilities.transPosDeleteFromGpdb(
+                        fragment, table.io(), org.apache.iceberg.MetricsConfig.forPositionDelete(table));
                 rowDelta.addDeletes(deleteFile);
             }
         }
