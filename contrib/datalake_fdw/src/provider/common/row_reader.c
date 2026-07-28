@@ -93,13 +93,27 @@ destroyRemoteFileHandle(DatalakeRemoteFileHandle *handle)
 	 * teardown (LIMIT satisfied, cancel, or an error elsewhere in the query)
 	 * reaches here with a file still open.  See Issue #404.
 	 */
-	if (handle->reader)
-		datalakeRowReaderClose(handle->reader);
+	PG_TRY();
+	{
+		if (handle->reader)
+			datalakeRowReaderClose(handle->reader);
+	}
+	PG_FINALLY();
+	{
+		/*
+		 * Must run even if the reader close above raised: the elog(ERROR)
+		 * longjmp would otherwise skip the disconnect and leak the gopher
+		 * connection handle.  PG_FINALLY re-raises the original error for us,
+		 * so the error state is left untouched -- important because this
+		 * function also runs from remoteFileAbortCallback during transaction
+		 * abort.
+		 */
+		if (handle->fileStream)
+			datalakeDestroyHandle(handle->fileStream);
 
-	if (handle->fileStream)
-		datalakeDestroyHandle(handle->fileStream);
-
-	pfree(handle);
+		pfree(handle);
+	}
+	PG_END_TRY();
 }
 
 static void
