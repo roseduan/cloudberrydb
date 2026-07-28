@@ -218,8 +218,16 @@ int GopherFileSystem::closeFile() {
 	else
 	{
 		file = NULL;
-		elog(ERROR, "gopherCloseFile failed path \"%s\" return value %d error message:%s.",
-			filePath.c_str(), ret, gopherGetLastError());
+		int			save_errno = errno;
+		const char *save_errstr = strerror(save_errno);
+
+		/*
+		 * gopherGetLastError() is not updated on gopher's parameter-check
+		 * path, so it can still read "Success" here; report errno too or the
+		 * message is actively misleading.  See Issue #404.
+		 */
+		elog(ERROR, "gopherCloseFile failed path \"%s\" return value %d errno %d (%s) error message:%s.",
+			filePath.c_str(), ret, save_errno, save_errstr, gopherGetLastError());
 	}
 	return ret;
 }

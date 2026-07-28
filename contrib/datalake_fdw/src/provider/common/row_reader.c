@@ -79,11 +79,25 @@ destroyRemoteFileHandle(DatalakeRemoteFileHandle *handle)
 	if (handle->next)
 		handle->next->prev = handle->prev;
 
-	if (handle->fileStream)
-		datalakeDestroyHandle(handle->fileStream);
-
+	/*
+	 * Release in reverse order of acquisition: the reader still holds an open
+	 * gopher file on fileStream, so it must be closed *before* the gopher
+	 * connection handle is torn down.  Destroying the handle first leaves
+	 * GopherFileSystem::fs NULL while GopherFileSystem::file is still set, and
+	 * the subsequent gopherCloseFile(NULL, file) fails its parameter check with
+	 * EINVAL -- which closeFile() then raises as an ERROR from inside this
+	 * cleanup path, masking the real reason the query was torn down.
+	 *
+	 * The normal end-of-scan path never noticed, because there the reader has
+	 * already closed its file and closeFile() returns early.  Only an early
+	 * teardown (LIMIT satisfied, cancel, or an error elsewhere in the query)
+	 * reaches here with a file still open.  See Issue #404.
+	 */
 	if (handle->reader)
 		datalakeRowReaderClose(handle->reader);
+
+	if (handle->fileStream)
+		datalakeDestroyHandle(handle->fileStream);
 
 	pfree(handle);
 }
