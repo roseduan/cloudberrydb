@@ -221,7 +221,8 @@ execute_get_fragments_via_fdw(const char *metadata_location,
 							  const char *foreignCatalogName,
 							  const char *volumeServer,
 							  const char *volumeName,
-							  IcebergTableSchema *schema)
+							  IcebergTableSchema *schema,
+							  int64 snapshot_id)
 {
 	FdwRoutine		   *fdwRoutine;
 	ForeignScanState   *scanstate;
@@ -260,6 +261,9 @@ execute_get_fragments_via_fdw(const char *metadata_location,
 
 	/* Carry the serialized scan filter so the agent can prune data files. */
 	fdwState->request.pushdownFilter = pushdown_filter;
+
+	/* Time travel: the target snapshot (0 = HEAD) for the agent to useSnapshot. */
+	fdwState->request.snapshotId = snapshot_id;
 
 	scanstate->fdw_state = fdwState;
 	fdwRoutine->BeginForeignScan(scanstate, 0);
@@ -306,6 +310,93 @@ execute_get_statistics_via_fdw(const char *metadata_location,
 		fdwState->request.buildInCatalog.metadataLocation = metadata_location;
 		fdwState->request.buildInCatalog.tableExists = true;
 	}
+
+	scanstate->fdw_state = fdwState;
+	fdwRoutine->BeginForeignScan(scanstate, 0);
+	fdwRoutine->EndForeignScan(scanstate);
+
+	return (IcebergCatalogFdwState *) scanstate->fdw_state;
+}
+
+/* Time travel: resolve a specific snapshot's schema (getSnapshotSchema). */
+static IcebergCatalogFdwState *
+execute_get_snapshot_schema_via_fdw(const char *metadata_location,
+									int64 snapshot_id,
+									const char *catalogName,
+									const char *nameSpace,
+									const char *tableName,
+									const char *catalogServer,
+									const char *foreignCatalogName,
+									const char *volumeServer,
+									const char *volumeName,
+									IcebergTableSchema *schema)
+{
+	FdwRoutine		   *fdwRoutine;
+	ForeignScanState   *scanstate;
+	IcebergCatalogFdwState *fdwState;
+
+	fdwRoutine = get_catalog_fdw_routine();
+	scanstate = makeNode(ForeignScanState);
+	fdwState = create_catalog_fdw_state(ICEBERG_GET_SNAPSHOT_SCHEMA,
+										catalogName,
+										nameSpace,
+										tableName,
+										catalogServer,
+										foreignCatalogName,
+										volumeServer,
+										volumeName,
+										schema);
+
+	fdwState->request.metadataLocation = metadata_location;
+	fdwState->request.buildInCatalog.metadataLocation = metadata_location;
+	/*
+	 * The pure-builtin catalog resolves the table from this flag +
+	 * metadata_location; without it the agent derives a bogus location from
+	 * the warehouse root.  Catalogs with a warehouse prefix resolve by name
+	 * and ignore it, which is how its absence went unnoticed.
+	 */
+	fdwState->request.buildInCatalog.tableExists = true;
+	fdwState->request.snapshotId = snapshot_id;
+
+	scanstate->fdw_state = fdwState;
+	fdwRoutine->BeginForeignScan(scanstate, 0);
+	fdwRoutine->EndForeignScan(scanstate);
+
+	return (IcebergCatalogFdwState *) scanstate->fdw_state;
+}
+
+/* Time travel: list the snapshots of the pinned metadata (getSnapshots). */
+static IcebergCatalogFdwState *
+execute_get_snapshots_via_fdw(const char *metadata_location,
+							  const char *catalogName,
+							  const char *nameSpace,
+							  const char *tableName,
+							  const char *catalogServer,
+							  const char *foreignCatalogName,
+							  const char *volumeServer,
+							  const char *volumeName,
+							  IcebergTableSchema *schema)
+{
+	FdwRoutine		   *fdwRoutine;
+	ForeignScanState   *scanstate;
+	IcebergCatalogFdwState *fdwState;
+
+	fdwRoutine = get_catalog_fdw_routine();
+	scanstate = makeNode(ForeignScanState);
+	fdwState = create_catalog_fdw_state(ICEBERG_GET_SNAPSHOTS,
+										catalogName,
+										nameSpace,
+										tableName,
+										catalogServer,
+										foreignCatalogName,
+										volumeServer,
+										volumeName,
+										schema);
+
+	fdwState->request.metadataLocation = metadata_location;
+	fdwState->request.buildInCatalog.metadataLocation = metadata_location;
+	/* See execute_get_snapshot_schema_via_fdw: required by pure-builtin. */
+	fdwState->request.buildInCatalog.tableExists = true;
 
 	scanstate->fdw_state = fdwState;
 	fdwRoutine->BeginForeignScan(scanstate, 0);
@@ -465,9 +556,10 @@ extract_load_table_result_from_fdw_state(IcebergCatalogFdwState *fdwState)
 }
 
 static char *
-extract_response_body_from_fdw_state(IcebergCatalogFdwState *fdwState)
+extract_response_body_from_fdw_state(IcebergCatalogFdwState *fdwState,
+									 const char *what)
 {
-	check_fdw_execution_error(fdwState, "Failed to get Iceberg table fragments");
+	check_fdw_execution_error(fdwState, what);
 	return fdwState->response.responseBody;
 }
 
@@ -891,7 +983,8 @@ pg_iceberg_get_fragments(Relation relation,
 						 const char *catalogServer,
 						 const char *foreignCatalogName,
 						 const char *volumeServer,
-						 const char *volumeName)
+						 const char *volumeName,
+						 int64 snapshot_id)
 {
 	IcebergTableSchema	   *schema;
 	IcebergCatalogFdwState *fdwState;
@@ -908,10 +1001,12 @@ pg_iceberg_get_fragments(Relation relation,
 											 foreignCatalogName,
 											 volumeServer,
 											 volumeName,
-											 schema);
+											 schema,
+											 snapshot_id);
 
 	free_schema_info(schema);
-	return extract_response_body_from_fdw_state(fdwState);
+	return extract_response_body_from_fdw_state(fdwState,
+												"Failed to get Iceberg table fragments");
 }
 
 IcebergTableStatistics *
@@ -944,6 +1039,70 @@ pg_iceberg_get_statistics(Relation relation,
 
 	free_schema_info(schema);
 	return extract_statistics_from_fdw_state(fdwState);
+}
+
+char *
+pg_iceberg_get_snapshot_schema(Relation relation,
+							   const char *catalogName,
+							   const char *nameSpace,
+							   const char *tableName,
+							   const char *metadata_location,
+							   int64 snapshot_id,
+							   const char *catalogServer,
+							   const char *foreignCatalogName,
+							   const char *volumeServer,
+							   const char *volumeName)
+{
+	IcebergTableSchema	   *schema;
+	IcebergCatalogFdwState *fdwState;
+
+	schema = build_schema_from_pg_table(relation);
+
+	fdwState = execute_get_snapshot_schema_via_fdw(metadata_location,
+												   snapshot_id,
+												   catalogName,
+												   nameSpace,
+												   tableName,
+												   catalogServer,
+												   foreignCatalogName,
+												   volumeServer,
+												   volumeName,
+												   schema);
+
+	free_schema_info(schema);
+	return extract_response_body_from_fdw_state(fdwState,
+												"Failed to get Iceberg snapshot schema");
+}
+
+char *
+pg_iceberg_get_snapshots(Relation relation,
+						 const char *catalogName,
+						 const char *nameSpace,
+						 const char *tableName,
+						 const char *metadata_location,
+						 const char *catalogServer,
+						 const char *foreignCatalogName,
+						 const char *volumeServer,
+						 const char *volumeName)
+{
+	IcebergTableSchema	   *schema;
+	IcebergCatalogFdwState *fdwState;
+
+	schema = build_schema_from_pg_table(relation);
+
+	fdwState = execute_get_snapshots_via_fdw(metadata_location,
+											 catalogName,
+											 nameSpace,
+											 tableName,
+											 catalogServer,
+											 foreignCatalogName,
+											 volumeServer,
+											 volumeName,
+											 schema);
+
+	free_schema_info(schema);
+	return extract_response_body_from_fdw_state(fdwState,
+												"Failed to list Iceberg snapshots");
 }
 
 char *
@@ -982,7 +1141,8 @@ pg_iceberg_get_rewrite_plan(Relation rel,
 												schema);
 
 	free_schema_info(schema);
-	return extract_response_body_from_fdw_state(fdwState);
+	return extract_response_body_from_fdw_state(fdwState,
+												"Failed to plan Iceberg rewrite file groups");
 }
 
 void

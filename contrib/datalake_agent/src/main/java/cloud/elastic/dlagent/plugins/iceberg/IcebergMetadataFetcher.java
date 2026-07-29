@@ -93,10 +93,15 @@ import java.util.stream.Collectors;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import com.fasterxml.jackson.databind.ObjectMapper;
+
 import static org.apache.iceberg.FileContent.EQUALITY_DELETES;
 
 public class IcebergMetadataFetcher extends BasePlugin implements MetadataFetcher {
     private static final Logger LOG = LoggerFactory.getLogger(IcebergMetadataFetcher.class);
+
+    /* Serializes a snapshot summary map into the scalar the C SAX parser reads. */
+    private final ObjectMapper objectMapper = new ObjectMapper();
 
     // ----- members for predicate pushdown handling -----
     static final EnumSet<Operator> SUPPORTED_OPERATORS =
@@ -716,7 +721,7 @@ public class IcebergMetadataFetcher extends BasePlugin implements MetadataFetche
      * then reads uncommitted metadata.json from the given location.
      */
     public FragmentDescription getFragmentsByUncommittedMetadata(
-            String uncommittedMetadataLocation) throws Exception {
+            String uncommittedMetadataLocation, long requestedSnapshotId) throws Exception {
         // 1. Load table from catalog to get FileIO
         IcebergCatalog catalog = icebergClientWrapper.getIcebergCatalog(context);
         Table catalogTable = catalog.loadTable(context.getDataSource());
@@ -727,8 +732,40 @@ public class IcebergMetadataFetcher extends BasePlugin implements MetadataFetche
         StaticTableOperations ops = new StaticTableOperations(uncommittedMetadataLocation, io);
         BaseTable table = new BaseTable(ops, context.getDataSource());
 
-        // 4. Reuse existing scan logic
-        TableScan scan = table.newScan().project(expectedSchema(table));
+        // 4. Reuse existing scan logic.  Time travel: read requestedSnapshotId
+        //    (0 = HEAD/current).  The projection MUST resolve against the
+        //    snapshot's schema, not the current one: a column dropped after the
+        //    requested snapshot is absent from table.schema() but still present
+        //    (and readable) in that snapshot's data files.
+        TableScan scan = table.newScan();
+        Schema projSchema = table.schema();                 // current, default
+        if (requestedSnapshotId > 0L) {
+            /* Check existence BEFORE useSnapshot(): Iceberg validates the id
+             * eagerly there and would throw its internal message first,
+             * making this descriptive error (which names the pinned metadata
+             * file) unreachable. */
+            Snapshot snap = table.snapshot(requestedSnapshotId);
+            if (snap == null) {
+                throw new IllegalArgumentException(
+                        "snapshot " + requestedSnapshotId + " not found in metadata "
+                                + uncommittedMetadataLocation);
+            }
+            scan = scan.useSnapshot(requestedSnapshotId);
+            Integer sid = snap.schemaId();
+            /* Same fail-closed rule as getSnapshotSchema: with several schemas
+             * in the metadata, guessing "current" would project the wrong
+             * columns.  Unreachable through SQL (getSnapshotSchema aborts
+             * planning first) -- defense in depth for direct REST calls. */
+            if (sid == null && table.schemas().size() > 1) {
+                throw new IllegalStateException(
+                        "snapshot " + requestedSnapshotId + " records no schema id and the"
+                        + " metadata holds multiple schemas; cannot resolve the snapshot schema");
+            }
+            if (sid != null && table.schemas().containsKey(sid)) {
+                projSchema = table.schemas().get(sid);
+            }
+        }
+        scan = scan.project(expectedSchema(table, projSchema));
 
         // Apply predicate pushdown so manifest column bounds prune data files,
         // matching getFragments().  The AM path (builtin catalog) always sends a
@@ -753,8 +790,132 @@ public class IcebergMetadataFetcher extends BasePlugin implements MetadataFetche
         try (CloseableIterable<CombinedScanTask> tasks = scan.planTasks()) {
             scanTasks = Lists.newArrayList(tasks);
         }
-        long snapshotId = table.currentSnapshot() != null ? table.currentSnapshot().snapshotId() : 0L;
+        long snapshotId = requestedSnapshotId > 0L
+            ? requestedSnapshotId
+            : (table.currentSnapshot() != null ? table.currentSnapshot().snapshotId() : 0L);
         return transformTasks(table, scanTasks, snapshotId);
+    }
+
+    /**
+     * Resolve the Iceberg schema of a given snapshot from pinned metadata.
+     *
+     * <p>Feeds the C describe callback at parse time: the C side needs the
+     * snapshot's schema (which may differ from the table's current schema, e.g.
+     * a column dropped after the snapshot) to build the result tuple descriptor
+     * and decide main-vs-fallback.  FileIO is obtained from the catalog exactly
+     * as in {@link #getFragmentsByUncommittedMetadata}, then the pinned
+     * metadata.json is read via StaticTableOperations.
+     *
+     * @param metadataLocation pinned metadata.json location
+     * @param snapshotId       target snapshot id (0 = current/HEAD)
+     * @return map with keys snapshotSchemaId, currentSchemaId, columns
+     *         (each column: name, type, fieldId, required — in field order)
+     */
+    public Map<String, Object> getSnapshotSchema(String metadataLocation, long snapshotId)
+            throws Exception {
+        // Load table from catalog to get FileIO, then read pinned metadata.json.
+        IcebergCatalog catalog = icebergClientWrapper.getIcebergCatalog(context);
+        Table catalogTable = catalog.loadTable(context.getDataSource());
+        FileIO io = catalogTable.io();
+
+        StaticTableOperations ops = new StaticTableOperations(metadataLocation, io);
+        BaseTable table = new BaseTable(ops, context.getDataSource());
+
+        int currentSchemaId = table.schema().schemaId();
+        int schemaId = currentSchemaId;
+        if (snapshotId > 0L) {
+            Snapshot snap = table.snapshot(snapshotId);
+            if (snap == null) {
+                throw new IllegalArgumentException(
+                        "snapshot " + snapshotId + " not found in metadata " + metadataLocation);
+            }
+            Integer sid = snap.schemaId();
+            /*
+             * v1 metadata may omit the per-snapshot schema id.  With a single
+             * schema in the metadata that is unambiguous; with several,
+             * assuming "current" could hand out the wrong descriptor for a
+             * historical read -- fail closed instead of guessing.
+             */
+            if (sid == null && table.schemas().size() > 1) {
+                throw new IllegalStateException(
+                        "snapshot " + snapshotId + " records no schema id and the metadata"
+                        + " holds multiple schemas; cannot resolve the snapshot schema");
+            }
+            if (sid != null) {
+                schemaId = sid;
+            }
+        }
+        Schema snapSchema = table.schemas().get(schemaId);
+        if (snapSchema == null) {
+            snapSchema = table.schema();
+            schemaId = currentSchemaId;
+        }
+
+        Map<String, Object> result = new LinkedHashMap<>();
+        result.put("snapshotSchemaId", schemaId);
+        result.put("currentSchemaId", currentSchemaId);
+
+        List<Map<String, Object>> columns = new ArrayList<>();
+        for (Types.NestedField column : snapSchema.columns()) {
+            Map<String, Object> col = new LinkedHashMap<>();
+            col.put("name", column.name());
+            col.put("type", column.type().toString());
+            col.put("fieldId", column.fieldId());
+            col.put("required", column.isRequired());
+            columns.add(col);
+        }
+        result.put("columns", columns);
+        return result;
+    }
+
+    /**
+     * List the snapshots recorded in a pinned metadata.json (time travel
+     * discovery, and the source for resolving AS OF TIMESTAMP to a snapshot id).
+     *
+     * Read through StaticTableOperations on the SAME metadata_location the
+     * describe callback and the scan use, not through the catalog: a catalog
+     * reload could return newer metadata, so the listed snapshots would not be
+     * the ones the accompanying read actually sees.
+     *
+     * Snapshots are returned in metadata order (chronological); the caller
+     * orders them if it needs to.  "summary" is emitted pre-serialized as
+     * "summaryJson" so the C SAX parser only ever sees scalars.
+     *
+     * @param metadataLocation pinned metadata.json to read
+     * @return map with keys currentSnapshotId, snapshots (each: snapshotId,
+     *         timestampMs, operation, schemaId, parentId, summaryJson)
+     */
+    public Map<String, Object> getSnapshots(String metadataLocation) throws Exception {
+        // Load table from catalog to get FileIO, then read pinned metadata.json.
+        IcebergCatalog catalog = icebergClientWrapper.getIcebergCatalog(context);
+        Table catalogTable = catalog.loadTable(context.getDataSource());
+        FileIO io = catalogTable.io();
+
+        StaticTableOperations ops = new StaticTableOperations(metadataLocation, io);
+        BaseTable table = new BaseTable(ops, context.getDataSource());
+
+        Snapshot current = table.currentSnapshot();
+
+        Map<String, Object> result = new LinkedHashMap<>();
+        result.put("currentSnapshotId", current != null ? current.snapshotId() : 0L);
+
+        List<Map<String, Object>> snapshots = new ArrayList<>();
+        for (Snapshot snap : table.snapshots()) {
+            Map<String, Object> entry = new LinkedHashMap<>();
+            entry.put("snapshotId", snap.snapshotId());
+            entry.put("timestampMs", snap.timestampMillis());
+            entry.put("operation", snap.operation() != null ? snap.operation() : "");
+            Integer sid = snap.schemaId();
+            entry.put("schemaId", sid != null ? sid : -1);
+            Long parent = snap.parentId();
+            entry.put("parentId", parent != null ? parent : 0L);
+            Map<String, String> summary = snap.summary();
+            entry.put("summaryJson",
+                    summary != null ? objectMapper.writeValueAsString(summary) : "{}");
+            snapshots.add(entry);
+        }
+        result.put("snapshots", snapshots);
+        return result;
     }
 
     /**
@@ -829,7 +990,8 @@ public class IcebergMetadataFetcher extends BasePlugin implements MetadataFetche
                     for (DeleteFile delete : fileScanTask.deletes()) {
                         List<String> deleteSchemas = null;
                         if (delete.content() == EQUALITY_DELETES) {
-                            deleteSchemas = getEqColumnNames(table, delete);
+                            /* Compaction reads HEAD: current schema. */
+                            deleteSchemas = getEqColumnNames(table.schema(), delete);
                         }
                         Fragment deleteFragment = new Fragment(delete.path().toString(),
                                 new IcebergFileFragmentMetadata(delete.format(), delete.content(),
@@ -933,9 +1095,19 @@ public class IcebergMetadataFetcher extends BasePlugin implements MetadataFetche
 
 
     public Schema expectedSchema(Table table) {
+        return expectedSchema(table, table.schema());
+    }
+
+    /**
+     * Resolve the projected PG columns against the PASSED schema instead of the
+     * table's current schema.  Time travel to an older snapshot must project
+     * against that snapshot's schema so a column dropped afterwards remains
+     * projectable (it is missing from table.schema() but present here).
+     */
+    public Schema expectedSchema(Table table, Schema schema) {
         Map<String, Types.NestedField> columnMetadata = Maps.newHashMap();
 
-        table.schema().columns().stream()
+        schema.columns().stream()
                 .forEach(column -> columnMetadata.put(column.name(), column));
 
         List<Types.NestedField> projectedFields = context.getTupleDescription().stream()
@@ -991,9 +1163,9 @@ public class IcebergMetadataFetcher extends BasePlugin implements MetadataFetche
         return expression;
     }
 
-    private List<String> getEqColumnNames(Table table, DeleteFile delete) {
+    private List<String> getEqColumnNames(Schema schema, DeleteFile delete) {
         Set<Integer> deleteIds = Sets.newHashSet(delete.equalityFieldIds());
-        Schema deleteSchema = TypeUtil.select(table.schema(), deleteIds);
+        Schema deleteSchema = TypeUtil.select(schema, deleteIds);
 
         List<String> eqColumnNames = deleteSchema.columns().stream()
                 .map(Types.NestedField::name)
@@ -1002,7 +1174,32 @@ public class IcebergMetadataFetcher extends BasePlugin implements MetadataFetche
         return eqColumnNames;
     }
 
+    /*
+     * Schema of the snapshot being read (by schema-id), falling back to the
+     * current schema for HEAD reads or metadata that predates per-snapshot
+     * schema ids.  Equality-delete key columns are resolved by field-id against
+     * this schema so a time-travel read whose eq-delete key column was later
+     * renamed/dropped still maps to the column names the data files are
+     * projected under (see getEqColumnNames / transformTasks).
+     */
+    private Schema snapshotSchemaOrCurrent(Table table, long snapshotId) {
+        if (snapshotId > 0L) {
+            Snapshot snap = table.snapshot(snapshotId);
+            if (snap != null && snap.schemaId() != null) {
+                Schema s = table.schemas().get(snap.schemaId());
+                if (s != null) {
+                    return s;
+                }
+            }
+        }
+        return table.schema();
+    }
+
     private FragmentDescription transformTasks(Table table, List<CombinedScanTask> scanTasks, long snapshotId) {
+        // Equality-delete key columns are resolved against the schema of the
+        // snapshot being read (by field-id), so a time-travel read whose key
+        // column was later renamed/dropped still lines up with the data files.
+        Schema readSchema = snapshotSchemaOrCurrent(table, snapshotId);
         // Pass 1: collect all unique delete files by path
         Map<String, Fragment> uniqueDeleteMap = new LinkedHashMap<>();
         for (CombinedScanTask combinedScanTask : scanTasks) {
@@ -1015,7 +1212,7 @@ public class IcebergMetadataFetcher extends BasePlugin implements MetadataFetche
                     if (!uniqueDeleteMap.containsKey(path)) {
                         List<String> deleteSchemas = null;
                         if (delete.content() == EQUALITY_DELETES) {
-                            deleteSchemas = getEqColumnNames(table, delete);
+                            deleteSchemas = getEqColumnNames(readSchema, delete);
                         }
                         uniqueDeleteMap.put(path, new Fragment(path,
                                 new IcebergFileFragmentMetadata(delete.format(), delete.content(), delete.recordCount(), deleteSchemas)));

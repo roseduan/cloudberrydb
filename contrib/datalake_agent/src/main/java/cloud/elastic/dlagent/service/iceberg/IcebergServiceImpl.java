@@ -337,14 +337,17 @@ public class IcebergServiceImpl implements IcebergService {
                     .expireAfterAccess(java.time.Duration.ofHours(6))
                     .build();
 
-    private String fragmentCacheKey(String metadataLocation, RequestContext context) {
+    private String fragmentCacheKey(String metadataLocation, RequestContext context, long snapshotId) {
         StringBuilder sb = new StringBuilder(metadataLocation.length() + 128);
         // NUL separators: a filterString may legally contain '|' (bitwise ops,
         // regex alternation), which with a printable separator could collide
         // with another (table, filter) pair and serve wrong fragments.
+        // snapshotId is part of the key: one metadata.json references many
+        // snapshots, so time-travel scans of the same table must not collide.
         sb.append(metadataLocation)
           .append('\0').append(context.getDataSource())
           .append('\0').append(context.getFilterString() == null ? "" : context.getFilterString())
+          .append('\0').append(snapshotId)
           .append('\0');
         if (context.getTupleDescription() != null) {
             context.getTupleDescription().forEach(
@@ -362,16 +365,28 @@ public class IcebergServiceImpl implements IcebergService {
             : null;
 
         if (uncommittedLocation != null && !uncommittedLocation.isEmpty()) {
-            String cacheKey = fragmentCacheKey(uncommittedLocation, context);
+            // Time travel: optional target snapshot id (absent/0 = HEAD).
+            long snapshotId = 0L;
+            String snapStr = properties.get("snapshot_id");
+            if (snapStr != null && !snapStr.isEmpty()) {
+                try {
+                    snapshotId = Long.parseLong(snapStr);
+                } catch (NumberFormatException e) {
+                    throw new IllegalArgumentException("Invalid snapshot_id value: " + snapStr, e);
+                }
+            }
+            String cacheKey = fragmentCacheKey(uncommittedLocation, context, snapshotId);
             String cached = fragmentCache.getIfPresent(cacheKey);
             if (cached != null) {
-                log.debug("Fragment cache hit for {} at {}", context.getDataSource(), uncommittedLocation);
+                log.debug("Fragment cache hit for {} at {} snapshot {}",
+                    context.getDataSource(), uncommittedLocation, snapshotId);
                 return cached;
             }
-            log.debug("Scanning with uncommitted metadata location: {}", uncommittedLocation);
+            log.debug("Scanning with uncommitted metadata location: {} snapshot {}",
+                uncommittedLocation, snapshotId);
             IcebergMetadataFetcher fetcher = newFetcher(context);
             FragmentDescription fragmentDescription =
-                fetcher.getFragmentsByUncommittedMetadata(uncommittedLocation);
+                fetcher.getFragmentsByUncommittedMetadata(uncommittedLocation, snapshotId);
             String result = objectMapper.writeValueAsString(fragmentDescription);
             fragmentCache.put(cacheKey, result);
             return result;
@@ -380,6 +395,46 @@ public class IcebergServiceImpl implements IcebergService {
         IcebergMetadataFetcher fetcher = newFetcher(context);
         FragmentDescription fragmentDescription = fetcher.getFragments(null);
         return objectMapper.writeValueAsString(fragmentDescription);
+    }
+
+    @Override
+    public String getSnapshotSchema(String namespace, String tableName, Map<String, String> properties,
+            RequestContext context) throws Exception {
+        String metadataLocation = properties != null
+            ? properties.get("metadata_location")
+            : null;
+        if (metadataLocation == null || metadataLocation.isEmpty()) {
+            throw new IllegalArgumentException(
+                "metadata_location is required for getSnapshotSchema");
+        }
+        // Time travel: optional target snapshot id (absent/0 = current/HEAD).
+        long snapshotId = 0L;
+        String snapStr = properties.get("snapshot_id");
+        if (snapStr != null && !snapStr.isEmpty()) {
+            try {
+                snapshotId = Long.parseLong(snapStr);
+            } catch (NumberFormatException e) {
+                throw new IllegalArgumentException("Invalid snapshot_id value: " + snapStr, e);
+            }
+        }
+        IcebergMetadataFetcher fetcher = newFetcher(context);
+        Map<String, Object> schema = fetcher.getSnapshotSchema(metadataLocation, snapshotId);
+        return objectMapper.writeValueAsString(schema);
+    }
+
+    @Override
+    public String getSnapshots(String namespace, String tableName, Map<String, String> properties,
+            RequestContext context) throws Exception {
+        String metadataLocation = properties != null
+            ? properties.get("metadata_location")
+            : null;
+        if (metadataLocation == null || metadataLocation.isEmpty()) {
+            throw new IllegalArgumentException(
+                "metadata_location is required for getSnapshots");
+        }
+        IcebergMetadataFetcher fetcher = newFetcher(context);
+        Map<String, Object> snapshots = fetcher.getSnapshots(metadataLocation);
+        return objectMapper.writeValueAsString(snapshots);
     }
 
     @Override

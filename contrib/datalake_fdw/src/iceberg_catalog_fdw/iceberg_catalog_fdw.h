@@ -42,6 +42,8 @@ typedef enum {
     ICEBERG_RESTCATALOG_LISTNAMESPACE,
     ICEBERG_RESTCATALOG_LISTCATALOG,
 	ICEBERG_GET_STATISTICS,
+	ICEBERG_GET_SNAPSHOT_SCHEMA,   /* time travel: resolve a snapshot's schema */
+	ICEBERG_GET_SNAPSHOTS,         /* time travel: list a table's snapshots */
 	ICEBERG_PLAN_FILE_GROUPS,
 	ICEBERG_COMMIT_FILE_GROUPS,
 	ICEBERG_COMMIT_APPEND,    /* PRE_COMMIT append (AppendFiles + commit) */
@@ -125,6 +127,7 @@ typedef struct IcebergCatalogRequest {
 	const char* metadataLocation;  /* deferred commit temp metadata location for RYOW */
 	const char* pushdownFilter;  /* serialized dlproxy scan filter for data-file pruning (get-fragment only) */
 	List* schemaOps;  /* List of IcebergSchemaOp*, for ICEBERG_UPDATE_SCHEMA ALTER TABLE (#401) */
+	int64 snapshotId;  /* time travel: read this Iceberg snapshot (0 = HEAD/current) */
 } IcebergCatalogRequest;
 
 typedef struct IcebergCatalogInfo {

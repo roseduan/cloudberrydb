@@ -156,7 +156,8 @@ extern char *pg_iceberg_get_fragments(Relation relation,
 									  const char *catalogServer,
 									  const char *foreignCatalogName,
 									  const char *volumeServer,
-									  const char *volumeName);
+									  const char *volumeName,
+									  int64 snapshot_id);
 
 extern IcebergTableStatistics *pg_iceberg_get_statistics(Relation relation,
 														 const char *catalogName,
@@ -168,6 +169,27 @@ extern IcebergTableStatistics *pg_iceberg_get_statistics(Relation relation,
 														 const char *foreignCatalogName,
 														 const char *volumeServer,
 														 const char *volumeName);
+
+extern char *pg_iceberg_get_snapshot_schema(Relation relation,
+											const char *catalogName,
+											const char *nameSpace,
+											const char *tableName,
+											const char *metadata_location,
+											int64 snapshot_id,
+											const char *catalogServer,
+											const char *foreignCatalogName,
+											const char *volumeServer,
+											const char *volumeName);
+
+extern char *pg_iceberg_get_snapshots(Relation relation,
+									  const char *catalogName,
+									  const char *nameSpace,
+									  const char *tableName,
+									  const char *metadata_location,
+									  const char *catalogServer,
+									  const char *foreignCatalogName,
+									  const char *volumeServer,
+									  const char *volumeName);
 
 extern char *pg_iceberg_catalog_op(Relation relation,
 									 IcebergCatalogOperation op,

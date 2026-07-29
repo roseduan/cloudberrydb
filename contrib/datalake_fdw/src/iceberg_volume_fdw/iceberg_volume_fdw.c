@@ -323,7 +323,12 @@ icebergVolumeGetForeignPlan(PlannerInfo *root,
 static dataLakeOptions* iceberg_volume_get_options(void* context)
 {
 	icebergVolumeScanState* vState = (icebergVolumeScanState*)context;
-	return getVolumeOptions(vState->iceTable);
+	dataLakeOptions* opts = getVolumeOptions(vState->iceTable);
+
+	/* Time travel: hand the snapshot's field-ids down to the reader. */
+	opts->iceberg_snapshot_field_ids = vState->snapshot_field_ids;
+	opts->n_iceberg_snapshot_field_ids = vState->n_snapshot_field_ids;
+	return opts;
 }
 
 static List* iceberg_volume_get_fragment_data(void* context)

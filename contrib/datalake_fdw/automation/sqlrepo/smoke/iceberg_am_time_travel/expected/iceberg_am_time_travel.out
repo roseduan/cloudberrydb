@@ -1,0 +1,13 @@
+DROP DATABASE
+CREATE DATABASE
+psql:../../../lib/sql/common_setup.sql:43: NOTICE:  [TEST] Common setup completed
+ test_log 
+----------
+ 
+(1 row)
+
+ASSERT rename_type_travel: PASS
+ASSERT snapshot_rowcount: PASS
+ASSERT snapshot_coltypes: PASS
+ASSERT snapshot_list: PASS
+psql:sql/iceberg_am_time_travel.sql:133: INFO:  ASSERT ts_travel: PASS

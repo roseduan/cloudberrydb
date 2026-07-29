@@ -13,7 +13,9 @@ DatalakeRowReader *datalakeCreateRowReader(MemoryContext mcxt,
 						   List *combinedScanTasks,
 						   DLTblFmt format,
 						   ExternalTableMetadata *tableOptions,
-						   bool isBuiltinIceberg);
+						   bool isBuiltinIceberg,
+						   const int *snapshotFieldIds,
+						   int nSnapshotFieldIds);
 bool datalakeRowReaderNext(DatalakeRowReader *reader, DatalakeInternalRecord *record);
 
 /*

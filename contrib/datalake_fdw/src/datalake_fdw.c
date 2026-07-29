@@ -704,7 +704,7 @@ datalake_ProcessUtility(PlannedStmt *pstmt,
 						 */
 						fragments = pg_iceberg_get_fragments_with_catalog(
 											rel, ti, mi->metadata_location,
-											mi->is_internal, NULL);
+											mi->is_internal, NULL, 0);
 
 						frag_relids = lappend_oid(frag_relids, relid);
 						frag_payloads = lappend(frag_payloads,

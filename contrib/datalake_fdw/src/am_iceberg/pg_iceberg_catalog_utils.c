@@ -789,3 +789,541 @@ free_schema_info(IcebergTableSchema *schema)
 		pfree(schema);
 	}
 }
+
+
+/* ------------------------------------------------------------------------
+ * Time travel: parse the agent getSnapshotSchema response
+ *   {"snapshotSchemaId":int,"currentSchemaId":int,
+ *    "columns":[{"name":str,"type":str,"fieldId":int,"required":bool},...]}
+ * with the project's native SAX JSON parser (jansson's function-like macros
+ * clash with PostgreSQL's built-in JSON function prototypes).  Root object is
+ * depth 1; the columns array is depth 2; each column object is depth 3.
+ * ------------------------------------------------------------------------
+ */
+typedef enum
+{
+	SSS_NONE,
+	SSS_SNAP_ID,
+	SSS_CUR_ID,
+	SSS_COL_NAME,
+	SSS_COL_TYPE,
+	SSS_COL_FIELD_ID
+} SnapSchemaField;
+
+typedef struct SnapSchemaParseState
+{
+	JsonLexContext *lex;
+	int			depth;
+	SnapSchemaField cur;
+	int			snapshot_schema_id;
+	int			current_schema_id;
+	char	   *col_name;
+	char	   *col_type;
+	int			col_field_id;
+	List	   *names;
+	List	   *types;
+	List	   *field_ids;
+	/*
+	 * True only inside the top-level "columns" array.  Column objects are
+	 * detected as depth-3 objects, but ANY future nested object under a root
+	 * field (e.g. "partitionSpec":{...}) also parses at depth 3; without this
+	 * gate it would be appended as a phantom empty column.
+	 */
+	bool		in_columns;
+} SnapSchemaParseState;
+
+static void
+sss_object_start(void *state)
+{
+	SnapSchemaParseState *s = (SnapSchemaParseState *) state;
+
+	s->depth++;
+	if (s->in_columns && s->depth == 3) /* entering a column object */
+	{
+		s->col_name = NULL;
+		s->col_type = NULL;
+		s->col_field_id = 0;
+	}
+}
+
+static void
+sss_object_end(void *state)
+{
+	SnapSchemaParseState *s = (SnapSchemaParseState *) state;
+
+	if (s->in_columns && s->depth == 3) /* leaving a column object */
+	{
+		/*
+		 * Fail closed on a column without a name or type: an empty name
+		 * would silently enter the tuple descriptor (an empty type at least
+		 * errors later, in iceberg_type_to_pg).
+		 */
+		if (s->col_name == NULL || s->col_type == NULL)
+			ereport(ERROR,
+					(errcode(ERRCODE_INVALID_TEXT_REPRESENTATION),
+					 errmsg("iceberg time travel: malformed getSnapshotSchema response"),
+					 errdetail("A column entry lacks the \"name\" or \"type\" key.")));
+		s->names = lappend(s->names, s->col_name);
+		s->types = lappend(s->types, s->col_type);
+		s->field_ids = lappend_int(s->field_ids, s->col_field_id);
+	}
+	s->depth--;
+	s->cur = SSS_NONE;
+}
+
+static void
+sss_array_start(void *state)
+{
+	((SnapSchemaParseState *) state)->depth++;
+}
+
+static void
+sss_array_end(void *state)
+{
+	SnapSchemaParseState *s = (SnapSchemaParseState *) state;
+
+	s->depth--;
+	if (s->depth == 1)
+		s->in_columns = false;
+}
+
+static void
+sss_object_field_start(void *state, char *fname, bool isnull)
+{
+	SnapSchemaParseState *s = (SnapSchemaParseState *) state;
+
+	if (s->depth == 1)
+	{
+		if (pg_strcasecmp(fname, "snapshotSchemaId") == 0)
+			s->cur = SSS_SNAP_ID;
+		else if (pg_strcasecmp(fname, "currentSchemaId") == 0)
+			s->cur = SSS_CUR_ID;
+		else
+			s->cur = SSS_NONE;
+		s->in_columns = (pg_strcasecmp(fname, "columns") == 0);
+	}
+	else if (s->depth == 3)
+	{
+		if (pg_strcasecmp(fname, "name") == 0)
+			s->cur = SSS_COL_NAME;
+		else if (pg_strcasecmp(fname, "type") == 0)
+			s->cur = SSS_COL_TYPE;
+		else if (pg_strcasecmp(fname, "fieldId") == 0)
+			s->cur = SSS_COL_FIELD_ID;
+		else
+			s->cur = SSS_NONE;
+	}
+}
+
+static void
+sss_scalar(void *state, char *token, JsonTokenType tokentype)
+{
+	SnapSchemaParseState *s = (SnapSchemaParseState *) state;
+
+	if (s->depth == 1 && s->cur == SSS_SNAP_ID && tokentype == JSON_TOKEN_NUMBER)
+		s->snapshot_schema_id = atoi(token);
+	else if (s->depth == 1 && s->cur == SSS_CUR_ID && tokentype == JSON_TOKEN_NUMBER)
+		s->current_schema_id = atoi(token);
+	else if (s->depth == 3 && s->cur == SSS_COL_NAME &&
+			 tokentype == JSON_TOKEN_STRING)
+		s->col_name = pstrdup(token);
+	else if (s->depth == 3 && s->cur == SSS_COL_TYPE &&
+			 tokentype == JSON_TOKEN_STRING)
+		s->col_type = pstrdup(token);
+	else if (s->depth == 3 && s->cur == SSS_COL_FIELD_ID &&
+			 tokentype == JSON_TOKEN_NUMBER)
+		s->col_field_id = atoi(token);
+	s->cur = SSS_NONE;
+}
+
+void
+pg_iceberg_parse_snapshot_schema_response(char *json_response,
+										  IcebergSnapshotSchema *out)
+{
+	JsonLexContext		   *lex;
+	JsonSemAction			sem;
+	SnapSchemaParseState	ps;
+	ListCell			   *lc;
+	int						i;
+
+	memset(&ps, 0, sizeof(ps));
+	lex = makeJsonLexContextCstringLen(json_response, strlen(json_response),
+									   GetDatabaseEncoding(), true);
+	ps.lex = lex;
+
+	memset(&sem, 0, sizeof(sem));
+	sem.semstate = &ps;
+	sem.object_start = sss_object_start;
+	sem.object_end = sss_object_end;
+	sem.array_start = sss_array_start;
+	sem.array_end = sss_array_end;
+	sem.object_field_start = sss_object_field_start;
+	sem.scalar = sss_scalar;
+
+	pg_parse_json_or_ereport(lex, &sem);
+
+	out->snapshot_schema_id = ps.snapshot_schema_id;
+	out->current_schema_id = ps.current_schema_id;
+	out->ncols = list_length(ps.names);
+	out->colnames = (char **) palloc(sizeof(char *) * Max(out->ncols, 1));
+	out->coltypes = (char **) palloc(sizeof(char *) * Max(out->ncols, 1));
+	out->fieldids = (int *) palloc0(sizeof(int) * Max(out->ncols, 1));
+
+	i = 0;
+	foreach(lc, ps.names)
+		out->colnames[i++] = (char *) lfirst(lc);
+	i = 0;
+	foreach(lc, ps.types)
+		out->coltypes[i++] = (char *) lfirst(lc);
+	i = 0;
+	foreach(lc, ps.field_ids)
+		out->fieldids[i++] = lfirst_int(lc);
+}
+
+
+/* ------------------------------------------------------------------------
+ * Time travel: parse the agent getSnapshots response
+ *   {"currentSnapshotId":long,
+ *    "snapshots":[{"snapshotId":long,"timestampMs":long,"operation":str,
+ *                  "schemaId":int,"parentId":long,"summaryJson":str},...]}
+ * Same native SAX approach (and the same jansson caveat) as the snapshot
+ * schema parser above.  Root object is depth 1; the snapshots array is depth
+ * 2; each snapshot object is depth 3.  The agent pre-serializes the snapshot
+ * summary into the summaryJson STRING so no nested object ever appears here.
+ * ------------------------------------------------------------------------
+ */
+typedef enum
+{
+	SL_NONE,
+	SL_CURRENT_ID,
+	SL_SNAP_ID,
+	SL_TIMESTAMP,
+	SL_OPERATION,
+	SL_SCHEMA_ID,
+	SL_PARENT_ID,
+	SL_SUMMARY
+} SnapListField;
+
+typedef struct SnapListParseState
+{
+	JsonLexContext *lex;
+	int				depth;
+	SnapListField	cur;
+	int64			current_snapshot_id;
+	IcebergSnapshotEntry entry;		/* the snapshot object being parsed */
+	List		   *entries;		/* List of IcebergSnapshotEntry * */
+} SnapListParseState;
+
+static void
+sl_object_start(void *state)
+{
+	SnapListParseState *s = (SnapListParseState *) state;
+
+	s->depth++;
+	if (s->depth == 3)			/* entering a snapshot object */
+	{
+		memset(&s->entry, 0, sizeof(s->entry));
+		s->entry.schema_id = -1;
+	}
+}
+
+static void
+sl_object_end(void *state)
+{
+	SnapListParseState *s = (SnapListParseState *) state;
+
+	if (s->depth == 3)			/* leaving a snapshot object */
+	{
+		IcebergSnapshotEntry *e = (IcebergSnapshotEntry *) palloc(sizeof(*e));
+
+		*e = s->entry;
+		/*
+		 * A snapshot entry without a positive id or a commit time cannot be
+		 * consumed safely: the id defaults to 0, which every consumer treats
+		 * as HEAD, so an AS OF resolution matching such an entry would
+		 * silently read current data.  Fail closed on the whole response.
+		 */
+		if (e->snapshot_id <= 0 || e->timestamp_ms <= 0)
+			ereport(ERROR,
+					(errcode(ERRCODE_INTERNAL_ERROR),
+					 errmsg("iceberg time travel: malformed getSnapshots response"),
+					 errdetail("A snapshot entry lacks a valid snapshotId or timestampMs.")));
+		if (e->operation == NULL)
+			e->operation = pstrdup("");
+		if (e->summary_json == NULL)
+			e->summary_json = pstrdup("{}");
+		s->entries = lappend(s->entries, e);
+	}
+	s->depth--;
+	s->cur = SL_NONE;
+}
+
+static void
+sl_array_start(void *state)
+{
+	((SnapListParseState *) state)->depth++;
+}
+
+static void
+sl_array_end(void *state)
+{
+	((SnapListParseState *) state)->depth--;
+}
+
+static void
+sl_object_field_start(void *state, char *fname, bool isnull)
+{
+	SnapListParseState *s = (SnapListParseState *) state;
+
+	if (s->depth == 1)
+	{
+		if (pg_strcasecmp(fname, "currentSnapshotId") == 0)
+			s->cur = SL_CURRENT_ID;
+		else
+			s->cur = SL_NONE;
+	}
+	else if (s->depth == 3)
+	{
+		if (pg_strcasecmp(fname, "snapshotId") == 0)
+			s->cur = SL_SNAP_ID;
+		else if (pg_strcasecmp(fname, "timestampMs") == 0)
+			s->cur = SL_TIMESTAMP;
+		else if (pg_strcasecmp(fname, "operation") == 0)
+			s->cur = SL_OPERATION;
+		else if (pg_strcasecmp(fname, "schemaId") == 0)
+			s->cur = SL_SCHEMA_ID;
+		else if (pg_strcasecmp(fname, "parentId") == 0)
+			s->cur = SL_PARENT_ID;
+		else if (pg_strcasecmp(fname, "summaryJson") == 0)
+			s->cur = SL_SUMMARY;
+		else
+			s->cur = SL_NONE;
+	}
+	else
+	{
+		/*
+		 * Any other depth is a shape we do not expect.  Clear the pending
+		 * field so a stray nested object cannot make its scalars land in the
+		 * slot selected by the enclosing snapshot object's last field name.
+		 */
+		s->cur = SL_NONE;
+	}
+}
+
+/* Parse an int64 JSON scalar, erroring out rather than silently yielding 0. */
+static int64
+sl_int64(const char *token)
+{
+	int64		value;
+
+	if (!scanint8(token, true, &value))
+		elog(ERROR, "invalid int64 value in getSnapshots response: %s", token);
+	return value;
+}
+
+static void
+sl_scalar(void *state, char *token, JsonTokenType tokentype)
+{
+	SnapListParseState *s = (SnapListParseState *) state;
+	SnapListField		field = s->cur;
+
+	/* One field per scalar: clear the selector before any early return. */
+	s->cur = SL_NONE;
+
+	if (token == NULL)
+		return;
+
+	if (s->depth == 1)
+	{
+		if (field == SL_CURRENT_ID && tokentype == JSON_TOKEN_NUMBER)
+			s->current_snapshot_id = sl_int64(token);
+		return;
+	}
+
+	if (s->depth != 3)
+		return;
+
+	switch (field)
+	{
+		case SL_SNAP_ID:
+			if (tokentype == JSON_TOKEN_NUMBER)
+				s->entry.snapshot_id = sl_int64(token);
+			break;
+		case SL_TIMESTAMP:
+			if (tokentype == JSON_TOKEN_NUMBER)
+				s->entry.timestamp_ms = sl_int64(token);
+			break;
+		case SL_PARENT_ID:
+			if (tokentype == JSON_TOKEN_NUMBER)
+				s->entry.parent_id = sl_int64(token);
+			break;
+		case SL_SCHEMA_ID:
+			if (tokentype == JSON_TOKEN_NUMBER)
+				s->entry.schema_id = atoi(token);
+			break;
+		case SL_OPERATION:
+			if (tokentype == JSON_TOKEN_STRING)
+				s->entry.operation = pstrdup(token);
+			break;
+		case SL_SUMMARY:
+			if (tokentype == JSON_TOKEN_STRING)
+				s->entry.summary_json = pstrdup(token);
+			break;
+		default:
+			break;
+	}
+}
+
+void
+pg_iceberg_parse_snapshots_response(char *json_response,
+									IcebergSnapshotList *out)
+{
+	JsonLexContext	   *lex;
+	JsonSemAction		sem;
+	SnapListParseState	ps;
+	ListCell		   *lc;
+	int					i;
+
+	memset(&ps, 0, sizeof(ps));
+	lex = makeJsonLexContextCstringLen(json_response, strlen(json_response),
+									   GetDatabaseEncoding(), true);
+	ps.lex = lex;
+
+	memset(&sem, 0, sizeof(sem));
+	sem.semstate = &ps;
+	sem.object_start = sl_object_start;
+	sem.object_end = sl_object_end;
+	sem.array_start = sl_array_start;
+	sem.array_end = sl_array_end;
+	sem.object_field_start = sl_object_field_start;
+	sem.scalar = sl_scalar;
+
+	pg_parse_json_or_ereport(lex, &sem);
+
+	out->current_snapshot_id = ps.current_snapshot_id;
+	out->nsnapshots = list_length(ps.entries);
+	out->snapshots = (IcebergSnapshotEntry *)
+		palloc(sizeof(IcebergSnapshotEntry) * Max(out->nsnapshots, 1));
+
+	i = 0;
+	foreach(lc, ps.entries)
+		out->snapshots[i++] = *(IcebergSnapshotEntry *) lfirst(lc);
+}
+
+
+/* ------------------------------------------------------------------------
+ * Snapshot summary map accessor
+ *
+ * IcebergSnapshotEntry.summary_json holds Snapshot.summary() as a flat JSON
+ * object.  Iceberg types the map as Map<String,String>, so every value arrives
+ * quoted ("total-records":"200000"), but engines other than the reference
+ * implementation have been seen to emit bare numbers; accept both rather than
+ * silently reporting "no statistics" for such a table.
+ * ------------------------------------------------------------------------
+ */
+typedef struct SummaryParseState
+{
+	const char *key;			/* the field being looked for */
+	int			depth;
+	bool		want;			/* the next scalar is that field's value */
+	bool		found;
+	int64		value;
+} SummaryParseState;
+
+static void
+sm_object_start(void *state)
+{
+	((SummaryParseState *) state)->depth++;
+}
+
+static void
+sm_object_end(void *state)
+{
+	((SummaryParseState *) state)->depth--;
+}
+
+static void
+sm_array_start(void *state)
+{
+	((SummaryParseState *) state)->depth++;
+}
+
+static void
+sm_array_end(void *state)
+{
+	((SummaryParseState *) state)->depth--;
+}
+
+static void
+sm_object_field_start(void *state, char *fname, bool isnull)
+{
+	SummaryParseState *s = (SummaryParseState *) state;
+
+	/*
+	 * Only the top-level map is of interest.  Clearing `want` at every other
+	 * depth keeps a scalar nested inside an unexpected sub-object from landing
+	 * in the slot selected by the enclosing object's last field name.
+	 */
+	s->want = (s->depth == 1 && strcmp(fname, s->key) == 0);
+}
+
+static void
+sm_scalar(void *state, char *token, JsonTokenType tokentype)
+{
+	SummaryParseState *s = (SummaryParseState *) state;
+	bool		want = s->want;
+
+	/* One field per scalar: clear the selector before any early return. */
+	s->want = false;
+
+	if (!want || s->found || token == NULL || s->depth != 1)
+		return;
+	if (tokentype != JSON_TOKEN_STRING && tokentype != JSON_TOKEN_NUMBER)
+		return;
+	/* A non-integral value is treated as absent, never as zero. */
+	if (scanint8(token, true, &s->value))
+		s->found = true;
+}
+
+/*
+ * Look up an integer-valued key in a snapshot summary map.  Returns false --
+ * leaving *out untouched -- when the summary is absent, is not a JSON object,
+ * does not carry the key, or carries a value that is not an integer.
+ *
+ * Deliberately non-throwing: the summary is agent-supplied text consumed on the
+ * planning path, where a malformed map must degrade to "no statistics" rather
+ * than fail the user's query.
+ */
+bool
+pg_iceberg_summary_int64(const char *summary_json, const char *key, int64 *out)
+{
+	JsonLexContext	   *lex;
+	JsonSemAction		sem;
+	SummaryParseState	ps;
+
+	if (summary_json == NULL || key == NULL || *summary_json == '\0')
+		return false;
+
+	memset(&ps, 0, sizeof(ps));
+	ps.key = key;
+
+	lex = makeJsonLexContextCstringLen((char *) summary_json,
+									   strlen(summary_json),
+									   GetDatabaseEncoding(), true);
+
+	memset(&sem, 0, sizeof(sem));
+	sem.semstate = &ps;
+	sem.object_start = sm_object_start;
+	sem.object_end = sm_object_end;
+	sem.array_start = sm_array_start;
+	sem.array_end = sm_array_end;
+	sem.object_field_start = sm_object_field_start;
+	sem.scalar = sm_scalar;
+
+	if (pg_parse_json(lex, &sem) != JSON_SUCCESS)
+		return false;
+
+	if (ps.found)
+		*out = ps.value;
+	return ps.found;
+}

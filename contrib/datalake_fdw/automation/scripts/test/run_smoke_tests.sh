@@ -159,7 +159,16 @@ declare -a SKIPPED_TEST_LIST
 # containers, so the spark client falls over with UnknownHostException
 # before any iceberg ops run.  Re-enable once spark conf points at the
 # split-container hosts.
-SMOKE_SKIP="${SMOKE_SKIP:-hudi iceberg_am_tpcds iceberg_am_tpch iceberg_am_hadoop_hdfs}"
+#
+# iceberg_am_time_travel is skipped for a different reason: it orchestrates
+# Docker from the HOST (a Spark container to build a multi-schema fixture +
+# the CBDB container to read it), so it cannot run inside the CBDB container
+# where CI invokes this runner.  Listing it here makes it count as SKIPPED
+# rather than a hollow PASS -- its run.sh self-skip would otherwise exit 0 and
+# be tallied as passed while asserting nothing.  Its database-only coverage
+# lives in iceberg_am_time_travel_basic (pg_regress, always runs).  Remove it
+# from SMOKE_SKIP in an environment that has host Docker + a Spark container.
+SMOKE_SKIP="${SMOKE_SKIP:-hudi iceberg_am_tpcds iceberg_am_tpch iceberg_am_hadoop_hdfs iceberg_am_time_travel}"
 
 # ===================================================================
 # Run tests

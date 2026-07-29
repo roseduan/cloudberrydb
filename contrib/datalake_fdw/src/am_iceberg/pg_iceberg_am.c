@@ -291,6 +291,112 @@ pg_iceberg_scan_begin_extractcolumns(Relation rel,
 	return (TableScanDesc) scan;
 }
 
+/*
+ * pg_iceberg_snapshot_beginscan
+ *
+ * Open an Iceberg scan for the time-travel SRF (iceberg_snapshot_scan),
+ * driven by an explicit tuple descriptor and a fragments JSON payload that
+ * was already resolved on the QD and shipped in through the function
+ * argument -- there is no CustomScan PlanState here.  The whole fragments
+ * list is handed to the volume-fdw reader, which shards it across segments
+ * internally (row_reader.c: idx % numSegments), so no per-caller sharding is
+ * needed.  Drive the returned state with its fdwroutine->IterateForeignScan
+ * and close it with fdwroutine->EndForeignScan.
+ */
+ForeignScanState *
+pg_iceberg_snapshot_beginscan(Relation rel, TupleDesc scan_tupdesc,
+							  char *fragments_json,
+							  const int *snapshot_field_ids,
+							  int n_snapshot_field_ids)
+{
+	IcebergTableInfo *table_info;
+	List	   *am_private;
+	List	   *retrieved_attrs = NIL;
+	ForeignScan *plan;
+	ForeignScanState *scanState;
+	icebergVolumeScanState *fdwState;
+	int			i;
+
+	table_info = pg_iceberg_get_table_info(RelationGetRelid(rel));
+
+	/* Parse the injected fragments JSON (String carrier) into am_private. */
+	am_private = pg_iceberg_materialize_am_private(
+		list_make1(makeString(fragments_json)));
+
+	/*
+	 * The volume-fdw reader consumes the last getgpsegmentCount() elements of
+	 * fdw_private as the participating-segment selection (see fdwFunction.c);
+	 * pg_iceberg_build_scan_am_private appends these on the normal scan path,
+	 * so replicate it here or the reader reads past the fragments and crashes.
+	 *
+	 * Unlike the CustomScan path -- which resolves the selection once on the QD
+	 * and dispatches it -- this runs independently on every QE (the SRF is
+	 * EXECUTE ON ALL SEGMENTS).  datalakeSelectRandomSegments seeds rand() from
+	 * time(NULL), so honoring external_table_limit_segment_num here would let
+	 * each QE pick a DIFFERENT participating set, and the reader shards by the
+	 * agreed set (idx % participating) -- disagreement means fragments read
+	 * twice or not at all.  Pass 0 so every segment participates: deterministic
+	 * and identical across QEs (no rand()), at the cost of not honoring the
+	 * segment-count limit on this historical-read fallback (a soft performance
+	 * knob, never correctness).
+	 */
+	am_private = list_concat(am_private,
+							 datalakeSelectRandomSegments(getgpsegmentCount(), 0));
+
+	/* Projection = every non-dropped column of the (snapshot) descriptor. */
+	for (i = 0; i < scan_tupdesc->natts; i++)
+		if (!TupleDescAttr(scan_tupdesc, i)->attisdropped)
+			retrieved_attrs = lappend_int(retrieved_attrs, i + 1);
+
+	scanState = makeNode(ForeignScanState);
+	scanState->ss.ss_currentRelation = rel;
+	scanState->fdwroutine = get_volume_fdw_routine();
+	scanState->ss.ss_ScanTupleSlot =
+		MakeTupleTableSlot(scan_tupdesc, &TTSOpsHeapTuple);
+	scanState->ss.ps.scandesc = scan_tupdesc;
+
+	plan = makeNode(ForeignScan);
+	plan->scan.plan.qual = NIL;
+	plan->fdw_private = iceberg_build_fdw_private(retrieved_attrs, am_private);
+	scanState->ss.ps.plan = (Plan *) plan;
+
+	fdwState = (icebergVolumeScanState *) palloc0(sizeof(icebergVolumeScanState));
+	fdwState->iceTable.volumn_server_name =
+		pstrdup(table_info->volume_server_name);
+	fdwState->iceTable.volumn_name = pstrdup(table_info->volume_name);
+	/*
+	 * Time travel: the snapshot schema's real field-ids (resolved on the QD,
+	 * shipped with the plan).  The reader matches data-file columns by these
+	 * instead of the constructed tupdesc's positional attnums, which are
+	 * wrong for a snapshot whose history holds a DROP COLUMN.
+	 */
+	if (snapshot_field_ids != NULL && n_snapshot_field_ids > 0)
+	{
+		/*
+		 * All or nothing: a partial array would leave the remaining columns
+		 * on positional matching -- a silent mix of authoritative and wrong.
+		 * A count mismatch means the plan and the schema payload came from
+		 * different resolutions; fail closed.
+		 */
+		if (n_snapshot_field_ids != scan_tupdesc->natts)
+			ereport(ERROR,
+					(errcode(ERRCODE_INTERNAL_ERROR),
+					 errmsg("iceberg time travel: field-id payload has %d entries for %d columns",
+							n_snapshot_field_ids, scan_tupdesc->natts)));
+		fdwState->snapshot_field_ids = (int *)
+			palloc(sizeof(int) * n_snapshot_field_ids);
+		memcpy(fdwState->snapshot_field_ids, snapshot_field_ids,
+			   sizeof(int) * n_snapshot_field_ids);
+		fdwState->n_snapshot_field_ids = n_snapshot_field_ids;
+	}
+	scanState->fdw_state = (void *) fdwState;
+
+	scanState->fdwroutine->BeginForeignScan(scanState, 0);
+
+	pg_iceberg_free_table_info(table_info);
+	return scanState;
+}
+
 void
 pg_iceberg_endscan(TableScanDesc sscan)
 {
@@ -354,47 +460,60 @@ pg_iceberg_getnextslot(TableScanDesc sscan, ScanDirection direction, TupleTableS
  * delete files deduplicated in a global "deleteFiles" array referenced by
  * index from each task).  Must run on the QD.
  */
-static char *
-iceberg_fetch_fragments_json(Relation rel, IcebergTableInfo *table_info,
-							 const char *pushdown_filter,
-							 bool *is_internal_out)
+/*
+ * Resolve the scan-time metadata location (and is_internal) for an Iceberg AM
+ * relation.  Tracked tables (modified in this txn) go through the tracker
+ * (rebase for Read-Your-Own-Writes); untracked tables read the catalog once.
+ * Shared by the fragment path and the time-travel describe callback so both
+ * pin the same metadata.json.  Returns a palloc'd string; caller pfrees.
+ */
+char *
+pg_iceberg_resolve_scan_metadata_location(Oid relid, bool *is_internal_out)
 {
-	char			   *fragments;
 	char			   *scan_metadata_location;
-	bool				is_internal;
 	TableMetadataState *tstate;
 
-	/*
-	 * Obtain metadata location and is_internal for scan planning.
-	 *
-	 * Tracked tables (modified in this txn): the tracker provides both.
-	 * get_scan_metadata_location() triggers a rebase to incorporate
-	 * concurrent commits, ensuring Read-Your-Own-Writes semantics.
-	 *
-	 * Untracked tables: read directly from the catalog (single read).
-	 */
-	tstate = pg_iceberg_tracker_get_table_state(RelationGetRelid(rel));
+	tstate = pg_iceberg_tracker_get_table_state(relid);
 	if (tstate != NULL)
 	{
 		scan_metadata_location =
-			pg_iceberg_tracker_get_scan_metadata_location(RelationGetRelid(rel));
-		is_internal = tstate->is_internal;
+			pg_iceberg_tracker_get_scan_metadata_location(relid);
+		if (is_internal_out)
+			*is_internal_out = tstate->is_internal;
 	}
 	else
 	{
 		IcebergMetadataInfo *metadata_info;
 
-		metadata_info = pg_iceberg_get_metadata_info(RelationGetRelid(rel));
+		metadata_info = pg_iceberg_get_metadata_info(relid);
 		scan_metadata_location = pstrdup(metadata_info->metadata_location);
-		is_internal = metadata_info->is_internal;
+		if (is_internal_out)
+			*is_internal_out = metadata_info->is_internal;
 		pg_iceberg_free_metadata_info(metadata_info);
 	}
+	return scan_metadata_location;
+}
+
+static char *
+iceberg_fetch_fragments_json(Relation rel, IcebergTableInfo *table_info,
+							 const char *pushdown_filter,
+							 bool *is_internal_out,
+							 int64 snapshot_id)
+{
+	char	   *fragments;
+	char	   *scan_metadata_location;
+	bool		is_internal;
+
+	scan_metadata_location =
+		pg_iceberg_resolve_scan_metadata_location(RelationGetRelid(rel),
+												  &is_internal);
 
 	fragments = pg_iceberg_get_fragments_with_catalog(rel,
 													  table_info,
 													  scan_metadata_location,
 													  is_internal,
-													  pushdown_filter);
+													  pushdown_filter,
+													  snapshot_id);
 
 	pfree(scan_metadata_location);
 
@@ -458,7 +577,8 @@ iceberg_rel_has_dropped_attrs(Relation rel)
 }
 
 List *
-pg_iceberg_build_scan_am_private(Relation rel, struct PlanState *ps, int random_segment_num)
+pg_iceberg_build_scan_am_private(Relation rel, struct PlanState *ps, int random_segment_num,
+								 int64 snapshot_id)
 {
 	List			   *am_private = NIL;
 	char			   *fragments = NULL;
@@ -482,8 +602,10 @@ pg_iceberg_build_scan_am_private(Relation rel, struct PlanState *ps, int random_
 		!iceberg_rel_has_dropped_attrs(rel))
 		pushdown_filter = serializeDlProxyFilterQuals(ps->plan->qual);
 
+	/* snapshot_id 0 = HEAD; a time-travel CustomScan passes the snapshot bound
+	 * to its relation (recovered from the RTE alias in IcebergBeginCustomScan). */
 	fragments = iceberg_fetch_fragments_json(rel, table_info, pushdown_filter,
-											 &is_internal);
+											 &is_internal, snapshot_id);
 
 	/*
 	 * Carry the raw JSON in the plan; pg_iceberg_materialize_am_private()
@@ -542,13 +664,14 @@ pg_iceberg_build_scan_am_private(Relation rel, struct PlanState *ps, int random_
  * parse with parseIcebergFragmentResponse() where the List form is needed.
  */
 char *
-pg_iceberg_list_data_fragments_json(Relation rel)
+pg_iceberg_list_data_fragments_json(Relation rel, int64 snapshot_id)
 {
 	char			   *fragments;
 	IcebergTableInfo   *table_info;
 
 	table_info = pg_iceberg_get_table_info(RelationGetRelid(rel));
-	fragments = iceberg_fetch_fragments_json(rel, table_info, NULL, NULL);
+	fragments = iceberg_fetch_fragments_json(rel, table_info, NULL, NULL,
+											 snapshot_id);
 	pg_iceberg_free_table_info(table_info);
 
 	return fragments;

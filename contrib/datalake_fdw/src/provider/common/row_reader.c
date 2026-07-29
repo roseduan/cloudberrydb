@@ -26,7 +26,8 @@ static bool isCacheEnabled(char *cacheEnabled);
 static void icebergFileIndexMapInitialize(DatalakeRowReader *reader);
 
 static List *
-createFieldDescription(TupleDesc tupleDesc, bool isBuiltinIceberg)
+createFieldDescription(TupleDesc tupleDesc, bool isBuiltinIceberg,
+					   const int *snapshotFieldIds, int nSnapshotFieldIds)
 {
 	int i;
 	List *result = NIL;
@@ -42,13 +43,30 @@ createFieldDescription(TupleDesc tupleDesc, bool isBuiltinIceberg)
 		strcpy(fieldDesc->name, attname);
 		fieldDesc->typeOid = typeOid;
 		fieldDesc->typeMod = typeMod;
-		/*
-		 * Only builtin iceberg files carry field-ids stamped as the PG attnum,
-		 * so only then do we let the reader match by field-id.  For external
-		 * iceberg (arbitrary Iceberg field-ids, name-mapped) and non-iceberg
-		 * reads, leave attnum 0 to keep the existing physical-name match.  #401
-		 */
-		fieldDesc->attnum = isBuiltinIceberg ? attr->attnum : 0;
+		if (snapshotFieldIds != NULL && i < nSnapshotFieldIds &&
+			snapshotFieldIds[i] > 0)
+		{
+			/*
+			 * Time travel: the caller supplied the snapshot schema's real
+			 * Iceberg field-ids.  These are authoritative for builtin AND
+			 * external tables alike -- the writer (ours or Spark's) stamped
+			 * the same ids into the data files' parquet metadata.  A
+			 * position-derived attnum would be wrong here: the scan tupdesc
+			 * is built positionally from the snapshot schema, and a snapshot
+			 * whose history holds a DROP COLUMN has holes in its id space.
+			 */
+			fieldDesc->attnum = snapshotFieldIds[i];
+		}
+		else
+		{
+			/*
+			 * Only builtin iceberg files carry field-ids stamped as the PG attnum,
+			 * so only then do we let the reader match by field-id.  For external
+			 * iceberg (arbitrary Iceberg field-ids, name-mapped) and non-iceberg
+			 * reads, leave attnum 0 to keep the existing physical-name match.  #401
+			 */
+			fieldDesc->attnum = isBuiltinIceberg ? attr->attnum : 0;
+		}
 
 		result = lappend(result, fieldDesc);
 	}
@@ -203,7 +221,9 @@ datalakeCreateRowReader(MemoryContext mcxt,
 				List *combinedScanTasks,
 				DLTblFmt format,
 				ExternalTableMetadata *tableOptions,
-				bool isBuiltinIceberg)
+				bool isBuiltinIceberg,
+				const int *snapshotFieldIds,
+				int nSnapshotFieldIds)
 {
 	MemoryContext oldcxt;
 	DatalakeRowReader *reader = MemoryContextAllocZero(TopMemoryContext,
@@ -235,7 +255,9 @@ datalakeCreateRowReader(MemoryContext mcxt,
 	MemoryContextSwitchTo(TopMemoryContext);
 	list_free(combinedScanTasks);
 
-	reader->datafileDesc = createFieldDescription(tupleDesc, isBuiltinIceberg);
+	reader->datafileDesc = createFieldDescription(tupleDesc, isBuiltinIceberg,
+												  snapshotFieldIds,
+												  nSnapshotFieldIds);
 	reader->attrUsed = attrUsed;
 	reader->fileStream = fileStream;
 	reader->mcxt = mcxt;
@@ -922,7 +944,9 @@ datalakeProtocolImportStart(dataLakeFdwScanState *scanstate, DatalakeProtocolCon
 													combinedScanTasks,
 													scanstate->options->format,
 													tableOptions,
-													isBuiltinIceberg);
+													isBuiltinIceberg,
+													scanstate->options->iceberg_snapshot_field_ids,
+													scanstate->options->n_iceberg_snapshot_field_ids);
 
 	/*
 	 * Carry the WHERE-clause quals (raw Expr list, captured on the QE in

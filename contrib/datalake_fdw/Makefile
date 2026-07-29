@@ -126,6 +126,7 @@ OBJS = 	src/datalake_fdw.o \
 		src/am_iceberg/pg_iceberg_rewrite_plan.o \
 		src/am_iceberg/pg_iceberg_extensible.o \
 		src/am_iceberg/pg_iceberg_custom_scan.o \
+		src/am_iceberg/pg_iceberg_time_travel.o \
 		src/am_iceberg/pg_iceberg_pending_delete.o \
 		src/am_iceberg/pg_iceberg_av_consumer.o \
 		src/common/fileMetadata.o \
@@ -161,7 +162,11 @@ endif
 PG_CPPFLAGS = -DSNAPPY_CODEC_AVAILABLE -Isrc/iceberg_catalog_fdw -Isrc/components/agent_cli/c_interface -Isrc/components/agent_cli/include
 
 EXTENSION = datalake_fdw
-DATA = datalake_fdw--1.0.sql
+# Standard PostgreSQL extension versioning: the 1.0 base script plus the
+# 1.0->1.1 upgrade script.  CREATE EXTENSION chains them to reach the control
+# file's default_version (1.1); existing 1.0 installs upgrade in place via
+# ALTER EXTENSION datalake_fdw UPDATE without re-creating dependent objects.
+DATA = datalake_fdw--1.0.sql datalake_fdw--1.0--1.1.sql
 
 ifdef ICEBERG_HUDI_TEST
 REGRESS = setup_hudi iceberg_read hudi_read

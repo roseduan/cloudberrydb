@@ -103,9 +103,67 @@ extern void pg_iceberg_snap_high_ndv_stats(Oid relid, int used_target,
 											int base_target);
 
 extern List *pg_iceberg_build_scan_am_private(Relation rel, struct PlanState *ps,
-											   int random_segment_num);
+											   int random_segment_num,
+											   int64 snapshot_id);
 extern List *pg_iceberg_materialize_am_private(List *am_private);
-extern char *pg_iceberg_list_data_fragments_json(Relation rel);
+extern char *pg_iceberg_list_data_fragments_json(Relation rel, int64 snapshot_id);
+extern char *pg_iceberg_resolve_scan_metadata_location(Oid relid, bool *is_internal_out);
+
+/*
+ * Time travel: open a scan driven by an explicit tuple descriptor and a
+ * fragments JSON payload resolved on the QD (iceberg_snapshot_scan SRF).
+ * Drive with the returned state's fdwroutine->IterateForeignScan and close
+ * with fdwroutine->EndForeignScan.
+ */
+extern struct ForeignScanState *pg_iceberg_snapshot_beginscan(
+	Relation rel, TupleDesc scan_tupdesc, char *fragments_json,
+	const int *snapshot_field_ids, int n_snapshot_field_ids);
+
+/*
+ * Planner-hook callback (QD): walk a finished plan tree and inject the
+ * QD-resolved fragment list into every iceberg_snapshot_scan FunctionScan.
+ */
+extern void iceberg_tt_inject_fragments(struct Plan *plan);
+
+/*
+ * Planner-hook helper (QD): if `plan` is a FunctionScan on a schema-changed
+ * iceberg_snapshot_scan() call, return an equivalent Iceberg CustomScan;
+ * otherwise return `plan` unchanged.
+ */
+extern struct Plan *iceberg_tt_try_make_custom_scan(struct Plan *plan, List *rtable);
+
+/*
+ * Main path: install the post_parse_analyze_hook that rewrites
+ * iceberg_snapshot_scan() FROM-calls into relation scans, and recover the
+ * bound snapshot id from a rewritten relation's alias at execution.
+ */
+extern void iceberg_tt_install_hooks(void);
+extern bool iceberg_tt_parse_alias(const char *aliasname, int64 *snapshot_id);
+
+/*
+ * One planner invocation's registry of per-snapshot base-table cardinalities
+ * (issue #413).  Stack-allocated by the planner hook and chained through
+ * `outer`, so nested planning nests and an error unwinding through the hook
+ * cannot leave a stale frame active.  The entries are private to
+ * pg_iceberg_time_travel.c.
+ */
+typedef struct IcebergTTStatsFrame
+{
+	struct IcebergTTStatsFrame *outer;
+	List	   *entries;
+} IcebergTTStatsFrame;
+
+extern void iceberg_tt_stats_begin(IcebergTTStatsFrame *frame,
+								   struct Query *parse);
+extern void iceberg_tt_stats_end(IcebergTTStatsFrame *frame);
+
+/*
+ * Guard (QD): if a time-travel snapshot reached the CustomScan through a
+ * hand-written relation alias (bypassing the rewrite's schema gate), reject a
+ * snapshot whose schema differs from the current schema before it decodes
+ * historical files under the wrong tuple descriptor.
+ */
+extern void iceberg_tt_check_alias_schema(Relation rel, int64 snapshot_id);
 
 /*
  * Process-local cache of modify-time fragment lists, keyed by relid.

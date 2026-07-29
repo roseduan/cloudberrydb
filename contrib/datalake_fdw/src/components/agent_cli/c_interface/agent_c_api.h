@@ -97,6 +97,8 @@ void agent_cli_wrapper_truncate_table(AgentCliHandle* handle, const char* table_
 void agent_cli_wrapper_drop_table(AgentCliHandle* handle, const char* table_name, const char* json);
 void agent_cli_wrapper_update_schema(AgentCliHandle* handle, const char* table_name, const char* json);
 void agent_cli_wrapper_get_statistics(AgentCliHandle* handle, const char* table_name, const char* json);
+void agent_cli_wrapper_get_snapshot_schema(AgentCliHandle* handle, const char* table_name, const char* json);
+void agent_cli_wrapper_get_snapshots(AgentCliHandle* handle, const char* table_name, const char* json);
 
 /*
  * File-level cleanup invoked by the deletion-queue consumer.  Issues an HTTP

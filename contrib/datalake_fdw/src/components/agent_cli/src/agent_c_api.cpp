@@ -260,6 +260,8 @@ AGENT_CLI_OP_WITH_TABLE(agent_cli_truncate_table_internal, truncate_table)
 AGENT_CLI_OP_WITH_TABLE(agent_cli_drop_table_internal, drop_table)
 AGENT_CLI_OP_WITH_TABLE(agent_cli_get_statistics_internal, get_statistics)
 AGENT_CLI_OP_WITH_TABLE(agent_cli_update_schema_internal, update_schema)
+AGENT_CLI_OP_WITH_TABLE(agent_cli_get_snapshot_schema_internal, get_snapshot_schema)
+AGENT_CLI_OP_WITH_TABLE(agent_cli_get_snapshots_internal, get_snapshots)
 
 /* Catalog operations (internal) */
 AGENT_CLI_OP_NO_TABLE(agent_cli_create_catalog_internal, create_catalog)
@@ -406,6 +408,8 @@ WRAPPER_TABLE_OP(agent_cli_wrapper_truncate_table, agent_cli_truncate_table_inte
 WRAPPER_TABLE_OP(agent_cli_wrapper_drop_table, agent_cli_drop_table_internal)
 WRAPPER_TABLE_OP(agent_cli_wrapper_get_statistics, agent_cli_get_statistics_internal)
 WRAPPER_TABLE_OP(agent_cli_wrapper_update_schema, agent_cli_update_schema_internal)
+WRAPPER_TABLE_OP(agent_cli_wrapper_get_snapshot_schema, agent_cli_get_snapshot_schema_internal)
+WRAPPER_TABLE_OP(agent_cli_wrapper_get_snapshots, agent_cli_get_snapshots_internal)
 
 /* Catalog operations */
 WRAPPER_NO_TABLE_OP(agent_cli_wrapper_create_catalog, agent_cli_create_catalog_internal)

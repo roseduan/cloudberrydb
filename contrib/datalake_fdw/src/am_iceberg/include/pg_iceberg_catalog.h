@@ -47,12 +47,22 @@ extern char *pg_iceberg_get_fragments_with_catalog(Relation rel,
 													IcebergTableInfo *table_info,
 													const char *metadata_location,
 													bool is_internal,
-													const char *pushdown_filter);
+													const char *pushdown_filter,
+													int64 snapshot_id);
 
 extern IcebergTableStatistics *pg_iceberg_get_statistics_with_catalog(Relation rel,
 																	  IcebergTableInfo *table_info,
 																	  const char *metadata_location,
 																	  bool is_internal);
+
+extern char *pg_iceberg_get_snapshot_schema_with_catalog(Relation rel,
+														 IcebergTableInfo *table_info,
+														 const char *metadata_location,
+														 int64 snapshot_id);
+
+extern char *pg_iceberg_get_snapshots_with_catalog(Relation rel,
+												   IcebergTableInfo *table_info,
+												   const char *metadata_location);
 
 extern char *pg_iceberg_get_rewrite_plan_with_catalog(Relation rel,
 													   IcebergTableInfo *table_info,

@@ -940,7 +940,123 @@ ALTER SYSTEM SET datalake.iceberg_autovacuum = off;           -- 如需关闭
 SELECT pg_reload_conf();
 ```
 
-### 4.10 内置工具函数（`iceberg_toolkit`）
+### 4.10 时间旅行（读历史快照）
+
+Iceberg 每次提交都会产生一个快照。`iceberg_snapshot_scan()` 让你把某个历史快照
+**当成一张表来查**，无需预先创建任何对象。
+
+```sql
+-- 1) 先看有哪些快照可选
+SELECT snapshot_id, committed_at, operation, is_current
+  FROM iceberg_snapshot_list('orders');
+
+--  snapshot_id     |        committed_at        | operation | is_current
+-- -----------------+----------------------------+-----------+------------
+--  808164795275195135 | 2026-08-04 12:20:47.211+08 | append    | f
+--  1686471219369376260| 2026-08-04 12:20:52.615+08 | append    | t
+
+-- 2) 按快照 ID 读
+SELECT * FROM iceberg_snapshot_scan('orders', 808164795275195135);
+
+-- 3) 按时间读：取「该时刻或之前最近的一个快照」
+SELECT * FROM iceberg_snapshot_scan('orders', TIMESTAMPTZ '2026-08-04 12:20:50+08');
+SELECT * FROM iceberg_snapshot_scan('orders', now() - interval '1 day');
+
+-- 4) 跨快照对比，一条 SQL、零预建对象
+SELECT a.id FROM iceberg_snapshot_scan('orders', 808164795275195135) a
+  JOIN orders b USING (id) WHERE a.amount <> b.amount;
+
+-- 0 或 NULL::bigint 表示读 HEAD（等价于直接查表）
+SELECT count(*) FROM iceberg_snapshot_scan('orders', 0);
+```
+
+#### 时间戳参数必须带类型
+
+`iceberg_snapshot_scan` 的第二个参数有 `bigint`（快照 ID）和 `timestamptz`（时刻）两个重载。
+一个**不带类型的字面量**两边都匹配不上，PostgreSQL 会报错：
+
+```sql
+SELECT * FROM iceberg_snapshot_scan('orders', '2026-08-04 12:20:50+08');
+ERROR:  function iceberg_snapshot_scan(unknown, unknown) is not unique
+```
+
+写成 `TIMESTAMPTZ '…'`、`'…'::timestamptz` 即可。同理，读 HEAD 时若要传 NULL，
+需写 `NULL::bigint`（整数字面量如 `0`、`123` 不受影响，能自行定到 `bigint`）。
+
+#### 允许什么样的参数
+
+两个参数都必须能在解析期折算成确定的值。
+
+| 写法 | 结果 |
+|------|------|
+| 字面量、`TIMESTAMPTZ '…'`、`'…'::timestamptz` | ✅ |
+| `now()`、`current_timestamp`、`now() - interval '1 day'` | ✅ 语句内恒定 |
+| `clock_timestamp()`、`random()` | ❌ `arguments must be constant expressions` |
+| `$1` 参数、子查询、引用其他表的列 | ❌ 同上 |
+
+拒绝非确定性表达式是必需的：快照选择器会在解析和规划的多个环节各自折算一次，
+取值若每次不同，会出现「列集来自一个快照、数据来自另一个快照」的错乱。
+这与 Spark 的规则一致（Spark 同样接受 `current_timestamp()`、拒绝 `rand()`）。
+
+#### 找不到对应快照时会报错，不会退回 HEAD
+
+```sql
+SELECT * FROM iceberg_snapshot_scan('orders', TIMESTAMPTZ '1999-01-01');
+ERROR:  iceberg time travel: "orders" has no snapshot at or before 1999-01-01 00:00:00+08
+HINT:  Use iceberg_snapshot_list() to list the available snapshots.
+```
+
+快照 ID 不存在同理报错。静默返回当前数据无法与正确结果区分，因此一律显式失败。
+
+#### 返回的是**该快照自己的 schema**
+
+与 Spark / Trino 语义一致：
+
+| 快照之后发生的变更 | 读旧快照时 |
+|---|---|
+| 加列 | 不出现（那时还不存在） |
+| 删列 | **仍可见，数据完整** |
+| 重命名 | 显示快照当时的旧列名 |
+| 类型提升 | 按快照当时的类型返回 |
+
+> `CHAR(N)`/`VARCHAR(N)` 在 Iceberg 侧统一是 `string`，历史快照读回来是 `text`；
+> `fixed[L]` 读回 `bytea`，长度不再强制。
+
+#### 预备语句会把时刻固定下来
+
+用 `PREPARE` / plpgsql 函数体缓存一条带 `now()` 的时间旅行语句时，**时刻在第一次解析时就被
+固定成具体快照**，之后每次 `EXECUTE` 都读同一个快照，不会随时间推移滑向新快照。
+
+这是刻意的：解析期确定的结果列集必须和实际读到的数据来自同一个快照，否则 schema 演化后
+会返回错乱的数据。Spark 也是在分析期一次性绑定快照。需要「每次都取最新的一天前」时，
+不要用预备语句，直接执行 SQL 即可。
+
+#### 可回溯窗口 = 快照保留窗口
+
+时间旅行只能到达 **metadata 里仍然记录着的快照**。Iceberg 的快照不会自动过期，但任何引擎
+（最常见是 Spark 的 `CALL <catalog>.system.expire_snapshots(...)`，或 Glue/Tabular 等托管
+服务的定时维护）都可能按保留策略把老快照连同其独占的数据文件一起清掉。规划保留策略时把
+时间旅行需求算进去：
+
+- **窗口内**：正常读。
+- **已过期**：确定性报错（按 id 读报 "snapshot not found"；按时刻读报
+  "no snapshot at or before …"），**绝不静默回落到 HEAD**——与 Spark/Trino 行为一致。
+- **竞态**：一条已经开始的长查询撞上并发的 expire，可能在读数据文件时失败
+  （文件已删）。协议层没有读锁，所有引擎皆然；唯一的防线是让保留窗口盖过最长的读。
+- **要长期保留某个快照**：让写入方打 tag（如 Spark
+  `ALTER TABLE t CREATE TAG eoy2025 AS OF VERSION ... RETAIN 365 DAYS`），
+  expire 不会删除被活 tag/branch 引用的快照。本产品暂不支持按 tag 读（见下），
+  但 tag 保住的快照 id 仍可通过 `iceberg_snapshot_list()` 找到并按 id 读取。
+
+本产品自身暂未提供 expire 能力：只由 CBDB 写入的内表快照会持续累积，共享表的过期
+由外部引擎的维护任务负责。
+
+#### 尚不支持
+
+`FOR SYSTEM_TIME AS OF` / `FOR VERSION AS OF` 语法糖、branch / tag 引用（`useRef`）、
+增量读（`appendsBetween`）暂未提供，请使用上面的函数形式。
+
+### 4.11 内置工具函数（`iceberg_toolkit`）
 
 `datalake_fdw` 注册了一组 SQL 函数用于直接调用 catalog/volume 操作或检查表元数据。所有函数定义在 `iceberg_toolkit` schema 下。
 
@@ -974,20 +1090,21 @@ SELECT iceberg_toolkit.get_fragments(
 ```
 
 
-### 4.11 当前不支持的功能 / 已知限制
+### 4.12 当前不支持的功能 / 已知限制
 
-#### 4.11.1 完全未实现
+#### 4.12.1 完全未实现
 
 | 功能 | 备注 |
 |------|------|
 | `PARTITION BY`（identity / bucket / truncate / year/month/day/hour） | 表统一按文件分布。可由 Spark 等引擎写入分区表后再被 datalake_fdw 读取 |
-| Time travel（`FOR SYSTEM_TIME AS OF` / `FOR SYSTEM_VERSION AS OF`） | 当前总是读最新快照 |
+| Time travel 的 **SQL 语法糖**（`FOR SYSTEM_TIME AS OF` / `FOR SYSTEM_VERSION AS OF`） | 时间旅行本身已支持，走函数形式 `iceberg_snapshot_scan()`，见 4.10；语法糖需改内核语法，暂不提供 |
+| Time travel 的 branch / tag 引用（`useRef`）、增量读（`appendsBetween` / changelog scan） | 仅支持按 snapshot id / 时间戳定位，见 4.10 |
 | `format-version=1/2`、`write.format.default`、`write.parquet.compression-codec`、`write.distribution-mode` 等 Iceberg 表级 property | 由 catalog 默认值决定，无 SQL 入口可覆盖 |
 | 跨表分布式事务 | 单表 ACID；多表写入不构成原子事务 |
 | Row-level security / 列级权限传递到物理 Iceberg 数据 | 仅在 PG 入口生效，物理文件无访问控制 |
 | 生成列（GENERATED COLUMN）、表达式 DEFAULT 写入 Iceberg | PG 端语法可写但不会反映到 Iceberg schema |
 
-#### 4.11.2 静默 no-op（不会报错但实际无效）
+#### 4.12.2 静默 no-op（不会报错但实际无效）
 
 | 操作 | 实际行为 |
 |------|---------|
@@ -996,7 +1113,7 @@ SELECT iceberg_toolkit.get_fragments(
 | `ANALYZE <iceberg_table>` | 非完全 no-op：会从 Iceberg catalog 元数据刷新 `pg_class.reltuples/relpages` 并抛 NOTICE：`ANALYZE on Iceberg tables refreshed pg_class.reltuples/relpages from Iceberg catalog metadata`；列级统计仍来自 manifest，不做采样 |
 | `PRIMARY KEY` / `UNIQUE` / `FOREIGN KEY` / `CHECK` 约束 | DDL 接受但无 Iceberg 端唯一索引承载，运行时不强制 |
 
-#### 4.11.3 显式拒绝
+#### 4.12.3 显式拒绝
 
 | 操作 | 错误 |
 |------|------|
@@ -1005,7 +1122,7 @@ SELECT iceberg_toolkit.get_fragments(
 | TID range scan（如 `WHERE ctid <@ '...'` 之类的范围 TID 谓词） | `ERRCODE_FEATURE_NOT_SUPPORTED`: `not supported`（pg_iceberg_am_handler.c） |
 | ANALYZE 内部的 `analyze_next_block` / `analyze_next_tuple` API | `ERRCODE_INTERNAL_ERROR`: `API not supported for iceberg relations`（pg_iceberg_am_handler.c） |
 
-#### 4.11.4 并发写入约束
+#### 4.12.4 并发写入约束
 
 同一张 Iceberg 表的并发提交走 **CAS + 重试**，最多重试 10 次（`TRACKER_MAX_COMMIT_RETRIES`）；超过会以 `ERRCODE_T_R_SERIALIZATION_FAILURE` 报错：
 
@@ -1018,7 +1135,7 @@ ERROR:  failed to commit iceberg metadata for table <oid> after <N> retries
 - 高并发写场景把单笔写入做大（一次 INSERT 多行），减少 commit 次数
 - 重试前会清理本地缓存并以最新 snapshot 重 base；外部 catalog（Hive/Polaris）不会重复触发 agent commit，避免重复落数据
 
-需要更强 Iceberg 能力（PARTITION BY、time travel、表 property、跨引擎一致 schema 演化）时，建议结合 Spark/Trino/Flink 直接对 Iceberg 表写元数据，由 datalake_fdw 做读侧消费。
+需要更强 Iceberg 能力（PARTITION BY、表 property、跨引擎一致 schema 演化）时，建议结合 Spark/Trino/Flink 直接对 Iceberg 表写元数据，由 datalake_fdw 做读侧消费。（时间旅行已原生支持，见 4.10。）
 
 ---
 
@@ -1212,7 +1329,7 @@ DROP SERVER cat_server CASCADE;  -- 级联删除所有依赖对象
 | `foreign catalog with OID %u does not exist` | catalog 对象引用失效 | 排查是否 DROP 后未重建；`pg_foreign_catalog` 中确认存在 |
 | `foreign volume with OID %u does not exist` | volume 对象引用失效 | 同上 |
 | `invalid value for boolean option "%s": "%s"` | OPTION 取值不是布尔字面量 | 用 `true` / `false`，不要用 `0/1` 或 `yes/no` |
-| `failed to commit iceberg metadata for table %u after %d retries due to concurrent updates` | 并发写入冲突 CAS 重试 10 次仍失败（详见 4.11.4） | 把多笔写合并成一笔事务、降低并发写并发度，或排查是否有外部引擎同时在写同一张表 |
+| `failed to commit iceberg metadata for table %u after %d retries due to concurrent updates` | 并发写入冲突 CAS 重试 10 次仍失败（详见 4.12.4） | 把多笔写合并成一笔事务、降低并发写并发度，或排查是否有外部引擎同时在写同一张表 |
 | `not supported`（来自 pg_iceberg_am_handler.c） | 触发了 TID range scan 路径 | 改用基于普通列的谓词，避免 `ctid <@ ...` 之类查询 |
-| `API not supported for iceberg relations` | 调用了 heap-only API（多见于第三方扩展直接调内部 API，或 ANALYZE 内部 block API） | 见 4.11.3；避免该扩展直接作用于 iceberg 表 |
+| `API not supported for iceberg relations` | 调用了 heap-only API（多见于第三方扩展直接调内部 API，或 ANALYZE 内部 block API） | 见 4.12.3；避免该扩展直接作用于 iceberg 表 |
 | `ANALYZE on Iceberg tables refreshed pg_class.reltuples/relpages from Iceberg catalog metadata` | 不是错误，只是 NOTICE | ANALYZE 仅刷新 reltuples/relpages（供 ORCA 使用）；列级统计来自 Iceberg manifest，不做采样 |

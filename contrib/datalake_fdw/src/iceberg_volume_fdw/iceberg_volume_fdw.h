@@ -25,6 +25,15 @@ typedef struct icebergTableInfo {
 typedef struct icebergVolumeScanState {
     icebergTableInfo iceTable;      /* Iceberg table information */
     void* volumeState;              /* Volume-specific scan state */
+
+    /*
+     * Time travel: snapshot schema field-ids for the scan tupdesc, copied
+     * into dataLakeOptions by iceberg_volume_get_options.  NULL/0 (the
+     * palloc0 default) for ordinary scans.  Set only by
+     * pg_iceberg_snapshot_beginscan.
+     */
+    int* snapshot_field_ids;
+    int  n_snapshot_field_ids;
 } icebergVolumeScanState;
 
 #endif /* ICEBERG_VOLUME_FDW_H */

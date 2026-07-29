@@ -610,7 +610,8 @@ pg_iceberg_get_fragments_with_catalog(Relation rel,
 									  IcebergTableInfo *table_info,
 									  const char *metadata_location,
 									  bool is_internal,
-									  const char *pushdown_filter)
+									  const char *pushdown_filter,
+									  int64 snapshot_id)
 {
 	const char *nameSpace;
 	const char *tableName;
@@ -643,7 +644,8 @@ pg_iceberg_get_fragments_with_catalog(Relation rel,
 									table_info->catalog_server_name,
 									table_info->catalog_name,
 									table_info->volume_server_name,
-									table_info->volume_name);
+									table_info->volume_name,
+									snapshot_id);
 }
 
 IcebergTableStatistics *
@@ -683,6 +685,79 @@ pg_iceberg_get_statistics_with_catalog(Relation rel,
 									 table_info->catalog_name,
 									 table_info->volume_server_name,
 									 table_info->volume_name);
+}
+
+char *
+pg_iceberg_get_snapshot_schema_with_catalog(Relation rel,
+											IcebergTableInfo *table_info,
+											const char *metadata_location,
+											int64 snapshot_id)
+{
+	const char *nameSpace;
+	const char *tableName;
+	const char *catalogName;
+
+	nameSpace = pg_iceberg_resolve_namespace(
+		table_info->opts ? table_info->opts->namespace : NULL,
+		table_info->catalog_server_name,
+		table_info->catalog_name,
+		RelationGetNamespace(rel));
+
+	if (table_info->opts == NULL || table_info->opts->table == NULL)
+	{
+		tableName = pstrdup(RelationGetRelationName(rel));
+		catalogName = NULL;
+	}
+	else
+	{
+		tableName = table_info->opts->table;
+		catalogName = table_info->opts->catalog;
+	}
+
+	return pg_iceberg_get_snapshot_schema(rel,
+										  catalogName,
+										  nameSpace,
+										  tableName,
+										  metadata_location,
+										  snapshot_id,
+										  table_info->catalog_server_name,
+										  table_info->catalog_name,
+										  table_info->volume_server_name,
+										  table_info->volume_name);
+}
+
+char *
+pg_iceberg_get_snapshots_with_catalog(Relation rel,
+									  IcebergTableInfo *table_info,
+									  const char *metadata_location)
+{
+	const char *nameSpace;
+	const char *tableName;
+	const char *catalogName;
+
+	nameSpace = pg_iceberg_resolve_namespace(
+		table_info->opts ? table_info->opts->namespace : NULL,
+		table_info->catalog_server_name,
+		table_info->catalog_name,
+		RelationGetNamespace(rel));
+
+	if (table_info->opts == NULL || table_info->opts->table == NULL)
+	{
+		tableName = pstrdup(RelationGetRelationName(rel));
+		catalogName = NULL;
+	}
+	else
+	{
+		tableName = table_info->opts->table;
+		catalogName = table_info->opts->catalog;
+	}
+
+	return pg_iceberg_get_snapshots(rel, catalogName, nameSpace, tableName,
+									metadata_location,
+									table_info->catalog_server_name,
+									table_info->catalog_name,
+									table_info->volume_server_name,
+									table_info->volume_name);
 }
 
 char *

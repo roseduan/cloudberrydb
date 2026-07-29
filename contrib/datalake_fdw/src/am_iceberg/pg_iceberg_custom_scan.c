@@ -118,7 +118,7 @@ stash_modify_fragments_for_iceberg_modifies(PlannedStmt *stmt)
 		}
 
 		rel = table_open(relid, NoLock);
-		fragments_json = pg_iceberg_list_data_fragments_json(rel);
+		fragments_json = pg_iceberg_list_data_fragments_json(rel, 0);
 		table_close(rel, NoLock);
 
 		if (fragments_json != NULL)
@@ -306,6 +306,19 @@ replace_iceberg_seqscan(Plan *plan, List *rtable)
 				return make_iceberg_custom_scan(seq);
 		}
 	}
+	else if (IsA(plan, FunctionScan))
+	{
+		/*
+		 * Time travel: a schema-changed iceberg_snapshot_scan() call stays a
+		 * FunctionScan (the main path rewrites schema-unchanged calls to a
+		 * relation SeqScan handled above).  Rewrite it into a self-contained
+		 * Iceberg CustomScan (leaf node -- no children to recurse into).
+		 */
+		Plan	   *swapped = iceberg_tt_try_make_custom_scan(plan, rtable);
+
+		if (swapped != plan)
+			return swapped;
+	}
 
 	/* Recurse common plan tree structure. */
 	plan->lefttree = replace_iceberg_seqscan(plan->lefttree, rtable);
@@ -362,15 +375,37 @@ iceberg_planner_hook(Query *parse,
 					 ParamListInfo boundParams,
 					 OptimizerOptions *optimizer_options)
 {
-	PlannedStmt	   *stmt;
-	ListCell	   *lc;
+	PlannedStmt		   *stmt;
+	ListCell		   *lc;
+	IcebergTTStatsFrame	tt_stats;
 
-	if (prev_planner_hook != NULL)
-		stmt = prev_planner_hook(parse, query_string, cursorOptions,
-								 boundParams, optimizer_options);
-	else
-		stmt = standard_planner(parse, query_string, cursorOptions,
-								boundParams, optimizer_options);
+	/*
+	 * Time travel: resolve the per-snapshot row counts this statement needs
+	 * before planning, so get_relation_info_hook can hand them to the planner
+	 * without talking to the catalog service from inside it (issue #413).  The
+	 * frame lives on this stack frame and is popped on every exit path, which
+	 * is what makes nested planning and cached-plan re-planning safe.
+	 *
+	 * _begin runs inside the PG_TRY because it can raise (a cancel arriving
+	 * during the prefetch is re-thrown); it pushes the frame before doing any
+	 * work, so _end pops it on that path too.
+	 */
+	PG_TRY();
+	{
+		iceberg_tt_stats_begin(&tt_stats, parse);
+
+		if (prev_planner_hook != NULL)
+			stmt = prev_planner_hook(parse, query_string, cursorOptions,
+									 boundParams, optimizer_options);
+		else
+			stmt = standard_planner(parse, query_string, cursorOptions,
+									boundParams, optimizer_options);
+	}
+	PG_FINALLY();
+	{
+		iceberg_tt_stats_end(&tt_stats);
+	}
+	PG_END_TRY();
 
 	/*
 	 * Rewrite only on the QD: QE receives an already-planned PlannedStmt
@@ -389,6 +424,14 @@ iceberg_planner_hook(Query *parse,
 	}
 
 	stash_modify_fragments_for_iceberg_modifies(stmt);
+
+	/*
+	 * Time travel: resolve and inject the fragment list for every
+	 * iceberg_snapshot_scan() call (QD-only, like fragment resolution above).
+	 */
+	iceberg_tt_inject_fragments(stmt->planTree);
+	foreach(lc, stmt->subplans)
+		iceberg_tt_inject_fragments((Plan *) lfirst(lc));
 
 	return stmt;
 }
@@ -586,9 +629,51 @@ IcebergBeginCustomScan(CustomScanState *node, EState *estate, int eflags)
 	 * pushdown / data-file pruning on the agent.
 	 */
 	if (Gp_role == GP_ROLE_DISPATCH)
+	{
+		int64		snapshot_id = 0;	/* 0 = HEAD */
+		RangeTblEntry *rte = exec_rt_fetch(cscan->scan.scanrelid, estate);
+		const char *aliasname = rte->alias ? rte->alias->aliasname
+			: (rte->eref ? rte->eref->aliasname : NULL);
+
+		/*
+		 * Time travel: a rewritten iceberg_snapshot_scan() call carries its
+		 * bound snapshot in the relation alias (see pg_iceberg_time_travel.c).
+		 */
+		if (aliasname != NULL && iceberg_tt_parse_alias(aliasname, &snapshot_id))
+		{
+			/*
+			 * Normally the alias was stamped by the post_parse_analyze rewrite
+			 * of an iceberg_snapshot_scan() call, whose describe callback ran
+			 * tt_reject_unsupported_relation and whose schema gate only rewrites
+			 * schema-unchanged snapshots.  But a user with SELECT could also
+			 * hand-write the token (SELECT * FROM t AS "__icetts_<id>_1"),
+			 * reaching here without either guard.  Replicate both:
+			 *
+			 *   - inheritance / partitioning: the planner expands children by
+			 *     the current structure, which diverges from the historical
+			 *     snapshot's file list and would return incorrect rows.  (RLS
+			 *     still applies -- a direct relation scan is rewritten with its
+			 *     policies -- so only the inheritance check is replicated.)
+			 *   - schema drift: a snapshot whose schema differs from the current
+			 *     schema would be decoded under the current tuple descriptor and
+			 *     return corrupt rows; reject it (the rewrite would have kept it
+			 *     on the FunctionScan fallback instead).
+			 */
+			if (rel->rd_rel->relhassubclass || rel->rd_rel->relispartition)
+				ereport(ERROR,
+						(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+						 errmsg("iceberg time travel does not support inheritance or partitioned tables"),
+						 errdetail("Relation \"%s\" participates in an inheritance or partition hierarchy.",
+								   RelationGetRelationName(rel))));
+
+			iceberg_tt_check_alias_schema(rel, snapshot_id);
+		}
+
 		cscan->custom_private =
 			pg_iceberg_build_scan_am_private(rel, &node->ss.ps,
-											 external_table_limit_segment_num);
+											 external_table_limit_segment_num,
+											 snapshot_id);
+	}
 
 	/* GPDB: the iceberg_volume_fdw layer reads ps.scandesc. */
 	node->ss.ps.scandesc = RelationGetDescr(rel);
@@ -714,4 +799,7 @@ pg_iceberg_install_custom_scan(void)
 
 	prev_executor_start_hook = ExecutorStart_hook;
 	ExecutorStart_hook = iceberg_executor_start_hook;
+
+	/* Time travel: rewrite iceberg_snapshot_scan() into native relation scans. */
+	iceberg_tt_install_hooks();
 }

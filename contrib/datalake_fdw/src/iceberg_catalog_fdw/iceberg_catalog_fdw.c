@@ -430,6 +430,22 @@ executeScanOperation(IcebergCatalogFdwState *fdwState,
             agent_cli_wrapper_get_statistics(catalogState->agentHandle,
                                              fdwState->request.tableName, jsonString);
             break;
+        case ICEBERG_GET_SNAPSHOT_SCHEMA:
+            /* Same request shape as GET_FRAGMENT: metadata_location + snapshot_id
+             * ride in properties (createCreateRequestJson). */
+            jsonString = createCreateRequestJson(fdwState, catalogState->catalogOption,
+                                                catalogState->volumeOption, fdwState->request);
+            agent_cli_wrapper_get_snapshot_schema(catalogState->agentHandle,
+                                                  fdwState->request.tableName, jsonString);
+            break;
+        case ICEBERG_GET_SNAPSHOTS:
+            /* Same request shape as GET_SNAPSHOT_SCHEMA, minus the snapshot id:
+             * the pinned metadata_location rides in properties. */
+            jsonString = createCreateRequestJson(fdwState, catalogState->catalogOption,
+                                                catalogState->volumeOption, fdwState->request);
+            agent_cli_wrapper_get_snapshots(catalogState->agentHandle,
+                                            fdwState->request.tableName, jsonString);
+            break;
 		case ICEBERG_PLAN_FILE_GROUPS:
 			jsonString = createPlanFileGroupsRequestJson(fdwState, catalogState->catalogOption,
 														 catalogState->volumeOption, fdwState->request);
@@ -692,6 +708,19 @@ createCreateRequestJson(IcebergCatalogFdwState* fdwState, IcebergCatalogOptions 
         agentcli_cJSON_AddStringToObject(properties,
             DATALAKEFDW_ICEBERG_KEY_DEFERRED_METADATA_LOCATION,
             req.metadataLocation);
+    }
+
+    // Time travel: read a specific snapshot (0 = HEAD).  Sent as a STRING
+    // because snapshot ids are random int64 that exceed JSON double precision.
+    if (req.snapshotId > 0) {
+        char snapshot_id_buf[32];
+
+        if (properties == NULL)
+            properties = agentcli_cJSON_CreateObject();
+        snprintf(snapshot_id_buf, sizeof(snapshot_id_buf),
+                 INT64_FORMAT, req.snapshotId);
+        agentcli_cJSON_AddStringToObject(properties, "snapshot_id",
+                                         snapshot_id_buf);
     }
 
     if (properties != NULL) {

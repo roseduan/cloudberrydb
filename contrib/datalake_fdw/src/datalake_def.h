@@ -364,6 +364,17 @@ typedef struct dataLakeOptions
 	/* iceberg catalog default impl */
 	bool		set_catalog_default_impl;
 	int			nJunkInfo;
+
+	/*
+	 * Time travel: the snapshot schema's real Iceberg field-ids, parallel to
+	 * the scan tuple descriptor (entry i belongs to attribute i+1).  NULL for
+	 * ordinary scans.  When set, the parquet reader matches data-file columns
+	 * by these ids instead of deriving one from the attribute number -- a
+	 * snapshot whose history holds a DROP COLUMN has holes in its id space,
+	 * so a column's position is NOT its id (see iceberg_snapshot_scan).
+	 */
+	int		   *iceberg_snapshot_field_ids;
+	int			n_iceberg_snapshot_field_ids;
 } dataLakeOptions;
 
 typedef struct dataLakeFdwPlanState

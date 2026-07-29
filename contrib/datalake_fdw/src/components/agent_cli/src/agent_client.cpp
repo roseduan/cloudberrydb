@@ -163,6 +163,20 @@ Response AgentClient::get_statistics(const std::string& table_name,
     return execute_request("POST", url, request_json, request_config);
 }
 
+Response AgentClient::get_snapshot_schema(const std::string& table_name,
+                                          const std::string& request_json,
+                                          const RequestConfig* request_config) {
+    std::string url = build_url(build_table_endpoint(table_name, "getSnapshotSchema"));
+    return execute_request("POST", url, request_json, request_config);
+}
+
+Response AgentClient::get_snapshots(const std::string& table_name,
+                                    const std::string& request_json,
+                                    const RequestConfig* request_config) {
+    std::string url = build_url(build_table_endpoint(table_name, "getSnapshots"));
+    return execute_request("POST", url, request_json, request_config);
+}
+
 Response AgentClient::execute_request(const std::string& method,
                                      const std::string& url,
                                      const std::string& json_data,

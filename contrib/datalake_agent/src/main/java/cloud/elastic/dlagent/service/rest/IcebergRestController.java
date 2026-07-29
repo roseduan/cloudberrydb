@@ -377,6 +377,119 @@ public class IcebergRestController {
     }
 
     /**
+     * Resolve the schema of a specific snapshot (time travel).
+     *
+     * <p>Called by the C describe callback at parse time so the result tuple
+     * descriptor can be built for a snapshot whose schema differs from the
+     * table's current schema (e.g. a column dropped after that snapshot).
+     * Reads the pinned {@code metadata_location} and {@code snapshot_id} from
+     * the request properties, mirroring getTableFragment's request handling.
+     *
+     * @param prefix Catalog prefix
+     * @param table Table name
+     * @param request Get snapshot schema request
+     * @return snapshot schema JSON (snapshotSchemaId, currentSchemaId, columns)
+     */
+    @PostMapping({
+        "/{prefix}/tables/{table}/getSnapshotSchema",
+        "/tables/{table}/getSnapshotSchema"
+    })
+    public ResponseEntity<?> getSnapshotSchema(
+            @PathVariable(value = "prefix", required = false) String prefix,
+            @PathVariable("table") String table,
+            @RequestBody Map<String, Object> request,
+            @RequestHeader(value = "If-None-Match", required = false) String ifNoneMatch) throws Exception {
+
+        // Extract namespace from request body
+        String namespace = (String) request.get("namespace");
+        if (namespace == null || namespace.isEmpty()) {
+            Map<String, Object> errorResponse = new HashMap<>();
+            Map<String, Object> error = new HashMap<>();
+            error.put("message", "Namespace is required");
+            error.put("type", "BadRequestException");
+            error.put("code", 400);
+            errorResponse.put("error", error);
+            return ResponseEntity.status(HttpStatus.BAD_REQUEST).body(errorResponse);
+        }
+
+        log.info("Getting snapshot schema: {}.{}", namespace, table);
+
+        // Extract configurations from request
+        Map<String, String> properties = extractProperties(request);
+
+        // convert to RequestContext and reuse the original iceberg logic
+        RequestContext context = createRequestContext(namespace, table, properties);
+
+        String schema = icebergService.getSnapshotSchema(namespace, table, properties, context);
+
+        // Content-based ETag: no timestamp, so a re-request with an unchanged
+        // snapshot schema hits the If-None-Match / 304 path instead of always
+        // producing a fresh tag (a millisecond timestamp made 304 dead code).
+        String etag = "snapshotSchema-" + Math.abs(schema.hashCode());
+        if (ifNoneMatch != null && ifNoneMatch.equals(etag)) {
+            return ResponseEntity.status(HttpStatus.NOT_MODIFIED).build();
+        }
+
+        return ResponseEntity.ok()
+                .header("ETag", etag)
+                .body(schema);
+    }
+
+    /**
+     * List the snapshots recorded in the pinned metadata_location.
+     *
+     * Backs iceberg_toolkit.snapshots() and the AS OF TIMESTAMP resolution.
+     *
+     * @param prefix Catalog prefix
+     * @param table Table name
+     * @param request Get snapshots request (must carry metadata_location)
+     * @return snapshot list JSON (currentSnapshotId, snapshots)
+     */
+    @PostMapping({
+        "/{prefix}/tables/{table}/getSnapshots",
+        "/tables/{table}/getSnapshots"
+    })
+    public ResponseEntity<?> getSnapshots(
+            @PathVariable(value = "prefix", required = false) String prefix,
+            @PathVariable("table") String table,
+            @RequestBody Map<String, Object> request,
+            @RequestHeader(value = "If-None-Match", required = false) String ifNoneMatch) throws Exception {
+
+        // Extract namespace from request body
+        String namespace = (String) request.get("namespace");
+        if (namespace == null || namespace.isEmpty()) {
+            Map<String, Object> errorResponse = new HashMap<>();
+            Map<String, Object> error = new HashMap<>();
+            error.put("message", "Namespace is required");
+            error.put("type", "BadRequestException");
+            error.put("code", 400);
+            errorResponse.put("error", error);
+            return ResponseEntity.status(HttpStatus.BAD_REQUEST).body(errorResponse);
+        }
+
+        log.info("Getting snapshots: {}.{}", namespace, table);
+
+        // Extract configurations from request
+        Map<String, String> properties = extractProperties(request);
+
+        // convert to RequestContext and reuse the original iceberg logic
+        RequestContext context = createRequestContext(namespace, table, properties);
+
+        String snapshots = icebergService.getSnapshots(namespace, table, properties, context);
+
+        // Content-based ETag, like getSnapshotSchema: the snapshot list of a
+        // pinned metadata.json is immutable, so an unchanged body hits 304.
+        String etag = "snapshots-" + Math.abs(snapshots.hashCode());
+        if (ifNoneMatch != null && ifNoneMatch.equals(etag)) {
+            return ResponseEntity.status(HttpStatus.NOT_MODIFIED).build();
+        }
+
+        return ResponseEntity.ok()
+                .header("ETag", etag)
+                .body(snapshots);
+    }
+
+    /**
      * Get table statistics from the current snapshot summary
      */
     @PostMapping({

@@ -123,6 +123,14 @@ public:
                             const std::string& request_json,
                             const RequestConfig* request_config = nullptr);
 
+    Response get_snapshot_schema(const std::string& table_name,
+                                 const std::string& request_json,
+                                 const RequestConfig* request_config = nullptr);
+
+    Response get_snapshots(const std::string& table_name,
+                           const std::string& request_json,
+                           const RequestConfig* request_config = nullptr);
+
     // Catalog management methods
     Response create_catalog(const std::string& request_json,
                            const RequestConfig* request_config = nullptr);

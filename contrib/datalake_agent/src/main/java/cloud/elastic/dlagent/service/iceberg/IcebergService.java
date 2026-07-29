@@ -49,6 +49,22 @@ public interface IcebergService {
     String getTableFragment(String namespace, String tableName, Map<String, String> properties, RequestContext context) throws Exception;
 
     /**
+     * Resolve the schema of a specific snapshot (time travel) from the pinned
+     * metadata_location, so the C describe callback can build the result tuple
+     * descriptor for a snapshot whose schema differs from the current one.
+     * Returns the JSON described by the getSnapshotSchema REST endpoint.
+     */
+    String getSnapshotSchema(String namespace, String tableName, Map<String, String> properties, RequestContext context) throws Exception;
+
+    /**
+     * List the snapshots recorded in the pinned metadata_location: the discovery
+     * source behind iceberg_toolkit.snapshots(), and what AS OF TIMESTAMP is
+     * resolved against.  Returns the JSON described by the getSnapshots REST
+     * endpoint.
+     */
+    String getSnapshots(String namespace, String tableName, Map<String, String> properties, RequestContext context) throws Exception;
+
+    /**
      * Append data files to a table
      */
     Map<String, Object> appendToTable(String namespace, String tableName, Map<String, String> properties, RequestContext context) throws Exception;
