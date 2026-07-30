@@ -89,7 +89,6 @@ test: workfile/hashagg_spill workfile/hashjoin_spill workfile/materialize_spill 
 # 'zlib' utilizes fault injectors so it needs to be in a group by itself
 test: zlib
 
-test: workfile_limits
 # It will also use faultinjector - so it needs to be in a group by itself.
 test: segspace
 

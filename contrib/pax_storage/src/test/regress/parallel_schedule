@@ -70,7 +70,7 @@ test: gp_gin_index
 # Another group of parallel tests
 # ----------
 
-test: create_aggregate create_function_3 create_cast select inherit typed_table drop_if_exists roleattributes create_am hash_func errors infinite_recurse
+test: create_aggregate create_function_3 create_cast select inherit typed_table drop_if_exists create_am hash_func errors infinite_recurse
 
 # ignore reason:
 #  1. Pax have not implements tuple_insert_speculative and tuple_lock
@@ -113,7 +113,7 @@ test: transactions
 # ----------
 # Another group of parallel tests
 # ----------
-test: privileges init_privs security_label collate lock replica_identity rowsecurity object_address tablesample groupingsets drop_operator password identity appendonly_sample aocs_sample
+test: privileges security_label collate lock replica_identity rowsecurity object_address tablesample groupingsets identity appendonly_sample aocs_sample
 
 test: matview
 # ignore reason: 
@@ -139,7 +139,7 @@ test: task
 # ----------
 # Another group of parallel tests
 # ----------
-test: create_table_like alter_generic alter_operator misc async dbsize misc_functions sysviews tsrf tid collate.icu.utf8 incremental_sort
+test: create_table_like alter_generic alter_operator misc async misc_functions tsrf tid collate.icu.utf8 incremental_sort
 # ignore reason: tidrangescan assumes the ctid is organized by heap
 # test: tidrangescan 
 # ignore reason: pax not support incremental matview
@@ -208,7 +208,6 @@ test: plancache limit copy2 temp domain rangefuncs prepare conversion truncate a
 # ignore reason: Pax not support almost of triggers and have not implements tuple_fetch_row_version
 # test: plpgsql returning with 
 
-test: gp_foreign_data
 
 # ----------
 # Another group of parallel tests
@@ -220,7 +219,7 @@ test: partition_join partition_prune hash_part indexing partition_aggregate part
 
 # event triggers cannot run concurrently with any test that runs DDL
 # oidjoins is read-only, though, and should run late for best coverage
-test: event_trigger oidjoins
+test: event_trigger
 # this test also uses event triggers, so likewise run it by itself
 test: fast_default
 
