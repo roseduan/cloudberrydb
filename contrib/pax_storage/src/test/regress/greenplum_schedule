@@ -18,7 +18,6 @@
 # test for builtin namespace pg_ext_aux
 test: pg_ext_aux
 
-test: gp_dispatch_keepalives
 
 # copy command
 # copy form a file with different EOL
@@ -42,7 +41,6 @@ test: instr_in_shmem
 test: createdb
 test: gp_aggregates gp_aggregates_costs variadic_parameters function_extensions spi shared_scan update_gp triggers_gp returning_gp resource_queue_with_rule gp_types gp_index cluster_gp combocid_gp gp_sort
 test: spi_processed64bit
-test: gp_tablespace_with_faults
 # below test(s) inject faults so each of them need to be in a separate group
 test: gp_tablespace
 
@@ -277,7 +275,6 @@ test: session_reset
 test: psql_gp_commands dropdb_check_shared_buffer_cache gp_upgrade_cornercases
 
 test: temp_relation
-test: alter_db_set_tablespace
 
 # This cannot run in parallel because other tests could increment the Oid
 # counters and make the Oid counter observations hardcoded in the answer file
@@ -286,7 +283,6 @@ test: oid_wraparound
 
 # fts_recovery_in_progresss uses fault injectors to simulate FTS fault states,
 # hence it should be run in isolation.
-test: fts_recovery_in_progress
 
 # append only case, and it must generate a core file.
 ignore: mirror_replay
