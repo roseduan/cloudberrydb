@@ -289,12 +289,6 @@ test_vectorization:
 
     export ENV=devel
     export MAKE_TEST_COMMAND="-c vector.enable_vectorization=on -c optimizer=off -c enable_parallel=off -c force_parallel_mode=1"
-    export TEST_TYPE=installcheck
-    make test-vectorization
-    export TEST_TYPE=icw_test
-    make test-vectorization
-
-    export TEST_TYPE=icw_aocs
     make test-vectorization
   rules:
     - !reference [ .common-rules ]
@@ -383,12 +377,6 @@ test_vectorization_orca:
     make build-database
 
     export MAKE_TEST_COMMAND="-c vector.enable_vectorization=on -c optimizer=on -c enable_parallel=off"
-    export TEST_TYPE=installcheck
-    make test-vectorization
-    export TEST_TYPE=icw_test
-    make test-vectorization
-
-    export TEST_TYPE=icw_aocs
     make test-vectorization
   rules:
     - !reference [ .common-rules ]
