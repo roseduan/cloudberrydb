@@ -26,6 +26,8 @@ STAGED=false      # --staged flag
 DIFF_ONLY=false   # --diff-only flag
 DIFF=""           # computed diff content
 USE_SKILL=false   # true if .claude/skills/code-review exists
+CLAUDE_CLI_VERSION=""  # `claude --version` output, set by call_claude
+MODEL_USED=""          # model(s) reported in Claude's JSON output, set by call_claude
 
 # ---------------------------------------------------------------------------
 # CLI parsing
@@ -400,7 +402,12 @@ PYEOF
 # Prompt building
 # ---------------------------------------------------------------------------
 build_prompt() {
-  # Review instructions go into a system prompt file (trusted).
+  # Review instructions go into a user prompt file (trusted), fed to Claude
+  # as the user turn rather than the system prompt — the target repo's own
+  # .claude/CLAUDE.md is auto-loaded into the system prompt and asserts
+  # priority over "default behavior", which can dilute review-specific
+  # instructions (e.g. the strict JSON output contract) if they also live
+  # in the system prompt.
   # All untrusted content (diff, MR context) lives in separate files under
   # WORK_DIR/. A review-context.md describes the file structure so Claude
   # knows what to read. The Read tool has access to WORK_DIR/** and
@@ -454,21 +461,21 @@ CTXEOF
     done
   fi
 
-  # --- Build system prompt ---
+  # --- Build user prompt ---
   # Check if a project-specific code-review skill exists; if so, instruct
   # Claude to invoke it via the Skill tool instead of using generic rules.
   local skill_file="${PROJECT_ROOT}/.claude/skills/code-review/SKILL.md"
   if [[ -f "$skill_file" ]]; then
     USE_SKILL=true
     echo "==> Found project 'code-review' skill — Claude will invoke it."
-    cat > "${WORK_DIR}/system_prompt.txt" <<'SKILL_EOF'
+    cat > "${WORK_DIR}/user_prompt.txt" <<'SKILL_EOF'
 You are invoked by the code-review.sh script to perform an automated code
 review. Before starting your review, use the /code-review skill to load
 project-specific review instructions, then follow those instructions when
 performing your review.
 SKILL_EOF
   else
-    cat > "${WORK_DIR}/system_prompt.txt" <<'REVIEW_EOF'
+    cat > "${WORK_DIR}/user_prompt.txt" <<'REVIEW_EOF'
 You are invoked by the code-review.sh script to perform an automated code
 review. You are an expert code reviewer.
 
@@ -488,7 +495,7 @@ REVIEW_EOF
   fi
 
   # Append common mechanics (context reading, dedup) and output format
-  cat >> "${WORK_DIR}/system_prompt.txt" <<'FORMAT_EOF'
+  cat >> "${WORK_DIR}/user_prompt.txt" <<'FORMAT_EOF'
 
 Start by reading review-context.md — it is an index file that lists all the
 files you need to read for this review, including:
@@ -570,6 +577,18 @@ call_claude() {
   # Unset CLAUDECODE to allow running inside an existing Claude Code session.
   unset CLAUDECODE 2>/dev/null || true
 
+  CLAUDE_CLI_VERSION=$(claude --version 2>/dev/null || echo "unknown")
+
+  # Feed the review instructions as the user turn (-p), not the system prompt.
+  # The target repo's own .claude/CLAUDE.md is auto-loaded into the system
+  # prompt and asserts priority over "default behavior" — instructions placed
+  # there via --append-system-prompt-file can be diluted by it. The user turn
+  # doesn't have that problem.
+  local claude_prompt
+  claude_prompt="$(cat "${WORK_DIR}/user_prompt.txt")
+
+Read ${WORK_DIR}/review-context.md and review the code."
+
   local attempt=0
   local delay=5
 
@@ -595,16 +614,14 @@ call_claude() {
     if [[ "$MODE" == "dev" ]]; then
       # Run from WORK_DIR to avoid conflicting with an interactive Claude Code
       # session that may be open in the project directory.
-      CLAUDE_OUTPUT=$(cd "$WORK_DIR" && claude -p "Read ${WORK_DIR}/review-context.md and review the code." \
+      CLAUDE_OUTPUT=$(cd "$WORK_DIR" && claude -p "$claude_prompt" \
         --output-format json \
         "${tools_args[@]}" \
-        --append-system-prompt-file "${WORK_DIR}/system_prompt.txt" \
         2>"${WORK_DIR}/claude_stderr.log" || true)
     else
-      CLAUDE_OUTPUT=$(claude -p "Read ${WORK_DIR}/review-context.md and review the code." \
+      CLAUDE_OUTPUT=$(claude -p "$claude_prompt" \
         --output-format json \
         "${tools_args[@]}" \
-        --append-system-prompt-file "${WORK_DIR}/system_prompt.txt" \
         2>"${WORK_DIR}/claude_stderr.log" || true)
     fi
 
@@ -635,6 +652,8 @@ call_claude() {
 
     # Success
     echo "==> Claude Code completed (attempt ${attempt})."
+    MODEL_USED=$(echo "$CLAUDE_OUTPUT" | jq -r '(.modelUsage // {}) | keys | join(", ")' 2>/dev/null || true)
+    MODEL_USED="${MODEL_USED:-unknown}"
     return
   done
 
@@ -749,7 +768,7 @@ output_pipeline() {
 ${summary}
 
 ---
-_${num_comments} inline comment(s) found._"
+_${num_comments} inline comment(s) found. Reviewed by ${MODEL_USED} via Claude Code ${CLAUDE_CLI_VERSION}._"
 
     echo "==> Posting summary comment to MR !${CI_MERGE_REQUEST_IID}..."
     glab mr note "$CI_MERGE_REQUEST_IID" -m "$summary_body" || {
@@ -1000,6 +1019,8 @@ output_dev() {
   printf '%b  Code Review Summary%b\n' "$BOLD" "$RESET"
   printf '%b══════════════════════════════════════════════════════════%b\n' "$BOLD" "$RESET"
   printf '\n'
+  printf '%bModel:%b %s   %bClaude Code:%b %s\n' "$BOLD" "$RESET" "$MODEL_USED" "$BOLD" "$RESET" "$CLAUDE_CLI_VERSION"
+  printf '\n'
   printf '%s\n' "$summary"
   printf '\n'
 
@@ -1036,6 +1057,7 @@ output_dev() {
   # Save review result as markdown for human-readable persistence
   {
     printf '# Code Review Result\n\n'
+    printf '_Model: %s — Claude Code %s_\n\n' "$MODEL_USED" "$CLAUDE_CLI_VERSION"
     printf '## Summary\n\n%s\n\n' "$summary"
     if (( num_comments > 0 )); then
       printf '## Inline Comments (%d)\n\n' "$num_comments"
