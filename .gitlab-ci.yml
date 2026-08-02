@@ -107,6 +107,9 @@ variables:
 .build-rules:
   - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
     when: always
+  # 合并列车机器人的验证分支：必须自动跑全套，不能停在 manual
+  - if: '$CI_COMMIT_BRANCH =~ /^merge-train\//'
+    when: always
   - if: '$CI_DEFAULT_BRANCH == $CI_COMMIT_REF_NAME'
     when: always
     interruptible: false
@@ -114,6 +117,8 @@ variables:
 
 .common-rules:
   - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+    when: on_success
+  - if: '$CI_COMMIT_BRANCH =~ /^merge-train\//'
     when: on_success
   - if: '$CI_DEFAULT_BRANCH == $CI_COMMIT_REF_NAME'
     when: on_success
