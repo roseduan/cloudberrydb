@@ -208,6 +208,14 @@
         <artifactId>jersey-servlet</artifactId>
         <version>${jersey.version}</version>
       </dependency>
+      <!-- jersey-json has no CVE of its own, but leaving it at 1.9 next to jersey-core
+           1.19.4 mixes two jersey 1.x generations in one classloader, and 1.9 is also
+           what drags in jettison 1.1 (pinned above) -->
+      <dependency>
+        <groupId>com.sun.jersey</groupId>
+        <artifactId>jersey-json</artifactId>
+        <version>${jersey.version}</version>
+      </dependency>
       <dependency>
         <groupId>com.sun.jersey.contribs</groupId>
         <artifactId>jersey-guice</artifactId>

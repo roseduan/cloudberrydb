@@ -98,7 +98,7 @@ ERROR:  failed to sync table "default.test_single_partition": NoSuchObjectExcept
 	at org.apache.hadoop.hive.metastore.api.ThriftHiveMetastore$get_table_req_result$get_table_req_resultStandardScheme.read(ThriftHiveMetastore.java)
 	at org.apache.hadoop.hive.metastore.api.ThriftHiveMetastore$get_table_req_result$get_table_req_resultStandardScheme.read(ThriftHiveMetastore.java)
 	at org.apache.hadoop.hive.metastore.api.ThriftHiveMetastore$get_table_req_result.read(ThriftHiveMetastore.java)
-	at org.apache.thrift.TServiceClient.receiveBase(TServiceClient.java:86)
+	at org.apache.thrift.TServiceClient.receiveBase(TServiceClient.java:88)
 	at org.apache.hadoop.hive.metastore.api.ThriftHiveMetastore$Client.recv_get_table_req(ThriftHiveMetastore.java:2079)
 	at org.apache.hadoop.hive.metastore.api.ThriftHiveMetastore$Client.get_table_req(ThriftHiveMetastore.java:2066)
 	at org.apache.hadoop.hive.metastore.HiveMetaStoreClientCompatibility2xx.getTable(HiveMetaStoreClientCompatibility2xx.java:70)
