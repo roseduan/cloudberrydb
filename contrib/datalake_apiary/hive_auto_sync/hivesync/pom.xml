@@ -18,13 +18,14 @@
         <dependency>
             <groupId>org.postgresql</groupId>
             <artifactId>postgresql</artifactId>
-            <!-- 42.7.2 already contains the CVE-2024-1597 fix; bump to the latest 42.7.x as hygiene / to avoid scanner boundary false positives -->
-            <version>42.7.5</version>
+            <!-- 42.7.2 already contains the CVE-2024-1597 fix; 42.7.5 is still flagged for
+                 CVE-2025-49146 / CVE-2026-42198 / CVE-2026-54291, so track the latest
+                 42.7.x via postgresql.version in apiary-extensions-parent -->
         </dependency>
         <dependency>
             <groupId>com.fasterxml.jackson.dataformat</groupId>
             <artifactId>jackson-dataformat-yaml</artifactId>
-            <version>2.15.2</version>
+            <!-- version from jackson-bom in apiary-extensions-parent -->
         </dependency>
         <dependency>
             <groupId>org.apache.logging.log4j</groupId>
@@ -109,6 +110,20 @@
                 <exclusion>
                     <groupId>org.slf4j</groupId>
                     <artifactId>slf4j-reload4j</artifactId>
+                </exclusion>
+                <!-- SBOM CVE cleanup: netty 3.x is EOL - CVE-2019-20444 (CVSS 9.1),
+                     CVE-2019-16869, CVE-2021-37136/37137 have no 3.x fix. Arrives via
+                     hadoop-common 2.10.2; nothing on the metastore-sync path uses it
+                     (datalake_agent and hive_connector already ship without it). -->
+                <exclusion>
+                    <groupId>io.netty</groupId>
+                    <artifactId>netty</artifactId>
+                </exclusion>
+                <!-- SBOM CVE cleanup: velocity 1.5 - CVE-2020-13936 is only fixed on the
+                     velocity-engine-core 2.x line, so the 1.x coordinate is a dead end. -->
+                <exclusion>
+                    <groupId>org.apache.velocity</groupId>
+                    <artifactId>velocity</artifactId>
                 </exclusion>
                 <!-- CVE-2019-10172:Jackson 1.x(org.codehaus.jackson) -->
                 <exclusion>

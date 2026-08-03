@@ -24,9 +24,98 @@
     <!-- CVE fix: avro 1.11.4 (CVE-2024-47561 RCE, overrides hadoop 2.x's transitive 1.7.4) -->
     <avro.version>1.11.4</avro.version>
     <jetty.version>9.4.57.v20241219</jetty.version>
+    <!-- ===== CVE fixes for the ungoverned transitive tree dragged in by hive 3.1.0 /
+         hadoop 2.10.2. Versions match what datalake_agent and hive_connector already
+         converged on, so the three datalake Java modules stay on one set. ===== -->
+    <!-- jackson 2.21.5: overrides hive-exec/hive-metastore's 2.9.5 (20 CRITICAL, incl.
+         CVE-2018-14721 SSRF CVSS 10.0) and the 2.15.2 hardcoded in our own submodules.
+         2.21.5 rather than 2.21.4 because 2.21.0-2.21.4 are themselves affected by
+         GHSA-5gvw-p9qm-jgwh / GHSA-5jmj-h7xm-6q6v / GHSA-mhm7-754m-9p8w. -->
+    <jackson.version>2.21.5</jackson.version>
+    <!-- netty 4.1.136: zookeeper 3.9.x brings its own netty 4.1.x tree along, so pin it here
+         too - otherwise it lands on 4.1.130, which is affected by the same
+         CVE-2026-56745 / CVE-2026-55831 / CVE-2026-55833 / CVE-2026-56817 set. -->
+    <netty.version>4.1.136.Final</netty.version>
+    <!-- zookeeper 3.9.5: CVE-2023-44981 auth bypass (overrides hive's transitive 3.4.14) -->
+    <zookeeper.version>3.9.5</zookeeper.version>
+    <!-- jettison 1.5.4: CVE-2022-40150 / CVE-2022-45685 / CVE-2022-45693 / CVE-2023-1436
+         (overrides the 1.1 pulled via jersey-json) -->
+    <jettison.version>1.5.4</jettison.version>
+    <!-- gson 2.10.1: CVE-2022-25647 deserialization (overrides hive's 2.2.4) -->
+    <gson.version>2.10.1</gson.version>
+    <!-- commons-io 2.16.1: CVE-2024-47554 (overrides the 2.4 / 2.5 from hadoop and hive) -->
+    <commons-io.version>2.16.1</commons-io.version>
+    <!-- commons-compress 1.26.1: CVE-2021-35515/35516/35517/36090 (overrides 1.9 and 1.21) -->
+    <commons-compress.version>1.26.1</commons-compress.version>
+    <!-- ant 1.10.15: CVE-2020-11979 (overrides hive's 1.9.1) -->
+    <ant.version>1.10.15</ant.version>
+    <!-- jersey 1.19.4: CVE-2014-3643 XXE (overrides hadoop 2.x's 1.9) -->
+    <jersey.version>1.19.4</jersey.version>
+    <!-- nimbus-jose-jwt 9.37.4: CVE-2023-52428 DoS. Staying on the 9.x line because
+         10.x requires Java 11 and these modules compile/run on Java 8. -->
+    <nimbus-jose-jwt.version>9.37.4</nimbus-jose-jwt.version>
+    <!-- json-smart 2.4.11: CVE-2023-1370 stack exhaustion (transitive via nimbus/hadoop-auth) -->
+    <json-smart.version>2.4.11</json-smart.version>
+    <!-- commons-beanutils 1.11.0: CVE-2025-48734 (1.9.4 is still affected) -->
+    <commons-beanutils.version>1.11.0</commons-beanutils.version>
+    <!-- java-xmlbuilder 1.2: CVE-2014-125087 XXE (transitive via jets3t) -->
+    <java-xmlbuilder.version>1.2</java-xmlbuilder.version>
+    <!-- lz4-java: CVE-2025-12183 / CVE-2025-66566 (hive/kafka bring 1.6.0). The org.lz4
+         coordinate is dead - its last release, 1.8.1, is a relocation POM pointing at
+         at.yawk.lz4 and is still flagged (last_affected 1.8.1). So pin org.lz4 to the
+         1.8.1 relocation stub to move every requester onto the live coordinate, then pin
+         that one to 1.11.1, which carries both fixes. -->
+    <lz4-java-relocation.version>1.8.1</lz4-java-relocation.version>
+    <lz4-java.version>1.11.1</lz4-java.version>
+    <!-- httpclient 4.5.14: CVE-2020-13956; also removes the 4.5.6 / 4.5.13 skew between
+         submodules -->
+    <httpclient.version>4.5.14</httpclient.version>
+    <!-- snappy-java 1.1.10.4: CVE-2023-34455 / CVE-2023-43642 (overrides 1.1.7.3) -->
+    <snappy-java.version>1.1.10.4</snappy-java.version>
+    <!-- protobuf-java 3.25.5: CVE-2024-7254 / CVE-2021-22569 (overrides hive's 2.5.0).
+         Safe here because every hadoop/hive artifact in these modules is provided
+         scope - the runtime protobuf comes from the host Hive install, not from us. -->
+    <protobuf.version>3.25.5</protobuf.version>
+    <!-- json-io 4.14.1: CVE-2023-34610 (transitive via hive-exec) -->
+    <json-io.version>4.14.1</json-io.version>
+    <!-- libthrift 0.13.0: fixes CVE-2018-1320 and CVE-2019-0205. Highest 0.x that keeps
+         hive 3.1.0's generated metastore stubs compiling; CVE-2020-13949 needs 0.14.0 and
+         CVE-2026-43869 needs 0.23.0, neither of which hive 3.1.0 can be built against. -->
+    <libthrift.version>0.13.0</libthrift.version>
+    <!-- postgresql 42.7.13: CVE-2025-49146 / CVE-2026-42198 / CVE-2026-54291 (42.7.5) -->
+    <postgresql.version>42.7.13</postgresql.version>
+    <!-- ivy 2.5.3: CVE-2022-37865 / CVE-2022-37866 path traversal + CVE-2022-46751 XXE
+         (hive-common's `ADD JAR` support brings 2.4.0); same version datalake_agent uses -->
+    <ivy.version>2.5.3</ivy.version>
+    <!-- aircompressor 0.27: CVE-2024-36114 (hive brings 0.10). CVE-2025-67721 is fixed only
+         in 2.0.3, which renames the packages (io.airlift.compress -> .compress.v3) and would
+         break hive/iceberg's compiled callers, so it stays as an accepted risk - same call
+         datalake_agent and hive_connector already made. -->
+    <aircompressor.version>0.27</aircompressor.version>
+    <!-- dnsjava 3.6.5: CVE-2024-25638 DNSSEC-validation bypass (hadoop-common 2.10.2 brings
+         2.1.7). 3.6.x still targets JDK 8. -->
+    <dnsjava.version>3.6.5</dnsjava.version>
   </properties>
 
-  <!-- CVE fixes: converge old coordinates pulled transitively via hive/hadoop across submodules -->
+  <!-- CVE fixes: converge old coordinates pulled transitively via hive/hadoop across submodules.
+       Anything that has a patched release is pinned below; the coordinates that have NO patched
+       release on Maven Central are instead excluded at each hive-*/hadoop-* declaration in the
+       submodules (Maven drops managed exclusions once a dependency declares its own, so they
+       cannot be centralised here). That dead-end set is:
+
+         log4j:log4j 1.2.17            6 CVEs, 3 CRITICAL; log4j 1.x is EOL. org.apache.log4j.*
+                                       is provided instead by the patched log4j-1.2-api bridge.
+         ch.qos.reload4j:reload4j      second org.apache.log4j.* provider - kept out so the
+         org.slf4j:slf4j-reload4j      active provider does not depend on classpath order
+         org.slf4j:slf4j-log4j12
+         io.netty:netty 3.10.6.Final   CVE-2019-20444 (9.1), CVE-2019-16869, CVE-2021-37136/37137;
+                                       netty 3.x is EOL. netty 4.x is used everywhere instead.
+         org.codehaus.jackson:*        jackson 1.x is EOL: CVE-2019-10202 (9.8), CVE-2019-10172
+         org.apache.velocity:velocity  CVE-2020-13936, fixed only on velocity-engine-core 2.x
+         org.apache.derby:derby        CVE-2022-46337 (9.8); the fixed 10.14.2.1 / 10.15.2.1 /
+                                       10.16.1.2 were never published to Maven Central, and
+                                       10.17.x needs Java 21. Only used for an embedded HMS DB,
+                                       which none of these modules run. -->
   <dependencyManagement>
     <dependencies>
       <!-- converge hivesync's transitive hadoop-common 2.6.0 (via metrics-reporter) to 2.10.2 (last hadoop 2.x) -->
@@ -48,6 +137,191 @@
         <version>${jetty.version}</version>
         <type>pom</type>
         <scope>import</scope>
+      </dependency>
+      <!-- jackson: one BOM for every jackson-* module, so hive's 2.9.5 and the 2.15.2 our
+           own submodules used to hardcode both converge here -->
+      <dependency>
+        <groupId>com.fasterxml.jackson</groupId>
+        <artifactId>jackson-bom</artifactId>
+        <version>${jackson.version}</version>
+        <type>pom</type>
+        <scope>import</scope>
+      </dependency>
+      <dependency>
+        <groupId>org.apache.zookeeper</groupId>
+        <artifactId>zookeeper</artifactId>
+        <version>${zookeeper.version}</version>
+      </dependency>
+      <dependency>
+        <groupId>org.apache.zookeeper</groupId>
+        <artifactId>zookeeper-jute</artifactId>
+        <version>${zookeeper.version}</version>
+      </dependency>
+      <dependency>
+        <groupId>org.codehaus.jettison</groupId>
+        <artifactId>jettison</artifactId>
+        <version>${jettison.version}</version>
+      </dependency>
+      <dependency>
+        <groupId>com.google.code.gson</groupId>
+        <artifactId>gson</artifactId>
+        <version>${gson.version}</version>
+      </dependency>
+      <dependency>
+        <groupId>commons-io</groupId>
+        <artifactId>commons-io</artifactId>
+        <version>${commons-io.version}</version>
+      </dependency>
+      <dependency>
+        <groupId>org.apache.commons</groupId>
+        <artifactId>commons-compress</artifactId>
+        <version>${commons-compress.version}</version>
+      </dependency>
+      <dependency>
+        <groupId>org.apache.ant</groupId>
+        <artifactId>ant</artifactId>
+        <version>${ant.version}</version>
+      </dependency>
+      <dependency>
+        <groupId>org.apache.ant</groupId>
+        <artifactId>ant-launcher</artifactId>
+        <version>${ant.version}</version>
+      </dependency>
+      <!-- jersey 1.x: hadoop 2.10.2 spreads 1.9 across core/client/server/json/servlet -->
+      <dependency>
+        <groupId>com.sun.jersey</groupId>
+        <artifactId>jersey-core</artifactId>
+        <version>${jersey.version}</version>
+      </dependency>
+      <dependency>
+        <groupId>com.sun.jersey</groupId>
+        <artifactId>jersey-client</artifactId>
+        <version>${jersey.version}</version>
+      </dependency>
+      <dependency>
+        <groupId>com.sun.jersey</groupId>
+        <artifactId>jersey-server</artifactId>
+        <version>${jersey.version}</version>
+      </dependency>
+      <dependency>
+        <groupId>com.sun.jersey</groupId>
+        <artifactId>jersey-servlet</artifactId>
+        <version>${jersey.version}</version>
+      </dependency>
+      <dependency>
+        <groupId>com.sun.jersey.contribs</groupId>
+        <artifactId>jersey-guice</artifactId>
+        <version>${jersey.version}</version>
+      </dependency>
+      <dependency>
+        <groupId>com.nimbusds</groupId>
+        <artifactId>nimbus-jose-jwt</artifactId>
+        <version>${nimbus-jose-jwt.version}</version>
+      </dependency>
+      <dependency>
+        <groupId>net.minidev</groupId>
+        <artifactId>json-smart</artifactId>
+        <version>${json-smart.version}</version>
+      </dependency>
+      <dependency>
+        <groupId>net.minidev</groupId>
+        <artifactId>accessors-smart</artifactId>
+        <version>${json-smart.version}</version>
+      </dependency>
+      <dependency>
+        <groupId>commons-beanutils</groupId>
+        <artifactId>commons-beanutils</artifactId>
+        <version>${commons-beanutils.version}</version>
+      </dependency>
+      <dependency>
+        <groupId>com.jamesmurty.utils</groupId>
+        <artifactId>java-xmlbuilder</artifactId>
+        <version>${java-xmlbuilder.version}</version>
+      </dependency>
+      <dependency>
+        <groupId>org.lz4</groupId>
+        <artifactId>lz4-java</artifactId>
+        <version>${lz4-java-relocation.version}</version>
+      </dependency>
+      <dependency>
+        <groupId>at.yawk.lz4</groupId>
+        <artifactId>lz4-java</artifactId>
+        <version>${lz4-java.version}</version>
+      </dependency>
+      <dependency>
+        <groupId>org.apache.httpcomponents</groupId>
+        <artifactId>httpclient</artifactId>
+        <version>${httpclient.version}</version>
+      </dependency>
+      <!-- netty 4.1.136: pinned via the BOM so zookeeper 3.9.x's netty tree comes along -->
+      <dependency>
+        <groupId>io.netty</groupId>
+        <artifactId>netty-bom</artifactId>
+        <version>${netty.version}</version>
+        <type>pom</type>
+        <scope>import</scope>
+      </dependency>
+      <dependency>
+        <groupId>org.xerial.snappy</groupId>
+        <artifactId>snappy-java</artifactId>
+        <version>${snappy-java.version}</version>
+      </dependency>
+      <dependency>
+        <groupId>com.google.protobuf</groupId>
+        <artifactId>protobuf-java</artifactId>
+        <version>${protobuf.version}</version>
+      </dependency>
+      <dependency>
+        <groupId>com.google.protobuf</groupId>
+        <artifactId>protobuf-java-util</artifactId>
+        <version>${protobuf.version}</version>
+      </dependency>
+      <dependency>
+        <groupId>com.cedarsoftware</groupId>
+        <artifactId>json-io</artifactId>
+        <version>${json-io.version}</version>
+      </dependency>
+      <dependency>
+        <groupId>org.apache.thrift</groupId>
+        <artifactId>libthrift</artifactId>
+        <version>${libthrift.version}</version>
+      </dependency>
+      <!-- hive 3.1.0 drags in YARN *server* jars; converge them onto hadoop 2.10.2 like
+           the rest of the hadoop tree instead of leaving 3.1.0 behind -->
+      <dependency>
+        <groupId>org.apache.hadoop</groupId>
+        <artifactId>hadoop-yarn-server-common</artifactId>
+        <version>${hadoop.version}</version>
+      </dependency>
+      <dependency>
+        <groupId>org.apache.hadoop</groupId>
+        <artifactId>hadoop-yarn-common</artifactId>
+        <version>${hadoop.version}</version>
+      </dependency>
+      <dependency>
+        <groupId>org.apache.hadoop</groupId>
+        <artifactId>hadoop-yarn-api</artifactId>
+        <version>${hadoop.version}</version>
+      </dependency>
+      <dependency>
+        <groupId>org.postgresql</groupId>
+        <artifactId>postgresql</artifactId>
+        <version>${postgresql.version}</version>
+      </dependency>
+      <dependency>
+        <groupId>org.apache.ivy</groupId>
+        <artifactId>ivy</artifactId>
+        <version>${ivy.version}</version>
+      </dependency>
+      <dependency>
+        <groupId>io.airlift</groupId>
+        <artifactId>aircompressor</artifactId>
+        <version>${aircompressor.version}</version>
+      </dependency>
+      <dependency>
+        <groupId>dnsjava</groupId>
+        <artifactId>dnsjava</artifactId>
+        <version>${dnsjava.version}</version>
       </dependency>
     </dependencies>
   </dependencyManagement>

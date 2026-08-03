@@ -32,16 +32,21 @@
         <parquet.version>1.15.2</parquet.version>
         <!-- avro 1.11.4: CVE-2024-47561 RCE / CVE-2023-39410 -->
         <avro.version>1.11.4</avro.version>
-        <!-- netty 4.1.135: HTTP/2 Rapid Reset/MadeYouReset DoS, request smuggling, DNS
-             cache poisoning etc. (overrides transitive 4.1.101); enforced via netty-bom below -->
-        <netty.version>4.1.135.Final</netty.version>
+        <!-- netty 4.1.136: HTTP/2 Rapid Reset/MadeYouReset DoS, request smuggling, DNS
+             cache poisoning etc. (overrides transitive 4.1.101); enforced via netty-bom below.
+             4.1.136 adds CVE-2026-56745 / CVE-2026-55831 / CVE-2026-55833 (netty-codec-http),
+             CVE-2026-56817 (netty-codec-xml) and the matching codec / codec-haproxy /
+             codec-http2 / codec-stomp / handler-ssl-ocsp advisories still open in 4.1.135. -->
+        <netty.version>4.1.136.Final</netty.version>
         <!-- jackson 2.21.4: newer PolymorphicTypeValidator bypass via generic type
              parameters + array-subtype allowlist bypass (CVE-2026-54512 / CVE-2026-54513),
              fixed only in 2.18.8 / 2.21.4 (the 2.19/2.20 branches were not separately
              patched). Still Java 8 baseline. Overrides spring-boot's 2.13.5 and iceberg's
              2.15.2; enforced via jackson-bom below. Does NOT affect the jackson 2.9.5
-             shaded inside hive-exec. -->
-        <jackson.version>2.21.4</jackson.version>
+             shaded inside hive-exec. 2.21.5 rather than 2.21.4 because 2.21.0-2.21.4 are
+             themselves affected by GHSA-5gvw-p9qm-jgwh / GHSA-5jmj-h7xm-6q6v /
+             GHSA-mhm7-754m-9p8w. -->
+        <jackson.version>2.21.5</jackson.version>
         <!-- zookeeper 3.9.5: CVE-2026-24308 (sensitive info in client logfile) /
              CVE-2026-24281 (ZKTrustManager PTR-fallback hostname verification), plus the
              earlier resource-consumption / auth fixes (overrides transitive 3.8.4) -->
@@ -55,6 +60,22 @@
         <!-- ivy 2.5.3: CVE-2022-37865 / CVE-2022-37866 path traversal (overrides the
              transitive 2.4.0 pulled via hive-common's `ADD JAR` support) -->
         <ivy.version>2.5.3</ivy.version>
+        <!-- lz4-java: CVE-2025-12183 / CVE-2025-66566 (hive-exec / kafka bring 1.8.0). The
+             org.lz4 coordinate is dead - its last release, 1.8.1, is only a relocation POM
+             pointing at at.yawk.lz4, and is itself still flagged (last_affected 1.8.1). Pin
+             org.lz4 to that relocation stub so every requester follows it onto the live
+             coordinate, then pin at.yawk.lz4 to 1.11.1, which carries both fixes. -->
+        <lz4-java-relocation.version>1.8.1</lz4-java-relocation.version>
+        <lz4-java.version>1.11.1</lz4-java.version>
+        <!-- mssql-jdbc 13.4.0.jre8: CVE-2025-59250 (hive-metastore 3.1.0 brings 10.2.3.jre8).
+             Microsoft only published the fix on the .jre11 classifier for the older lines, so
+             move to the current .jre8 build. The agent talks to HMS over thrift and never
+             opens a SQL Server metastore itself; the driver is carried for completeness. -->
+        <mssql-jdbc.version>13.4.0.jre8</mssql-jdbc.version>
+        <!-- libthrift 0.13.0: CVE-2018-1320 / CVE-2019-0205 (overrides hive 3.1.0's 0.9.3).
+             0.13.0 is the ceiling that keeps hive 3.1.0's generated metastore stubs working;
+             CVE-2020-13949 (needs 0.14.0) and CVE-2026-43869 (needs 0.23.0) stay open. -->
+        <libthrift.version>0.13.0</libthrift.version>
     </properties>
 
     <dependencies>
@@ -317,6 +338,15 @@
                     <groupId>org.codehaus.jackson</groupId>
                     <artifactId>jackson-xc</artifactId>
                 </exclusion>
+                <!-- CVE-2022-46337 (CVSS 9.8): derby 10.14.2.0 LDAP injection. The fixed
+                     10.14.2.1 / 10.15.2.1 / 10.16.1.2 were never published to Maven Central
+                     and 10.17.x needs Java 21, so the coordinate is a dead end. It is only
+                     the embedded HMS database, which the agent never runs - it talks to a
+                     remote metastore. -->
+                <exclusion>
+                    <groupId>org.apache.derby</groupId>
+                    <artifactId>derby</artifactId>
+                </exclusion>
             </exclusions>
         </dependency>
         <dependency>
@@ -328,6 +358,10 @@
                     <groupId>org.eclipse.jetty.aggregate</groupId>
                     <artifactId>jetty-all</artifactId>
                 </exclusion>
+                <exclusion>
+                    <groupId>org.apache.derby</groupId>
+                    <artifactId>derby</artifactId>
+                </exclusion>
             </exclusions>
         </dependency>
 
@@ -335,6 +369,20 @@
             <groupId>org.apache.hive</groupId>
             <artifactId>hive-exec</artifactId>
             <version>${hive.version}</version>
+            <exclusions>
+                <exclusion>
+                    <groupId>org.apache.derby</groupId>
+                    <artifactId>derby</artifactId>
+                </exclusion>
+                <!-- CVE-2020-13936: velocity 1.5 template sandbox escape, fixed only on the
+                     velocity-engine-core 2.x line, so 1.x is a dead end. The fat jar already
+                     ships velocity-engine-core 2.3, which owns the same org.apache.velocity.*
+                     packages - dropping 1.5 also removes that classpath-order ambiguity. -->
+                <exclusion>
+                    <groupId>org.apache.velocity</groupId>
+                    <artifactId>velocity</artifactId>
+                </exclusion>
+            </exclusions>
         </dependency>
 
         <dependency>
@@ -602,6 +650,30 @@
                 <groupId>org.apache.ivy</groupId>
                 <artifactId>ivy</artifactId>
                 <version>${ivy.version}</version>
+            </dependency>
+            <!-- lz4-java: CVE-2025-12183 / CVE-2025-66566 (transitive via hive-exec).
+                 org.lz4 -> relocation stub -> at.yawk.lz4 1.11.1; see the properties. -->
+            <dependency>
+                <groupId>org.lz4</groupId>
+                <artifactId>lz4-java</artifactId>
+                <version>${lz4-java-relocation.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>at.yawk.lz4</groupId>
+                <artifactId>lz4-java</artifactId>
+                <version>${lz4-java.version}</version>
+            </dependency>
+            <!-- mssql-jdbc 13.4.0.jre8: CVE-2025-59250 (transitive via hive-metastore) -->
+            <dependency>
+                <groupId>com.microsoft.sqlserver</groupId>
+                <artifactId>mssql-jdbc</artifactId>
+                <version>${mssql-jdbc.version}</version>
+            </dependency>
+            <!-- libthrift 0.13.0: CVE-2018-1320 / CVE-2019-0205 (transitive via hive 3.1.0) -->
+            <dependency>
+                <groupId>org.apache.thrift</groupId>
+                <artifactId>libthrift</artifactId>
+                <version>${libthrift.version}</version>
             </dependency>
             <!-- hadoop-yarn-server-* 3.4.3: CVE-2021-33036 (user-account escalation in
                  yarn-server-common). hive-metastore/hive-exec 3.1.0 drag these YARN server

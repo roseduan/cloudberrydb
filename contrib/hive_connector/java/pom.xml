@@ -21,15 +21,21 @@
              jackson-core 2.4.0 / jackson-annotations 2.7.9 (unmanaged, dragged in via
              hive-metastore 3.1.0 + hadoop 2.x). 2.21.4 clears the whole 2018-2020
              deserialization CVE wave plus CVE-2026-54512/54513 (PTV / array-subtype
-             allowlist bypass); still Java 8 baseline. Enforced via jackson-bom below. -->
-        <jackson.version>2.21.4</jackson.version>
-        <!-- netty 4.1.135: fat jar shipped netty-all 4.1.12 / netty-buffer|common 4.1.17;
+             allowlist bypass); still Java 8 baseline. Enforced via jackson-bom below.
+             2.21.5 rather than 2.21.4 because 2.21.0-2.21.4 are themselves affected by
+             GHSA-5gvw-p9qm-jgwh / GHSA-5jmj-h7xm-6q6v / GHSA-mhm7-754m-9p8w. -->
+        <jackson.version>2.21.5</jackson.version>
+        <!-- netty 4.1.136: fat jar shipped netty-all 4.1.12 / netty-buffer|common 4.1.17;
              enforced via netty-bom below. The legacy netty 3.10.6 (io.netty:netty,
              CVE-2019-20444/20445) is a SEPARATE artifact that hadoop-mapreduce-client-core
              2.10.2 pulls in for the Hadoop 2.x IPC layer; a version bump cannot replace it
              (different artifactId), so it is excluded explicitly on the hadoop-mapreduce-
-             client-* dependencies below. A metastore client never exercises Hadoop MR IPC. -->
-        <netty.version>4.1.135.Final</netty.version>
+             client-* dependencies below. A metastore client never exercises Hadoop MR IPC.
+             4.1.136 adds the fixes for CVE-2026-56745 / CVE-2026-55831 / CVE-2026-55833
+             (netty-codec-http), CVE-2026-56817 (netty-codec-xml) and the matching
+             codec / codec-haproxy / codec-http2 / codec-stomp / handler-ssl-ocsp
+             advisories that 4.1.135 is still flagged for. -->
+        <netty.version>4.1.136.Final</netty.version>
         <!-- zookeeper 3.9.5: CVE-2023-44981 (old 3.4.x) + CVE-2026-24308/24281 (3.9.x);
              overrides the transitive version pulled via hive/curator. -->
         <zookeeper.version>3.9.5</zookeeper.version>
@@ -45,9 +51,25 @@
         <gson.version>2.10.1</gson.version>
         <!-- commons-compress 1.26.1: CVE-2024-25710/26308 (fat jar shipped 1.21). -->
         <commons-compress.version>1.26.1</commons-compress.version>
-        <!-- aircompressor 0.27: bump from the 0.10 shipped (last io.airlift release;
-             CVE-2025-67721 remains open upstream, no fixed release exists yet). -->
+        <!-- aircompressor 0.27: bump from the 0.10 shipped. CVE-2025-67721 is fixed only in
+             2.0.3, which renames the packages (io.airlift.compress -> io.airlift.compress.v3)
+             and would break hive/iceberg's compiled callers, so 0.x stays and the CVE is
+             carried as an accepted risk. -->
         <aircompressor.version>0.27</aircompressor.version>
+        <!-- ant 1.10.15: CVE-2020-11979 (overrides hive-common's transitive 1.9.1) -->
+        <ant.version>1.10.15</ant.version>
+        <!-- jersey 1.19.4: CVE-2014-3643 XXE (overrides hadoop 2.x's transitive 1.9) -->
+        <jersey.version>1.19.4</jersey.version>
+        <!-- nimbus-jose-jwt 9.37.4: CVE-2023-52428; 10.x needs Java 11, this module is Java 8 -->
+        <nimbus-jose-jwt.version>9.37.4</nimbus-jose-jwt.version>
+        <!-- json-smart 2.4.11: CVE-2023-1370 (transitive via nimbus-jose-jwt / hadoop-auth) -->
+        <json-smart.version>2.4.11</json-smart.version>
+        <!-- commons-beanutils 1.11.0: CVE-2025-48734 -->
+        <commons-beanutils.version>1.11.0</commons-beanutils.version>
+        <!-- libthrift 0.13.0: CVE-2018-1320 / CVE-2019-0205 (overrides hive 3.1.0's 0.9.3) -->
+        <libthrift.version>0.13.0</libthrift.version>
+        <!-- httpclient 4.5.14: CVE-2020-13956 (the fat jar resolves 4.5.6 via hive/hadoop) -->
+        <httpclient.version>4.5.14</httpclient.version>
     </properties>
 
     <dependencyManagement>
@@ -181,6 +203,86 @@
                 <groupId>io.airlift</groupId>
                 <artifactId>aircompressor</artifactId>
                 <version>${aircompressor.version}</version>
+            </dependency>
+            <!-- ant 1.10.15: CVE-2020-11979 (fat jar shipped 1.9.1 via hive-common) -->
+            <dependency>
+                <groupId>org.apache.ant</groupId>
+                <artifactId>ant</artifactId>
+                <version>${ant.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>org.apache.ant</groupId>
+                <artifactId>ant-launcher</artifactId>
+                <version>${ant.version}</version>
+            </dependency>
+            <!-- jersey 1.19.4: CVE-2014-3643 XXE (fat jar shipped 1.9 via hadoop 2.x) -->
+            <dependency>
+                <groupId>com.sun.jersey</groupId>
+                <artifactId>jersey-core</artifactId>
+                <version>${jersey.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>com.sun.jersey</groupId>
+                <artifactId>jersey-client</artifactId>
+                <version>${jersey.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>com.sun.jersey</groupId>
+                <artifactId>jersey-server</artifactId>
+                <version>${jersey.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>com.sun.jersey</groupId>
+                <artifactId>jersey-servlet</artifactId>
+                <version>${jersey.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>com.sun.jersey</groupId>
+                <artifactId>jersey-json</artifactId>
+                <version>${jersey.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>com.sun.jersey.contribs</groupId>
+                <artifactId>jersey-guice</artifactId>
+                <version>${jersey.version}</version>
+            </dependency>
+            <!-- nimbus-jose-jwt 9.37.4: CVE-2023-52428 DoS (fat jar shipped 7.9 via
+                 hadoop-auth). Staying on 9.x: 10.x requires Java 11, this module is Java 8. -->
+            <dependency>
+                <groupId>com.nimbusds</groupId>
+                <artifactId>nimbus-jose-jwt</artifactId>
+                <version>${nimbus-jose-jwt.version}</version>
+            </dependency>
+            <!-- json-smart 2.4.11: CVE-2023-1370 stack exhaustion (fat jar shipped 2.3) -->
+            <dependency>
+                <groupId>net.minidev</groupId>
+                <artifactId>json-smart</artifactId>
+                <version>${json-smart.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>net.minidev</groupId>
+                <artifactId>accessors-smart</artifactId>
+                <version>${json-smart.version}</version>
+            </dependency>
+            <!-- commons-beanutils 1.11.0: CVE-2025-48734 (1.9.4 is still affected) -->
+            <dependency>
+                <groupId>commons-beanutils</groupId>
+                <artifactId>commons-beanutils</artifactId>
+                <version>${commons-beanutils.version}</version>
+            </dependency>
+            <!-- libthrift 0.13.0: CVE-2018-1320 / CVE-2019-0205 (fat jar shipped 0.9.3).
+                 0.13.0 is the ceiling that keeps hive 3.1.0's generated metastore stubs
+                 working; CVE-2020-13949 (0.14.0) and CVE-2026-43869 (0.23.0) stay open. -->
+            <dependency>
+                <groupId>org.apache.thrift</groupId>
+                <artifactId>libthrift</artifactId>
+                <version>${libthrift.version}</version>
+            </dependency>
+            <!-- httpclient 4.5.14: CVE-2020-13956 -->
+            <dependency>
+                <groupId>org.apache.httpcomponents</groupId>
+                <artifactId>httpclient</artifactId>
+                <version>${httpclient.version}</version>
             </dependency>
         </dependencies>
     </dependencyManagement>
