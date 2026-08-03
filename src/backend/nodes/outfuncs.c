@@ -3098,6 +3098,7 @@ _outCreateLakeTableStmt(StringInfo str, const CreateLakeTableStmt *node)
 	WRITE_STRING_FIELD(foreign_volume);
 	WRITE_NODE_FIELD(options);
 	WRITE_NODE_FIELD(distributedBy);
+	WRITE_NODE_FIELD(partitionColumns);
 }
 
 static void

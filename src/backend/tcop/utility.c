@@ -1657,6 +1657,15 @@ ProcessUtilitySlow(ParseState *pstate,
 							table_rv = cstmt->base.relation;
 
 							/*
+							 * Iceberg PARTITION BY is carried in
+							 * cstmt->partitionColumns and translated to an
+							 * Iceberg spec; it must never leak into PG native
+							 * partitioning (which would build parent/child
+							 * tables).  base.partspec stays NULL for lake tables.
+							 */
+							Assert(cstmt->base.partspec == NULL);
+
+							/*
 							 * Validate catalog/volume resolution up front:
 							 * DefineRelation dispatches the statement to the
 							 * QEs, so a failure raised only later inside

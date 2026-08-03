@@ -5396,6 +5396,7 @@ _copyCreateLakeTableStmt(const CreateLakeTableStmt *from)
 	COPY_STRING_FIELD(foreign_volume);
 	COPY_NODE_FIELD(options);
 	COPY_NODE_FIELD(distributedBy);
+	COPY_NODE_FIELD(partitionColumns);
 
 	return newnode;
 }
@@ -5675,6 +5676,8 @@ _copyFileFragment(const FileFragment *from)
 	COPY_SCALAR_FIELD(format);
 	COPY_SCALAR_FIELD(recordCount);
 	COPY_NODE_FIELD(eqColumnNames);
+	COPY_SCALAR_FIELD(fileSize);
+	COPY_NODE_FIELD(partitionValues);
 
 	return newnode;
 }

@@ -620,6 +620,8 @@ _outFileFragment(StringInfo str, const FileFragment *node)
 	WRITE_ENUM_FIELD(format, FileFormat);
 	WRITE_LONG_FIELD(recordCount);
 	WRITE_NODE_FIELD(eqColumnNames);
+	WRITE_LONG_FIELD(fileSize);
+	WRITE_NODE_FIELD(partitionValues);
 }
 
 static void

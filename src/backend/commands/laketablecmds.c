@@ -32,6 +32,7 @@
 #include "commands/extension.h"
 #include "commands/laketablecmds.h"
 #include "foreign/foreign.h"
+#include "lib/stringinfo.h"
 #include "miscadmin.h"
 #include "nodes/makefuncs.h"
 #include "utils/acl.h"
@@ -42,6 +43,13 @@
 #include "utils/rel.h"
 #include "utils/syscache.h"
 #include "utils/array.h"
+
+/*
+ * Reloption that stores the Iceberg partition spec, as a comma-separated column
+ * list ("col1,col2").  It is derived from the PARTITION BY clause; the datalake
+ * AM reads it back through parseRelOptions.
+ */
+#define ICEBERG_PARTITION_BY_OPTION "iceberg_partition_by"
 
 /* GUC variables for default Iceberg catalog and volume */
 char	   *iceberg_default_catalog = NULL;
@@ -366,6 +374,119 @@ CreateLakeTable(CreateLakeTableStmt *stmt, Oid relId)
 	values[Anum_pg_lake_table_ltforeign_catalog - 1] = ObjectIdGetDatum(catalog_oid);
 	values[Anum_pg_lake_table_ltforeign_volume - 1] = ObjectIdGetDatum(volume_oid);
 	values[Anum_pg_lake_table_lttable_type - 1] = CStringGetTextDatum(stmt->table_type);
+
+	/*
+	 * iceberg_partition_by is an internal reloption derived from the PARTITION
+	 * BY clause below; it is never settable directly.  Reject an explicit one
+	 * in the OPTIONS (...) clause unconditionally -- i.e. regardless of whether
+	 * a PARTITION BY clause is also present.  Otherwise a table created with
+	 * OPTIONS (iceberg_partition_by '...') and no PARTITION BY clause would
+	 * skip the block below entirely and store an unvalidated partition spec
+	 * (bypassing the column-existence / duplicate / comma checks), and one
+	 * created with both would append a second copy and later fail with a
+	 * confusing "option ... provided more than once" error.
+	 */
+	{
+		ListCell   *lc;
+
+		foreach(lc, stmt->options)
+		{
+			DefElem    *def = (DefElem *) lfirst(lc);
+
+			if (strcmp(def->defname, ICEBERG_PARTITION_BY_OPTION) == 0)
+				ereport(ERROR,
+						(errcode(ERRCODE_INVALID_OBJECT_DEFINITION),
+						 errmsg("option \"%s\" cannot be set directly",
+								ICEBERG_PARTITION_BY_OPTION),
+						 errhint("Use the PARTITION BY clause instead.")));
+		}
+	}
+
+	/*
+	 * Iceberg PARTITION BY: validate the declared partition columns exist and
+	 * stash them into ltoptions as "iceberg_partition_by=col1,col2".  This is
+	 * NOT PostgreSQL native partitioning (base.partspec is always NULL for lake
+	 * tables); it is later translated into an Iceberg partition spec.
+	 */
+	if (stmt->partitionColumns != NIL)
+	{
+		StringInfoData pbuf;
+		ListCell   *lc;
+		List	   *seen = NIL;
+		bool		first = true;
+
+		/*
+		 * PARTITION BY only maps to an Iceberg partition spec; the grammar
+		 * attaches it to both the ICEBERG and HUDI productions, so reject it
+		 * for anything but an Iceberg lake table rather than silently storing
+		 * an iceberg_partition_by option a HUDI table would ignore.
+		 */
+		if (stmt->table_type == NULL || strcmp(stmt->table_type, "ICEBERG") != 0)
+			ereport(ERROR,
+					(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+					 errmsg("PARTITION BY is only supported for Iceberg lake tables")));
+
+		initStringInfo(&pbuf);
+		foreach(lc, stmt->partitionColumns)
+		{
+			char	   *pcol = strVal(lfirst(lc));
+			ListCell   *lc2;
+			bool		found = false;
+
+			foreach(lc2, stmt->base.tableElts)
+			{
+				Node	   *elt = (Node *) lfirst(lc2);
+
+				if (IsA(elt, ColumnDef) &&
+					strcmp(((ColumnDef *) elt)->colname, pcol) == 0)
+				{
+					found = true;
+					break;
+				}
+			}
+			if (!found)
+				ereport(ERROR,
+						(errcode(ERRCODE_UNDEFINED_COLUMN),
+						 errmsg("partition column \"%s\" does not exist in table \"%s\"",
+								pcol, stmt->base.relation->relname)));
+
+			/*
+			 * A column may appear only once in the partition spec; a duplicate
+			 * would produce an invalid Iceberg PartitionSpec downstream.
+			 */
+			if (list_member(seen, lfirst(lc)))
+				ereport(ERROR,
+						(errcode(ERRCODE_INVALID_OBJECT_DEFINITION),
+						 errmsg("partition column \"%s\" specified more than once",
+								pcol)));
+			seen = lappend(seen, lfirst(lc));
+
+			/*
+			 * The partition column list is stored as a comma-separated string
+			 * in the iceberg_partition_by reloption. A column name that itself
+			 * contains a comma would make that encoding ambiguous (e.g. a
+			 * column "my,col" is indistinguishable from two columns "my" and
+			 * "col" once datalake_fdw splits the value on commas), yielding a
+			 * wrong partition spec. Reject such a name instead.
+			 */
+			if (strchr(pcol, ',') != NULL)
+				ereport(ERROR,
+						(errcode(ERRCODE_INVALID_OBJECT_DEFINITION),
+						 errmsg("partition column name \"%s\" contains a comma",
+								pcol),
+						 errhint("Rename the column before using it as an Iceberg partition column.")));
+
+			if (!first)
+				appendStringInfoChar(&pbuf, ',');
+			appendStringInfoString(&pbuf, pcol);
+			first = false;
+		}
+		list_free(seen);
+
+		stmt->options = lappend(stmt->options,
+								makeDefElem(ICEBERG_PARTITION_BY_OPTION,
+											(Node *) makeString(pbuf.data), -1));
+	}
 
 	/* Handle options */
 	if (stmt->options)

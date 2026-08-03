@@ -654,7 +654,8 @@ static void check_expressions_in_partition_key(PartitionSpec *spec, core_yyscan_
 %type <str>     OptFileHandler
 
 %type <rolespec> OptTableSpaceOwner
-%type <node>    DistributedBy OptDistributedBy 
+%type <node>    DistributedBy OptDistributedBy
+%type <list>	OptIcebergPartitionBy
 %type <ival>	OptTabPartitionRangeInclusive
 %type <node>	TabSubPartitionBy TabSubPartition
 				tab_part_val tab_part_val_no_paran
@@ -8490,12 +8491,23 @@ OptTableType:
 		| HUDI			{ $$ = "HUDI"; }
 		;
 
+/*
+ * Iceberg lake-table partitioning: a plain list of columns / transform(col).
+ * This is NOT PostgreSQL native partitioning (no parent/child tables); it is
+ * translated into an Iceberg partition spec.  Milestone 0 accepts identity
+ * columns only (columnList); transform(col) forms are added later.
+ */
+OptIcebergPartitionBy:
+		PARTITION BY '(' columnList ')'		{ $$ = $4; }
+		| /*EMPTY*/							{ $$ = NIL; }
+		;
+
 
 CreateLakeTableStmt:
 		CREATE OptTableType TABLE qualified_name
 			'(' OptTableElementList ')'
 			OptForeignCatalog OptForeignVolume create_generic_options
-			OptDistributedBy table_access_method_clause
+			OptDistributedBy table_access_method_clause OptIcebergPartitionBy
 				{
 					CreateLakeTableStmt *n = makeNode(CreateLakeTableStmt);
 					$4->relpersistence = RELPERSISTENCE_PERMANENT;
@@ -8518,6 +8530,8 @@ CreateLakeTableStmt:
 					n->foreign_catalog = $8 ? pstrdup($8) : NULL;  /* Optional FOREIGN CATALOG */
 					n->foreign_volume = $9 ? pstrdup($9) : NULL;  /* Optional FOREIGN VOLUME */
 					n->options = $10;
+					/* Iceberg PARTITION BY (translated to Iceberg spec, not PG native) */
+					n->partitionColumns = $13;
 
 					/*
 					 * Lake tables store data on object storage (S3) where
@@ -8550,7 +8564,7 @@ CreateLakeTableStmt:
 		| CREATE OptTableType TABLE IF_P NOT EXISTS qualified_name
 			'(' OptTableElementList ')'
 			OptForeignCatalog OptForeignVolume create_generic_options
-			OptDistributedBy table_access_method_clause
+			OptDistributedBy table_access_method_clause OptIcebergPartitionBy
 				{
 					CreateLakeTableStmt *n = makeNode(CreateLakeTableStmt);
 					$7->relpersistence = RELPERSISTENCE_PERMANENT;
@@ -8573,6 +8587,8 @@ CreateLakeTableStmt:
 					n->foreign_catalog = $11 ? pstrdup($11) : NULL;  /* Optional FOREIGN CATALOG */
 					n->foreign_volume = $12 ? pstrdup($12) : NULL;  /* Optional FOREIGN VOLUME */
 					n->options = $13;
+					/* Iceberg PARTITION BY (translated to Iceberg spec, not PG native) */
+					n->partitionColumns = $16;
 
 					/* Same as above: force DISTRIBUTED RANDOMLY for lake tables */
 					{

@@ -2309,6 +2309,7 @@ _equalCreateLakeTableStmt(const CreateLakeTableStmt *a, const CreateLakeTableStm
 	COMPARE_STRING_FIELD(foreign_volume);
 	COMPARE_NODE_FIELD(options);
 	COMPARE_NODE_FIELD(distributedBy);
+	COMPARE_NODE_FIELD(partitionColumns);
 
 	return true;
 }

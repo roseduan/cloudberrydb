@@ -832,6 +832,7 @@ _readCreateLakeTableStmt(void)
 	READ_STRING_FIELD(foreign_volume);
 	READ_NODE_FIELD(options);
 	READ_NODE_FIELD(distributedBy);
+	READ_NODE_FIELD(partitionColumns);
 
 	READ_DONE();
 }

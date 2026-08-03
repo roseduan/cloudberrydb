@@ -402,4 +402,8 @@ test: dboptions
 test: gp_log_mem_dispatch
 test: outerquery_on_subquery_tlist derive_cte
 
+# Iceberg lake-table PARTITION BY grammar (syntax-only; functional coverage
+# lives in the datalake_fdw regression suite).
+test: lake_partition_syntax
+
 # end of tests

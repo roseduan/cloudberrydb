@@ -3016,6 +3016,8 @@ typedef struct CreateLakeTableStmt
 	char	   *foreign_volume;		/* foreign volume name */
 	List	   *options;			/* table-specific options */
 	DistributedBy *distributedBy;   /* what columns we distribute the data by */
+	List	   *partitionColumns;	/* Iceberg PARTITION BY: List of String(colname);
+									 * NIL if not partitioned. NOT PG native partition. */
 } CreateLakeTableStmt;
 
 /* ----------------------
@@ -4551,6 +4553,7 @@ typedef struct FileFragment
 	int64        recordCount;
 	List        *eqColumnNames;
 	int64		 fileSize;
+	List        *partitionValues;
 } FileFragment;
 
 typedef struct FileScanTask
