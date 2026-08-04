@@ -33,6 +33,11 @@
 #define PAX_TABLES_RELATION_ID 7061
 #define PAX_TABLES_RELID_INDEX_ID 7047
 
+/*
+ * Mirrored in core as EXT_PAX_TABLE_AM_OID (src/include/catalog/pg_am.h),
+ * which core code uses under a different name to avoid a duplicate-macro
+ * clash when both headers land in one translation unit.  Keep in sync at 7047.
+ */
 #define PAX_TABLE_AM_OID 7047
 #define PAX_AMNAME "pax"
 #define PAX_AM_HANDLER_OID 7600

@@ -26,5 +26,6 @@ test: bool_encoding
 
 test: cluster
 test: db_size_functions
+test: relfrozenxid_zero
 
 test: teardown

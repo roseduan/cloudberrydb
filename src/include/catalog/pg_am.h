@@ -25,6 +25,34 @@
 #define IsAccessMethodAO(am_oid) \
 	((am_oid) == AO_ROW_TABLE_AM_OID || (am_oid) == AO_COLUMN_TABLE_AM_OID)
 
+/*
+ * Cloudberry: PAX is a contrib-registered table AM with a fixed OID.  Its
+ * pg_am row is created at extension-init time by
+ * contrib/pax_storage/tools/gen_sql.c (INSERT INTO pg_am ... 7047), so unlike
+ * the core AMs above the OID is not carried in pg_am.dat / pg_am_d.h.
+ *
+ * The contrib side defines its own macro PAX_TABLE_AM_OID in
+ * contrib/pax_storage/src/cpp/comm/pax_rel.h.  Because that header and this
+ * one are both pulled into the same translation unit (via the PAX cbdb_api.h
+ * umbrella), core deliberately uses a *separate* symbol, EXT_PAX_TABLE_AM_OID,
+ * to name the same OID and avoid a duplicate-macro clash.  Keep the two
+ * defines and gen_sql.c in sync at 7047.
+ *
+ * Like AO/AOCS, PAX does not store xmin/xmax per tuple — visibility comes from
+ * aux relations (pg_ext_aux.pg_pax_blocks_<oid> or pg_manifest_<oid>) — so
+ * its pg_class.relfrozenxid should always be InvalidTransactionId.
+ *
+ * Core code that decides whether to write a "normal" XID into
+ * pg_class.relfrozenxid (e.g. cluster.c::swap_relation_files) checks
+ * the IsAccessMethodAO whitelist and historically missed PAX, letting
+ * VACUUM FULL / CLUSTER on PAX tables leave non-Invalid stale values
+ * in catalog.  IsAccessMethodPAX exists so those sites can be updated
+ * symmetrically without depending on contrib headers.
+ */
+#define EXT_PAX_TABLE_AM_OID 7047
+#define IsAccessMethodPAX(am_oid) \
+	((am_oid) == EXT_PAX_TABLE_AM_OID)
+
 /* ----------------
  *		pg_am definition.  cpp turns this into
  *		typedef struct FormData_pg_am

@@ -534,10 +534,50 @@ TransactionId PaxAccessMethod::IndexDeleteTuples(
   return 0;
 }
 
-void PaxAccessMethod::RelationVacuum(Relation /*onerel*/,
+void PaxAccessMethod::RelationVacuum(Relation onerel,
                                      VacuumParams * /*params*/,
                                      BufferAccessStrategy /*bstrategy*/) {
-  /* PAX: micro-partitions have no dead tuples, so vacuum is empty */
+  /*
+   * PAX micro-partitions have no dead tuples — visibility comes from
+   * aux relations, not per-tuple xmin/xmax — so there's nothing for
+   * a heap-style VACUUM to do.  The relation's pg_class.relfrozenxid
+   * is supposed to be InvalidTransactionId for PAX.
+   *
+   * Self-heal: if any older code path (pre-manifest-API PAX,
+   * cluster.c::swap_relation_files's AO-only whitelist before this
+   * fix, isolation fault injection during VACUUM FULL interrupt, or a
+   * direct catalog UPDATE) leaked a non-Invalid value into
+   * pg_class.relfrozenxid for this PAX rel, VACUUM is the natural
+   * place to clear it.  Otherwise the stale value pins
+   * pg_database.datfrozenxid forever — VACUUM FREEZE on the database
+   * looks like it succeeded but datfrozenxid_age stays high, tripping
+   * pg_upgrade's freeze-correctness check
+   * (controldata_gp.c::freeze_master_data) and autovacuum's anti-
+   * wraparound emergency.
+   *
+   * vac_update_relstats() would refuse to write InvalidTransactionId
+   * (it requires TransactionIdIsNormal(frozenxid)), so do the
+   * pg_class UPDATE directly.
+   */
+  if (TransactionIdIsValid(onerel->rd_rel->relfrozenxid) ||
+      MultiXactIdIsValid(onerel->rd_rel->relminmxid)) {
+    Relation pg_class_rel;
+    HeapTuple tuple;
+    Form_pg_class classform;
+
+    pg_class_rel = table_open(RelationRelationId, RowExclusiveLock);
+    tuple = SearchSysCacheCopy1(RELOID,
+                                ObjectIdGetDatum(RelationGetRelid(onerel)));
+    if (!HeapTupleIsValid(tuple))
+      elog(ERROR, "cache lookup failed for relation %u",
+           RelationGetRelid(onerel));
+    classform = (Form_pg_class) GETSTRUCT(tuple);
+    classform->relfrozenxid = InvalidTransactionId;
+    classform->relminmxid   = InvalidMultiXactId;
+    CatalogTupleUpdate(pg_class_rel, &tuple->t_self, tuple);
+    heap_freetuple(tuple);
+    table_close(pg_class_rel, RowExclusiveLock);
+  }
 }
 
 BlockSequence *PaxAccessMethod::RelationGetBlockSequences(Relation rel,

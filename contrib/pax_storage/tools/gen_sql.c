@@ -44,6 +44,9 @@
 #undef printf
 #endif
 
+StaticAssertDecl(PAX_TABLE_AM_OID == EXT_PAX_TABLE_AM_OID,
+                 "The pax am oid must match");
+
 #define PAX_COMMENT "column-optimized PAX table access method handler"
 int main() {
   printf("-- insert pax catalog values\n");

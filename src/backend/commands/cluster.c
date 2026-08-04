@@ -1442,13 +1442,27 @@ swap_relation_files(Oid r1, Oid r2, bool target_is_pg_class,
 		relform1->relminmxid = cutoffMulti;
 	}
 	/*
-	 * Cloudberry: append-optimized tables do not have a valid relfrozenxid.
-	 * Overwrite the entry for both relations.
+	 * Cloudberry: append-optimized and PAX tables do not have a valid
+	 * relfrozenxid (visibility comes from aux relations, not per-tuple
+	 * xmin/xmax).  Overwrite the entry for both relations so a
+	 * VACUUM FULL / CLUSTER / SET ACCESS METHOD rebuild path doesn't
+	 * leave a stale non-Invalid value in pg_class.relfrozenxid for them.
+	 * Without this, the stale value would pin pg_database.datfrozenxid
+	 * and trip both autovacuum's anti-wraparound emergency and
+	 * pg_upgrade's freeze-correctness check (controldata_gp.c:144).
 	 */
-	if (relform1->relkind != RELKIND_INDEX && IsAccessMethodAO(relform1->relam))
+	if (relform1->relkind != RELKIND_INDEX &&
+		(IsAccessMethodAO(relform1->relam) || IsAccessMethodPAX(relform1->relam)))
+	{
 		relform1->relfrozenxid = InvalidTransactionId;
-	if (relform2->relkind != RELKIND_INDEX && IsAccessMethodAO(relform2->relam))
+		relform1->relminmxid   = InvalidMultiXactId;
+	}
+	if (relform2->relkind != RELKIND_INDEX &&
+		(IsAccessMethodAO(relform2->relam) || IsAccessMethodPAX(relform2->relam)))
+	{
 		relform2->relfrozenxid = InvalidTransactionId;
+		relform2->relminmxid   = InvalidMultiXactId;
+	}
 
 	/* swap size statistics too, since new rel has freshly-updated stats */
 	if (swap_stats)
