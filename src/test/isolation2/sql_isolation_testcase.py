@@ -17,6 +17,7 @@ limitations under the License.
 
 import pg
 import pty
+import termios
 import os
 import subprocess
 import re
@@ -95,6 +96,18 @@ class GlobalShellExecutor(object):
         self.v_cnt = 0
         # open pseudo-terminal to interact with subprocess
         self.master_fd, self.slave_fd = pty.openpty()
+        # Turn OFF terminal echo so the command we send is not echoed back to
+        # us.  Otherwise __run_command would have to guess how many echoed
+        # lines to skip, but the tty line discipline does not echo exactly one
+        # physical line per logical line of the command: ICRNL turns a CR in
+        # the query result into an extra newline (the echoed command then leaks
+        # into the captured output), and a form-feed is counted by
+        # str.splitlines() but not echoed as a newline (a real output line is
+        # silently dropped).  With echo off the read stream is just the
+        # command's stdout followed by the prompt.
+        attrs = termios.tcgetattr(self.slave_fd)
+        attrs[3] &= ~termios.ECHO       # lflag
+        termios.tcsetattr(self.slave_fd, termios.TCSANOW, attrs)
         bash_cmd = shutil.which('bash')
         if bash_cmd is None:
             raise GlobalShellExecutor.ExecutionError("cannot find bash command")
@@ -154,7 +167,13 @@ class GlobalShellExecutor(object):
                 output += o
                 if output.endswith(GlobalShellExecutor.BASH_PS1):
                     lines = output.splitlines()
-                    return lines[len(sh_cmd.splitlines()):len(lines) - 1]
+                    # Echo is off, so the stream is just the command's stdout
+                    # followed by the prompt line; drop only the trailing
+                    # prompt.  Do not try to skip echoed command lines by
+                    # counting sh_cmd's logical lines -- that miscounts when the
+                    # result carries bytes the tty translates differently than
+                    # str.splitlines() (see the comment in __init__).
+                    return lines[:len(lines) - 1]
 
             if not r and not e:
                 self.terminate(True)
