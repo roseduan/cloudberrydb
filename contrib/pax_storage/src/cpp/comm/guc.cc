@@ -80,6 +80,11 @@ bool pax_enable_rle_batch_encoding = false;
 
 bool pax_enable_fast_filter = true;
 
+// Prototype: chunk fixed-length column DATA streams so random/sparse fetches
+// decompress only the needed chunk instead of the whole group.
+bool pax_enable_chunk_index = true;
+int pax_chunk_index_rows = 8192;
+
 }  // namespace pax
 
 namespace paxc {
@@ -158,6 +163,16 @@ void DefineGUCs() {
   DefineCustomBoolVariable("pax.enable_rle_batch_encoding", "enable pax rle batch encoding",
                            NULL, &pax::pax_enable_rle_batch_encoding, false,
                            PGC_USERSET, GUC_GPDB_NEED_SYNC, NULL, NULL, NULL);
+
+  DefineCustomBoolVariable("pax.enable_chunk_index",
+                           "chunk fixed-length column streams for sparse fetch",
+                           NULL, &pax::pax_enable_chunk_index, true,
+                           PGC_USERSET, GUC_GPDB_NEED_SYNC, NULL, NULL, NULL);
+
+  DefineCustomIntVariable(
+      "pax.chunk_index_rows", "rows per column chunk when chunk index is on",
+      NULL, &pax::pax_chunk_index_rows, 8192, 1024, 131072, PGC_USERSET,
+      GUC_GPDB_NEED_SYNC, NULL, NULL, NULL);
 
   DefineCustomIntVariable(
       "pax.scan_reuse_buffer_size", "set the reuse buffer size", NULL,

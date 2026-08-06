@@ -51,6 +51,9 @@ extern bool pax_enable_iouring;
 extern bool pax_enable_rle_batch_encoding;
 
 extern bool pax_enable_fast_filter;
+
+extern bool pax_enable_chunk_index;
+extern int pax_chunk_index_rows;
 }  // namespace pax
 
 namespace paxc {

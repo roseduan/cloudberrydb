@@ -28,10 +28,20 @@
 #include "storage/columns/pax_encoding_non_fixed_column.h"
 
 #include "comm/fmt.h"
+#include "comm/guc.h"
 #include "comm/pax_memory.h"
 #include "storage/pax_defined.h"
 
 namespace pax {
+// Chunk-index magic for a non-fixed column's DATA stream (distinct from the
+// fixed-length magic and from the ZSTD frame magic). Layout:
+//   [uint32 magic][uint32 n_chunks][uint32 chunk_rows][uint32 total_rows]
+//   [per chunk: uint64 ulen, uint64 clen][compressed chunk 0][chunk 1]...
+// ulen/clen are uint64: a varlena column's DATA stream is bounded only by the
+// tuple count (PAX_MAX_NUM_TUPLES_PER_FILE), not by any byte cap, so a single
+// chunk's (un)compressed length can exceed 4GB for wide values.
+// Only the DATA (varlena) stream is chunked; the OFFSETS stream is unchanged.
+static const uint32 kPaxNfChunkMagic = 0x50414332;  // "PAC2"
 
 void PaxNonFixedEncodingColumn::InitEncoder() {
   if (encoder_options_.column_encode_type ==
@@ -159,6 +169,56 @@ void PaxNonFixedEncodingColumn::Set(std::unique_ptr<DataBuffer<char>> data,
       return;
     }
 
+    // Chunk-indexed DATA stream? Keep the compressed bytes and decode lazily
+    // per chunk in GetDatum(); the OFFSETS stream is still decoded whole below.
+    if (compressor_ && data->Used() >= 4 * sizeof(uint32) &&
+        *reinterpret_cast<const uint32 *>(data->Start()) == kPaxNfChunkMagic) {
+      const uint32 *h = reinterpret_cast<const uint32 *>(data->Start());
+      uint32 n_chunks = h[1];
+      chunk_rows_ = h[2];
+      chunk_total_rows_ = h[3];
+      const uint64 *tab = reinterpret_cast<const uint64 *>(h + 4);
+      // n_chunks comes from the (untrusted) stream header; each chunk has an
+      // [ulen,clen] pair (2 uint64). The magic cannot legitimately collide with
+      // a zstd/lz4 frame header, so a stream that matches the magic but whose
+      // declared table/chunks do not fit the received buffer is
+      // corrupt/truncated: fall through to whole-frame decompression (which
+      // then rejects it) rather than reading past the buffer. All size math is
+      // size_t; the multiply cannot overflow because n_chunks is uint32.
+      size_t hdr_need = 4 * sizeof(uint32) + (size_t)n_chunks * 2 * sizeof(uint64);
+      // Reject a degenerate/corrupt header as well: n_chunks or chunk_rows_ == 0
+      // would divide by zero / index empty chunk tables in GetDatum(). A valid
+      // stream always satisfies these (the writer only chunks when
+      // nrows > chunk_rows >= 1024).
+      if (n_chunks > 0 && chunk_rows_ > 0 && data->Used() >= hdr_need) {
+        chunk_ulen_.resize(n_chunks);
+        chunk_clen_.resize(n_chunks);
+        chunk_coff_.resize(n_chunks);
+        chunk_ustart_.resize(n_chunks);
+        size_t off = hdr_need, ustart = 0, maxu = 0;
+        for (uint32 c = 0; c < n_chunks; c++) {
+          chunk_ulen_[c] = tab[2 * c];
+          chunk_clen_[c] = tab[2 * c + 1];
+          chunk_coff_[c] = off;
+          chunk_ustart_[c] = ustart;
+          off += chunk_clen_[c];
+          ustart += chunk_ulen_[c];
+          if (chunk_ulen_[c] > maxu) maxu = chunk_ulen_[c];
+        }
+        // Only adopt the chunked layout if every chunk's compressed bytes are
+        // present; otherwise a later DecodeChunk()/MaterializeAll() would read
+        // past chunk_src_.
+        if (off <= data->Used()) {
+          chunk_buf_ = std::make_shared<DataBuffer<char>>(maxu);
+          cached_chunk_ = -1;
+          chunk_src_ = std::move(data);
+          chunked_ = true;
+          return;
+        }
+      }
+      // Not a usable chunk stream -- fall through to whole decompression.
+    }
+
     if (compressor_) {
       auto d_size = compressor_->Decompress(
           PaxNonFixedColumn::data_->Start(),
@@ -242,6 +302,9 @@ void PaxNonFixedEncodingColumn::Set(std::unique_ptr<DataBuffer<char>> data,
 }
 
 std::pair<char *, size_t> PaxNonFixedEncodingColumn::GetBuffer() {
+  // Whole-buffer accessors need the full column; materialize lazy chunks first.
+  if (!compress_route_ && chunked_) MaterializeAll();
+
   bool exist_encoder;
   exist_encoder = compressor_ || encoder_;
 
@@ -259,13 +322,58 @@ std::pair<char *, size_t> PaxNonFixedEncodingColumn::GetBuffer() {
 
     // do compressed
     if (compressor_) {
-      size_t bound_size =
-          compressor_->GetCompressBound(PaxNonFixedColumn::data_->Used());
+      char *src = PaxNonFixedColumn::data_->Start();
+      size_t total_bytes = PaxNonFixedColumn::data_->Used();
+      // Use the real non-null value count. offsets_->GetSize() carries an extra
+      // trailing offset (== total_bytes) when next_offsets_ == -1, so using it
+      // directly adds a phantom final value: when the count is an exact
+      // multiple of chunk_rows (e.g. a full 131072-row group with the default
+      // 8192 chunk size) it produces a trailing zero-length chunk whose
+      // Compress(src_len=0) trips an assertion / writes a bogus chunk.
+      size_t nrows = GetNonNullRows();
+
+      // Chunk-indexed DATA layout: split the varlena bytes at row boundaries
+      // (chunk_rows values per chunk), compress each independently, and prepend
+      // an [ulen,clen] table so a random fetch decompresses just one chunk.
+      if (pax_enable_chunk_index && total_bytes > 0 &&
+          nrows > (size_t)pax_chunk_index_rows) {
+        uint32 chunk_rows = (uint32)pax_chunk_index_rows;
+        uint32 n_chunks = (uint32)((nrows + chunk_rows - 1) / chunk_rows);
+        size_t hdr = 4 * sizeof(uint32) + (size_t)n_chunks * 2 * sizeof(uint64);
+        size_t cap =
+            hdr + compressor_->GetCompressBound(total_bytes) + n_chunks * 128;
+        shared_data_ = std::make_shared<DataBuffer<char>>(cap);
+        char *base = shared_data_->Start();
+        uint32 h[4] = {kPaxNfChunkMagic, n_chunks, chunk_rows, (uint32)nrows};
+        memcpy(base, h, sizeof(h));
+        uint64 *tab = reinterpret_cast<uint64 *>(base + sizeof(h));
+        size_t off = hdr;
+        for (uint32 c = 0; c < n_chunks; c++) {
+          size_t rs = (size_t)c * chunk_rows;
+          size_t re = rs + chunk_rows < nrows ? rs + chunk_rows : nrows;
+          size_t bstart = (*offsets_)[rs];
+          size_t bend = (re < nrows) ? (size_t)(*offsets_)[re] : total_bytes;
+          size_t ulen = bend - bstart;
+          size_t clen = compressor_->Compress(base + off, cap - off,
+                                              src + bstart, ulen,
+                                              encoder_options_.compress_level);
+          if (compressor_->IsError(clen)) {
+            CBDB_RAISE(cbdb::CException::ExType::kExTypeCompressError,
+                       fmt("Compress failed, %s", compressor_->ErrorName(clen)));
+          }
+          tab[2 * c] = ulen;
+          tab[2 * c + 1] = clen;
+          off += clen;
+        }
+        shared_data_->Brush(off);
+        return std::make_pair(shared_data_->Start(), shared_data_->Used());
+      }
+
+      size_t bound_size = compressor_->GetCompressBound(total_bytes);
       shared_data_ = std::make_shared<DataBuffer<char>>(bound_size);
 
       auto c_size = compressor_->Compress(
-          shared_data_->Start(), shared_data_->Capacity(),
-          PaxNonFixedColumn::data_->Start(), PaxNonFixedColumn::data_->Used(),
+          shared_data_->Start(), shared_data_->Capacity(), src, total_bytes,
           encoder_options_.compress_level);
 
       if (compressor_->IsError(c_size)) {
@@ -304,6 +412,22 @@ std::pair<char *, size_t> PaxNonFixedEncodingColumn::GetBuffer() {
 
   // no compress or uncompressed
   return PaxNonFixedColumn::GetBuffer();
+}
+
+std::pair<char *, size_t> PaxNonFixedEncodingColumn::GetBuffer(size_t position) {
+  // The vectorized read path fetches varlena values through this per-position
+  // accessor, which reads data_ directly. Materialize a lazily chunk-indexed
+  // DATA stream first; otherwise data_ is empty and the read returns garbage.
+  if (!compress_route_ && chunked_) MaterializeAll();
+  return PaxNonFixedColumn::GetBuffer(position);
+}
+
+std::pair<char *, size_t> PaxNonFixedEncodingColumn::GetRangeBuffer(
+    size_t start_pos, size_t len) {
+  // Same lazy-chunk contract as GetBuffer(position): the vec adapter sizes its
+  // output buffer from this range and reads data_ directly.
+  if (!compress_route_ && chunked_) MaterializeAll();
+  return PaxNonFixedColumn::GetRangeBuffer(start_pos, len);
 }
 
 std::pair<char *, size_t> PaxNonFixedEncodingColumn::GetOffsetBuffer(
@@ -372,6 +496,55 @@ size_t PaxNonFixedEncodingColumn::GetAlignSize() const {
   }
 
   return PAX_DATA_NO_ALIGN;
+}
+
+void PaxNonFixedEncodingColumn::DecodeChunk(uint32 chunk_no) {
+  Assert(chunk_no < chunk_clen_.size());
+  size_t d = compressor_->Decompress(chunk_buf_->Start(), chunk_buf_->Capacity(),
+                                     chunk_src_->Start() + chunk_coff_[chunk_no],
+                                     chunk_clen_[chunk_no]);
+  if (compressor_->IsError(d)) {
+    CBDB_RAISE(cbdb::CException::ExType::kExTypeCompressError,
+               fmt("Decompress failed, %s", compressor_->ErrorName(d)));
+  }
+  cached_chunk_ = (int)chunk_no;
+}
+
+void PaxNonFixedEncodingColumn::MaterializeAll() {
+  if (!chunked_) return;
+  size_t total_u = 0;
+  for (size_t c = 0; c < chunk_clen_.size(); c++) {
+    size_t d = compressor_->Decompress(
+        PaxNonFixedColumn::data_->Start() + chunk_ustart_[c],
+        PaxNonFixedColumn::data_->Capacity() - chunk_ustart_[c],
+        chunk_src_->Start() + chunk_coff_[c], chunk_clen_[c]);
+    if (compressor_->IsError(d)) {
+      CBDB_RAISE(cbdb::CException::ExType::kExTypeCompressError,
+                 fmt("Decompress failed, %s", compressor_->ErrorName(d)));
+    }
+    total_u += chunk_ulen_[c];
+  }
+  PaxNonFixedColumn::data_->Brush(total_u);
+  chunked_ = false;
+  chunk_src_ = nullptr;
+  chunk_buf_ = nullptr;
+  cached_chunk_ = -1;
+}
+
+Datum PaxNonFixedEncodingColumn::GetDatum(size_t position, int null_counts) {
+  if (!chunked_) return PaxNonFixedColumn::GetDatum(position, null_counts);
+
+  // Toast values need the full detoast path; fall back for them (rare).
+  if (unlikely(IsToast(position))) {
+    MaterializeAll();
+    return PaxNonFixedColumn::GetDatum(position, null_counts);
+  }
+
+  size_t data_idx = (null_counts >= 0) ? (position - null_counts) : position;
+  uint32 c = (uint32)(data_idx / chunk_rows_);
+  if ((int)c != cached_chunk_) DecodeChunk(c);
+  size_t local = (size_t)(*offsets_)[data_idx] - chunk_ustart_[c];
+  return PointerGetDatum(chunk_buf_->Start() + local);
 }
 
 }  // namespace pax
