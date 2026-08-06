@@ -130,6 +130,10 @@ class CCPaxAccessMethod final {
                                           ParallelTableScanDesc parallel_scan,
                                           struct PlanState *ps, uint32 flags);
 
+  static TableScanDesc ScanExtractColumnsBM(Relation rel, Snapshot snapshot,
+                                            List *targetlist, List *qual,
+                                            List *bitmapqualorig, uint32 flags);
+
   static bool IndexUniqueCheck(Relation rel, ItemPointer tid, Snapshot snapshot,
                                bool *all_dead);
 

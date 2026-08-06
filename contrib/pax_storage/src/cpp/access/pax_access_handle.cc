@@ -117,6 +117,24 @@ TableScanDesc CCPaxAccessMethod::ScanExtractColumns(
   pg_unreachable();
 }
 
+TableScanDesc CCPaxAccessMethod::ScanExtractColumnsBM(
+    Relation rel, Snapshot snapshot, List *targetlist, List *qual,
+    List *bitmapqualorig, uint32 flags) {
+  CBDB_TRY();
+  {
+    auto desc = PAX_NEW<PaxScanDesc>();
+    pax::common::RememberResourceCallback(pax::ReleaseTopObject<PaxScanDesc>,
+                                          cbdb::PointerToDatum(desc));
+
+    return desc->BeginScanExtractColumnsBM(rel, snapshot, targetlist, qual,
+                                           bitmapqualorig, flags);
+  }
+  CBDB_CATCH_DEFAULT();
+  CBDB_FINALLY({});
+  CBDB_END_TRY();
+  pg_unreachable();
+}
+
 bool CCPaxAccessMethod::IndexUniqueCheck(Relation rel, ItemPointer tid,
                                          Snapshot snapshot, bool *all_dead) {
   CBDB_TRY();
@@ -770,6 +788,8 @@ static const TableAmRoutine kPaxColumnMethods = {
     .slot_callbacks = paxc::PaxAccessMethod::SlotCallbacks,
     .scan_begin = pax::CCPaxAccessMethod::ScanBegin,
     .scan_begin_extractcolumns = pax::CCPaxAccessMethod::ScanExtractColumns,
+    .scan_begin_extractcolumns_bm =
+        pax::CCPaxAccessMethod::ScanExtractColumnsBM,
     .scan_end = pax::CCPaxAccessMethod::ScanEnd,
     .scan_rescan = pax::CCPaxAccessMethod::ScanRescan,
     .scan_getnextslot = pax::CCPaxAccessMethod::ScanGetNextSlot,

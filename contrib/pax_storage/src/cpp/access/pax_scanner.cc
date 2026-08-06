@@ -102,9 +102,16 @@ static inline int ChooseCheapColumn(TupleDesc desc) {
   return 0;
 }
 
-PaxIndexScanDesc::PaxIndexScanDesc(Relation rel) : base_{.rel = rel} {
+PaxIndexScanDesc::PaxIndexScanDesc(Relation rel,
+                                   std::shared_ptr<PaxFilter> filter,
+                                   std::shared_ptr<PaxFilter> filter_recheck)
+    : base_{.rel = rel} {
   Assert(rel);
   Assert(&base_ == reinterpret_cast<IndexFetchTableData *>(this));
+  // When no recheck projection is supplied (e.g. a plain index scan), fall
+  // back to the no-recheck projection for both slots.
+  filter_[0] = std::move(filter);
+  filter_[1] = filter_recheck ? std::move(filter_recheck) : filter_[0];
   rel_path_ = cbdb::BuildPaxDirectoryPath(
       rel->rd_node, rel->rd_backend);
 }
@@ -121,18 +128,18 @@ int PaxIndexScanDesc::FetchTuple(ItemPointer tid, Snapshot snapshot,
   if (snapshot && snapshot->snapshot_type == SNAPSHOT_ANY) {
     meta_snapshot = GetCatalogSnapshot(InvalidOid);
   }
-  if (block != current_block_ || !reader_) {
+  if (block != current_block_[which_] || !reader_[which_]) {
     if (!OpenMicroPartition(block, meta_snapshot)) return -1;
   }
 
-  Assert(current_block_ == block && reader_);
+  Assert(current_block_[which_] == block && reader_[which_]);
   if (call_again) *call_again = false;
   if (all_dead) *all_dead = false;
 
   try {
     ExecClearTuple(slot);
 
-    rc = reader_->GetTuple(slot, pax::GetTupleOffset(*tid));
+    rc = reader_[which_]->GetTuple(slot, pax::GetTupleOffset(*tid));
     if (rc > 0) {
       SetBlockNumber(&slot->tts_tid, block);
       ExecStoreVirtualTuple(slot);
@@ -150,8 +157,9 @@ bool PaxIndexScanDesc::OpenMicroPartition(BlockNumber block,
                                           Snapshot snapshot) {
   bool ok;
   pax::MicroPartitionMetadata metadata;
+  int w = which_;
 
-  Assert(block != current_block_);
+  Assert(block != current_block_[w]);
 
   ok = cbdb::GetMicroPartitionMetadata(base_.rel, snapshot, block, metadata);
   if (!ok) return false;
@@ -159,6 +167,12 @@ bool PaxIndexScanDesc::OpenMicroPartition(BlockNumber block,
     MicroPartitionReader::ReaderOptions options;
     std::unique_ptr<File> data_file;
     std::unique_ptr<File> toast_file;
+
+    // Restrict decoding to the columns the scan actually needs. Without this
+    // the reader decompresses every column of each touched group, which
+    // dominates bitmap/index scan cost on wide tables. filter_[which_]
+    // selects the no-recheck vs recheck projection for this block.
+    options.filter = filter_[w];
 
     auto block_name = std::to_string(block);
     auto file_name = cbdb::BuildPaxFilePath(rel_path_, block_name);
@@ -186,11 +200,11 @@ bool PaxIndexScanDesc::OpenMicroPartition(BlockNumber block,
 
     auto reader = std::make_unique<OrcReader>(std::move(data_file), std::move(toast_file));
     reader->Open(options);
-    if (reader_) {
-      reader_->Close();
+    if (reader_[w]) {
+      reader_[w]->Close();
     }
-    reader_ = std::move(reader);
-    current_block_ = block;
+    reader_[w] = std::move(reader);
+    current_block_[w] = block;
 
   }
 
@@ -198,9 +212,11 @@ bool PaxIndexScanDesc::OpenMicroPartition(BlockNumber block,
 }
 
 void PaxIndexScanDesc::Release() {
-  if (reader_) {
-    reader_->Close();
-    reader_ = nullptr;
+  for (int w = 0; w < 2; w++) {
+    if (reader_[w]) {
+      reader_[w]->Close();
+      reader_[w] = nullptr;
+    }
   }
 }
 
@@ -209,8 +225,11 @@ bool PaxScanDesc::BitmapNextBlock(struct TBMIterateResult *tbmres) {
 
   if (tbmres->ntuples == 0) return false;
   if (!index_desc_) {
-    index_desc_ = std::make_unique<PaxIndexScanDesc>(rs_base_.rs_rd);
+    index_desc_ = std::make_unique<PaxIndexScanDesc>(rs_base_.rs_rd, filter_,
+                                                     filter_recheck_);
   }
+  // Exact pages skip the recheck-only columns; lossy pages need them.
+  index_desc_->SetRecheck(tbmres->recheck);
   return true;
 }
 
@@ -419,6 +438,52 @@ TableScanDesc PaxScanDesc::BeginScanExtractColumns(
     }
   }
   return BeginScan(rel, snapshot, nkeys, key, parallel_scan, flags,
+                   std::move(filter), build_bitmap);
+}
+
+TableScanDesc PaxScanDesc::BeginScanExtractColumnsBM(
+    Relation rel, Snapshot snapshot, List *targetlist, List *qual,
+    List *bitmapqualorig, uint32 flags) {
+  auto natts = cbdb::RelationGetAttributesNumber(rel);
+  bool found = false;
+  bool build_bitmap = true;
+  // No-recheck projection: columns needed by the target list and the residual
+  // filter qual. This is what an exact bitmap page decodes -- the recheck qual
+  // is not evaluated there, so its columns are deliberately excluded.
+  std::vector<bool> col_bits(natts, false);
+  {
+    PaxcExtractcolumnContext extract_column(col_bits);
+
+    found = cbdb::ExtractcolumnsFromNode(reinterpret_cast<Node *>(targetlist),
+                                         &extract_column);
+    found = cbdb::ExtractcolumnsFromNode(reinterpret_cast<Node *>(qual),
+                                         col_bits) ||
+            found;
+    build_bitmap = cbdb::IsSystemAttrNumExist(&extract_column,
+                                              SelfItemPointerAttributeNumber);
+  }
+
+  // At least one column must be projected; otherwise the fetch path may skip
+  // visibility checking and return wrong results (same rationale as the
+  // AO_COLUMN bitmap scan).
+  if (!found && !build_bitmap && natts > 0) {
+    int i = ChooseCheapColumn(RelationGetDescr(rel));
+    col_bits[i] = true;
+  }
+
+  // Recheck projection: additionally decode the bitmapqualorig columns, which
+  // a lossy bitmap page re-evaluates on the fetched tuple.
+  std::vector<bool> col_bits_recheck(col_bits);
+  cbdb::ExtractcolumnsFromNode(reinterpret_cast<Node *>(bitmapqualorig),
+                               col_bits_recheck);
+
+  auto filter = std::make_shared<PaxFilter>();
+  filter->SetColumnProjection(std::move(col_bits));
+
+  filter_recheck_ = std::make_shared<PaxFilter>();
+  filter_recheck_->SetColumnProjection(std::move(col_bits_recheck));
+
+  return BeginScan(rel, snapshot, 0, nullptr, nullptr, flags,
                    std::move(filter), build_bitmap);
 }
 
