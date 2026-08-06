@@ -27,6 +27,8 @@
 
 #include "storage/orc/orc_format_reader.h"
 
+#include <algorithm>
+
 #include "comm/cbdb_wrappers.h"
 #include "comm/fmt.h"
 #include "comm/pax_memory.h"
@@ -41,7 +43,8 @@ OrcFormatReader::OrcFormatReader(std::unique_ptr<File> file,
       toast_file_(std::move(toast_file)),
       reused_buffer_(nullptr),
       num_of_stripes_(0),
-      is_vec_(false) {}
+      is_vec_(false),
+      total_number_of_rows_(0) {}
 
 OrcFormatReader::~OrcFormatReader() {}
 
@@ -210,6 +213,7 @@ finish_read:
     stripe_row_offsets_.emplace_back(cur_stripe_row_offset);
     cur_stripe_row_offset += file_footer_.stripes(i).numberofrows();
   }
+  total_number_of_rows_ = cur_stripe_row_offset;
 }
 
 void OrcFormatReader::Close() {
@@ -227,6 +231,19 @@ size_t OrcFormatReader::GetStripeNumberOfRows(size_t stripe_index) const {
 size_t OrcFormatReader::GetStripeOffset(size_t stripe_index) {
   Assert(stripe_index < GetStripeNums());
   return stripe_row_offsets_[stripe_index];
+}
+
+size_t OrcFormatReader::FindStripeByRow(size_t row_index) const {
+  if (row_index >= total_number_of_rows_) {
+    return num_of_stripes_;
+  }
+
+  // stripe_row_offsets_ is strictly ascending and starts at 0, so the target
+  // stripe is the one just before the first offset greater than row_index.
+  auto it = std::upper_bound(stripe_row_offsets_.begin(),
+                             stripe_row_offsets_.end(), row_index);
+  Assert(it != stripe_row_offsets_.begin());
+  return static_cast<size_t>(it - stripe_row_offsets_.begin() - 1);
 }
 
 pax::porc::proto::StripeFooter OrcFormatReader::ReadStripeFooter(

@@ -69,6 +69,12 @@ class OrcGroup : public MicroPartitionReader::Group {
  protected:
   void CalcNullShuffle(PaxColumn *column, size_t column_index);
 
+  // Fill a single attribute of `slot` (absolute column index) from the decoded
+  // column at `row_index`, using the random-access null bookkeeping. Shared by
+  // the projected and full-tuple loops of GetTuple().
+  void GetTupleColumn(TupleTableSlot *slot, size_t index, size_t row_index,
+                      size_t column_nums);
+
   // Used to get the no missing column
   std::pair<Datum, bool> GetColumnValueNoMissing(size_t column_index,
                                                  size_t row_index);

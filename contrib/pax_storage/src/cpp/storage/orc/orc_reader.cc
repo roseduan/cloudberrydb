@@ -285,47 +285,22 @@ retry_read_group:
 }
 
 int OrcReader::GetTuple(TupleTableSlot *slot, size_t row_index) {
-  int32 group_index = -1;
-  size_t nums_of_group;
-  int left, right;
-
-  size_t group_offset, number_of_rows;
-
-  nums_of_group = GetGroupNums();
-  left = 0;
-  right = nums_of_group - 1;
-
-  // current `row_index` in group
-  if (cached_group_ && cached_group_->GetRowOffset() <= row_index &&
-      row_index < (cached_group_->GetRowOffset() + cached_group_->GetRows())) {
-    goto found;
-  }
-
-  while (left <= right) {
-    auto mid = (right - left) / 2 + left;
-    group_offset = format_reader_.GetStripeOffset(mid);
-    number_of_rows = format_reader_.GetStripeNumberOfRows(mid);
-
-    if (row_index >= group_offset &&
-        row_index < (group_offset + number_of_rows)) {
-      group_index = mid;
-      break;
-    } else if (row_index < group_offset) {
-      right = mid - 1;
-    } else {  // row_index >= (group_offset + number_of_rows)
-      left = mid + 1;
+  // Fast path: the row lives in the group we already have decoded. Bitmap and
+  // index scans fetch TIDs in ascending order, so consecutive rows almost
+  // always fall into the same group. Check this before touching any stripe
+  // metadata so the common case is a couple of comparisons per tuple.
+  if (!cached_group_ || row_index < cached_group_->GetRowOffset() ||
+      row_index >= (cached_group_->GetRowOffset() + cached_group_->GetRows())) {
+    // Locate the containing group via the cached row-offset array. This avoids
+    // the per-tuple protobuf field access that GetStripeNumberOfRows() would
+    // otherwise perform on every step of the search.
+    size_t group_index = format_reader_.FindStripeByRow(row_index);
+    if (group_index >= format_reader_.GetStripeNums()) {
+      return -1;
     }
+    cached_group_ = ReadGroup(group_index);
   }
 
-  if (group_index == -1) {
-    return -1;
-  }
-
-  // group_offset have been inited in loop
-  // and must not in cached_group_
-  cached_group_ = ReadGroup(group_index);
-
-found:
   int rc =
       cached_group_->GetTuple(slot, row_index - cached_group_->GetRowOffset());
   SetTupleOffset(&slot->tts_tid, row_index);

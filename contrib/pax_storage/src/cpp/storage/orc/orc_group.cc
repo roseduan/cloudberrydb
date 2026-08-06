@@ -198,8 +198,47 @@ std::pair<bool, size_t> OrcGroup::ReadTuple(TupleTableSlot *slot) {
   return {true, current_row_index_++};
 }
 
+// Fill `slot` attribute `index` (an absolute column index) from the decoded
+// column at `row_index`. Shared by the projected and full-tuple paths of
+// GetTuple(). Non-fixed-length columns compute their byte offset from the
+// running null count, which for random access is materialized once per group
+// by CalcNullShuffle().
+void OrcGroup::GetTupleColumn(TupleTableSlot *slot, size_t index,
+                              size_t row_index, size_t column_nums) {
+  // The column number in the file can be smaller than natts after an
+  // ADD COLUMN, in which case the trailing attributes are missing values.
+  if (index >= column_nums) {
+    cbdb::SlotGetMissingAttrs(slot, index, index + 1);
+    return;
+  }
+
+  auto column = ((*pax_columns_)[index]).get();
+
+  if (!column) {
+    slot->tts_isnull[index] = true;
+    return;
+  }
+
+  if (unlikely(slot->tts_tupleDescriptor->attrs[index].attisdropped)) {
+    slot->tts_isnull[index] = true;
+    return;
+  }
+
+  if (column->HasNull() && !nulls_shuffle_[index]) {
+    CalcNullShuffle(column, index);
+  }
+
+  uint32 null_counts = 0;
+  if (nulls_shuffle_[index]) {
+    null_counts = nulls_shuffle_[index][row_index];
+  }
+
+  // different with `ReadTuple`
+  std::tie(slot->tts_values[index], slot->tts_isnull[index]) =
+      GetColumnDatum(column, row_index, &null_counts);
+}
+
 int OrcGroup::GetTuple(TupleTableSlot *slot, size_t row_index) {
-  size_t index = 0;
   size_t natts = 0;
   size_t column_nums = 0;
 
@@ -219,36 +258,26 @@ int OrcGroup::GetTuple(TupleTableSlot *slot, size_t row_index) {
   natts = static_cast<size_t>(slot->tts_tupleDescriptor->natts);
   column_nums = pax_columns_->GetColumns();
 
-  for (index = 0; index < natts; index++) {
-    // Same logic with `ReadTuple`
+  // Only decode the projected columns. Bitmap/index scans project just the
+  // attributes referenced above the scan, so walking every attribute (and
+  // re-testing the ones that were never read into pax_columns_) is wasted
+  // work repeated once per fetched tuple. This mirrors the projected path in
+  // ReadTuple().
+  if (proj_col_index_ && !proj_col_index_->empty()) {
+    for (size_t i = 0; i < proj_col_index_->size(); i++) {
+      auto index = static_cast<size_t>((*proj_col_index_)[i]);
+      GetTupleColumn(slot, index, row_index, column_nums);
+    }
+    return 1;
+  }
+
+  // Fallback: no projection information, read all columns.
+  for (size_t index = 0; index < natts; index++) {
     if (index >= column_nums) {
       cbdb::SlotGetMissingAttrs(slot, index, natts);
       break;
     }
-
-    auto column = ((*pax_columns_)[index]).get();
-
-    if (!column) {
-      continue;
-    }
-
-    if (unlikely(slot->tts_tupleDescriptor->attrs[index].attisdropped)) {
-      slot->tts_isnull[index] = true;
-      continue;
-    }
-
-    if (column->HasNull() && !nulls_shuffle_[index]) {
-      CalcNullShuffle(column, index);
-    }
-
-    uint32 null_counts = 0;
-    if (nulls_shuffle_[index]) {
-      null_counts = nulls_shuffle_[index][row_index];
-    }
-
-    // different with `ReadTuple`
-    std::tie(slot->tts_values[index], slot->tts_isnull[index]) =
-        GetColumnDatum(column, row_index, &null_counts);
+    GetTupleColumn(slot, index, row_index, column_nums);
   }
 
   return 1;

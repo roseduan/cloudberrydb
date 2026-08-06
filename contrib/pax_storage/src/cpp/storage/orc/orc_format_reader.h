@@ -54,6 +54,13 @@ class OrcFormatReader final {
 
   size_t GetStripeOffset(size_t stripe_index);
 
+  // Locate the stripe (group) that contains the absolute row `row_index`.
+  // Uses the precomputed `stripe_row_offsets_` array only, so it performs no
+  // protobuf field access -- important because this runs once per fetched
+  // tuple on the bitmap/index scan path. Returns `num_of_stripes_` when
+  // `row_index` is out of range.
+  size_t FindStripeByRow(size_t row_index) const;
+
   std::unique_ptr<PaxColumns> ReadStripe(size_t group_index, const std::vector<bool> &proj_cols);
 
   const std::vector<pax::porc::proto::Type_Kind> &GetColumnTypes() const { return column_types_; }
@@ -87,6 +94,9 @@ class OrcFormatReader final {
   bool is_vec_;
 
   std::vector<size_t> stripe_row_offsets_;
+  // Total number of rows across all stripes; cached in Open() so that
+  // FindStripeByRow() can bound-check without reading stripe footers.
+  size_t total_number_of_rows_;
 
   pax::porc::proto::PostScript post_script_;
   pax::porc::proto::Footer file_footer_;
