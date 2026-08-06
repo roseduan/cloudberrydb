@@ -188,6 +188,15 @@ iceberg_modify_init(Relation rel, IcebergDMLState *state, CmdType operation,
 	resultRelInfo->ri_RelationDesc = rel;
 
 	table_info = pg_iceberg_get_table_info(RelationGetRelid(rel));
+
+	/*
+	 * Partitioned-table writes are fully supported: INSERT and vacuum-rewrite
+	 * (state == NULL) route rows through the fanout writer, which stamps each
+	 * new data file's partition tuple; UPDATE/DELETE carry the deleted file's
+	 * partition tuple on the position-delete files.  No operation is rejected
+	 * here for partitioned tables.
+	 */
+
 	fdwState = (icebergVolumeScanState *) palloc0(sizeof(icebergVolumeScanState));
 
 	fdwState->iceTable.volumn_server_name = table_info->volume_server_name;
@@ -210,6 +219,14 @@ iceberg_modify_init(Relation rel, IcebergDMLState *state, CmdType operation,
 		table_info->opts->compression : "zstd";
 	fdwState->iceTable.compression_level =
 		table_info->opts ? table_info->opts->compression_level : -1;
+
+	/*
+	 * Iceberg PARTITION BY columns.  The fanout writer routes rows into
+	 * per-partition data files and stamps each file's partition tuple; NULL
+	 * when the table is unpartitioned.
+	 */
+	fdwState->iceTable.partition_by =
+		table_info->opts ? table_info->opts->partition_by : NULL;
 
 	{
 		char	   *location;

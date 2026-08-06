@@ -38,6 +38,17 @@ public:
 
 	virtual void setPartitionValue(void* values, void* nulls);
 
+	/*
+	 * Set the identity partition tuple of the data file that the next
+	 * position-delete record(s) target, so the position-delete writer can fan
+	 * out per partition and stamp each delete file's partition.  The argument
+	 * is a PostgreSQL List* (String nodes / NULL cells, spec order) passed as
+	 * void* to keep PG node types out of this widely-included header; NULL/NIL
+	 * means unpartitioned.  No-op by default; overridden by the Iceberg
+	 * position-delete writer.
+	 */
+	virtual void setDeletePartition(void* partitionValues) {}
+
 	virtual void destroyHandler();
 
 	/* Rewind the scan to the beginning for ExecReScan; no-op by default,

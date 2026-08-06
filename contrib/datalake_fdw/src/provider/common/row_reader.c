@@ -553,6 +553,14 @@ icebergFileIndexMapPopulateFromAllFragments(IcebergFileIndexMap *map,
 
 				fileId = icebergAddFile(map, filePath, recordCount);
 
+				/*
+				 * Stamp the data file's partition tuple so UPDATE/DELETE can
+				 * attribute a position-delete file to the same partition as the
+				 * data file it references (looked up by this fileId).  NIL for
+				 * unpartitioned tables.
+				 */
+				icebergSetFilePartition(map, fileId, task->dataFile->partitionValues);
+
 				entry = (FileMapEntry *) hash_search(filePathToIdMap,
 													 (void *) &filePath,
 													 HASH_ENTER, &found);
@@ -644,6 +652,9 @@ icebergFileIndexMapInitialize(DatalakeRowReader *reader)
 		{
 			/* File not in map yet (fallback: map was not pre-populated) */
 			fileId = icebergAddFile(datalake_iceberg_file_index_map, filePath, recordCount);
+			/* Keep partition attribution working on this fallback path too. */
+			icebergSetFilePartition(datalake_iceberg_file_index_map, fileId,
+									task->dataFile->partitionValues);
 
 			entry = (FileMapEntry *) hash_search(filePathToIdMap,
 			                                     (void *) &filePath,

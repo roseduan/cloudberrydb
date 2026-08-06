@@ -201,6 +201,7 @@ public class IcebergRestController {
         response.put("metadata", metadataMap);
         response.put("metadata-location", metadataLocation);
         response.put("table-location", icebergTable.location());
+        response.put("partition-spec-summary", partitionSpecSummary(icebergTable));
 
         // Add config to response - static S3 configuration (non-sensitive)
         Map<String, String> config = new HashMap<>();
@@ -493,6 +494,11 @@ public class IcebergRestController {
         // Convert schema map to Iceberg Schema (simplified for now)
         Schema schema = convertMapToSchema(schemaMap);
 
+        // Optional PARTITION BY declaration; null means unpartitioned
+        @SuppressWarnings("unchecked")
+        Map<String, Object> partitionSpecMap = (Map<String, Object>) request.get("partition_spec");
+        PartitionSpec partitionSpec = buildPartitionSpec(schema, partitionSpecMap);
+
         // Create request context
         RequestContext context = createRequestContext(namespace, tableName, properties);
 
@@ -512,7 +518,7 @@ public class IcebergRestController {
             "write.metadata.delete-after-commit.enabled", "true");
 
         // Create the table using ServiceResult - pass null as location to use default warehouse
-        Table icebergTable = icebergService.createTable(namespace, tableName, schema, context.getPath(), userTableProperties, context);
+        Table icebergTable = icebergService.createTable(namespace, tableName, schema, partitionSpec, context.getPath(), userTableProperties, context);
 
         // Create response following the Iceberg REST API spec
         Map<String, Object> metadataMap = convertTableToMetadata(icebergTable);
@@ -522,6 +528,7 @@ public class IcebergRestController {
         response.put("metadata", metadataMap);
         response.put("metadata-location", metadataLocation);
         response.put("table-location", icebergTable.location());
+        response.put("partition-spec-summary", partitionSpecSummary(icebergTable));
 
         // Add config to response
         Map<String, String> config = new HashMap<>();
@@ -649,6 +656,7 @@ public class IcebergRestController {
                 (String) fragmentMap.get("format") : "PARQUET";
 
             GpdbFragmentMetadata metadata = new GpdbFragmentMetadata(fileSize, format, recordCount, "DATA_FILE");
+            setPartitionValuesFromMap(metadata, fragmentMap);
 
             // Create Fragment with path and metadata
             Fragment fragment = new Fragment(path, metadata);
@@ -751,6 +759,7 @@ public class IcebergRestController {
             String ContentTypeStr = (String) fragmentMap.get("position_on_delete");
 
             GpdbFragmentMetadata metadata = new GpdbFragmentMetadata(fileSize, format, recordCount, ContentTypeStr);
+            setPartitionValuesFromMap(metadata, fragmentMap);
 
             // Create Fragment with path and metadata
             Fragment fragment = new Fragment(path, metadata);
@@ -853,6 +862,25 @@ public class IcebergRestController {
     }
 
     /**
+     * Copy the identity partition tuple (spec order) from a fragment map onto
+     * the metadata.  A JSON null element is a SQL NULL value; absent/empty
+     * means unpartitioned.  Used by every append/commit endpoint so the data
+     * file is stamped with its partition via transFileFromGpdb.
+     */
+    private void setPartitionValuesFromMap(GpdbFragmentMetadata metadata,
+                                           Map<String, Object> fragmentMap) {
+        Object pvObj = fragmentMap.get("partition_values");
+        if (pvObj instanceof List) {
+            List<?> pvRaw = (List<?>) pvObj;
+            List<String> partitionValues = new ArrayList<>(pvRaw.size());
+            for (Object o : pvRaw) {
+                partitionValues.add(o == null ? null : o.toString());
+            }
+            metadata.setPartitionValues(partitionValues);
+        }
+    }
+
+    /**
      * Convert a list of fragment maps to Fragment objects.
      */
     private List<Fragment> convertToFragments(List<Map<String, Object>> fragmentMaps) {
@@ -871,6 +899,8 @@ public class IcebergRestController {
                 (String) fragmentMap.get("format") : "PARQUET";
 
             GpdbFragmentMetadata metadata = new GpdbFragmentMetadata(fileSize, format, recordCount, "DATA_FILE");
+            setPartitionValuesFromMap(metadata, fragmentMap);
+
             Fragment fragment = new Fragment(path, metadata);
             fragments.add(fragment);
         }
@@ -954,6 +984,7 @@ public class IcebergRestController {
                 (String) fragmentMap.get("format") : "PARQUET";
             String contentTypeStr = (String) fragmentMap.get("position_on_delete");
             GpdbFragmentMetadata metadata = new GpdbFragmentMetadata(fileSize, format, recordCount, contentTypeStr);
+            setPartitionValuesFromMap(metadata, fragmentMap);
             Fragment fragment = new Fragment(path, metadata);
             fragments.add(fragment);
         }
@@ -1910,6 +1941,97 @@ public class IcebergRestController {
      */
     private Schema convertMapToSchema(Map<String, Object> schemaMap) {
         return schemaConverter.fromJson(schemaMap);
+    }
+
+    /**
+     * Build a PartitionSpec from the "partition_spec" section of a create-table
+     * request:
+     *
+     * <pre>
+     * {"spec-id":0,"fields":[
+     *     {"source-id":1,"field-id":1000,"transform":"identity","name":"region"}, ...]}
+     * </pre>
+     *
+     * Only identity transforms are supported for now. Returns null when the
+     * request carries no partition_spec (unpartitioned table).
+     */
+    private PartitionSpec buildPartitionSpec(Schema schema, Map<String, Object> partitionSpecMap) {
+        if (partitionSpecMap == null) {
+            return null;
+        }
+
+        @SuppressWarnings("unchecked")
+        List<Map<String, Object>> fields = (List<Map<String, Object>>) partitionSpecMap.get("fields");
+        if (fields == null || fields.isEmpty()) {
+            return null;
+        }
+
+        PartitionSpec.Builder builder = PartitionSpec.builderFor(schema);
+        for (Map<String, Object> field : fields) {
+            Object transformObj = field.get("transform");
+            if (transformObj == null) {
+                throw new IllegalArgumentException(
+                    "Partition field " + field + " is missing the required \"transform\" key");
+            }
+            if (!(transformObj instanceof String)) {
+                throw new IllegalArgumentException(String.format(
+                    "Partition field %s has a non-string \"transform\" value", field));
+            }
+            String transform = (String) transformObj;
+            if (!"identity".equals(transform)) {
+                throw new IllegalArgumentException(String.format(
+                    "Unsupported partition transform \"%s\": only identity is supported", transform));
+            }
+
+            // Resolve the source column through source-id (assigned in schema
+            // field order by the client); fall back to the field name.
+            String columnName = null;
+            Object sourceId = field.get("source-id");
+            if (sourceId instanceof Number) {
+                columnName = schema.findColumnName(((Number) sourceId).intValue());
+            }
+            if (columnName == null) {
+                /* Guard the cast like the sibling "source-id" branch: a
+                 * non-string "name" leaves columnName null and falls into the
+                 * clean IllegalArgumentException below, rather than throwing a
+                 * ClassCastException (a confusing 500 instead of a 400). */
+                Object nameObj = field.get("name");
+                columnName = (nameObj instanceof String) ? (String) nameObj : null;
+            }
+            if (columnName == null || schema.findField(columnName) == null) {
+                throw new IllegalArgumentException(String.format(
+                    "Partition field %s does not resolve to a schema column", field));
+            }
+
+            builder.identity(columnName);
+        }
+        return builder.build();
+    }
+
+    /**
+     * Render a table's current partition spec as a flat, order-preserving
+     * summary the C side can compare against the PARTITION BY declaration:
+     * identity fields as the bare source column name, any other transform as
+     * "transform(column)", comma-joined. Empty string for unpartitioned.
+     */
+    private String partitionSpecSummary(Table table) {
+        StringBuilder summary = new StringBuilder();
+        for (PartitionField field : table.spec().fields()) {
+            if (summary.length() > 0) {
+                summary.append(',');
+            }
+            String columnName = table.schema().findColumnName(field.sourceId());
+            if (columnName == null) {
+                columnName = field.name();
+            }
+            String transform = field.transform().toString();
+            if ("identity".equals(transform)) {
+                summary.append(columnName);
+            } else {
+                summary.append(transform).append('(').append(columnName).append(')');
+            }
+        }
+        return summary.toString();
     }
 
     /**

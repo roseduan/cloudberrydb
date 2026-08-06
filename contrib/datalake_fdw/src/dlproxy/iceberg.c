@@ -148,6 +148,36 @@ parseIcebergFragmentResponse(char *buffer, size_t buffer_size)
 			dataFragment->format = convertFileFormat(json_string_value(json_object_get(jmetadata, "fileFormat")));
 			dataFragment->recordCount = json_integer_value(json_object_get(jmetadata, "recordCount"));
 
+			/*
+			 * Identity partition values (spec order) of this data file, when
+			 * the table is partitioned.  Carried so UPDATE/DELETE can attribute
+			 * a position-delete file to the same partition as the data file it
+			 * references (looked up by fileId).  A JSON null element is a SQL
+			 * NULL partition value; a missing/empty array is unpartitioned.
+			 */
+			dataFragment->partitionValues = NIL;
+			{
+				json_t *jpv = json_object_get(jmetadata, "partitionValues");
+
+				if (jpv && json_is_array(jpv))
+				{
+					size_t pi;
+
+					for (pi = 0; pi < json_array_size(jpv); pi++)
+					{
+						json_t *pel = json_array_get(jpv, pi);
+
+						if (pel == NULL || json_is_null(pel))
+							dataFragment->partitionValues =
+								lappend(dataFragment->partitionValues, NULL);
+						else
+							dataFragment->partitionValues =
+								lappend(dataFragment->partitionValues,
+										makeString(pstrdup(json_string_value(pel))));
+					}
+				}
+			}
+
 			fileScanTask->dataFile = dataFragment;
 
 			/*

@@ -87,6 +87,7 @@ typedef struct IcebergTableOptions
 	bool autovacuum_enabled;	/* Whether autovacuum is enabled for this table */
 	char *compression;		/* Parquet write compression codec (default zstd) */
 	int  compression_level;	/* Parquet write compression level; -1 = codec default */
+	char *partition_by;		/* Iceberg partition columns from PARTITION BY, comma-separated */
 } IcebergTableOptions;
 
 /*
@@ -127,6 +128,11 @@ extern IcebergTableOptions *parse_iceberg_table_options(ArrayType *options_array
 extern IcebergTableOptions *get_iceberg_options(Oid relid,
 												Oid *catalog_oid,
 												Oid *volume_oid);
+
+/*
+ * Free an IcebergTableOptions and all its owned string fields (NULL-safe).
+ */
+extern void free_iceberg_table_options(IcebergTableOptions *opts);
 
 /*
  * Upsert "location=<value>" in pg_lake_table.ltoptions for a relation.

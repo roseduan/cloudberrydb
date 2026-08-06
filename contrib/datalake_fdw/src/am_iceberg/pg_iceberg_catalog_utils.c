@@ -22,7 +22,9 @@
 #include "utils/jsonfuncs.h"
 
 #include "../datalake_def.h"
+#include "src/common/iceberg_constants.h"
 #include "include/pg_iceberg_catalog_utils.h"
+#include "include/pg_iceberg_options.h"
 
 /* JSON Parsing State */
 typedef enum
@@ -226,6 +228,7 @@ typedef enum
 	LT_PARSE_NONE,
 	LT_PARSE_METADATA_LOCATION,
 	LT_PARSE_TABLE_LOCATION,
+	LT_PARSE_PARTITION_SPEC_SUMMARY,
 	LT_PARSE_CONFIG,
 	LT_PARSE_STORAGE_CREDENTIALS
 } LoadTableParseField;
@@ -239,6 +242,7 @@ typedef struct
 
 	char			   *metadata_location;
 	char			   *location;
+	char			   *partition_spec_summary;
 
 	/* raw JSON capture for config / storage-credentials */
 	const char		   *config_start;		/* pointer into input */
@@ -301,6 +305,8 @@ lt_object_field_start(void *state, char *fname, bool isnull)
 		s->current_field = LT_PARSE_METADATA_LOCATION;
 	else if (pg_strcasecmp(fname, "table-location") == 0)
 		s->current_field = LT_PARSE_TABLE_LOCATION;
+	else if (pg_strcasecmp(fname, DATALAKEFDW_ICEBERG_KEY_PARTITION_SPEC_SUMMARY) == 0)
+		s->current_field = LT_PARSE_PARTITION_SPEC_SUMMARY;
 	else if (pg_strcasecmp(fname, "config") == 0)
 	{
 		s->current_field = LT_PARSE_CONFIG;
@@ -332,6 +338,13 @@ lt_scalar(void *state, char *token, JsonTokenType tokentype)
 			 tokentype == JSON_TOKEN_STRING)
 	{
 		s->location = pstrdup(token);
+		s->current_field = LT_PARSE_NONE;
+	}
+	else if (s->current_field == LT_PARSE_PARTITION_SPEC_SUMMARY &&
+			 s->depth == 1 &&
+			 tokentype == JSON_TOKEN_STRING)
+	{
+		s->partition_spec_summary = pstrdup(token);
 		s->current_field = LT_PARSE_NONE;
 	}
 }
@@ -415,6 +428,7 @@ parse_load_table_response(char *json_response)
 	result->metadata_location = ps.metadata_location;
 	result->catalog_properties = buf.data;
 	result->location = ps.location;
+	result->partition_spec_summary = ps.partition_spec_summary;
 
 	pfree(lex);
 
@@ -714,6 +728,36 @@ build_schema_from_pg_table(Relation relation)
 		schema->columns = lappend(schema->columns, colDef);
 	}
 
+	/*
+	 * PARTITION BY declaration, stored by CreateLakeTable in
+	 * pg_lake_table.ltoptions as "iceberg_partition_by=col1,col2".  The
+	 * create-table request translates these into identity partition fields
+	 * of the Iceberg partition spec.
+	 */
+	{
+		IcebergTableOptions *opts;
+		Oid			catalog_oid;
+		Oid			volume_oid;
+
+		opts = get_iceberg_options(RelationGetRelid(relation),
+								   &catalog_oid, &volume_oid);
+		if (opts != NULL && opts->partition_by != NULL)
+		{
+			char	   *cols = pstrdup(opts->partition_by);
+			char	   *tok;
+			char	   *saveptr = NULL;
+
+			for (tok = strtok_r(cols, ",", &saveptr);
+				 tok != NULL;
+				 tok = strtok_r(NULL, ",", &saveptr))
+				schema->partitionColumns = lappend(schema->partitionColumns,
+												   pstrdup(tok));
+			pfree(cols);
+		}
+		if (opts != NULL)
+			free_iceberg_table_options(opts);
+	}
+
 	return schema;
 }
 
@@ -740,7 +784,8 @@ free_schema_info(IcebergTableSchema *schema)
 		}
 
 		list_free(schema->columns);
-		list_free(schema->partitionColumns);
+		/* partitionColumns holds pstrdup'd name strings; free them too. */
+		list_free_deep(schema->partitionColumns);
 		pfree(schema);
 	}
 }

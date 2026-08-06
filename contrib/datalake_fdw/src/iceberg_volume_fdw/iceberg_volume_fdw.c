@@ -30,6 +30,8 @@
 #include "foreign/foreign.h"
 #include "nodes/pg_list.h"
 #include "nodes/makefuncs.h"
+#include "nodes/value.h"
+#include "utils/json.h"
 #include "optimizer/optimizer.h"
 #include "optimizer/paths.h"
 #include "optimizer/pathnode.h"
@@ -450,6 +452,16 @@ getVolumeOptions(icebergTableInfo info)
 	 * ERROR rather than silently writing uncompressed data.
 	 */
 	opt->compressLevel = info.compression_level;
+
+	/*
+	 * Iceberg PARTITION BY columns.  Copy into the write options so the fanout
+	 * writer (iceberg_write.cpp) can resolve the partition attnos from the
+	 * relation tuple descriptor and route rows per partition.  NULL/empty is
+	 * the unpartitioned case and leaves the writer on its single-stream path.
+	 */
+	if (info.partition_by != NULL && info.partition_by[0] != '\0')
+		opt->partition_by = pstrdup(info.partition_by);
+
 	if (info.compression != NULL && info.compression[0] != '\0')
 	{
 		CompressType ct = datalakeGetCompression(info.compression);
@@ -1136,7 +1148,33 @@ iceberg_volume_get_metadata(Relation relation, dataLakeFdwScanState *sstate, Lis
 		appendStringInfo(&json_buf, "\"record_count\":%ld,", fragment->recordCount);
 		appendStringInfo(&json_buf, "\"file_size_in_bytes\":%ld,", fragment->fileSize);
 		appendStringInfo(&json_buf, "\"position_on_delete\":\"%s\"", get_position_on_delete_string(fragment->content));
-		appendStringInfo(&json_buf, "}");
+
+		/*
+		 * Partition tuple for this data file (identity values in spec order).
+		 * A NULL list element serializes as JSON null; an empty/NIL list (an
+		 * unpartitioned table) yields "partition_values":[].  The tracker
+		 * parses this back and the agent uses it for withPartition().
+		 */
+		appendStringInfo(&json_buf, ",\"partition_values\":[");
+		{
+			ListCell   *pvlc;
+			bool		pvfirst = true;
+
+			foreach(pvlc, fragment->partitionValues)
+			{
+				Node	   *pv = (Node *) lfirst(pvlc);
+
+				if (!pvfirst)
+					appendStringInfoChar(&json_buf, ',');
+				pvfirst = false;
+
+				if (pv == NULL)
+					appendStringInfoString(&json_buf, "null");
+				else
+					escape_json(&json_buf, strVal(pv));
+			}
+		}
+		appendStringInfo(&json_buf, "]}");
 
 		first = false;
 	}

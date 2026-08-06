@@ -101,7 +101,13 @@ public class IcebergPolarisCatalog implements IcebergCatalog {
             String location,
             Map<String, String> tableProps) throws Exception {
         TableIdentifier tableId = icebergUtilities.getIcebergTableIdentifier(identifier.toString());
-        return restCatalog.createTable(tableId, schema);
+        // location is intentionally not forwarded: the Polaris REST catalog
+        // assigns the table location itself.  The partition spec and table
+        // properties must be forwarded, otherwise PARTITION BY tables are
+        // silently created unpartitioned.
+        return restCatalog.createTable(tableId, schema,
+                spec != null ? spec : PartitionSpec.unpartitioned(),
+                IcebergUtilities.stripInternalProperties(tableProps));
     }
 
     @Override

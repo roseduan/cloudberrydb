@@ -746,20 +746,80 @@ public class IcebergUtilities {
     }
 
     public DataFile transFileFromGpdb(Fragment gpdbFile,
+                                      PartitionSpec spec,
                                       org.apache.iceberg.io.FileIO io,
                                       org.apache.iceberg.MetricsConfig metricsConfig) {
         GpdbFragmentMetadata metadata = (GpdbFragmentMetadata) gpdbFile.getMetadata();
-        DataFiles.Builder builder = DataFiles.builder(PartitionSpec.unpartitioned())
+        PartitionSpec effectiveSpec = (spec != null) ? spec : PartitionSpec.unpartitioned();
+        DataFiles.Builder builder = DataFiles.builder(effectiveSpec)
                         .withPath(gpdbFile.getSourceName())
                         .withFormat(metadata.getFileFormat())
                         .withFileSizeInBytes(metadata.getFileSize())
                         .withRecordCount(metadata.getRowCount());
+
+        /*
+         * Stamp the data file's partition tuple.  The segment computed the
+         * identity values (as text, spec order); convert each to the partition
+         * field's typed value via Iceberg's own partition-string parser (which
+         * maps null / "null" to a SQL NULL value) and attach as a StructLike.
+         */
+        if (effectiveSpec.isPartitioned()) {
+            List<String> partitionValues = metadata.getPartitionValues();
+            List<Types.NestedField> fields = effectiveSpec.partitionType().fields();
+            if (partitionValues == null || partitionValues.size() != fields.size()) {
+                throw new IllegalArgumentException(String.format(
+                        "partition value count %d does not match spec field count %d for %s",
+                        partitionValues == null ? 0 : partitionValues.size(),
+                        fields.size(), gpdbFile.getSourceName()));
+            }
+            Object[] converted = new Object[fields.size()];
+            for (int i = 0; i < fields.size(); i++) {
+                converted[i] = org.apache.iceberg.types.Conversions.fromPartitionString(
+                        fields.get(i).type(), partitionValues.get(i));
+            }
+            builder.withPartition(new SimplePartitionStruct(converted));
+        }
+
         org.apache.iceberg.Metrics metrics =
                 computeParquetMetrics(io, metricsConfig, gpdbFile.getSourceName(), metadata.getFileFormat());
         if (metrics != null) {
             builder.withMetrics(metrics);
         }
         return builder.build();
+    }
+
+    /**
+     * Minimal immutable StructLike over a pre-converted partition tuple, used
+     * to hand identity partition values to DataFiles.Builder.withPartition
+     * (which copies the values into a spec-typed PartitionData).
+     */
+    private static final class SimplePartitionStruct implements org.apache.iceberg.StructLike {
+        private final Object[] values;
+
+        SimplePartitionStruct(Object[] values) {
+            this.values = values;
+        }
+
+        @Override
+        public int size() {
+            return values.length;
+        }
+
+        @Override
+        public <T> T get(int pos, Class<T> javaClass) {
+            return javaClass.cast(values[pos]);
+        }
+
+        @Override
+        public <T> void set(int pos, T value) {
+            /*
+             * This struct is an immutable, input-only view over a pre-converted
+             * partition tuple handed to DataFiles/FileMetadata builders (which
+             * only read it via copyFrom()).  Reject any write so a future
+             * Iceberg code path cannot silently corrupt the tuple.
+             */
+            throw new UnsupportedOperationException("SimplePartitionStruct is read-only");
+        }
     }
 
     /**
@@ -812,11 +872,13 @@ public class IcebergUtilities {
      * Full.
      */
     public DeleteFile transPosDeleteFromGpdb(Fragment gpdbFile,
+                                             PartitionSpec spec,
                                              org.apache.iceberg.io.FileIO io,
                                              org.apache.iceberg.MetricsConfig metricsConfig) {
         GpdbFragmentMetadata metadata = (GpdbFragmentMetadata) gpdbFile.getMetadata();
+        PartitionSpec effectiveSpec = (spec != null) ? spec : PartitionSpec.unpartitioned();
         FileMetadata.Builder builder =
-                FileMetadata.deleteFileBuilder(PartitionSpec.unpartitioned())
+                FileMetadata.deleteFileBuilder(effectiveSpec)
                             .withPath(gpdbFile.getSourceName())
                             .withFormat(metadata.getFileFormat())
                             .withFileSizeInBytes(metadata.getFileSize())
@@ -826,6 +888,31 @@ public class IcebergUtilities {
                 computeParquetMetrics(io, metricsConfig, gpdbFile.getSourceName(), metadata.getFileFormat());
         if (metrics != null) {
             builder.withMetrics(metrics);
+        }
+
+        /*
+         * Stamp the delete file's partition tuple so it is registered under the
+         * same partition as the data files it references.  The segment carried
+         * the deleted data file's identity values (text, spec order) looked up
+         * by fileId; convert each via Iceberg's partition-string parser (which
+         * maps null to a SQL NULL value) and attach as a StructLike.  Mirrors
+         * transFileFromGpdb.
+         */
+        if (effectiveSpec.isPartitioned()) {
+            List<String> partitionValues = metadata.getPartitionValues();
+            List<Types.NestedField> fields = effectiveSpec.partitionType().fields();
+            if (partitionValues == null || partitionValues.size() != fields.size()) {
+                throw new IllegalArgumentException(String.format(
+                        "partition value count %d does not match spec field count %d for %s",
+                        partitionValues == null ? 0 : partitionValues.size(),
+                        fields.size(), gpdbFile.getSourceName()));
+            }
+            Object[] converted = new Object[fields.size()];
+            for (int i = 0; i < fields.size(); i++) {
+                converted[i] = org.apache.iceberg.types.Conversions.fromPartitionString(
+                        fields.get(i).type(), partitionValues.get(i));
+            }
+            builder.withPartition(new SimplePartitionStruct(converted));
         }
         return builder.build();
     }

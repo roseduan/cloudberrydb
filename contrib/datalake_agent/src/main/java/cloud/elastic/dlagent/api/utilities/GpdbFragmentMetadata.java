@@ -19,6 +19,8 @@
 
 package cloud.elastic.dlagent.api.utilities;
 
+import java.util.List;
+
 public class GpdbFragmentMetadata implements FragmentMetadata {
 	public static enum ContentType {
         DATA_FILE,
@@ -29,6 +31,12 @@ public class GpdbFragmentMetadata implements FragmentMetadata {
 	private long fileSize;
 	private String fileFormat;
 	private ContentType contentType;
+	/*
+	 * Iceberg partition values (identity, spec order) for this data file, as
+	 * sent by the segment writer.  A null element means SQL NULL; null/empty
+	 * list means unpartitioned.
+	 */
+	private List<String> partitionValues;
 
 	public GpdbFragmentMetadata(long fileSize, String fileFormat, long rowCount) {
 		this.rowCount = rowCount;
@@ -65,6 +73,14 @@ public class GpdbFragmentMetadata implements FragmentMetadata {
 
 	public ContentType getContentType() {
 		return contentType;
+	}
+
+	public List<String> getPartitionValues() {
+		return partitionValues;
+	}
+
+	public void setPartitionValues(List<String> partitionValues) {
+		this.partitionValues = partitionValues;
 	}
 
 }

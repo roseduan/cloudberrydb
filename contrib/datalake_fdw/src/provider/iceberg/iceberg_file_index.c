@@ -8,6 +8,7 @@
 #include "postgres.h"
 
 #include "iceberg_file_index.h"
+#include "nodes/value.h"
 #include "utils/memutils.h"
 
 #define ICEBERG_FILE_INDEX_INITIAL_CAPACITY 16
@@ -107,6 +108,7 @@ icebergAddFile(IcebergFileIndexMap *map, const char *filePath, int64 recordCount
 	map->entries[fileId].fileId = fileId;
 	map->entries[fileId].filePath = pstrdup(filePath);
 	map->entries[fileId].recordCount = recordCount;
+	map->entries[fileId].partitionValues = NIL;
 
 	map->numFiles++;
 
@@ -128,6 +130,49 @@ icebergGetFilePath(IcebergFileIndexMap *map, uint32 fileId)
 		return NULL;
 
 	return map->entries[fileId].filePath;
+}
+
+/*
+ * Set the identity partition tuple for a file ID.  Deep-copies the list into
+ * the map's memory context so it survives the caller's per-fragment cleanup.
+ * A NULL list cell denotes a SQL NULL partition value; NIL leaves the file
+ * unpartitioned.
+ */
+void
+icebergSetFilePartition(IcebergFileIndexMap *map, uint32 fileId, List *partitionValues)
+{
+	MemoryContext oldContext;
+	ListCell   *lc;
+	List	   *copy = NIL;
+
+	if (map == NULL || fileId >= map->numFiles)
+		return;
+
+	oldContext = MemoryContextSwitchTo(map->context);
+	foreach(lc, partitionValues)
+	{
+		Value *v = (Value *) lfirst(lc);	/* String node, or NULL for SQL NULL */
+
+		if (v == NULL)
+			copy = lappend(copy, NULL);
+		else
+			copy = lappend(copy, makeString(pstrdup(strVal(v))));
+	}
+	map->entries[fileId].partitionValues = copy;
+	MemoryContextSwitchTo(oldContext);
+}
+
+/*
+ * Get the identity partition tuple for a file ID.  Returns NIL if the file is
+ * unknown or unpartitioned.  The list is owned by the map.
+ */
+List *
+icebergGetFilePartition(IcebergFileIndexMap *map, uint32 fileId)
+{
+	if (map == NULL || fileId >= map->numFiles)
+		return NIL;
+
+	return map->entries[fileId].partitionValues;
 }
 
 /*
@@ -176,6 +221,9 @@ icebergClearFileIndexMap(IcebergFileIndexMap *map)
 			pfree(map->entries[i].filePath);
 			map->entries[i].filePath = NULL;
 		}
+		/* Partition lists live in map->context and are reclaimed with it; just
+		 * drop the reference so a reused slot does not alias a stale tuple. */
+		map->entries[i].partitionValues = NIL;
 	}
 
 	map->numFiles = 0;

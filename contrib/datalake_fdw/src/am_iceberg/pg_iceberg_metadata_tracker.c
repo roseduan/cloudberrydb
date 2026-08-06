@@ -60,6 +60,7 @@
 #include "lib/stringinfo.h"
 #include "mb/pg_wchar.h"
 #include "miscadmin.h"
+#include "nodes/value.h"
 #include "utils/hsearch.h"
 #include "utils/inval.h"
 #include "utils/lsyscache.h"
@@ -166,11 +167,23 @@ static TrackedDataFile *
 copy_tracked_file(const TrackedDataFile *src)
 {
 	TrackedDataFile *dst = (TrackedDataFile *) palloc(sizeof(TrackedDataFile));
+	ListCell	   *lc;
 
 	dst->file_path = pstrdup(src->file_path);
 	dst->record_count = src->record_count;
 	dst->file_size = src->file_size;
 	dst->file_format = src->file_format ? pstrdup(src->file_format) : NULL;
+
+	/* Deep-copy the partition tuple; NULL elements are SQL NULL values. */
+	dst->partition_values = NIL;
+	foreach(lc, src->partition_values)
+	{
+		Node	   *v = (Node *) lfirst(lc);
+
+		dst->partition_values = lappend(dst->partition_values,
+										v ? (void *) makeString(pstrdup(strVal(v)))
+										  : NULL);
+	}
 
 	return dst;
 }
@@ -182,10 +195,27 @@ copy_tracked_file(const TrackedDataFile *src)
 static void
 free_tracked_file(TrackedDataFile *file)
 {
+	ListCell   *lc;
+
 	if (file->file_path)
 		pfree(file->file_path);
 	if (file->file_format)
 		pfree(file->file_format);
+
+	/* Free the partition tuple; skip NULL (SQL NULL) list elements. */
+	foreach(lc, file->partition_values)
+	{
+		Value	   *v = (Value *) lfirst(lc);
+
+		if (v)
+		{
+			if (v->val.str)
+				pfree(v->val.str);
+			pfree(v);
+		}
+	}
+	list_free(file->partition_values);
+
 	pfree(file);
 }
 
@@ -1448,12 +1478,18 @@ typedef struct
 	bool		in_fragment_object;
 	int			fragment_object_depth;
 
+	/* Nested partition_values array (scalars) inside a fragment object */
+	bool		next_array_is_partvals;
+	bool		in_partvals_array;
+	int			partvals_array_depth;
+
 	/* Fields of the fragment currently being parsed */
 	char	   *cur_path;
 	char	   *cur_format;
 	int64		cur_record_count;
 	int64		cur_file_size;
 	bool		cur_is_delete;
+	List	   *cur_partition_values;	/* List of String / NULL, spec order */
 
 	/* Accumulated output (List of TrackedDataFile*) */
 	List	   *data_files;
@@ -1476,6 +1512,7 @@ dl_object_start(void *semstate)
 		s->cur_record_count = 0;
 		s->cur_file_size = 0;
 		s->cur_is_delete = false;
+		s->cur_partition_values = NIL;
 	}
 }
 
@@ -1493,6 +1530,8 @@ dl_object_end(void *semstate)
 		file->file_format = s->cur_format;
 		file->record_count = s->cur_record_count;
 		file->file_size = s->cur_file_size;
+		file->partition_values = s->cur_partition_values;
+		s->cur_partition_values = NIL;
 
 		if (s->cur_is_delete)
 			s->delete_files = lappend(s->delete_files, file);
@@ -1518,6 +1557,12 @@ dl_array_start(void *semstate)
 		s->fragments_array_depth = s->array_depth;
 		s->next_array_is_fragments = false;
 	}
+	else if (s->next_array_is_partvals)
+	{
+		s->in_partvals_array = true;
+		s->partvals_array_depth = s->array_depth;
+		s->next_array_is_partvals = false;
+	}
 }
 
 static void
@@ -1528,6 +1573,10 @@ dl_array_end(void *semstate)
 	if (s->in_fragments_array &&
 		s->array_depth == s->fragments_array_depth)
 		s->in_fragments_array = false;
+
+	if (s->in_partvals_array &&
+		s->array_depth == s->partvals_array_depth)
+		s->in_partvals_array = false;
 
 	s->array_depth--;
 }
@@ -1549,6 +1598,12 @@ dl_field_start(void *semstate, char *fname, bool isnull)
 			s->current_field = DL_FIELD_FILE_SIZE;
 		else if (strcmp(fname, "position_on_delete") == 0)
 			s->current_field = DL_FIELD_POSITION_ON_DELETE;
+		else if (strcmp(fname, "partition_values") == 0)
+		{
+			/* The value is an array; collected in dl_scalar via the flag. */
+			s->next_array_is_partvals = true;
+			s->current_field = DL_FIELD_NONE;
+		}
 		else
 			s->current_field = DL_FIELD_NONE;
 	}
@@ -1569,6 +1624,21 @@ dl_scalar(void *semstate, char *token, JsonTokenType tokentype)
 
 	if (!s->in_fragment_object)
 		return;
+
+	/*
+	 * Elements of the partition_values array: a JSON string becomes a String
+	 * node, JSON null becomes a NULL list cell (SQL NULL partition value).
+	 * current_field is not used here so multiple elements accumulate.
+	 */
+	if (s->in_partvals_array)
+	{
+		if (tokentype == JSON_TOKEN_NULL)
+			s->cur_partition_values = lappend(s->cur_partition_values, NULL);
+		else
+			s->cur_partition_values =
+				lappend(s->cur_partition_values, makeString(pstrdup(token)));
+		return;
+	}
 
 	switch (s->current_field)
 	{
@@ -1660,6 +1730,7 @@ pg_iceberg_parse_data_locations(const char *json,
 			arr[i].record_count = src->record_count;
 			arr[i].file_size = src->file_size;
 			arr[i].file_format = src->file_format;
+			arr[i].partition_values = src->partition_values;
 			i++;
 			pfree(src);
 		}
@@ -1684,6 +1755,7 @@ pg_iceberg_parse_data_locations(const char *json,
 			arr[i].record_count = src->record_count;
 			arr[i].file_size = src->file_size;
 			arr[i].file_format = src->file_format;
+			arr[i].partition_values = src->partition_values;
 			i++;
 			pfree(src);
 		}
@@ -1716,6 +1788,35 @@ pg_iceberg_parse_data_locations(const char *json,
  *
  * Also returns the appropriate CmdType via *cmd_out.
  */
+/*
+ * append_partition_values_json
+ *    Emit ,"partition_values":[...] for one file.  NULL list elements become
+ *    JSON null; NIL (unpartitioned) yields an empty array.  Round-trips with
+ *    dl_scalar's partition_values parsing and feeds the agent's withPartition.
+ */
+static void
+append_partition_values_json(StringInfo buf, List *partition_values)
+{
+	ListCell   *lc;
+	bool		first = true;
+
+	appendStringInfoString(buf, ",\"partition_values\":[");
+	foreach(lc, partition_values)
+	{
+		Node	   *v = (Node *) lfirst(lc);
+
+		if (!first)
+			appendStringInfoChar(buf, ',');
+		first = false;
+
+		if (v == NULL)
+			appendStringInfoString(buf, "null");
+		else
+			escape_json(buf, strVal(v));
+	}
+	appendStringInfoChar(buf, ']');
+}
+
 static char *
 serialize_files_to_data_locations(List *data_files,
 								  List *delete_files,
@@ -1777,9 +1878,11 @@ serialize_files_to_data_locations(List *data_files,
 		appendStringInfo(&buf,
 						 ",\"record_count\":" INT64_FORMAT ","
 						 "\"file_size_in_bytes\":" INT64_FORMAT ","
-						 "\"position_on_delete\":\"DATA_FILE\"}",
+						 "\"position_on_delete\":\"DATA_FILE\"",
 						 f->record_count,
 						 f->file_size);
+		append_partition_values_json(&buf, f->partition_values);
+		appendStringInfoChar(&buf, '}');
 	}
 
 	/* Serialize delete files */
@@ -1800,9 +1903,11 @@ serialize_files_to_data_locations(List *data_files,
 		appendStringInfo(&buf,
 						 ",\"record_count\":" INT64_FORMAT ","
 						 "\"file_size_in_bytes\":" INT64_FORMAT ","
-						 "\"position_on_delete\":\"POSITION_DELETE\"}",
+						 "\"position_on_delete\":\"POSITION_DELETE\"",
 						 f->record_count,
 						 f->file_size);
+		append_partition_values_json(&buf, f->partition_values);
+		appendStringInfoChar(&buf, '}');
 	}
 
 	appendStringInfoString(&buf, "]}");

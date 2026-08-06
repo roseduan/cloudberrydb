@@ -51,6 +51,15 @@ typedef struct IcebergLoadTableResult
 	char *metadata_location;
 	char *catalog_properties;
 	char *location;
+
+	/*
+	 * Comma-separated partition spec summary from the agent
+	 * ("partition-spec-summary" in the load-table response): one entry per
+	 * partition field in spec order, identity fields as the bare column name,
+	 * other transforms as "transform(column)".  NULL when the table is
+	 * unpartitioned (or the agent predates the field).
+	 */
+	char *partition_spec_summary;
 } IcebergLoadTableResult;
 
 /*
@@ -102,7 +111,8 @@ extern char *pg_iceberg_create_table(Relation relation,
 									 const char *foreignCatalogName,
 									 const char *volumeServer,
 									 const char *volumeName,
-									 const char *location);
+									 const char *location,
+									 char **partition_spec_summary_out);
 
 extern IcebergLoadTableResult *pg_iceberg_load_table(const char *catalogName,
 									   const char *nameSpace,

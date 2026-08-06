@@ -38,8 +38,10 @@ typedef struct
 	RewriteHelperParseField current_field;
 	const char *added_fragments_start;
 	const char *added_fragments_end;
+	int			added_fragments_depth;
 	const char *rewritten_fragments_start;
 	const char *rewritten_fragments_end;
+	int			rewritten_fragments_depth;
 } RewriteHelperParseState;
 
 /* --- Parser callbacks --- */
@@ -65,10 +67,16 @@ rw_helper_array_start(void *state)
 
 	if (s->current_field == RW_HELPER_PARSE_ADDED_FRAGMENTS &&
 		s->added_fragments_start == NULL)
+	{
 		s->added_fragments_start = s->lex->token_start;
+		s->added_fragments_depth = s->depth;
+	}
 	else if (s->current_field == RW_HELPER_PARSE_REWRITTEN_FRAGMENTS &&
 			 s->rewritten_fragments_start == NULL)
+	{
 		s->rewritten_fragments_start = s->lex->token_start;
+		s->rewritten_fragments_depth = s->depth;
+	}
 
 	s->depth++;
 }
@@ -78,18 +86,26 @@ rw_helper_array_end(void *state)
 {
 	RewriteHelperParseState *s = (RewriteHelperParseState *) state;
 
-	if (s->current_field == RW_HELPER_PARSE_ADDED_FRAGMENTS)
+	/*
+	 * Decrement first, then capture only when we are back at the depth where
+	 * the tracked array opened.  Fragment objects now contain a nested
+	 * "partition_values" array; without this guard the extractor would fire on
+	 * that inner ']' and truncate the captured fragments JSON.
+	 */
+	s->depth--;
+
+	if (s->current_field == RW_HELPER_PARSE_ADDED_FRAGMENTS &&
+		s->depth == s->added_fragments_depth)
 	{
 		s->added_fragments_end = s->lex->prev_token_terminator;
 		s->current_field = RW_HELPER_PARSE_NONE;
 	}
-	else if (s->current_field == RW_HELPER_PARSE_REWRITTEN_FRAGMENTS)
+	else if (s->current_field == RW_HELPER_PARSE_REWRITTEN_FRAGMENTS &&
+			 s->depth == s->rewritten_fragments_depth)
 	{
 		s->rewritten_fragments_end = s->lex->prev_token_terminator;
 		s->current_field = RW_HELPER_PARSE_NONE;
 	}
-
-	s->depth--;
 }
 
 static void
@@ -200,6 +216,37 @@ pg_iceberg_rewrite_append_fragment_json(StringInfo buf,
 					 fragment->recordCount,
 					 file_size);
 	escape_json(buf, position_on_delete);
+
+	/*
+	 * Partition tuple of the rewritten (old) data file, identity values in
+	 * spec order.  A NULL list element serializes as JSON null; an empty/NIL
+	 * list (unpartitioned table) yields "partition_values":[].  The agent's
+	 * commitFileGroups requires this on both new and old files to attach the
+	 * partition via withPartition() when the table is partitioned; without it
+	 * transFileFromGpdb() throws for a partitioned spec.  Same JSON shape as
+	 * the write-result emit in iceberg_volume_fdw.c.
+	 */
+	appendStringInfoString(buf, ",\"partition_values\":[");
+	{
+		ListCell   *pvlc;
+		bool		pvfirst = true;
+
+		foreach(pvlc, fragment->partitionValues)
+		{
+			Node	   *pv = (Node *) lfirst(pvlc);
+
+			if (!pvfirst)
+				appendStringInfoChar(buf, ',');
+			pvfirst = false;
+
+			if (pv == NULL)
+				appendStringInfoString(buf, "null");
+			else
+				escape_json(buf, strVal(pv));
+		}
+	}
+	appendStringInfoChar(buf, ']');
+
 	appendStringInfoChar(buf, '}');
 }
 

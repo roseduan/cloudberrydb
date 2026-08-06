@@ -126,7 +126,11 @@ public class IcebergBuildInCatalog implements IcebergCatalog {
             return buildInCatalog.createTable(identifier, schema, spec, location,
                     IcebergUtilities.stripInternalProperties(properties));
         } else {
-            return buildInCatalog.createTable(identifier, schema);
+            /* No catalog location: let the catalog assign one, but still
+             * forward the partition spec and properties. */
+            return buildInCatalog.createTable(identifier, schema,
+                    spec != null ? spec : PartitionSpec.unpartitioned(),
+                    IcebergUtilities.stripInternalProperties(properties));
         }
     }
 

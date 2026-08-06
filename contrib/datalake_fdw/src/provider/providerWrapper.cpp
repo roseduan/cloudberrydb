@@ -189,6 +189,23 @@ int64_t writeToProvider(providerWrapper provider, const void* buf, int64_t lengt
 	return writenLen;
 }
 
+void providerSetDeletePartition(providerWrapper provider, void* partitionValues) {
+	if (provider == NULL)
+		return;
+	try
+	{
+		provider->getContext()->setDeletePartition(partitionValues);
+	}
+	catch (std::exception &e)
+	{
+		elog(ERROR, "Datalake set delete partition failed, failed msg : %s", e.what());
+	}
+	catch (...)
+	{
+		elog(ERROR, "Datalake set delete partition failed.");
+	}
+}
+
 void destroyHandler(providerWrapper provider) {
 	try
 	{

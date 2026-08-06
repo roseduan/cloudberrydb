@@ -339,6 +339,11 @@ typedef struct dataLakeOptions
 	 * Values <= 0 mean "unset" and the writer uses the codec's default level.
 	 */
 	int			compressLevel;
+	/*
+	 * Iceberg PARTITION BY columns (comma-separated names, declaration order).
+	 * NULL/empty for unpartitioned tables; consumed by the fanout writer.
+	 */
+	char		*partition_by;
 	/* parser filePath get prefix */
 	char		*prefix;
 	int64_t		fileSizeLimit;

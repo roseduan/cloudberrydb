@@ -587,6 +587,8 @@ pg_iceberg_free_load_table_result(IcebergLoadTableResult *result)
 		pfree(result->catalog_properties);
 	if (result->location != NULL)
 		pfree(result->location);
+	if (result->partition_spec_summary != NULL)
+		pfree(result->partition_spec_summary);
 	pfree(result);
 }
 
@@ -599,10 +601,12 @@ pg_iceberg_create_table(Relation relation,
 						const char *foreignCatalogName,
 						const char *volumeServer,
 						const char *volumeName,
-						const char *location)
+						const char *location,
+						char **partition_spec_summary_out)
 {
 	IcebergTableSchema	   *schema;
 	IcebergCatalogFdwState *fdwState;
+	char				   *result;
 
 	schema = build_schema_from_pg_table(relation);
 
@@ -616,7 +620,37 @@ pg_iceberg_create_table(Relation relation,
 											location,
 											schema);
 	free_schema_info(schema);
-	return extract_location_from_fdw_state(fdwState);
+
+	/*
+	 * Extract the metadata location first: this raises the real create error
+	 * (e.g. an agent HTTP failure) for a failed create.  Only parse the rest
+	 * of the response once we know the create succeeded.
+	 */
+	result = extract_location_from_fdw_state(fdwState);
+
+	/*
+	 * The agent's create response also carries "partition-spec-summary" for
+	 * the table it actually created.  Surface it (when requested) so the
+	 * caller can verify it matches the declared PARTITION BY without a second
+	 * round-trip -- a builtin-catalog load_table needs a metadata location we
+	 * do not have yet, which is why the builtin path cannot simply refresh.
+	 */
+	if (partition_spec_summary_out != NULL)
+	{
+		IcebergLoadTableResult *created;
+
+		*partition_spec_summary_out = NULL;
+		created = parse_load_table_response(fdwState->response.responseBody);
+		if (created != NULL)
+		{
+			if (created->partition_spec_summary != NULL)
+				*partition_spec_summary_out =
+					pstrdup(created->partition_spec_summary);
+			pg_iceberg_free_load_table_result(created);
+		}
+	}
+
+	return result;
 }
 
 char *

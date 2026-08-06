@@ -47,6 +47,7 @@ static const OptionDef icebergTableOptionDefs[] = {
 	OPTION_BOOL("autovacuum_enabled", IcebergTableOptions, autovacuum_enabled, true),
 	OPTION_STRING("compression", IcebergTableOptions, compression, "zstd"),
 	OPTION_INT("compression_level", IcebergTableOptions, compression_level, -1),
+	OPTION_STRING("iceberg_partition_by", IcebergTableOptions, partition_by, NULL),
 	/* Add new Iceberg table options here */
 };
 
@@ -389,6 +390,33 @@ pg_iceberg_upsert_location_option_local_internal(Oid relid,
 
 	systable_endscan(scan);
 	table_close(lake_rel, RowExclusiveLock);
+}
+
+/*
+ * free_iceberg_table_options
+ *		Free an IcebergTableOptions and every pstrdup'd string field it owns.
+ *		Safe on NULL.  Callers that stashed a shallow copy of any field must
+ *		not use it after this returns.
+ */
+void
+free_iceberg_table_options(IcebergTableOptions *opts)
+{
+	if (opts == NULL)
+		return;
+
+	if (opts->catalog)
+		pfree(opts->catalog);
+	if (opts->namespace)
+		pfree(opts->namespace);
+	if (opts->table)
+		pfree(opts->table);
+	if (opts->location)
+		pfree(opts->location);
+	if (opts->compression)
+		pfree(opts->compression);
+	if (opts->partition_by)
+		pfree(opts->partition_by);
+	pfree(opts);
 }
 
 IcebergTableOptions *

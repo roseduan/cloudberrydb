@@ -3,6 +3,7 @@ package cloud.elastic.dlagent.service.iceberg;
 import cloud.elastic.dlagent.plugins.iceberg.IcebergCatalog;
 import cloud.elastic.dlagent.api.model.RequestContext;
 import cloud.elastic.dlagent.service.ServiceResult;
+import org.apache.iceberg.PartitionSpec;
 import org.apache.iceberg.Schema;
 import org.apache.iceberg.Table;
 import org.apache.iceberg.catalog.TableIdentifier;
@@ -26,10 +27,13 @@ public interface IcebergService {
     Table loadTable(String namespace, String tableName, Map<String, String> properties, RequestContext context) throws Exception;
 
     /**
-     * Create a new table
+     * Create a new table.
+     *
+     * @param spec partition spec built against {@code schema}; null means
+     *             unpartitioned
      */
-    Table createTable(String namespace, String tableName, Schema schema, String location, 
-                      Map<String, String> properties, RequestContext context) throws Exception;
+    Table createTable(String namespace, String tableName, Schema schema, PartitionSpec spec,
+                      String location, Map<String, String> properties, RequestContext context) throws Exception;
 
     /**
      * Get table fragment

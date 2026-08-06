@@ -114,11 +114,13 @@ public class IcebergServiceImpl implements IcebergService {
     }
 
     @Override
-    public Table createTable(String namespace, String tableName, Schema schema, String location,
-            Map<String, String> properties, RequestContext context) throws Exception {
+    public Table createTable(String namespace, String tableName, Schema schema, PartitionSpec spec,
+            String location, Map<String, String> properties, RequestContext context) throws Exception {
         TableIdentifier tableId = TableIdentifier.of(namespace, tableName);
         IcebergCatalog catalog = icebergCatalogWrapper.getIcebergCatalog(context);
-        PartitionSpec spec = PartitionSpec.unpartitioned();
+        if (spec == null) {
+            spec = PartitionSpec.unpartitioned();
+        }
 
         // Set format version to 2 to support UPDATE/DELETE operations.
         // Belt-and-suspenders: the controller already filters user props via

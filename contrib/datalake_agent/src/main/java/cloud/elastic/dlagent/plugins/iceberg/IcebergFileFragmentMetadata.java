@@ -46,6 +46,17 @@ public class IcebergFileFragmentMetadata implements FragmentMetadata {
     @Setter
     private List<String> eqColumnNames;
 
+    /*
+     * Identity partition values of this data file, in partition-spec order
+     * (a null element means a SQL NULL partition value; null/empty means the
+     * table is unpartitioned).  Emitted on the scan plan so the C side can map
+     * a data file's fileId to its partition for partition-aware position
+     * deletes on UPDATE/DELETE.
+     */
+    @Getter
+    @Setter
+    private List<String> partitionValues;
+
     public IcebergFileFragmentMetadata(FileFormat format, FileContent content, Long recordCount, List<String> eqColumnNames) {
         fileFormat = format;
         fileContent = content;

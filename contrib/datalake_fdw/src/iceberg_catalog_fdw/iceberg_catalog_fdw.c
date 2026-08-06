@@ -131,6 +131,7 @@ static agentcli_cJSON* createIcebergVolumeConfig(IcebergVolumeOptions *volumeOpt
 static agentcli_cJSON* createIcebergAdditionalConfig(IcebergCatalogOptions *option, IcebergVolumeOptions *volumeOpt);
 static agentcli_cJSON* createIcebergConfig(IcebergCatalogOptions *option, IcebergVolumeOptions *volumeOpt);
 static agentcli_cJSON* createSchemaFromRequest(IcebergCatalogRequest req);
+static agentcli_cJSON* createPartitionSpecFromRequest(IcebergCatalogRequest req);
 static agentcli_cJSON* createBuildInProperties(IcebergCatalogOperation opration, IcebergCatalogOptions *option, IcebergCatalogRequest req);
 static const char* mapPostgresToIcebergType(Oid pgType, int32 typemod);
 const char * createAppendRequestJson(IcebergCatalogFdwState* fdwState, IcebergCatalogOptions *option, IcebergVolumeOptions *volumeOpt, IcebergCatalogRequest req);
@@ -643,6 +644,17 @@ createCreateRequestJson(IcebergCatalogFdwState* fdwState, IcebergCatalogOptions 
     // Add schema - use real schema if available, otherwise use default
     agentcli_cJSON *schema = createSchemaFromRequest(req);
     agentcli_cJSON_AddItemToObject(request, DATALAKEFDW_ICEBERG_KEY_SCHEMA, schema);
+
+    /*
+     * PARTITION BY declaration: ship the Iceberg partition spec so the agent
+     * creates the table partitioned instead of unpartitioned.  Omitted for
+     * tables without a declaration (agent falls back to unpartitioned).
+     */
+    if (req.schema != NULL && req.schema->partitionColumns != NIL)
+    {
+        agentcli_cJSON *partitionSpec = createPartitionSpecFromRequest(req);
+        agentcli_cJSON_AddItemToObject(request, DATALAKEFDW_ICEBERG_KEY_PARTITION_SPEC, partitionSpec);
+    }
 
     // Add table name
     agentcli_cJSON_AddStringToObject(request, DATALAKEFDW_ICEBERG_KEY_NAME, fdwState->request.tableName);
@@ -1395,6 +1407,61 @@ static agentcli_cJSON* createSchemaFromRequest(IcebergCatalogRequest req)
 
     agentcli_cJSON_AddItemToObject(schema, DATALAKEFDW_ICEBERG_KEY_FIELDS, fields);
     return schema;
+}
+
+/*
+ * Create the Iceberg partition spec JSON for a create-table request from the
+ * PARTITION BY declaration (identity transforms only for now):
+ *
+ *   {"spec-id":0,"fields":[
+ *       {"source-id":<schema field id>,"field-id":1000,
+ *        "transform":"identity","name":"<col>"}, ...]}
+ *
+ * source-id must match the field id assigned by createSchemaFromRequest,
+ * which numbers req.schema->columns from 1 in list order.  field-id starts
+ * at 1000 per the Iceberg spec convention for partition fields.
+ */
+static agentcli_cJSON* createPartitionSpecFromRequest(IcebergCatalogRequest req)
+{
+    agentcli_cJSON *spec = agentcli_cJSON_CreateObject();
+    agentcli_cJSON *fields = agentcli_cJSON_CreateArray();
+    ListCell *plc;
+    int partitionFieldId = 1000;
+
+    agentcli_cJSON_AddNumberToObject(spec, DATALAKEFDW_ICEBERG_KEY_SPECID, 0);
+
+    foreach(plc, req.schema->partitionColumns) {
+        char *partCol = (char *) lfirst(plc);
+        ListCell *clc;
+        int fieldId = 1;
+        int sourceId = 0;
+
+        foreach(clc, req.schema->columns) {
+            IcebergColumnDef *colDef = (IcebergColumnDef*)lfirst(clc);
+
+            if (strcmp(colDef->columnName, partCol) == 0) {
+                sourceId = fieldId;
+                break;
+            }
+            fieldId++;
+        }
+
+        if (sourceId == 0)
+            ereport(ERROR,
+                    (errcode(ERRCODE_UNDEFINED_COLUMN),
+                     errmsg("partition column \"%s\" not found in iceberg table schema",
+                            partCol)));
+
+        agentcli_cJSON *field = agentcli_cJSON_CreateObject();
+        agentcli_cJSON_AddNumberToObject(field, DATALAKEFDW_ICEBERG_KEY_SOURCE_ID, sourceId);
+        agentcli_cJSON_AddNumberToObject(field, DATALAKEFDW_ICEBERG_KEY_FIELD_ID, partitionFieldId++);
+        agentcli_cJSON_AddStringToObject(field, DATALAKEFDW_ICEBERG_KEY_TRANSFORM, DATALAKEFDW_ICEBERG_TRANSFORM_IDENTITY);
+        agentcli_cJSON_AddStringToObject(field, DATALAKEFDW_ICEBERG_KEY_NAME, partCol);
+        agentcli_cJSON_AddItemToArray(fields, field);
+    }
+
+    agentcli_cJSON_AddItemToObject(spec, DATALAKEFDW_ICEBERG_KEY_FIELDS, fields);
+    return spec;
 }
 
 /*

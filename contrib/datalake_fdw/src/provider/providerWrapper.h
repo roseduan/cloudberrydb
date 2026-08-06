@@ -35,6 +35,10 @@ int64_t readBufferFromProvider(providerWrapper provider, void* buffer, int64_t l
 
 int64_t writeToProvider(providerWrapper provider, const void* buf, int64_t length);
 
+/* Set the partition tuple (a PG List* passed as void*) of the data file that
+ * the next writeToProvider() position-delete record targets. */
+void providerSetDeletePartition(providerWrapper provider, void* partitionValues);
+
 const char* getReadProviderFileName(providerWrapper provider);
 
 void destroyHandler(providerWrapper provider);

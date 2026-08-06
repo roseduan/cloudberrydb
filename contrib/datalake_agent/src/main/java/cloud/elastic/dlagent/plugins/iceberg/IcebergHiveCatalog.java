@@ -207,7 +207,11 @@ public class IcebergHiveCatalog implements IcebergCatalog, AutoCloseable {
             return hiveCatalog.createTable(identifier, schema, spec, location,
                     IcebergUtilities.stripInternalProperties(properties));
         } else {
-            return hiveCatalog.createTable(identifier, schema);
+            /* No catalog location: let the catalog assign one, but still
+             * forward the partition spec and properties. */
+            return hiveCatalog.createTable(identifier, schema,
+                    spec != null ? spec : PartitionSpec.unpartitioned(),
+                    IcebergUtilities.stripInternalProperties(properties));
         }
     }
 

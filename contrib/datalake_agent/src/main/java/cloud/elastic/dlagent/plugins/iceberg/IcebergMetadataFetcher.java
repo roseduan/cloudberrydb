@@ -289,7 +289,7 @@ public class IcebergMetadataFetcher extends BasePlugin implements MetadataFetche
         Transaction txn = table.newTransaction();
         AppendFiles batchAppend = txn.newAppend();
         for (Fragment fragment : context.getFragments()) {
-            DataFile dataFile = icebergUtilities.transFileFromGpdb(fragment, table.io(), org.apache.iceberg.MetricsConfig.forTable(table));
+            DataFile dataFile = icebergUtilities.transFileFromGpdb(fragment, table.spec(), table.io(), org.apache.iceberg.MetricsConfig.forTable(table));
             batchAppend.appendFile(dataFile);
         }
         batchAppend.commit(); // writes manifest only
@@ -407,11 +407,12 @@ public class IcebergMetadataFetcher extends BasePlugin implements MetadataFetche
         for (Fragment fragment : context.getFragments()) {
             GpdbFragmentMetadata meta = (GpdbFragmentMetadata)fragment.getMetadata();
             if (meta.getContentType() == GpdbFragmentMetadata.ContentType.DATA_FILE) {
-                DataFile dataFile = icebergUtilities.transFileFromGpdb(fragment, table.io(), org.apache.iceberg.MetricsConfig.forTable(table));
+                DataFile dataFile = icebergUtilities.transFileFromGpdb(fragment, table.spec(), table.io(), org.apache.iceberg.MetricsConfig.forTable(table));
                 rowDelta.addRows(dataFile);
             } else if (meta.getContentType() == GpdbFragmentMetadata.ContentType.POSITION_DELETE) {
                 DeleteFile deleteFile = icebergUtilities.transPosDeleteFromGpdb(
-                        fragment, table.io(), org.apache.iceberg.MetricsConfig.forPositionDelete(table));
+                        fragment, table.spec(), table.io(),
+                        org.apache.iceberg.MetricsConfig.forPositionDelete(table));
                 rowDelta.addDeletes(deleteFile);
             }
         }
@@ -504,11 +505,11 @@ public class IcebergMetadataFetcher extends BasePlugin implements MetadataFetche
         rewrite.dataSequenceNumber(sequenceNumber);
 
         for (Fragment fragment : context.getRewrittenFragments()) {
-            DataFile dataFile = icebergUtilities.transFileFromGpdb(fragment, table.io(), org.apache.iceberg.MetricsConfig.forTable(table));
+            DataFile dataFile = icebergUtilities.transFileFromGpdb(fragment, table.spec(), table.io(), org.apache.iceberg.MetricsConfig.forTable(table));
             rewrite.deleteFile(dataFile);
         }
         for (Fragment fragment : context.getFragments()) {
-            DataFile dataFile = icebergUtilities.transFileFromGpdb(fragment, table.io(), org.apache.iceberg.MetricsConfig.forTable(table));
+            DataFile dataFile = icebergUtilities.transFileFromGpdb(fragment, table.spec(), table.io(), org.apache.iceberg.MetricsConfig.forTable(table));
             rewrite.addFile(dataFile);
         }
 
@@ -638,7 +639,7 @@ public class IcebergMetadataFetcher extends BasePlugin implements MetadataFetche
         healLegacyTableProperties(table);
         AppendFiles batchAppend = table.newAppend();
         for (Fragment fragment : context.getFragments()) {
-            DataFile dataFile = icebergUtilities.transFileFromGpdb(fragment, table.io(), org.apache.iceberg.MetricsConfig.forTable(table));
+            DataFile dataFile = icebergUtilities.transFileFromGpdb(fragment, table.spec(), table.io(), org.apache.iceberg.MetricsConfig.forTable(table));
             batchAppend.appendFile(dataFile);
         }
         batchAppend.commit(); // normal commit — updates catalog
@@ -658,11 +659,12 @@ public class IcebergMetadataFetcher extends BasePlugin implements MetadataFetche
         for (Fragment fragment : context.getFragments()) {
             GpdbFragmentMetadata meta = (GpdbFragmentMetadata)fragment.getMetadata();
             if (meta.getContentType() == GpdbFragmentMetadata.ContentType.DATA_FILE) {
-                DataFile dataFile = icebergUtilities.transFileFromGpdb(fragment, table.io(), org.apache.iceberg.MetricsConfig.forTable(table));
+                DataFile dataFile = icebergUtilities.transFileFromGpdb(fragment, table.spec(), table.io(), org.apache.iceberg.MetricsConfig.forTable(table));
                 rowDelta.addRows(dataFile);
             } else if (meta.getContentType() == GpdbFragmentMetadata.ContentType.POSITION_DELETE) {
                 DeleteFile deleteFile = icebergUtilities.transPosDeleteFromGpdb(
-                        fragment, table.io(), org.apache.iceberg.MetricsConfig.forPositionDelete(table));
+                        fragment, table.spec(), table.io(),
+                        org.apache.iceberg.MetricsConfig.forPositionDelete(table));
                 rowDelta.addDeletes(deleteFile);
             }
         }
@@ -693,11 +695,11 @@ public class IcebergMetadataFetcher extends BasePlugin implements MetadataFetche
         rewrite.dataSequenceNumber(sequenceNumber);
 
         for (Fragment fragment : context.getRewrittenFragments()) {
-            DataFile dataFile = icebergUtilities.transFileFromGpdb(fragment, table.io(), org.apache.iceberg.MetricsConfig.forTable(table));
+            DataFile dataFile = icebergUtilities.transFileFromGpdb(fragment, table.spec(), table.io(), org.apache.iceberg.MetricsConfig.forTable(table));
             rewrite.deleteFile(dataFile);
         }
         for (Fragment fragment : context.getFragments()) {
-            DataFile dataFile = icebergUtilities.transFileFromGpdb(fragment, table.io(), org.apache.iceberg.MetricsConfig.forTable(table));
+            DataFile dataFile = icebergUtilities.transFileFromGpdb(fragment, table.spec(), table.io(), org.apache.iceberg.MetricsConfig.forTable(table));
             rewrite.addFile(dataFile);
         }
 
@@ -810,9 +812,18 @@ public class IcebergMetadataFetcher extends BasePlugin implements MetadataFetche
                 List<ScanTask> scanTasks = new ArrayList<>();
                 for (FileScanTask fileScanTask : bin) {
                     DataFile file = fileScanTask.file();
-                    Fragment data = new Fragment(file.path().toString(),
+                    IcebergFileFragmentMetadata dataMeta =
                             new IcebergFileFragmentMetadata(file.format(), file.content(),
-                                    file.recordCount(), null));
+                                    file.recordCount(), null);
+                    /*
+                     * Stamp the rewrite input file's partition tuple so the QE
+                     * carries it through to the rewrite result; the commit
+                     * (RewriteFiles.deleteFile) needs it to attach the old file
+                     * to its partition on a partitioned table.  Same as the
+                     * normal scan plan (transformTasks).
+                     */
+                    dataMeta.setPartitionValues(partitionValuesOf(table.spec(), file.partition()));
+                    Fragment data = new Fragment(file.path().toString(), dataMeta);
 
                     List<Fragment> deletes = Lists.newArrayList();
                     for (DeleteFile delete : fileScanTask.deletes()) {
@@ -1030,8 +1041,15 @@ public class IcebergMetadataFetcher extends BasePlugin implements MetadataFetche
                 }
 
                 DataFile file = fileScanTask.file();
-                Fragment data = new Fragment(file.path().toString(),
-                        new IcebergFileFragmentMetadata(file.format(), file.content(), file.recordCount(), null));
+                IcebergFileFragmentMetadata dataMeta =
+                        new IcebergFileFragmentMetadata(file.format(), file.content(), file.recordCount(), null);
+                /*
+                 * Stamp the data file's identity partition values (spec order)
+                 * so the C side can map this file's fileId to its partition and
+                 * attribute partition-aware position deletes on UPDATE/DELETE.
+                 */
+                dataMeta.setPartitionValues(partitionValuesOf(table.spec(), file.partition()));
+                Fragment data = new Fragment(file.path().toString(), dataMeta);
 
                 List<Integer> deleteIndexes = new ArrayList<>();
                 for (DeleteFile delete : fileScanTask.deletes()) {
@@ -1053,6 +1071,39 @@ public class IcebergMetadataFetcher extends BasePlugin implements MetadataFetche
                 allDeleteFiles.size(), tasks.size());
 
         return new FragmentDescription(null, allDeleteFiles, tasks, snapshotId);
+    }
+
+    /*
+     * Convert a data file's partition tuple into identity value texts in
+     * partition-spec order.  Returns null for an unpartitioned spec; a null
+     * list element denotes a SQL NULL partition value.  The text form must
+     * round-trip through Conversions.fromPartitionString() on the commit path
+     * (integers -> "5", strings -> "east"), matching the identity values the
+     * INSERT path emits from the segment.
+     *
+     * NOTE on String.valueOf(): it round-trips through fromPartitionString for
+     * every partition-column type the write path actually allows.  Partition
+     * columns are restricted to identity partitioning on integer and
+     * character/text types (the C fanout writer's parsePartitionColumns rejects
+     * everything else), so BINARY / FIXED / TIME columns -- whose toString()
+     * would emit an unparseable JVM representation -- can never reach here.  If
+     * that type restriction is ever widened, switch to Iceberg's canonical
+     * partition-string conversion for those types.
+     */
+    private static List<String> partitionValuesOf(org.apache.iceberg.PartitionSpec spec,
+                                                  org.apache.iceberg.StructLike partition) {
+        if (spec == null || !spec.isPartitioned() || partition == null) {
+            return null;
+        }
+        org.apache.iceberg.types.Types.StructType ptype = spec.partitionType();
+        int n = ptype.fields().size();
+        List<String> vals = new ArrayList<>(n);
+        for (int i = 0; i < n; i++) {
+            Class<?> javaClass = ptype.fields().get(i).type().typeId().javaClass();
+            Object v = partition.get(i, javaClass);
+            vals.add(v == null ? null : String.valueOf(v));
+        }
+        return vals;
     }
 
     public boolean open() throws Exception {

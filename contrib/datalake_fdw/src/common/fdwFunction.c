@@ -1456,6 +1456,14 @@ TupleTableSlot *datalake_exec_foreign_update(EState *estate, ResultRelInfo *rinf
 
 	slot_getallattrs(slot);
 	writeToProvider(sstate->provider, slot, 0);
+	/*
+	 * Attribute this position-delete to the partition of the data file the old
+	 * row lived in (looked up by fileId), so the delete writer can fan out per
+	 * partition and stamp the delete file's partition tuple.  NIL for
+	 * unpartitioned tables -> single-stream delete, unchanged behaviour.
+	 */
+	providerSetDeletePartition(mstate->us_provider,
+							   icebergGetFilePartition(datalake_iceberg_file_index_map, fileId));
 	writeToProvider(mstate->us_provider, junk_slot, 0);
 
 	MemoryContextSwitchTo(oldcontext);
@@ -1542,6 +1550,14 @@ TupleTableSlot *datalake_exec_foreign_delete(EState *estate, ResultRelInfo *rinf
 	MemoryContextReset(sstate->rowcontext);
 	oldcontext = MemoryContextSwitchTo(sstate->rowcontext);
 
+	/*
+	 * Attribute this position-delete to the partition of the data file the
+	 * deleted row lived in (looked up by fileId), so the delete writer can fan
+	 * out per partition and stamp the delete file's partition tuple.  NIL for
+	 * unpartitioned tables -> single-stream delete, unchanged behaviour.
+	 */
+	providerSetDeletePartition(mstate->us_provider,
+							   icebergGetFilePartition(datalake_iceberg_file_index_map, fileId));
 	writeToProvider(mstate->us_provider, junk_slot, 0);
 
 	MemoryContextSwitchTo(oldcontext);

@@ -251,17 +251,7 @@ pg_iceberg_free_table_info(IcebergTableInfo *info)
 	if (info->volume_server_name)
 		pfree(info->volume_server_name);
 	if (info->opts)
-	{
-		if (info->opts->catalog)
-			pfree(info->opts->catalog);
-		if (info->opts->namespace)
-			pfree(info->opts->namespace);
-		if (info->opts->table)
-			pfree(info->opts->table);
-		if (info->opts->location)
-			pfree(info->opts->location);
-		pfree(info->opts);
-	}
+		free_iceberg_table_options(info->opts);
 
 	/* Free the structure itself */
 	pfree(info);
@@ -348,12 +338,58 @@ pg_iceberg_get_latest_metadata_and_mode(Oid relid, bool *is_internal_out)
 	return latest_metadata_location;
 }
 
+/*
+ * pg_iceberg_check_partition_spec
+ *		Cross-check the PARTITION BY declaration against the partition spec
+ *		the external catalog actually holds for the table.
+ *
+ * Called with the load/refresh result of an external-catalog table, either
+ * when adopting a pre-existing table or right after creating one (the agent
+ * silently adopts an already-existing table on create, and an agent that
+ * predates partition support would create the table unpartitioned).  A
+ * mismatch would make the write path place rows into the wrong partitions,
+ * so fail the DDL instead.
+ */
+static void
+pg_iceberg_check_partition_spec(const IcebergTableInfo *table_info,
+								const char *actual_summary,
+								const char *nameSpace,
+								const char *tableName)
+{
+	const char *declared = NULL;
+	const char *actual = actual_summary;
+
+	if (table_info->opts != NULL)
+		declared = table_info->opts->partition_by;
+
+	if (declared != NULL && declared[0] == '\0')
+		declared = NULL;
+	if (actual != NULL && actual[0] == '\0')
+		actual = NULL;
+
+	if (declared == NULL && actual == NULL)
+		return;
+	if (declared != NULL && actual != NULL &&
+		strcmp(declared, actual) == 0)
+		return;
+
+	ereport(ERROR,
+			(errcode(ERRCODE_INVALID_TABLE_DEFINITION),
+			 errmsg("iceberg table \"%s.%s\" partition spec (%s) does not match declared PARTITION BY (%s)",
+					nameSpace, tableName,
+					actual ? actual : "none",
+					declared ? declared : "none"),
+			 errhint("Match the PARTITION BY clause to the existing table's partition spec, "
+					 "or drop the table in the external catalog first.")));
+}
+
 char *
 pg_iceberg_create_table_with_catalog(Relation rel, bool *is_internal)
 {
 	IcebergTableInfo *table_info;
 	char	   *result;
 	char	   *location = NULL;
+	char	   *created_spec_summary = NULL;
 	const char *nameSpace;
 	const char *tableName;
 	const char *catalogName;
@@ -400,12 +436,26 @@ pg_iceberg_create_table_with_catalog(Relation rel, bool *is_internal)
 										 table_info->catalog_name,
 										 table_info->volume_server_name,
 										 table_info->volume_name,
-										 location);
+										 location,
+										 &created_spec_summary);
 
 		if (location != NULL)
 		{
 			/* Builtin: location was pre-determined */
 			pg_iceberg_upsert_location_option(RelationGetRelid(rel), location);
+
+			/*
+			 * The builtin path cannot refresh from the catalog after create
+			 * (its load_table needs a metadata location we do not have yet), so
+			 * it would otherwise never notice a mismatch between the declared
+			 * PARTITION BY and what the agent actually created -- e.g. an agent
+			 * that ignores partition_spec, or that adopted a pre-existing
+			 * unpartitioned table.  Verify against the partition-spec summary
+			 * the agent returned in the create response.  The check is a no-op
+			 * when neither side is partitioned.
+			 */
+			pg_iceberg_check_partition_spec(table_info, created_spec_summary,
+											nameSpace, tableName);
 		}
 		else
 		{
@@ -441,6 +491,8 @@ pg_iceberg_create_table_with_catalog(Relation rel, bool *is_internal)
 									table_info->catalog_name,
 									nameSpace,
 									tableName)));
+				pg_iceberg_check_partition_spec(table_info, refresh_result->partition_spec_summary,
+												nameSpace, tableName);
 				pg_iceberg_upsert_location_option(RelationGetRelid(rel),
 												  refresh_result->location);
 				pg_iceberg_free_load_table_result(refresh_result);
@@ -486,7 +538,8 @@ pg_iceberg_create_table_with_catalog(Relation rel, bool *is_internal)
 											 table_info->catalog_name,
 											 table_info->volume_server_name,
 											 table_info->volume_name,
-											 location);
+											 location,
+											 NULL);
 
 			/*
 			 * Refresh once to capture catalog-returned table-location and persist
@@ -515,6 +568,8 @@ pg_iceberg_create_table_with_catalog(Relation rel, bool *is_internal)
 								table_info->catalog_name,
 								nameSpace,
 								tableName)));
+			pg_iceberg_check_partition_spec(table_info, refresh_result->partition_spec_summary,
+											nameSpace, tableName);
 			pg_iceberg_upsert_location_option(RelationGetRelid(rel),
 											  refresh_result->location);
 			pg_iceberg_free_load_table_result(refresh_result);
@@ -531,6 +586,8 @@ pg_iceberg_create_table_with_catalog(Relation rel, bool *is_internal)
 								table_info->catalog_name,
 								nameSpace,
 								tableName)));
+			pg_iceberg_check_partition_spec(table_info, load_result->partition_spec_summary,
+											nameSpace, tableName);
 			pg_iceberg_upsert_location_option(RelationGetRelid(rel),
 											  load_result->location);
 			pg_iceberg_free_load_table_result(load_result);
@@ -540,6 +597,8 @@ pg_iceberg_create_table_with_catalog(Relation rel, bool *is_internal)
 
 	if (location != NULL)
 		pfree(location);
+	if (created_spec_summary != NULL)
+		pfree(created_spec_summary);
 
 	/* Clean up allocated strings */
 	pg_iceberg_free_table_info(table_info);

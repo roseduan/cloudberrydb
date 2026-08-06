@@ -18,6 +18,7 @@ typedef struct icebergTableInfo {
     const char* catalog_properties;  /* Catalog config JSON (config + storage-credentials + table-location), NULL if volume specified */
     const char* compression;         /* Parquet write compression codec; NULL on non-AM volume path */
     int         compression_level;   /* Parquet write compression level; -1 = codec default */
+    const char* partition_by;        /* Iceberg partition columns (comma-separated); NULL/empty when unpartitioned */
 } icebergTableInfo;
 
 /* Scan state for Iceberg volume foreign data wrapper */

@@ -44,6 +44,11 @@ typedef struct IcebergFileIndexEntry
 	uint32		fileId;				/* File ID (0 to 1,048,575) */
 	char	   *filePath;			/* Full path to the data file */
 	int64		recordCount;		/* Total records in this file */
+	List	   *partitionValues;	/* identity partition tuple (spec order),
+									 * String nodes / NULL cells; NIL when the
+									 * table is unpartitioned. Used to attribute
+									 * position-delete files to a partition on
+									 * UPDATE/DELETE. Owned by map->context. */
 } IcebergFileIndexEntry;
 
 /*
@@ -73,6 +78,17 @@ icebergAddFile(IcebergFileIndexMap *map, const char *filePath, int64 recordCount
 /* Get file path from file ID, returns NULL if not found */
 extern const char *
 icebergGetFilePath(IcebergFileIndexMap *map, uint32 fileId);
+
+/* Set the identity partition tuple for a file ID (deep-copied into the map's
+ * memory context). partitionValues is a List of String nodes / NULL cells in
+ * partition-spec order; NIL for unpartitioned. No-op if fileId is unknown. */
+extern void
+icebergSetFilePartition(IcebergFileIndexMap *map, uint32 fileId, List *partitionValues);
+
+/* Get the identity partition tuple for a file ID, NIL if unknown/unpartitioned.
+ * The returned list is owned by the map; callers must not free it. */
+extern List *
+icebergGetFilePartition(IcebergFileIndexMap *map, uint32 fileId);
 
 /* Get file record count from file ID, returns -1 if not found */
 extern int64

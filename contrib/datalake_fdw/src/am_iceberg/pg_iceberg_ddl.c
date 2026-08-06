@@ -61,6 +61,15 @@ iceberg_object_access_hook(ObjectAccessType access, Oid classId, Oid objectId,
 			{
 				bool is_internal;
 				char *metadata_location = pg_iceberg_create_table_with_catalog(rel, &is_internal);
+
+				/*
+				 * default_spec_id 0 is correct for both unpartitioned and
+				 * PARTITION BY tables: a freshly created table's first spec
+				 * (empty or not) always gets id 0.  Only spec evolution --
+				 * which we do not support -- assigns higher ids; for adopted
+				 * pre-existing tables the spec is cross-checked against the
+				 * declaration in pg_iceberg_create_table_with_catalog.
+				 */
 				pg_iceberg_add_metadata(objectId, metadata_location, NULL, is_internal, 0);
 				pfree(metadata_location);
 			}

@@ -57,6 +57,7 @@
 
 #include "postgres.h"
 #include "nodes/pg_list.h"
+#include "nodes/value.h"
 
 /*
  * TrackedDataFile - represents a data or delete file accumulated in the tracker.
@@ -75,6 +76,13 @@ typedef struct TrackedDataFile
 	int64	file_size;		/* File size in bytes */
 	char   *file_format;	/* File format: "parquet", "orc", "avro", etc.
 							 * Defaults to "parquet" if NULL. */
+	/*
+	 * Iceberg partition tuple for this file: List of String (identity values
+	 * in partition-spec order); a NULL list element is a SQL NULL value.
+	 * NIL for unpartitioned tables.  Preserved across CAS rebase retries so
+	 * the agent can stamp each data file with its partition.
+	 */
+	List   *partition_values;
 } TrackedDataFile;
 
 /*

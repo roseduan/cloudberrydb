@@ -9,6 +9,7 @@
 #include "utils/json.h"
 #include "utils/hsearch.h"
 #include "utils/memutils.h"
+#include "nodes/value.h"
 
 /* QD-side: per-Oid metadata hash table (replaces former FDW_ResultMetaList) */
 typedef struct FDW_MetaMapEntry
@@ -255,10 +256,31 @@ FDW_FreeMetaList(List *meta_list)
 	foreach(lc, meta_list)
 	{
 		FileFragment *meta = (FileFragment *) lfirst(lc);
+		ListCell   *pv;
+
 		if (meta == NULL)
 			continue;
 		if (meta->filePath)
 			pfree(meta->filePath);
+
+		/*
+		 * Free the partition tuple built in FDW_deserializeMetaToMap: a List
+		 * of String nodes (with pstrdup'd/palloc'd strings), NULL cells for
+		 * SQL NULL partition values.
+		 */
+		foreach(pv, meta->partitionValues)
+		{
+			Value	   *v = (Value *) lfirst(pv);
+
+			if (v)
+			{
+				if (v->val.str)
+					pfree(v->val.str);
+				pfree(v);
+			}
+		}
+		list_free(meta->partitionValues);
+
 		pfree(meta);
 	}
 	list_free(meta_list);
@@ -317,6 +339,47 @@ FDW_deserializeMetaToMap(PGresult *res)
 		meta->filePath = (char *) palloc(slen + 1);
 		memcpy(meta->filePath, ptr, slen);
 		meta->filePath[slen] = '\0';
+		ptr += slen;
+
+		/*
+		 * Partition values: [int32 n] then, per value,
+		 * [uint8 isNull][int32 len][char bytes[len]].  A NULL element becomes
+		 * a NULL list cell (SQL NULL partition value); NIL when n == 0.
+		 */
+		{
+			int32		npv;
+
+			memcpy(&npv, ptr, sizeof(int32));
+			ptr += sizeof(int32);
+
+			meta->partitionValues = NIL;
+			for (int k = 0; k < npv; k++)
+			{
+				uint8		isNull;
+				int32		len;
+
+				memcpy(&isNull, ptr, sizeof(uint8));
+				ptr += sizeof(uint8);
+				memcpy(&len, ptr, sizeof(int32));
+				ptr += sizeof(int32);
+
+				if (isNull)
+				{
+					meta->partitionValues =
+						lappend(meta->partitionValues, NULL);
+				}
+				else
+				{
+					char	   *val = (char *) palloc(len + 1);
+
+					memcpy(val, ptr, len);
+					val[len] = '\0';
+					ptr += len;
+					meta->partitionValues =
+						lappend(meta->partitionValues, makeString(val));
+				}
+			}
+		}
 
 		/* store into hash table by relid */
 		map_entry = (FDW_MetaMapEntry *) hash_search(FDW_ResultMetaMap,
@@ -369,16 +432,34 @@ chain:
  * Wire format:
  *   [Oid relid][int64_t fileSize][int64_t recordCount]
  *   [FileFormat format][FileContent content][size_t slen][char filePath[slen]]
+ *   [int32 npv][per partition value: uint8 isNull, int32 len, char bytes[len]]
+ *
+ * The partition-value trailer carries one entry per partition column (in
+ * partition-spec order); isNull marks a SQL NULL value.  npv == 0 for
+ * unpartitioned tables.  Encoder and FDW_deserializeMetaToMap must stay
+ * byte-for-byte symmetric.
  */
 bytea *FDW_serializeMeta(void *msg, Oid relid)
 {
 	FileFragment *meta = (FileFragment *) msg;
 	bytea	   *result;
+	ListCell   *lc;
 
 	size_t		slen = strlen(meta->filePath);
+	size_t		pv_size = sizeof(int32);	/* npv count */
+
+	foreach(lc, meta->partitionValues)
+	{
+		Node	   *val = (Node *) lfirst(lc);
+
+		pv_size += sizeof(uint8) + sizeof(int32);	/* isNull + len */
+		if (val != NULL)
+			pv_size += strlen(strVal(val));
+	}
+
 	size_t		size = sizeof(Oid) + 2 * sizeof(int64_t) +
 					   sizeof(FileFormat) + sizeof(FileContent) +
-					   sizeof(size_t) + slen;
+					   sizeof(size_t) + slen + pv_size;
 
 	result = (bytea*)palloc0(size + VARHDRSZ);
 	SET_VARSIZE(result, size + VARHDRSZ);
@@ -397,6 +478,38 @@ bytea *FDW_serializeMeta(void *msg, Oid relid)
 	memcpy(ptr, &slen, sizeof(size_t));
 	ptr += sizeof(size_t);
 	memcpy(ptr, meta->filePath, slen);
+	ptr += slen;
+
+	int32		npv = list_length(meta->partitionValues);
+
+	memcpy(ptr, &npv, sizeof(int32));
+	ptr += sizeof(int32);
+	foreach(lc, meta->partitionValues)
+	{
+		Node	   *val = (Node *) lfirst(lc);
+		uint8		isNull = (val == NULL) ? 1 : 0;
+
+		memcpy(ptr, &isNull, sizeof(uint8));
+		ptr += sizeof(uint8);
+
+		if (isNull)
+		{
+			int32		len = 0;
+
+			memcpy(ptr, &len, sizeof(int32));
+			ptr += sizeof(int32);
+		}
+		else
+		{
+			char	   *str = strVal(val);
+			int32		len = (int32) strlen(str);
+
+			memcpy(ptr, &len, sizeof(int32));
+			ptr += sizeof(int32);
+			memcpy(ptr, str, len);
+			ptr += len;
+		}
+	}
 
 	return result;
 }

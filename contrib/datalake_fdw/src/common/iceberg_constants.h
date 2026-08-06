@@ -85,6 +85,15 @@
 #define DATALAKEFDW_ICEBERG_KEY_DOC                      "doc"
 #define DATALAKEFDW_ICEBERG_KEY_SCHEMAID                 "schema-id"
 
+/* ========== Partition Spec Keys ========== */
+#define DATALAKEFDW_ICEBERG_KEY_PARTITION_SPEC           "partition_spec"
+#define DATALAKEFDW_ICEBERG_KEY_SPECID                   "spec-id"
+#define DATALAKEFDW_ICEBERG_KEY_SOURCE_ID                "source-id"
+#define DATALAKEFDW_ICEBERG_KEY_FIELD_ID                 "field-id"
+#define DATALAKEFDW_ICEBERG_KEY_TRANSFORM                "transform"
+#define DATALAKEFDW_ICEBERG_TRANSFORM_IDENTITY           "identity"
+#define DATALAKEFDW_ICEBERG_KEY_PARTITION_SPEC_SUMMARY   "partition-spec-summary"
+
 /* ========== Type Values ========== */
 #define DATALAKEFDW_ICEBERG_TYPE_STRUCT                  "struct"
 #define DATALAKEFDW_ICEBERG_TYPE_BOOLEAN                 "boolean"

@@ -1134,6 +1134,12 @@ void datalakeFreeDatalakeOptions(dataLakeOptions *options)
 			options->prefix = NULL;
 		}
 
+		if (options->partition_by)
+		{
+			pfree(options->partition_by);
+			options->partition_by = NULL;
+		}
+
 		if (options->hive_cluster_name)
 		{
 			pfree(options->hive_cluster_name);
