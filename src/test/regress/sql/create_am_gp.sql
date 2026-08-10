@@ -40,6 +40,30 @@ create table create_am_gp_ao6(a int, b int) using ao_row_testam with (compressty
 create table create_am_gp_ao7(a int, b int encoding (compresstype=zlib)) using ao_col_testam distributed by (a);
 \d+ create_am_gp_ao7
 
+-- Exercise AOCS / AO row internal sanity asserts on tables whose AM is a
+-- user-defined AM created with the canonical handler (ao_col_testam /
+-- ao_row_testam above).  Such tables dispatch into the AO/AOCS code path
+-- via rd_amhandler, but pg_class.relam is the derived AM's OID, not
+-- AO_{ROW,COLUMN}_TABLE_AM_OID.  Before the rel.h fix, the
+-- RelationStorageIs{AoRows,AoCols} macros were OID-strict and the
+-- internal asserts (aocssegfiles.c:{329,519,...}, aocs_compaction.c, ...)
+-- aborted the backend on VACUUM / VACUUM FREEZE / etc.  pg_upgrade's
+-- post-restore VACUUM FREEZE on every DB hit this and broke `make check`.
+insert into create_am_gp_ao3 select i, i * 2 from generate_series(1, 100) i;
+insert into create_am_gp_ao7 select i, i * 2 from generate_series(1, 100) i;
+insert into create_am_gp_ao1 select i, i * 2 from generate_series(1, 100) i;
+insert into create_am_gp_ao2 select i, i * 2 from generate_series(1, 100) i;
+vacuum            create_am_gp_ao3;
+vacuum freeze     create_am_gp_ao3;
+vacuum analyze    create_am_gp_ao7;
+vacuum            create_am_gp_ao1;
+vacuum freeze     create_am_gp_ao1;
+vacuum analyze    create_am_gp_ao2;
+select 'ao_col_testam pass' as result, count(*) from create_am_gp_ao3;
+select 'ao_col_testam pass' as result, count(*) from create_am_gp_ao7;
+select 'ao_row_testam pass' as result, count(*) from create_am_gp_ao1;
+select 'ao_row_testam pass' as result, count(*) from create_am_gp_ao2;
+
 -- Cleanup
 drop table if exists create_am_gp_ao1;
 drop table if exists create_am_gp_ao2;

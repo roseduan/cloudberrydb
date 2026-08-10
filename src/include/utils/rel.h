@@ -503,8 +503,19 @@ typedef struct ViewOptions
 #define RelationIsAoRows(relation) \
 	AMHandlerIsAoRows((relation)->rd_amhandler)
 
+/*
+ * RelationStorageIsAoRows / RelationStorageIsAoCols intentionally key off
+ * rd_amhandler rather than rd_rel->relam: user-defined AMs created with
+ * the canonical AO row / AO column handler (see create_am_gp.sql,
+ * e.g. ao_row_testam / ao_col_testam) get dispatched into the AO/AOCS
+ * code path via rd_amhandler, but their relam is the derived AM's OID,
+ * not AO_{ROW,COLUMN}_TABLE_AM_OID.  An OID-strict check breaks the
+ * internal sanity asserts (aocssegfiles.c, aocs_compaction.c, ...) on
+ * those tables.  See also RelationStorageIsAO which is already
+ * handler-based.
+ */
 #define RelationStorageIsAoRows(relation) \
-	((relation)->rd_rel->relam == AO_ROW_TABLE_AM_OID && \
+	(RelationIsAoRows(relation) && \
 		(relation)->rd_rel->relkind != RELKIND_PARTITIONED_TABLE)
 
 /*
@@ -519,8 +530,9 @@ typedef struct ViewOptions
 #define RelationIsAoCols(relation) \
 	AMHandlerIsAoCols((relation)->rd_amhandler)
 
+/* See comment on RelationStorageIsAoRows above. */
 #define RelationStorageIsAoCols(relation) \
-	((relation)->rd_rel->relam == AO_COLUMN_TABLE_AM_OID && \
+	(RelationIsAoCols(relation) && \
 		(relation)->rd_rel->relkind != RELKIND_PARTITIONED_TABLE)
 
 /*
