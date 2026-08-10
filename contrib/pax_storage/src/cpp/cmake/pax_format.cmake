@@ -97,6 +97,8 @@ set(pax_storage_src
    clustering/zorder_utils.cc
  )
  
+set(pax_vec_src)
+if(VEC_BUILD)
 set(pax_vec_src
   storage/vec/arrow_wrapper.cc
   storage/vec/pax_porc_adpater.cc
@@ -105,11 +107,7 @@ set(pax_vec_src
   storage/vec/pax_vec_comm.cc
   storage/vec/pax_vec_reader.cc
 )
-
-if(VEC_BUILD)
-set(pax_vec_src ${pax_vec_src}
-  storage/vec_parallel_common.cc
-   )
+set(pax_vec_src ${pax_vec_src} storage/vec_parallel_common.cc)
 
 endif()
 
