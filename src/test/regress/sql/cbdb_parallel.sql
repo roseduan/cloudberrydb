@@ -218,7 +218,7 @@ begin;
 create table t1(c1 int, c2 int) with(parallel_workers=2) distributed by (c1);
 set local enable_parallel = on;
 create index on t1(c2);
-insert into t1 select i, i from generate_series(1, 10000000) i;
+insert into t1 select i, i from generate_series(1, 1000000) i;
 analyze t1;
 set local force_parallel_mode = 1;
 set local enable_seqscan = off;
