@@ -28,6 +28,8 @@ import org.apache.iceberg.Table;
 import org.apache.iceberg.TableProperties;
 import org.apache.iceberg.TableScan;
 import org.apache.iceberg.AppendFiles;
+import org.apache.iceberg.BaseTable;
+import org.apache.iceberg.UpdateSchema;
 import org.apache.iceberg.catalog.TableIdentifier;
 import org.apache.iceberg.exceptions.NoSuchNamespaceException;
 import org.apache.iceberg.io.CloseableIterable;
@@ -82,6 +84,9 @@ public class IcebergServiceImpl implements IcebergService {
     private IcebergCatalogWrapper icebergCatalogWrapper;
 
     @Autowired
+    private SchemaConverter schemaConverter;
+
+    @Autowired
     @Qualifier("polarisIcebergCatalogManager")
     private IcebergPolarisCatalogManager polarisCatalogManager;
 
@@ -111,6 +116,28 @@ public class IcebergServiceImpl implements IcebergService {
         TableIdentifier tableId = TableIdentifier.of(namespace, tableName);
         Table table = catalog.loadTable(tableId, context.getPath(), properties);
         return table;
+    }
+
+    @Override
+    public String updateSchema(String namespace, String tableName, java.util.List<SchemaOp> ops,
+            Map<String, String> properties, RequestContext context) throws Exception {
+        IcebergCatalog catalog = icebergCatalogWrapper.getIcebergCatalog(context);
+        TableIdentifier tableId = TableIdentifier.of(namespace, tableName);
+        Table table = catalog.loadTable(tableId, context.getPath(), properties);
+
+        UpdateSchema us = table.updateSchema();
+        SchemaEvolutionOps.apply(us, table.schema(), ops, schemaConverter);
+        us.commit();
+
+        table.refresh();
+        /* Guard the cast: a custom or future Iceberg catalog adapter may hand back a
+         * Table implementation that does not extend BaseTable, and an unchecked cast
+         * would surface as a bare ClassCastException. */
+        if (!(table instanceof BaseTable)) {
+            throw new IllegalStateException(
+                    "updateSchema requires a BaseTable implementation, got: " + table.getClass().getName());
+        }
+        return ((BaseTable) table).operations().current().metadataFileLocation();
     }
 
     @Override

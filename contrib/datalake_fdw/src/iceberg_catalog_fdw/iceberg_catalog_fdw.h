@@ -48,7 +48,8 @@ typedef enum {
 	ICEBERG_COMMIT_UPDATE,    /* PRE_COMMIT update (RowDelta + commit) */
 	ICEBERG_COMMIT_DELETE,    /* PRE_COMMIT delete (RowDelta + commit) */
 	ICEBERG_COMMIT_REWRITE,   /* VACUUM commit (RewriteFiles + commit) */
-	ICEBERG_TRUNCATE          /* TRUNCATE: metadata-only delete of all rows */
+	ICEBERG_TRUNCATE,         /* TRUNCATE: metadata-only delete of all rows */
+	ICEBERG_UPDATE_SCHEMA     /* ALTER TABLE: schema evolution, builtin only (#401) */
 } IcebergCatalogOperation;
 
 typedef enum {
@@ -94,6 +95,19 @@ typedef struct IcebergTableSchema {
 } IcebergTableSchema;
 
 /*
+ * One schema-evolution operation for ALTER TABLE (issue #401, builtin only).
+ * op is one of: addColumn, dropColumn, renameColumn, updateColumn,
+ * makeOptional, requireColumn. newName is used by renameColumn; type carries
+ * the Iceberg target type string (e.g. "long") for addColumn/updateColumn.
+ */
+typedef struct IcebergSchemaOp {
+    const char* op;
+    const char* name;
+    const char* newName;
+    const char* type;
+} IcebergSchemaOp;
+
+/*
  * Catalog table request
  */
 typedef struct IcebergCatalogRequest {
@@ -109,6 +123,7 @@ typedef struct IcebergCatalogRequest {
 	const char* location;  /* pre-formatted location from AM layer, must be non-NULL */
 	const char* metadataLocation;  /* deferred commit temp metadata location for RYOW */
 	const char* pushdownFilter;  /* serialized dlproxy scan filter for data-file pruning (get-fragment only) */
+	List* schemaOps;  /* List of IcebergSchemaOp*, for ICEBERG_UPDATE_SCHEMA ALTER TABLE (#401) */
 } IcebergCatalogRequest;
 
 typedef struct IcebergCatalogInfo {
@@ -134,6 +149,14 @@ typedef struct IcebergCatalogFdwState {
     /* State information */
     IcebergCatalogStatus lastStatus;
 } IcebergCatalogFdwState;
+
+/*
+ * Map a PostgreSQL type (OID + typmod) to the Iceberg primitive type string
+ * (e.g. int4 -> "int", int8 -> "long", numeric(p,s) -> "decimal(p,s)").  Shared
+ * with the ALTER TABLE ADD COLUMN path (#401) so new columns get the same type
+ * mapping as CREATE TABLE.
+ */
+extern const char* mapPostgresToIcebergType(Oid pgType, int32 typemod);
 
 void check_catalog_fdw_exec_error(IcebergCatalogFdwState *fdwState, const char *error_prefix);
 

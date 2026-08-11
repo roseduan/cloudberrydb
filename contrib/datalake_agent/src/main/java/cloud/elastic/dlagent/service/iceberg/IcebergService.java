@@ -120,4 +120,12 @@ public interface IcebergService {
      */
     Map<String, Object> commitRewrite(String namespace, String tableName,
         Map<String, String> properties, RequestContext context) throws Exception;
+
+    /**
+     * ALTER TABLE schema evolution (builtin catalog only, issue #401): apply the given
+     * ops via Iceberg UpdateSchema and commit. Returns the new metadata-location.
+     * Builtin-only gating is enforced upstream on the datalake_fdw utility side.
+     */
+    String updateSchema(String namespace, String tableName, java.util.List<SchemaOp> ops,
+        Map<String, String> properties, RequestContext context) throws Exception;
 }

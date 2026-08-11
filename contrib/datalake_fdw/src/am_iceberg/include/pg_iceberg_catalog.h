@@ -79,6 +79,11 @@ extern char *pg_iceberg_truncate_with_catalog(Relation rel,
 											   IcebergTableInfo *table_info,
 											   const char *metadata_location);
 
+extern char *pg_iceberg_update_schema_with_catalog(Relation rel,
+												   IcebergTableInfo *table_info,
+												   const char *metadata_location,
+												   List *schemaOps);
+
 extern char *pg_iceberg_commit_data_with_catalog(Relation rel,
 												 IcebergTableInfo *table_info,
 												 const char *data_locations,

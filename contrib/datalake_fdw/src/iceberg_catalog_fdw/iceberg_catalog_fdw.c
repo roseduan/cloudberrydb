@@ -133,11 +133,11 @@ static agentcli_cJSON* createIcebergConfig(IcebergCatalogOptions *option, Iceber
 static agentcli_cJSON* createSchemaFromRequest(IcebergCatalogRequest req);
 static agentcli_cJSON* createPartitionSpecFromRequest(IcebergCatalogRequest req);
 static agentcli_cJSON* createBuildInProperties(IcebergCatalogOperation opration, IcebergCatalogOptions *option, IcebergCatalogRequest req);
-static const char* mapPostgresToIcebergType(Oid pgType, int32 typemod);
 const char * createAppendRequestJson(IcebergCatalogFdwState* fdwState, IcebergCatalogOptions *option, IcebergVolumeOptions *volumeOpt, IcebergCatalogRequest req);
 const char * createUpdateRequestJson(IcebergCatalogFdwState* fdwState, IcebergCatalogOptions *option, IcebergVolumeOptions *volumeOpt, IcebergCatalogRequest req);
 const char * createDropTableRequestJson(IcebergCatalogFdwState* fdwState, IcebergCatalogOptions *option, IcebergVolumeOptions *volumeOpt, IcebergCatalogRequest req);
 const char * createTruncateRequestJson(IcebergCatalogFdwState* fdwState, IcebergCatalogOptions *option, IcebergVolumeOptions *volumeOpt, IcebergCatalogRequest req);
+const char * createUpdateSchemaRequestJson(IcebergCatalogFdwState* fdwState, IcebergCatalogOptions *option, IcebergVolumeOptions *volumeOpt, IcebergCatalogRequest req);
 const char * createListCatalogsRequestJson(IcebergCatalogFdwState* fdwState, IcebergCatalogOptions *option, IcebergVolumeOptions *volumeOpt, IcebergCatalogRequest req);
 const char * createListNamespacesRequestJson(IcebergCatalogFdwState* fdwState, IcebergCatalogOptions *option, IcebergVolumeOptions *volumeOpt, IcebergCatalogRequest req);
 const char * createPlanFileGroupsRequestJson(IcebergCatalogFdwState* fdwState, IcebergCatalogOptions *option, IcebergVolumeOptions *volumeOpt, IcebergCatalogRequest req);
@@ -483,6 +483,12 @@ executeModifyOperation(IcebergCatalogFdwState *fdwState,
                                                    catalogState->volumeOption, fdwState->request);
             agent_cli_wrapper_truncate_table(catalogState->agentHandle,
                                              fdwState->request.tableName, jsonString);
+            break;
+        case ICEBERG_UPDATE_SCHEMA:
+            jsonString = createUpdateSchemaRequestJson(fdwState, catalogState->catalogOption,
+                                                       catalogState->volumeOption, fdwState->request);
+            agent_cli_wrapper_update_schema(catalogState->agentHandle,
+                                            fdwState->request.tableName, jsonString);
             break;
 		case ICEBERG_COMMIT_FILE_GROUPS:
 			jsonString = createCommitFileGroupsRequestJson(fdwState, catalogState->catalogOption,
@@ -923,6 +929,61 @@ createTruncateRequestJson(IcebergCatalogFdwState* fdwState, IcebergCatalogOption
     return json_string;
 }
 
+/*
+ * Build the request body for ALTER TABLE schema evolution (issue #401).
+ * Builtin catalog only. Carries namespace + IcebergConfig + buildin properties
+ * (with metadataLocation so the agent loads the exact current table) + the list
+ * of schema operations the agent applies via a single Iceberg UpdateSchema commit.
+ */
+const char *
+createUpdateSchemaRequestJson(IcebergCatalogFdwState* fdwState, IcebergCatalogOptions *option, IcebergVolumeOptions *volumeOpt, IcebergCatalogRequest req)
+{
+    ListCell *lc;
+    agentcli_cJSON *request;
+    agentcli_cJSON *icebergConfig;
+    agentcli_cJSON *buildInProp;
+    agentcli_cJSON *operations;
+    char *json_string;
+
+    /* Only builtin catalog supports schema evolution (PG-pointer-authoritative metadata). */
+    if (pg_strcasecmp(option->catalog_server.server_type, DATALAKEFDW_ICEBERG_SERVER_BUILTIN) != 0) {
+        elog(ERROR, "ALTER TABLE is only supported for buildin catalog iceberg tables");
+    }
+
+    request = agentcli_cJSON_CreateObject();
+
+    agentcli_cJSON_AddStringToObject(request, DATALAKEFDW_ICEBERG_KEY_NAMESPACE, req.nameSpace);
+    agentcli_cJSON_AddStringToObject(request, "name", req.tableName);
+
+    icebergConfig = createIcebergConfig(option, volumeOpt);
+    agentcli_cJSON_AddItemToObject(request, DATALAKEFDW_ICEBERG_KEY_ICEBERGCONFIG, icebergConfig);
+
+    buildInProp = createBuildInProperties(ICEBERG_UPDATE_SCHEMA, option, req);
+    agentcli_cJSON_AddItemToObject(request, DATALAKEFDW_ICEBERG_KEY_PROPERTIES, buildInProp);
+
+    operations = agentcli_cJSON_CreateArray();
+    foreach(lc, req.schemaOps)
+    {
+        IcebergSchemaOp *sop = (IcebergSchemaOp *) lfirst(lc);
+        agentcli_cJSON *opObj = agentcli_cJSON_CreateObject();
+
+        agentcli_cJSON_AddStringToObject(opObj, "op", sop->op);
+        if (sop->name != NULL)
+            agentcli_cJSON_AddStringToObject(opObj, "name", sop->name);
+        if (sop->newName != NULL)
+            agentcli_cJSON_AddStringToObject(opObj, "newName", sop->newName);
+        if (sop->type != NULL)
+            agentcli_cJSON_AddStringToObject(opObj, "type", sop->type);
+
+        agentcli_cJSON_AddItemToArray(operations, opObj);
+    }
+    agentcli_cJSON_AddItemToObject(request, "operations", operations);
+
+    json_string = agentcli_cJSON_PrintUnformatted(request);
+    agentcli_cJSON_Delete(request);
+    return json_string;
+}
+
 const char *
 createListCatalogsRequestJson(IcebergCatalogFdwState* fdwState, IcebergCatalogOptions *option, IcebergVolumeOptions *volumeOpt, IcebergCatalogRequest req)
 {
@@ -1310,7 +1371,7 @@ static agentcli_cJSON* createIcebergConfig(IcebergCatalogOptions *option, Iceber
     return icebergConfig;
 }
 
-static const char* mapPostgresToIcebergType(Oid pgType, int32 typemod)
+const char* mapPostgresToIcebergType(Oid pgType, int32 typemod)
 {
     switch (pgType) {
         case BOOLOID:

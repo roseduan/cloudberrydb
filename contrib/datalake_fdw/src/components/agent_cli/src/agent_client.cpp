@@ -142,6 +142,13 @@ Response AgentClient::drop_table(const std::string& table_name,
     return execute_request("POST", url, request_json, request_config);
 }
 
+Response AgentClient::update_schema(const std::string& table_name,
+                                    const std::string& request_json,
+                                    const RequestConfig* request_config) {
+    std::string url = build_url(build_table_endpoint(table_name, "updateSchema"));
+    return execute_request("POST", url, request_json, request_config);
+}
+
 Response AgentClient::get_statistics(const std::string& table_name,
                                      const std::string& request_json,
                                      const RequestConfig* request_config) {

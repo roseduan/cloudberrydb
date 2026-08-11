@@ -151,6 +151,19 @@ public class SchemaConverter {
     /**
      * Parse primitive type from string
      */
+    /**
+     * Parse an Iceberg primitive type string (e.g. "int", "long", "double",
+     * "decimal(20,2)") for schema evolution. Rejects complex/non-primitive types.
+     */
+    public Type.PrimitiveType parseColumnType(String typeStr) {
+        Type t = parsePrimitiveType(typeStr);
+        if (!(t instanceof Type.PrimitiveType)) {
+            throw new IllegalArgumentException(
+                    "schema evolution supports primitive column types only, got: " + typeStr);
+        }
+        return (Type.PrimitiveType) t;
+    }
+
     private Type parsePrimitiveType(String typeStr) {
         if ("boolean".equals(typeStr)) {
             return Types.BooleanType.get();

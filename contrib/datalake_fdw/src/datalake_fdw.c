@@ -565,32 +565,6 @@ relid_is_iceberg(Oid relid)
 	return is_iceberg;
 }
 
-/*
- * No ALTER TABLE subcommand is safe on an Iceberg AM table from inside
- * Cloudberry: ALTER COLUMN TYPE drives the standard PG rewrite into empty AM
- * stubs (iceberg_relation_set_new_filenode / iceberg_relation_copy_data) and
- * SIGSEGVs the backend; every other subcommand half-applies (PG catalog
- * updated while the Iceberg manifest stays stale) and silently desyncs PG
- * readers from Spark/Trino/Flink ones.  ADD COLUMN superficially worked via
- * field-id mapping but offered no way to keep the Iceberg-side schema in
- * sync, so it is rejected here too -- schema evolution must go through an
- * Iceberg-aware writer.
- *
- * RENAME COLUMN arrives as T_RenameStmt rather than T_AlterTableStmt; it is
- * rejected in the sibling branch of datalake_ProcessUtility.
- */
-static void
-reject_unsupported_iceberg_alter(List *cmds)
-{
-	if (cmds == NIL)
-		return;
-
-	ereport(ERROR,
-			(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-			 errmsg("ALTER TABLE is not supported on Iceberg tables"),
-			 errhint("Use Spark/Trino/Flink to perform Iceberg schema evolution, or recreate the table.")));
-}
-
 static void
 datalake_ProcessUtility(PlannedStmt *pstmt,
 						const char *queryString,
@@ -874,7 +848,37 @@ datalake_ProcessUtility(PlannedStmt *pstmt,
 			relid = AlterTableLookupRelation(atstmt, lockmode);
 
 			if (relid_is_iceberg(relid))
-				reject_unsupported_iceberg_alter(atstmt->cmds);
+			{
+				List	   *ops;
+				List	   *standard_cmds = NIL;
+				List	   *type_changes = NIL;
+
+				/*
+				 * Schema evolution for builtin-catalog iceberg tables (#401).
+				 * Validate + build the op list BEFORE the standard ALTER so
+				 * unsupported subcommands (e.g. ALTER COLUMN TYPE, whose PG
+				 * rewrite hits the empty iceberg AM stub and crashes) and
+				 * external catalogs are rejected up front.  Then run the
+				 * standard ALTER (PG catalog change), and on the QD commit the
+				 * matching Iceberg UpdateSchema and swap the metadata pointer.
+				 */
+				ops = pg_iceberg_build_alter_ops(relid, atstmt->cmds,
+												 &standard_cmds, &type_changes);
+				atstmt->cmds = standard_cmds;
+
+				if (datalake_prev_ProcessUtility)
+					(*datalake_prev_ProcessUtility) (pstmt, queryString, readOnlyTree,
+													 context, params, queryEnv,
+													 dest, qc);
+				else
+					standard_ProcessUtility(pstmt, queryString, readOnlyTree,
+											context, params, queryEnv,
+											dest, qc);
+
+				pg_iceberg_apply_type_changes(relid, type_changes);
+				pg_iceberg_alter_apply(relid, ops);
+				return;
+			}
 			break;
 		}
 		case T_RenameStmt:
@@ -894,11 +898,21 @@ datalake_ProcessUtility(PlannedStmt *pstmt,
 
 				relid = RangeVarGetRelid(rnstmt->relation, AccessShareLock,
 										 rnstmt->missing_ok);
-				if (relid_is_iceberg(relid))
-					ereport(ERROR,
-							(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-							 errmsg("RENAME COLUMN is not supported on Iceberg tables"),
-							 errhint("Recreate the table with the desired column name, or rename the column via Spark/Trino/Flink.")));
+				if (OidIsValid(relid) && relid_is_iceberg(relid))
+				{
+					char   *oldname = pstrdup(rnstmt->subname);
+					char   *newname = pstrdup(rnstmt->newname);
+
+					if (datalake_prev_ProcessUtility)
+						(*datalake_prev_ProcessUtility) (pstmt, queryString, readOnlyTree,
+														 context, params, queryEnv, dest, qc);
+					else
+						standard_ProcessUtility(pstmt, queryString, readOnlyTree,
+											context, params, queryEnv, dest, qc);
+
+					pg_iceberg_rename_column(relid, oldname, newname);
+					return;
+				}
 			}
 			break;
 		}

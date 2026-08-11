@@ -39,6 +39,7 @@ void agent_cli_wrapper_commit_rewrite(AgentCliHandle* handle, const char* table_
 void agent_cli_wrapper_append_table(AgentCliHandle* handle, const char* table_name, const char* json);
 void agent_cli_wrapper_update_table(AgentCliHandle* handle, const char* table_name, const char* json);
 void agent_cli_wrapper_drop_table(AgentCliHandle* handle, const char* table_name, const char* json);
+void agent_cli_wrapper_update_schema(AgentCliHandle* handle, const char* table_name, const char* json);
 
 void agent_cli_wrapper_get_statistics(AgentCliHandle* handle, const char* table_name, const char* json);
 

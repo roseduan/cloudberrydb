@@ -69,6 +69,14 @@ typedef struct DatalakeFieldDescription
 	char  name[NAMEDATALEN];
 	Oid   typeOid;
 	int   typeMod;
+	/*
+	 * PG attnum, which for builtin iceberg tables equals the Iceberg field-id
+	 * our writer stamps into data files.  Used by the parquet reader to match
+	 * columns by field-id (authoritative, survives RENAME, does not resurrect
+	 * a dropped-then-re-added same-name column).  0 means "match by physical
+	 * name only" (external iceberg / non-iceberg reads).  #401
+	 */
+	int   attnum;
 } DatalakeFieldDescription;
 
 typedef struct DatalakeKeyValue

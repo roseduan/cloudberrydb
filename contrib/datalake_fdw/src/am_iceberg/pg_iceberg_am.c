@@ -256,6 +256,25 @@ pg_iceberg_scan_begin_extractcolumns(Relation rel,
 		memcpy(scan->rs_base.rs_key, key, sizeof(ScanKeyData) * nkeys);
 	}
 
+	/*
+	 * A plan-less scan (ps == NULL) comes only from PG core's table_beginscan
+	 * used by ALTER TABLE's ATRewriteTable verify pass (e.g. SET NOT NULL's
+	 * null check).  The iceberg AM cannot drive a data scan without a plan --
+	 * data lives in object storage read by the QEs via a dispatched fragment
+	 * list, and the QD never scans it (see fdwFunction.c "master does not
+	 * process any fragments").  Return an empty scan (scanState == NULL) rather
+	 * than crash: the verify pass sees zero rows, which is safe because the real
+	 * validation (e.g. the no-NULL check for SET NOT NULL) is performed up front
+	 * with a distributed SQL query before the standard ALTER runs.  This path is
+	 * never taken for a rewrite-class ALTER (ALTER COLUMN TYPE is intercepted
+	 * before it can reach ATRewriteTable), so it cannot empty a table.
+	 */
+	if (ps == NULL)
+	{
+		scan->scanState = NULL;
+		return (TableScanDesc) scan;
+	}
+
 	table_info = pg_iceberg_get_table_info(RelationGetRelid(rel));
 	if (ps && ps->plan && IsA(ps->plan, CustomScan))
 		am_private = pg_iceberg_materialize_am_private(
@@ -276,8 +295,16 @@ void
 pg_iceberg_endscan(TableScanDesc sscan)
 {
 	IcebergScanDesc scan = (IcebergScanDesc) sscan;
-	FdwRoutine *fdw_routine = scan->scanState->fdwroutine;
+	FdwRoutine *fdw_routine;
 
+	/* Empty plan-less scan (see pg_iceberg_scan_begin_extractcolumns). */
+	if (scan->scanState == NULL)
+	{
+		pfree(scan);
+		return;
+	}
+
+	fdw_routine = scan->scanState->fdwroutine;
 	fdw_routine->EndForeignScan(scan->scanState);
 	pfree(scan);
 }
@@ -287,7 +314,13 @@ pg_iceberg_rescan(TableScanDesc sscan, struct ScanKeyData *key, bool set_params,
 				  bool allow_sync, bool allow_pagemode)
 {
 	IcebergScanDesc scan = (IcebergScanDesc) sscan;
-	FdwRoutine *fdw_routine = scan->scanState->fdwroutine;
+	FdwRoutine *fdw_routine;
+
+	/* Empty plan-less scan (see pg_iceberg_scan_begin_extractcolumns). */
+	if (scan->scanState == NULL)
+		return;
+
+	fdw_routine = scan->scanState->fdwroutine;
 
 	/* Defensive: an FDW without a ReScan callback must not crash the segment. */
 	if (fdw_routine->ReScanForeignScan != NULL)
@@ -298,7 +331,13 @@ bool
 pg_iceberg_getnextslot(TableScanDesc sscan, ScanDirection direction, TupleTableSlot *slot)
 {
 	IcebergScanDesc scan = (IcebergScanDesc) sscan;
-	FdwRoutine *fdw_routine = scan->scanState->fdwroutine;
+	FdwRoutine *fdw_routine;
+
+	/* Empty plan-less scan (see pg_iceberg_scan_begin_extractcolumns): EOF. */
+	if (scan->scanState == NULL)
+		return false;
+
+	fdw_routine = scan->scanState->fdwroutine;
 
 	slot = fdw_routine->IterateForeignScan(scan->scanState);
 	if (TupIsNull(slot))

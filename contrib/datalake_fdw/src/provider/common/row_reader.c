@@ -26,7 +26,7 @@ static bool isCacheEnabled(char *cacheEnabled);
 static void icebergFileIndexMapInitialize(DatalakeRowReader *reader);
 
 static List *
-createFieldDescription(TupleDesc tupleDesc)
+createFieldDescription(TupleDesc tupleDesc, bool isBuiltinIceberg)
 {
 	int i;
 	List *result = NIL;
@@ -34,13 +34,21 @@ createFieldDescription(TupleDesc tupleDesc)
 	for (i = 0; i < tupleDesc->natts; i++)
 	{
 		DatalakeFieldDescription *fieldDesc = (DatalakeFieldDescription *) palloc0(sizeof(DatalakeFieldDescription));
-		Oid typeOid = TupleDescAttr(tupleDesc, i)->atttypid;
-		int typeMod = TupleDescAttr(tupleDesc, i)->atttypmod;
-		const char *attname = NameStr(TupleDescAttr(tupleDesc, i)->attname);
+		Form_pg_attribute attr = TupleDescAttr(tupleDesc, i);
+		Oid typeOid = attr->atttypid;
+		int typeMod = attr->atttypmod;
+		const char *attname = NameStr(attr->attname);
 
 		strcpy(fieldDesc->name, attname);
 		fieldDesc->typeOid = typeOid;
 		fieldDesc->typeMod = typeMod;
+		/*
+		 * Only builtin iceberg files carry field-ids stamped as the PG attnum,
+		 * so only then do we let the reader match by field-id.  For external
+		 * iceberg (arbitrary Iceberg field-ids, name-mapped) and non-iceberg
+		 * reads, leave attnum 0 to keep the existing physical-name match.  #401
+		 */
+		fieldDesc->attnum = isBuiltinIceberg ? attr->attnum : 0;
 
 		result = lappend(result, fieldDesc);
 	}
@@ -194,7 +202,8 @@ datalakeCreateRowReader(MemoryContext mcxt,
 				ossFileStream fileStream,
 				List *combinedScanTasks,
 				DLTblFmt format,
-				ExternalTableMetadata *tableOptions)
+				ExternalTableMetadata *tableOptions,
+				bool isBuiltinIceberg)
 {
 	MemoryContext oldcxt;
 	DatalakeRowReader *reader = MemoryContextAllocZero(TopMemoryContext,
@@ -226,7 +235,7 @@ datalakeCreateRowReader(MemoryContext mcxt,
 	MemoryContextSwitchTo(TopMemoryContext);
 	list_free(combinedScanTasks);
 
-	reader->datafileDesc = createFieldDescription(tupleDesc);
+	reader->datafileDesc = createFieldDescription(tupleDesc, isBuiltinIceberg);
 	reader->attrUsed = attrUsed;
 	reader->fileStream = fileStream;
 	reader->mcxt = mcxt;
@@ -862,6 +871,19 @@ datalakeProtocolImportStart(dataLakeFdwScanState *scanstate, DatalakeProtocolCon
 
     ExternalTableMetadata *tableOptions = (ExternalTableMetadata *)linitial(scanstate->fragments);
 
+	/*
+	 * Builtin (native-AM) iceberg tables are read through the iceberg_volume_fdw
+	 * path, whose getVolumeOptions() leaves catalog_type unset; every external
+	 * iceberg catalog (hive/polaris/rest) requires catalog_type and errors out
+	 * without it.  Only builtin files carry field-ids stamped as the PG attnum,
+	 * so only builtin reads may match columns by field-id (see
+	 * createFieldDescription / ParquetReader::createMapping).  Misclassifying an
+	 * external table here is impossible (it always has catalog_type); the reverse
+	 * would merely keep the old name-only match, never corrupt external reads. #401
+	 */
+	bool isBuiltinIceberg = FORMAT_IS_ICEBERG(scanstate->options->format) &&
+							scanstate->options->catalog_type == NULL;
+
 	if (FORMAT_IS_ICEBERG(scanstate->options->format) &&
 		pg_iceberg_enable_balanced_scan && numSegments > 1)
 	{
@@ -899,7 +921,8 @@ datalakeProtocolImportStart(dataLakeFdwScanState *scanstate, DatalakeProtocolCon
 													context->file->fileStream,
 													combinedScanTasks,
 													scanstate->options->format,
-													tableOptions);
+													tableOptions,
+													isBuiltinIceberg);
 
 	/*
 	 * Carry the WHERE-clause quals (raw Expr list, captured on the QE in

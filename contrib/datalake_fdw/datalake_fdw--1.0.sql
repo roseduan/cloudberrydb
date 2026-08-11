@@ -177,6 +177,13 @@ RETURNS void
 AS 'MODULE_PATHNAME', 'pg_iceberg_upsert_location_option_local'
 LANGUAGE C STRICT;
 
+-- Internal helper used by C code to dispatch ALTER COLUMN TYPE (widening) to QEs
+-- (issue #401): applies the pg_attribute type change on the local segment.
+CREATE FUNCTION pg_catalog.pg_iceberg_alter_column_type_local(oid, text, oid, integer)
+RETURNS void
+AS 'MODULE_PATHNAME', 'pg_iceberg_alter_column_type_local'
+LANGUAGE C STRICT;
+
 
 -- The two iceberg catalog tables (pg_ext_aux.pg_iceberg_metadata,
 -- pg_ext_aux.pg_iceberg_deletion_queue) are no longer created here.

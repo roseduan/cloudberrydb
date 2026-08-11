@@ -1,0 +1,263 @@
+-- Iceberg builtin ALTER TABLE schema evolution (issue #401)
+-- Purpose: exhaustively exercise the SUPPORTED M1 subcommands on a builtin
+-- catalog iceberg table -- ADD COLUMN (all primitive types, nullable only),
+-- DROP COLUMN, DROP NOT NULL, SET NOT NULL -- verifying data written BEFORE and AFTER each
+-- change reads back correctly (old files under the new schema + new writes),
+-- plus multi-subcommand atomicity, transaction rollback, empty-table ALTER,
+-- IF [NOT] EXISTS, boundary values, and re-adding a dropped column name.
+-- Still-unsupported subcommands are covered by iceberg_alter_unsupported.
+
+CREATE EXTENSION IF NOT EXISTS datalake_fdw;
+
+-- Normalize segment ids / pids in segment-raised error messages so expected
+-- output is stable across cluster layouts.
+CREATE OR REPLACE FUNCTION __test_exec(sql text) RETURNS void AS $$
+BEGIN
+    EXECUTE sql;
+EXCEPTION WHEN OTHERS THEN
+    RAISE USING
+        MESSAGE = regexp_replace(SQLERRM, '\(seg\d+[^)]*\)', '(segN)', 'g'),
+        ERRCODE = SQLSTATE;
+END;
+$$ LANGUAGE plpgsql;
+
+-- catalog + volume setup
+CREATE SERVER evo_catalog_server
+FOREIGN DATA WRAPPER iceberg_catalog_fdw;
+CREATE USER MAPPING FOR current_user SERVER evo_catalog_server;
+CREATE FOREIGN CATALOG evo_catalog SERVER evo_catalog_server;
+SET iceberg_default_catalog = 'evo_catalog';
+
+CREATE SERVER evo_volume_server
+FOREIGN DATA WRAPPER iceberg_volume_fdw
+OPTIONS (
+    type 's3',
+    endpoint 'http://minio:9000',
+    region 'us-east-1',
+    bucket_name 'warehouse',
+    path_style_access 'true'
+);
+CREATE USER MAPPING FOR current_user
+SERVER evo_volume_server
+OPTIONS (
+    access_key_id 'admin',
+    secret_access_key 'admin12345');
+CREATE FOREIGN VOLUME evo_volume SERVER evo_volume_server
+    OPTIONS(base_path '/evo_volume/');
+SET iceberg_default_volume = 'evo_volume';
+-- Pin date/timestamp rendering so the c_ts / c_date columns below do not depend
+-- on the server's DateStyle (CI defaults to 'Postgres, MDY').
+SET datestyle = 'ISO, MDY';
+
+-- ============================================================
+-- A. ADD COLUMN: read-old (NULL) + write-new + mixed, all types
+-- ============================================================
+CREATE ICEBERG TABLE evo_add (id int, val int);
+INSERT INTO evo_add VALUES (1, 100), (2, 200);
+SELECT id, val FROM evo_add ORDER BY id;
+
+ALTER TABLE evo_add
+    ADD COLUMN c_big  bigint,
+    ADD COLUMN c_num  numeric(12,3),
+    ADD COLUMN c_bool boolean,
+    ADD COLUMN c_dbl  float8,
+    ADD COLUMN c_real real,
+    ADD COLUMN c_ts   timestamp,
+    ADD COLUMN c_date date,
+    ADD COLUMN c_txt  varchar(32);
+
+-- old rows: every added column reads NULL
+SELECT id, val, c_big, c_num, c_bool, c_dbl, c_real, c_ts, c_date, c_txt
+    FROM evo_add ORDER BY id;
+
+-- write new row with every type populated
+INSERT INTO evo_add VALUES
+    (3, 300, 9223372036854775807, 123.456, true, 3.141592653589,
+     2.5, '2026-07-24 10:11:12', '2026-07-24', 'hello');
+
+-- mixed old+new read: old rows NULL, new row exact values
+SELECT id, val, c_big, c_num, c_bool, c_dbl, c_real, c_ts, c_date, c_txt
+    FROM evo_add ORDER BY id;
+
+-- ============================================================
+-- B. DROP COLUMN: integrity of remaining columns + write after
+-- ============================================================
+CREATE ICEBERG TABLE evo_drop (id int, a int, b text, c int);
+INSERT INTO evo_drop VALUES (1, 10, 'x', 11), (2, 20, 'y', 22);
+SELECT id, a, b, c FROM evo_drop ORDER BY id;
+
+-- drop a middle column
+ALTER TABLE evo_drop DROP COLUMN b;
+-- old rows: a and c intact, b gone
+SELECT id, a, c FROM evo_drop ORDER BY id;
+-- write after drop
+INSERT INTO evo_drop VALUES (3, 30, 33);
+SELECT id, a, c FROM evo_drop ORDER BY id;
+SELECT sum(a) AS sum_a, sum(c) AS sum_c FROM evo_drop;
+
+-- drop another column, then re-add a column with the same name (b)
+ALTER TABLE evo_drop DROP COLUMN c;
+ALTER TABLE evo_drop ADD COLUMN b text;
+INSERT INTO evo_drop VALUES (4, 40, 'reborn');
+-- old rows: b (re-added) NULL; new row has value
+SELECT id, a, b FROM evo_drop ORDER BY id;
+
+-- ============================================================
+-- C. DROP NOT NULL: NULL rejected before, accepted after
+-- ============================================================
+CREATE ICEBERG TABLE evo_dnn (id int NOT NULL, val int);
+INSERT INTO evo_dnn VALUES (1, 100);
+-- before DROP NOT NULL: inserting a NULL id must fail
+SELECT __test_exec($$INSERT INTO evo_dnn VALUES (NULL, 999)$$);
+ALTER TABLE evo_dnn ALTER COLUMN id DROP NOT NULL;
+-- after DROP NOT NULL: NULL id now accepted
+INSERT INTO evo_dnn VALUES (NULL, 500);
+SELECT id, val FROM evo_dnn ORDER BY val;
+-- DROP NOT NULL on an already-nullable column is an accepted no-op
+ALTER TABLE evo_dnn ALTER COLUMN val DROP NOT NULL;
+
+-- SET NOT NULL on a column with no NULLs succeeds; a later NULL insert is then
+-- rejected on the segment (attnotnull enforced cluster-wide).
+ALTER TABLE evo_dnn ALTER COLUMN val SET NOT NULL;
+SELECT __test_exec($$INSERT INTO evo_dnn VALUES (7, NULL)$$);
+INSERT INTO evo_dnn VALUES (8, 800);
+-- SET NOT NULL on a column that currently has NULLs is rejected up front
+-- (id has the NULL row inserted above), leaving the table unchanged.
+SELECT __test_exec($$ALTER TABLE evo_dnn ALTER COLUMN id SET NOT NULL$$);
+SELECT id, val FROM evo_dnn ORDER BY val;
+
+-- ============================================================
+-- D. Multiple subcommands in one ALTER = single atomic commit
+-- ============================================================
+CREATE ICEBERG TABLE evo_multi (id int, a int, b int);
+INSERT INTO evo_multi VALUES (1, 10, 11), (2, 20, 22);
+ALTER TABLE evo_multi ADD COLUMN c text, DROP COLUMN b;
+INSERT INTO evo_multi VALUES (3, 30, 'cc');
+SELECT id, a, c FROM evo_multi ORDER BY id;
+
+-- ============================================================
+-- E. Atomicity: a rejected subcommand rolls back the whole ALTER
+--    (the valid ADD COLUMN "ok" must NOT be applied)
+-- ============================================================
+CREATE ICEBERG TABLE evo_atom (id int, val int);
+INSERT INTO evo_atom VALUES (1, 100);
+SELECT __test_exec($$ALTER TABLE evo_atom ADD COLUMN ok int, ADD COLUMN bad int NOT NULL$$);
+-- columns unchanged: only id, val
+SELECT string_agg(attname, ',' ORDER BY attnum) AS cols
+    FROM pg_attribute
+    WHERE attrelid = 'evo_atom'::regclass AND attnum > 0 AND NOT attisdropped;
+
+-- ============================================================
+-- F. Transaction ROLLBACK leaves PG schema consistent
+-- ============================================================
+BEGIN;
+ALTER TABLE evo_atom ADD COLUMN x int;
+SELECT string_agg(attname, ',' ORDER BY attnum) AS cols_in_txn
+    FROM pg_attribute
+    WHERE attrelid = 'evo_atom'::regclass AND attnum > 0 AND NOT attisdropped;
+ROLLBACK;
+SELECT string_agg(attname, ',' ORDER BY attnum) AS cols_after_rollback
+    FROM pg_attribute
+    WHERE attrelid = 'evo_atom'::regclass AND attnum > 0 AND NOT attisdropped;
+SELECT id, val FROM evo_atom ORDER BY id;
+
+-- ============================================================
+-- G. ALTER on an empty table, then write
+-- ============================================================
+CREATE ICEBERG TABLE evo_empty (id int);
+ALTER TABLE evo_empty ADD COLUMN note text;
+ALTER TABLE evo_empty DROP COLUMN note;
+ALTER TABLE evo_empty ADD COLUMN val int;
+INSERT INTO evo_empty VALUES (1, 111);
+SELECT id, val FROM evo_empty ORDER BY id;
+
+-- ============================================================
+-- H. IF NOT EXISTS / IF EXISTS
+-- ============================================================
+CREATE ICEBERG TABLE evo_ifx (id int, val int);
+ALTER TABLE evo_ifx ADD COLUMN IF NOT EXISTS val int;   -- no-op, already exists
+ALTER TABLE evo_ifx ADD COLUMN IF NOT EXISTS note text; -- added
+ALTER TABLE evo_ifx DROP COLUMN IF EXISTS missing;      -- no-op, absent
+ALTER TABLE evo_ifx DROP COLUMN IF EXISTS note;         -- dropped
+INSERT INTO evo_ifx VALUES (1, 100);
+SELECT id, val FROM evo_ifx ORDER BY id;
+
+-- ============================================================
+-- I. Boundary values survive add-column + read
+-- ============================================================
+CREATE ICEBERG TABLE evo_bound (id int);
+INSERT INTO evo_bound VALUES (1);
+ALTER TABLE evo_bound ADD COLUMN big bigint, ADD COLUMN txt text, ADD COLUMN neg int;
+INSERT INTO evo_bound VALUES (2, -9223372036854775808, '', -2147483648);
+INSERT INTO evo_bound VALUES (3, 9223372036854775807, 'unicode-éü', 0);
+SELECT id, big, txt, neg FROM evo_bound ORDER BY id;
+
+-- ============================================================
+-- J. DROP + re-ADD same name: dropped data must NOT resurrect (#401)
+--    Reads match by Iceberg field-id (= PG attnum), not physical name, so a
+--    re-added same-name column (new, higher attnum) never picks up the old
+--    dropped column's physical data from files written before the drop.
+-- ============================================================
+CREATE ICEBERG TABLE evo_reborn (id int, x int);
+INSERT INTO evo_reborn VALUES (1, 111), (2, 222);
+ALTER TABLE evo_reborn DROP COLUMN x;
+ALTER TABLE evo_reborn ADD COLUMN x int;   -- same name, fresh field-id
+INSERT INTO evo_reborn VALUES (3, 333);
+-- old rows read x = NULL (111/222 must NOT reappear); new row = 333
+SELECT id, x FROM evo_reborn ORDER BY id;
+-- widen the re-added column, then confirm the pattern still holds
+ALTER TABLE evo_reborn ALTER COLUMN x TYPE bigint;
+INSERT INTO evo_reborn VALUES (4, 9223372036854775807);
+SELECT id, x FROM evo_reborn ORDER BY id;
+
+-- ============================================================
+-- K. ALTER COLUMN TYPE (widening): old files promoted at read time (#401, #334)
+-- ============================================================
+CREATE ICEBERG TABLE evo_type (id int, val int, n numeric(10,2), f real);
+INSERT INTO evo_type VALUES (1, 100, 12345.67, 1.5), (2, 200, 1.00, 2.5);
+-- widen across families; old physical int32/float/decimal read under new types
+ALTER TABLE evo_type ALTER COLUMN val TYPE bigint;      -- int4 -> int8
+ALTER TABLE evo_type ALTER COLUMN n   TYPE numeric(20,2); -- widen precision, same scale
+ALTER TABLE evo_type ALTER COLUMN f   TYPE float8;      -- real -> double
+-- old rows promoted correctly
+SELECT id, val, n, f FROM evo_type ORDER BY id;
+-- new rows use the widened range/precision
+INSERT INTO evo_type VALUES (3, 9223372036854775807, 123456789012345678.99, 3.25);
+SELECT id, val, n, f FROM evo_type ORDER BY id;
+-- illegal widenings are rejected up front, table stays usable
+SELECT __test_exec($$ALTER TABLE evo_type ALTER COLUMN val TYPE int$$);        -- narrowing
+SELECT __test_exec($$ALTER TABLE evo_type ALTER COLUMN n TYPE numeric(20,3)$$); -- scale change
+SELECT id, val FROM evo_type ORDER BY id;
+
+-- ============================================================
+-- L. RENAME COLUMN: old files read under the new name (field-id stable) (#401)
+-- ============================================================
+CREATE ICEBERG TABLE evo_ren (id int, a int, b text);
+INSERT INTO evo_ren VALUES (1, 10, 'x'), (2, 20, 'y');
+ALTER TABLE evo_ren RENAME COLUMN a TO a2;
+-- pre-rename rows read back under the new name (not NULL)
+SELECT id, a2, b FROM evo_ren ORDER BY id;
+INSERT INTO evo_ren VALUES (3, 30, 'z');
+-- mixed old/new rows all correct; old name is gone
+SELECT id, a2, b FROM evo_ren ORDER BY id;
+
+-- Cleanup
+DROP TABLE evo_add;
+DROP TABLE evo_drop;
+DROP TABLE evo_dnn;
+DROP TABLE evo_multi;
+DROP TABLE evo_atom;
+DROP TABLE evo_empty;
+DROP TABLE evo_ifx;
+DROP TABLE evo_bound;
+DROP TABLE evo_reborn;
+DROP TABLE evo_type;
+DROP TABLE evo_ren;
+
+DROP VOLUME evo_volume;
+DROP USER MAPPING FOR current_user SERVER evo_volume_server;
+DROP SERVER evo_volume_server;
+DROP CATALOG evo_catalog;
+DROP USER MAPPING FOR current_user SERVER evo_catalog_server;
+DROP SERVER evo_catalog_server;
+DROP FUNCTION __test_exec(text);

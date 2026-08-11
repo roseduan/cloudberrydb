@@ -123,7 +123,10 @@ public final class OAuthTokenEndpoint extends HttpServlet {
         Map<String, Object> body = Map.of(
                 "access_token", token,
                 "token_type", "bearer",
-                "expires_in", jwt.getTtlSeconds()
+                "expires_in", jwt.getTtlSeconds(),
+                // RFC 8693 token-exchange field; optional for client_credentials but some
+                // strict Iceberg REST clients (e.g. PyIceberg <0.7) require it. #401 interop
+                "issued_token_type", "urn:ietf:params:oauth:token-type:access_token"
         );
         resp.setStatus(HttpServletResponse.SC_OK);
         resp.setContentType("application/json");

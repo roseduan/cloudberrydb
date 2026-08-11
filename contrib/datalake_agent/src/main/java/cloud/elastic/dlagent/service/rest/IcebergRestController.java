@@ -8,6 +8,7 @@ import cloud.elastic.dlagent.constants.IcebergConfigConstants;
 import cloud.elastic.dlagent.plugins.iceberg.utilities.IcebergUtilities;
 import cloud.elastic.dlagent.service.iceberg.IcebergService;
 import cloud.elastic.dlagent.service.iceberg.SchemaConverter;
+import cloud.elastic.dlagent.service.iceberg.SchemaOp;
 import cloud.elastic.dlagent.service.ServiceResult;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.core.type.TypeReference;
@@ -442,6 +443,30 @@ public class IcebergRestController {
      * @param request Create table request
      * @return Table metadata result
      */
+    @PostMapping({
+        "/{prefix}/tables/{table}/updateSchema",
+        "/tables/{table}/updateSchema"
+    })
+    public ResponseEntity<?> updateSchema(
+            @PathVariable(value = "prefix", required = false) String prefix,
+            @PathVariable("table") String table,
+            @RequestBody Map<String, Object> request) throws Exception {
+
+        String namespace = (String) request.get("namespace");
+        Map<String, String> properties = extractProperties(request);
+        RequestContext context = createRequestContext(namespace, table, properties);
+
+        @SuppressWarnings("unchecked")
+        List<Map<String, Object>> rawOps = (List<Map<String, Object>>) request.get("operations");
+        List<SchemaOp> ops = SchemaOp.fromRequestList(rawOps);
+
+        String metadataLocation = icebergService.updateSchema(namespace, table, ops, properties, context);
+
+        Map<String, Object> response = new HashMap<>();
+        response.put("metadata-location", metadataLocation);
+        return ResponseEntity.ok(response);
+    }
+
     @PostMapping({
         "/{prefix}/tables/create",
         "/tables/create"

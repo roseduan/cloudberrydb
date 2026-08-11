@@ -108,6 +108,10 @@ public:
                         const std::string& request_json,
                         const RequestConfig* request_config = nullptr);
 
+    Response update_schema(const std::string& table_name,
+                           const std::string& request_json,
+                           const RequestConfig* request_config = nullptr);
+
     Response get_statistics(const std::string& table_name,
                             const std::string& request_json,
                             const RequestConfig* request_config = nullptr);

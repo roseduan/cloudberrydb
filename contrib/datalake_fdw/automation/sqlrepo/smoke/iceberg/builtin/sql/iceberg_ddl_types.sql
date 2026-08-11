@@ -206,18 +206,20 @@ SELECT COUNT(*) FROM types_single_col;
 DROP TABLE types_single_col;
 
 -- ============================================================
--- Test 8: DROP COLUMN is rejected on Iceberg tables (issue #334)
+-- Test 8: DROP COLUMN on builtin-catalog Iceberg tables (issues #334, #401)
 -- DROP COLUMN used to half-apply (PG catalog updated while Iceberg
--- metadata stayed stale); ALTER COLUMN TYPE crashed the backend.
--- The Iceberg AM now rejects every ALTER subcommand in
--- datalake_ProcessUtility; the table must remain usable afterwards.
+-- metadata stayed stale), so the AM rejected every ALTER subcommand;
+-- ALTER COLUMN TYPE crashed the backend.  Builtin-catalog schema
+-- evolution (#401) now applies DROP COLUMN to both sides, so it
+-- succeeds -- and the table must remain usable afterwards.
 -- ============================================================
 CREATE ICEBERG TABLE types_drop_col (id int, name text, age int)
     CATALOG types_catalog VOLUME types_volume;
 INSERT INTO types_drop_col VALUES (1, 'a', 20), (2, 'b', 30);
 ALTER TABLE types_drop_col DROP COLUMN age;
--- Table still has all three columns; INSERT must succeed against the original schema.
-INSERT INTO types_drop_col VALUES (3, 'c', 40);
+-- The column is gone from both the PG catalog and the Iceberg schema, so
+-- INSERT must match the new two-column shape and old rows stay readable.
+INSERT INTO types_drop_col VALUES (3, 'c');
 SELECT * FROM types_drop_col ORDER BY id;
 DROP TABLE types_drop_col;
 

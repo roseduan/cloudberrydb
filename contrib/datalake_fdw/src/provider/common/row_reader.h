@@ -12,7 +12,8 @@ DatalakeRowReader *datalakeCreateRowReader(MemoryContext mcxt,
 						   ossFileStream fileStream,
 						   List *combinedScanTasks,
 						   DLTblFmt format,
-						   ExternalTableMetadata *tableOptions);
+						   ExternalTableMetadata *tableOptions,
+						   bool isBuiltinIceberg);
 bool datalakeRowReaderNext(DatalakeRowReader *reader, DatalakeInternalRecord *record);
 
 /*

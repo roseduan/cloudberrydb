@@ -91,6 +91,22 @@ ParquetReader::createMapping(List *columnDesc, bool *attrUsed)
 	auto      schema = metadata->schema();
 
 	numColumns_ = schema->num_columns();
+
+	/*
+	 * Does this file carry Iceberg field-ids?  The builtin writer stamps one
+	 * (== PG attnum) on every column, so a file with none predates field-id
+	 * stamping and must fall back to name matching.  Checked once up front. #401
+	 */
+	bool fileHasFieldIds = false;
+	for (j = 0; j < numColumns_; j++)
+	{
+		if (schema->Column(j)->schema_node()->field_id() >= 0)
+		{
+			fileHasFieldIds = true;
+			break;
+		}
+	}
+
 	foreach_with_count(lc, columnDesc, i)
 	{
 		DatalakeFieldDescription *entry = (DatalakeFieldDescription *) lfirst(lc);
@@ -100,22 +116,65 @@ ParquetReader::createMapping(List *columnDesc, bool *attrUsed)
 		if (!attrUsed[i])
 			continue;
 
-		for (j = 0; j < numColumns_; j++)
-		{
-			const parquet::ColumnDescriptor *field = schema->Column(j);
-			auto fieldName = field->name();
+		int matched = -1;
 
-			if (pg_strcasecmp(entry->name, fieldName.c_str()) == 0)
+		if (entry->attnum > 0 && fileHasFieldIds)
+		{
+			/*
+			 * Builtin iceberg: the writer stamps the field-id as the PG attnum,
+			 * so match by field-id authoritatively.  This is stable across
+			 * RENAME COLUMN (name changes, id does not) and, crucially, does
+			 * NOT match a dropped-then-re-added same-name column -- the new
+			 * column has a fresh (higher) attnum that no old data file carries,
+			 * so old data never resurrects.  A column absent from this file
+			 * (added after it was written) stays unmatched and reads NULL. #401
+			 */
+			for (j = 0; j < numColumns_; j++)
 			{
-				typeMap_[i].columnIndex_ = j;
-				typeMap_[i].fileTypeId_ = mapParquetDataType(field->physical_type());
-				typeMap_[i].timeUnit_ = getTimeUnit(field);
-				typeMap_[i].scale_ = field->type_scale();
-				typeMap_[i].precision_ = field->type_precision();
-				typeMap_[i].typeLength_ = field->type_length();
-				typeMap_[i].readFn_ = resolveReadFn(typeMap_[i]);
-				break;
+				if (schema->Column(j)->schema_node()->field_id() == entry->attnum)
+				{
+					matched = j;
+					break;
+				}
 			}
+		}
+		else
+		{
+			/*
+			 * External iceberg (arbitrary Iceberg field-ids, name-mapped),
+			 * non-iceberg reads, or a legacy builtin file with no field-ids:
+			 * match by physical column name, as before.
+			 */
+			for (j = 0; j < numColumns_; j++)
+			{
+				if (pg_strcasecmp(entry->name, schema->Column(j)->name().c_str()) == 0)
+				{
+					matched = j;
+					break;
+				}
+			}
+		}
+
+		if (matched >= 0)
+		{
+			const parquet::ColumnDescriptor *field = schema->Column(matched);
+
+			typeMap_[i].columnIndex_ = matched;
+			typeMap_[i].fileTypeId_ = mapParquetDataType(field->physical_type());
+			/*
+			 * mapParquetDataType collapses physical FLOAT and DOUBLE to
+			 * FLOAT8OID.  Keep them distinct here so read-time promotion for
+			 * ALTER COLUMN TYPE real->double precision (#401) can tell that
+			 * an older data file physically stored FLOAT while the column is
+			 * now double.
+			 */
+			if (field->physical_type() == parquet::Type::FLOAT)
+				typeMap_[i].fileTypeId_ = FLOAT4OID;
+			typeMap_[i].timeUnit_ = getTimeUnit(field);
+			typeMap_[i].scale_ = field->type_scale();
+			typeMap_[i].precision_ = field->type_precision();
+			typeMap_[i].typeLength_ = field->type_length();
+			typeMap_[i].readFn_ = resolveReadFn(typeMap_[i]);
 		}
 	}
 
@@ -476,6 +535,18 @@ ParquetReader::readPrimitive(const TypeInfo &typInfo, bool &isNull)
 		case TIMEOID:
 		case INT8OID:
 		{
+			/*
+			 * Read-time widening for ALTER COLUMN TYPE int->bigint (#401): a
+			 * column that was int2/int4 when older data files were written is
+			 * physically INT32 in those files (fileTypeId_ == INT4OID) even
+			 * though the column is now bigint.  Read it as int32 and promote,
+			 * exactly as Iceberg readers do.
+			 */
+			if (typInfo.fileTypeId_ == INT4OID)
+			{
+				((parquet::TypedScanner<parquet::Int32Type> *)scanner.get())->NextValue(&d.int32Value, &isNull);
+				return Int64GetDatum((int64) d.int32Value);
+			}
 			((parquet::TypedScanner<parquet::Int64Type> *)scanner.get())->NextValue(&d.int64Value, &isNull);
 			return Int64GetDatum(d.int64Value);
 		}
@@ -486,6 +557,12 @@ ParquetReader::readPrimitive(const TypeInfo &typInfo, bool &isNull)
 		}
 		case FLOAT8OID:
 		{
+			/* Read-time widening for ALTER COLUMN TYPE real->double (#401). */
+			if (typInfo.fileTypeId_ == FLOAT4OID)
+			{
+				((parquet::TypedScanner<parquet::FloatType> *)scanner.get())->NextValue(&d.floatValue, &isNull);
+				return Float8GetDatum((double) d.floatValue);
+			}
 			((parquet::TypedScanner<parquet::DoubleType> *)scanner.get())->NextValue(&d.doubleValue, &isNull);
 			return Float8GetDatum(d.doubleValue);
 		}
@@ -795,10 +872,16 @@ ParquetReader::resolveReadFn(const TypeInfo &typInfo)
 			return readInt32Column;
 		case TIMEOID:
 		case INT8OID:
+			/* Widened int4->int8 (physical INT32): use readPrimitive to promote. */
+			if (typInfo.fileTypeId_ == INT4OID)
+				return nullptr;
 			return readInt64Column;
 		case FLOAT4OID:
 			return readFloat4Column;
 		case FLOAT8OID:
+			/* Widened real->double (physical FLOAT): use readPrimitive to promote. */
+			if (typInfo.fileTypeId_ == FLOAT4OID)
+				return nullptr;
 			return readFloat8Column;
 		case DATEOID:
 			return readDateColumn;
@@ -835,10 +918,16 @@ ParquetReader::resolveFillKind(const TypeInfo &typInfo)
 			return FILL_INT4;
 		case TIMEOID:
 		case INT8OID:
+			/* Widened int4->int8 (physical INT32): fall back to readPrimitive. */
+			if (typInfo.fileTypeId_ == INT4OID)
+				return FILL_NONE;
 			return FILL_INT8;
 		case FLOAT4OID:
 			return FILL_FLOAT4;
 		case FLOAT8OID:
+			/* Widened real->double (physical FLOAT): fall back to readPrimitive. */
+			if (typInfo.fileTypeId_ == FLOAT4OID)
+				return FILL_NONE;
 			return FILL_FLOAT8;
 		case DATEOID:
 			return FILL_DATE;

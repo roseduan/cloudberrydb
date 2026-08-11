@@ -13,7 +13,7 @@ REGRESS = iceberg_buildin iceberg_buildin_statistics iceberg_buildin_vacuum iceb
           iceberg_write_types iceberg_delete_coverage iceberg_volume_ops \
           iceberg_catalog_ops iceberg_toolkit_errors iceberg_fragment_cache \
           iceberg_coverage_boost iceberg_deep_coverage iceberg_internal_funcs \
-          iceberg_alter_unsupported \
+          iceberg_alter_unsupported iceberg_alter_schema_evolution \
           iceberg_drop_schema_cleanup \
           iceberg_truncate_cleanup iceberg_vacuum_cleanup \
           iceberg_txn_rollback_cleanup \

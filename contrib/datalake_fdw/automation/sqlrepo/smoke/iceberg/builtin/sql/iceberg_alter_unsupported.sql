@@ -1,13 +1,12 @@
--- Iceberg ALTER TABLE coverage (issue #334 + follow-up)
--- Purpose: NO ALTER TABLE subcommand is supported on Iceberg AM tables.
--- ALTER COLUMN TYPE used to SIGSEGV (empty AM stubs + uninitialized DML
--- state during table rewrite); the others silently half-applied (PG catalog
--- changed while Iceberg manifest stayed stale).  ADD COLUMN was briefly
--- allowed but offered no way to keep the Iceberg-side schema in sync, so
--- it is now rejected too -- schema evolution must go through Spark / Trino /
--- Flink.  RENAME COLUMN (T_RenameStmt) is rejected by a sibling hook.
--- This test pins the full-ban contract and confirms the table stays usable
--- after every rejection.
+-- Iceberg ALTER TABLE: still-unsupported subcommands (issue #401, after #334)
+-- Purpose: ADD COLUMN (bare nullable) / DROP COLUMN / DROP NOT NULL / SET NOT
+-- NULL / ALTER COLUMN TYPE (widening) / RENAME COLUMN are supported (covered by
+-- iceberg_alter_schema_evolution).  This test pins the subcommands that remain
+-- rejected -- each must fail cleanly (FEATURE_NOT_SUPPORTED, no crash) and leave
+-- the table fully usable, so #334's SIGSEGV never recurs.  NOT NULL / DEFAULT /
+-- CONSTRAINT on ADD COLUMN and SET/DROP DEFAULT are not representable in
+-- Iceberg's optional-column model; non-widening ALTER COLUMN TYPE (narrowing /
+-- scale change) is rejected and covered in iceberg_alter_schema_evolution.
 
 CREATE EXTENSION IF NOT EXISTS datalake_fdw;
 
@@ -36,36 +35,30 @@ CREATE FOREIGN VOLUME alter_neg_volume SERVER alter_neg_volume_server
     OPTIONS(base_path '/alter_neg_volume/');
 SET iceberg_default_volume = 'alter_neg_volume';
 
--- ============================================================
--- Set up the target table with two rows so any rewrite-triggering
--- ALTER would have data to chew through (this is what crashed in #334).
--- ============================================================
+-- Target table with two rows so a rewrite-triggering ALTER would have data to
+-- chew through (this is what SIGSEGV'd in #334).
 CREATE ICEBERG TABLE alter_block_t (id int, val int, name text);
 INSERT INTO alter_block_t VALUES (1, 100, 'a'), (2, 200, 'b');
 
 -- ============================================================
--- Every ALTER subcommand must be rejected with FEATURE_NOT_SUPPORTED.
+-- Each still-unsupported subcommand must be rejected cleanly (no crash).
 -- ============================================================
 
--- ADD COLUMN: previously the only allowed subcommand; now also rejected.
-ALTER TABLE alter_block_t ADD COLUMN note text;
-
--- Original repro from issue #334 (this used to SIGSEGV the backend).
-ALTER TABLE alter_block_t ALTER COLUMN val TYPE bigint;
-
-ALTER TABLE alter_block_t DROP COLUMN name;
-ALTER TABLE alter_block_t ALTER COLUMN val SET NOT NULL;
-ALTER TABLE alter_block_t ALTER COLUMN val DROP NOT NULL;
+-- SET / DROP DEFAULT: no Iceberg equivalent kept in sync.
 ALTER TABLE alter_block_t ALTER COLUMN val SET DEFAULT 0;
 ALTER TABLE alter_block_t ALTER COLUMN val DROP DEFAULT;
+
+-- ADD COLUMN with NOT NULL / DEFAULT / CONSTRAINT: only bare nullable allowed.
+ALTER TABLE alter_block_t ADD COLUMN bad int NOT NULL;
+ALTER TABLE alter_block_t ADD COLUMN bad2 int DEFAULT 5;
+ALTER TABLE alter_block_t ADD COLUMN bad3 int UNIQUE;
+
+-- ADD table CONSTRAINT.
 ALTER TABLE alter_block_t ADD CONSTRAINT alter_block_chk CHECK (val >= 0);
 
--- RENAME COLUMN goes through RenameStmt (a separate hook branch).
-ALTER TABLE alter_block_t RENAME COLUMN val TO val2;
-
 -- ============================================================
--- Table is still usable: schema unchanged (id int, val int, name text) and
--- the rejected DDLs left no side effects on PG or Iceberg metadata.
+-- Table is still usable: schema unchanged (id int, val int, name text) and the
+-- rejected DDLs left no side effect on PG or Iceberg metadata.
 -- ============================================================
 SELECT * FROM alter_block_t ORDER BY id;
 INSERT INTO alter_block_t VALUES (3, 300, 'c');

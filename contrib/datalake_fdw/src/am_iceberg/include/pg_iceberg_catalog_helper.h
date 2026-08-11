@@ -180,6 +180,21 @@ extern char *pg_iceberg_catalog_op_ex(Relation relation,
 									  List **written_metadata_files);
 
 /*
+ * ALTER TABLE schema evolution (builtin only, issue #401): fire an
+ * ICEBERG_UPDATE_SCHEMA op carrying a List of IcebergSchemaOp*, returning the
+ * new metadata-location.
+ */
+extern char *pg_iceberg_update_schema_op(const char *catalogName,
+										 const char *nameSpace,
+										 const char *tableName,
+										 const char *metadata_location,
+										 const char *catalogServer,
+										 const char *foreignCatalogName,
+										 const char *volumeServer,
+										 const char *volumeName,
+										 List *schemaOps);
+
+/*
  * Vacuum rewrite functions
  *
  * pg_iceberg_get_rewrite_plan:

@@ -554,6 +554,76 @@ pg_iceberg_catalog_op(Relation relation,
 									NULL);
 }
 
+/*
+ * Fire an ICEBERG_UPDATE_SCHEMA op (ALTER TABLE schema evolution, builtin only,
+ * issue #401).  Mirrors execute_catalog_op_via_fdw but carries the schema-op list
+ * (List of IcebergSchemaOp*) instead of data locations, and always runs as the
+ * builtin/internal path so the agent loads the exact current table by metadata.
+ */
+static IcebergCatalogFdwState *
+execute_update_schema_via_fdw(const char *metadata_location,
+							  List *schemaOps,
+							  const char *catalogName,
+							  const char *nameSpace,
+							  const char *tableName,
+							  const char *catalogServer,
+							  const char *foreignCatalogName,
+							  const char *volumeServer,
+							  const char *volumeName)
+{
+	IcebergCatalogFdwState *fdwState;
+	FdwRoutine *fdwRoutine = get_catalog_fdw_routine();
+	ResultRelInfo *resultRelInfo = makeNode(ResultRelInfo);
+
+	fdwState = create_catalog_fdw_state(ICEBERG_UPDATE_SCHEMA,
+										catalogName,
+										nameSpace,
+										tableName,
+										catalogServer,
+										foreignCatalogName,
+										volumeServer,
+										volumeName,
+										NULL /* no schema needed; agent loads by metadata */);
+
+	fdwState->request.buildInCatalog.metadataLocation = metadata_location;
+	fdwState->request.buildInCatalog.tableExists = true;
+	fdwState->request.schemaOps = schemaOps;
+
+	resultRelInfo->ri_FdwState = fdwState;
+
+	fdwRoutine->BeginForeignInsert(NULL, resultRelInfo);
+	fdwRoutine->ExecForeignInsert(NULL, resultRelInfo, NULL, NULL);
+	fdwRoutine->EndForeignInsert(NULL, resultRelInfo);
+
+	return (IcebergCatalogFdwState *) resultRelInfo->ri_FdwState;
+}
+
+char *
+pg_iceberg_update_schema_op(const char *catalogName,
+							const char *nameSpace,
+							const char *tableName,
+							const char *metadata_location,
+							const char *catalogServer,
+							const char *foreignCatalogName,
+							const char *volumeServer,
+							const char *volumeName,
+							List *schemaOps)
+{
+	IcebergCatalogFdwState *fdwState;
+
+	fdwState = execute_update_schema_via_fdw(metadata_location,
+											 schemaOps,
+											 catalogName,
+											 nameSpace,
+											 tableName,
+											 catalogServer,
+											 foreignCatalogName,
+											 volumeServer,
+											 volumeName);
+
+	return extract_location_from_fdw_state(fdwState);
+}
+
 IcebergLoadTableResult *
 pg_iceberg_load_table(const char *catalogName,
 					  const char *nameSpace,

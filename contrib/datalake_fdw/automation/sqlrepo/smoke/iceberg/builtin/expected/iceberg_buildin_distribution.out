@@ -76,8 +76,7 @@ SELECT policytype, distkey FROM gp_distribution_policy
 
 -- Test 6: ALTER TABLE SET DISTRIBUTED BY should ERROR
 ALTER TABLE iceberg_dist_default SET DISTRIBUTED BY (id);
-ERROR:  ALTER TABLE is not supported on Iceberg tables
-HINT:  Use Spark/Trino/Flink to perform Iceberg schema evolution, or recreate the table.
+ERROR:  this ALTER TABLE subcommand is not supported on Iceberg tables
 -- cleanup
 DROP TABLE IF EXISTS iceberg_dist_default;
 DROP TABLE IF EXISTS iceberg_dist_hash;

@@ -841,6 +841,50 @@ pg_iceberg_truncate_with_catalog(Relation rel,
 								 table_info->volume_name);
 }
 
+/*
+ * ALTER TABLE schema evolution for a builtin-catalog iceberg table (issue #401).
+ * Resolves namespace/table/catalog names the same way as TRUNCATE, then fires a
+ * single ICEBERG_UPDATE_SCHEMA op carrying schemaOps.  Returns the new
+ * metadata-location produced by the agent's UpdateSchema commit.
+ */
+char *
+pg_iceberg_update_schema_with_catalog(Relation rel,
+									  IcebergTableInfo *table_info,
+									  const char *metadata_location,
+									  List *schemaOps)
+{
+	const char *nameSpace;
+	const char *tableName;
+	const char *catalogName;
+
+	nameSpace = pg_iceberg_resolve_namespace(
+		table_info->opts ? table_info->opts->namespace : NULL,
+		table_info->catalog_server_name,
+		table_info->catalog_name,
+		rel);
+
+	if (table_info->opts == NULL || table_info->opts->table == NULL)
+	{
+		tableName = pstrdup(RelationGetRelationName(rel));
+		catalogName = NULL;
+	}
+	else
+	{
+		tableName = table_info->opts->table;
+		catalogName = table_info->opts->catalog;
+	}
+
+	return pg_iceberg_update_schema_op(catalogName,
+									   nameSpace,
+									   tableName,
+									   metadata_location,
+									   table_info->catalog_server_name,
+									   table_info->catalog_name,
+									   table_info->volume_server_name,
+									   table_info->volume_name,
+									   schemaOps);
+}
+
 char *
 pg_iceberg_commit_data_with_catalog(Relation rel,
 									IcebergTableInfo *table_info,
