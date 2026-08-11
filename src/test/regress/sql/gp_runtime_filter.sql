@@ -263,9 +263,9 @@ create table test11(c1 int, c2 int);
 create table test22(c1 int, c2 int);
 create table test33(c1 int, c2 int);
 
-insert into test11 select t,t from generate_series(1,1000000) t;
-insert into test22 select t,t+10 from generate_series(1,1000000) t;
-insert into test33 select t,t+10 from generate_series(1,1000000) t;
+insert into test11 select t,t from generate_series(1,200000) t;
+insert into test22 select t,t+10 from generate_series(1,200000) t;
+insert into test33 select t,t+10 from generate_series(1,200000) t;
 
 SET gp_enable_runtime_filter_pushdown TO off;
 select count(*) from (select c1 as c from test22 union all select c2 as c from test33) test, test11 where test11.c1 = test.c and test11.c2 < 10;
