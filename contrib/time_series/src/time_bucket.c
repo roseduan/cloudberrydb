@@ -22,6 +22,7 @@
 #include <utils/timestamp.h>
 
 #include "include/time_series.h"
+#include "include/time_bucket/time_bucket.h"
 
 #define TIME_BUCKET(period, timestamp, offset, min, max, result)                                   \
 	do                                                                                             \
@@ -311,9 +312,9 @@ ts_timestamptz_bucket(PG_FUNCTION_ARGS)
 
 		/*
 		 * Use date_timestamp (not date_timestamptz) to return UTC midnight
-		 * as the bucket boundary. This matches TimescaleDB behavior: the
-		 * non-timezone variant of time_bucket(interval, timestamptz) uses
-		 * UTC-based month bucketing. The timezone-aware variant
+		 * as the bucket boundary. The non-timezone variant of
+		 * time_bucket(interval, timestamptz) uses UTC-based month
+		 * bucketing; the timezone-aware variant
 		 * ts_timestamptz_timezone_bucket handles local-time bucketing.
 		 */
 		PG_RETURN_DATUM(DirectFunctionCall1(date_timestamp, DateADTGetDatum(date)));

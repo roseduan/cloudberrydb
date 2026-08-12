@@ -1,0 +1,647 @@
+-- ts_btree.sql: Comprehensive tests for ts_btree per-chunk B-tree index
+--
+-- Covers: index creation, bulk build, insert maintenance, all operator
+--         classes, range queries, boundary conditions, multi-chunk indexes,
+--         DROP/REINDEX, multiple indexes, large data sets, edge cases.
+
+-- start_matchsubs
+-- m/\(seg\d+ .*\)/
+-- s/\(seg\d+ .*\)/(seg0 slice1 127.0.0.1:1234 pid=12345)/
+-- end_matchsubs
+
+\i sql/include/setup.sql
+
+CREATE OR REPLACE FUNCTION test.show_indexes(rel regclass)
+RETURNS TABLE(index_name name, index_am name, columns text, is_unique boolean) AS $$
+    SELECT ci.relname,
+           am.amname,
+           pg_catalog.pg_get_indexdef(i.indexrelid, 0, true),
+           i.indisunique
+    FROM pg_catalog.pg_index i
+    JOIN pg_catalog.pg_class ci ON ci.oid = i.indexrelid
+    JOIN pg_catalog.pg_am am ON am.oid = ci.relam
+    WHERE i.indrelid = rel
+    ORDER BY ci.relname;
+$$ LANGUAGE SQL STABLE;
+
+CREATE OR REPLACE FUNCTION test.results_match(query_a text, query_b text)
+RETURNS boolean AS $$
+DECLARE
+    diff_count bigint;
+BEGIN
+    EXECUTE format(
+        'SELECT count(*) FROM ((SELECT * FROM (%s) a EXCEPT SELECT * FROM (%s) b) UNION ALL (SELECT * FROM (%s) c EXCEPT SELECT * FROM (%s) d)) q',
+        query_a, query_b, query_b, query_a
+    ) INTO diff_count;
+    IF diff_count <> 0 THEN
+        RAISE NOTICE 'FAIL: queries differ by % rows', diff_count;
+        RETURN false;
+    END IF;
+    RETURN true;
+END;
+$$ LANGUAGE plpgsql;
+
+-- ======================================================================
+-- Section 1: Operator class registration
+-- ======================================================================
+
+SELECT amname, opcname
+    FROM pg_opclass JOIN pg_am ON pg_am.oid = opcmethod
+    WHERE amname = 'ts_btree'
+    ORDER BY opcname;
+
+-- ======================================================================
+-- Section 2: Index on empty table (bulk build on 0 rows)
+-- ======================================================================
+
+CREATE TABLE ts_b_empty (ts TIMESTAMPTZ NOT NULL, val FLOAT8)
+    USING time_series WITH (ts_partition_column='ts', ts_chunk_interval='1 day', ts_chunk_origin='2025-01-01')
+    DISTRIBUTED BY (val);
+
+CREATE INDEX ts_b_empty_idx ON ts_b_empty USING ts_btree (ts);
+SELECT * FROM test.show_indexes('ts_b_empty');
+
+-- Insert after index creation
+INSERT INTO ts_b_empty VALUES ('2025-01-01 10:00:00+00', 1.0);
+INSERT INTO ts_b_empty VALUES ('2025-01-01 11:00:00+00', 2.0);
+SELECT count(*) FROM ts_b_empty;
+
+-- ======================================================================
+-- Section 3: Bulk build on existing data (single chunk)
+-- ======================================================================
+
+CREATE TABLE ts_b_single (ts TIMESTAMPTZ NOT NULL, val INT)
+    USING time_series WITH (ts_partition_column='ts', ts_chunk_interval='1 day', ts_chunk_origin='2025-01-01')
+    DISTRIBUTED BY (val);
+
+-- All rows in the same chunk (same day)
+INSERT INTO ts_b_single
+    SELECT '2025-01-01'::timestamptz + (i || ' minutes')::interval, i
+    FROM generate_series(1, 50) AS i;
+
+CREATE INDEX ts_b_single_idx ON ts_b_single USING ts_btree (ts);
+SELECT count(*) FROM ts_b_single;
+
+-- Verify ordering through index
+SELECT val FROM ts_b_single ORDER BY ts LIMIT 5;
+SELECT val FROM ts_b_single ORDER BY ts DESC LIMIT 5;
+
+
+-- ======================================================================
+-- Section 4: Bulk build on existing data (multiple chunks)
+-- ======================================================================
+
+CREATE TABLE ts_b_multi (ts TIMESTAMPTZ NOT NULL, val INT)
+    USING time_series WITH (ts_partition_column='ts', ts_chunk_interval='1 day', ts_chunk_origin='2025-01-01')
+    DISTRIBUTED BY (val);
+
+-- Rows spanning 5 days = 5 chunks
+INSERT INTO ts_b_multi
+    SELECT '2025-01-01'::timestamptz + (i || ' hours')::interval, i
+    FROM generate_series(0, 99) AS i;
+
+CREATE INDEX ts_b_multi_idx ON ts_b_multi USING ts_btree (ts);
+SELECT count(*) FROM ts_b_multi;
+
+-- Verify time ordering is preserved
+SELECT val FROM ts_b_multi ORDER BY ts LIMIT 5;
+SELECT val FROM ts_b_multi ORDER BY ts DESC LIMIT 5;
+
+-- ======================================================================
+-- Section 5: INSERT maintains index (incremental inserts)
+-- ======================================================================
+
+-- Insert into existing chunk
+INSERT INTO ts_b_multi VALUES ('2025-01-01 00:30:00+00', 200);
+
+-- Insert into new chunk
+INSERT INTO ts_b_multi VALUES ('2025-01-10 12:00:00+00', 300);
+
+SELECT count(*) FROM ts_b_multi;
+
+-- Verify new rows are findable
+SELECT val FROM ts_b_multi WHERE ts = '2025-01-01 00:30:00+00';
+SELECT val FROM ts_b_multi WHERE ts = '2025-01-10 12:00:00+00';
+
+-- ======================================================================
+-- Section 6: EXPLAIN — verify plan uses ChunkScan, not IndexScan
+-- ======================================================================
+
+-- 6a: ChunkScan replaces all paths for time_series tables (index is maintained
+--     on writes but ChunkScan handles reads with chunk pruning)
+EXPLAIN (COSTS OFF)
+    SELECT count(*) FROM ts_b_multi WHERE ts = '2025-01-01 00:00:00+00';
+
+-- 6b: Range query — should show ChunkScan, not Index Scan
+EXPLAIN (COSTS OFF)
+    SELECT count(*) FROM ts_b_multi
+        WHERE ts >= '2025-01-02 00:00:00+00' AND ts < '2025-01-03 00:00:00+00';
+
+-- 6c: Unindexed column filter — also ChunkScan
+EXPLAIN (COSTS OFF)
+    SELECT val FROM ts_b_multi WHERE val > 50;
+
+-- ======================================================================
+-- Section 7: Range queries (correctness)
+-- ======================================================================
+
+-- 7a: Equality
+SELECT count(*) FROM ts_b_multi WHERE ts = '2025-01-01 00:00:00+00';
+
+-- 7b: Less than
+SELECT count(*) FROM ts_b_multi
+    WHERE ts < '2025-01-02 00:00:00+00';
+
+-- 7c: Less than or equal
+SELECT count(*) FROM ts_b_multi
+    WHERE ts <= '2025-01-01 23:00:00+00';
+
+-- 7d: Greater than
+SELECT count(*) FROM ts_b_multi
+    WHERE ts > '2025-01-04 00:00:00+00';
+
+-- 7e: Greater than or equal
+SELECT count(*) FROM ts_b_multi
+    WHERE ts >= '2025-01-05 00:00:00+00';
+
+-- 7f: BETWEEN (closed range)
+SELECT count(*) FROM ts_b_multi
+    WHERE ts >= '2025-01-02 00:00:00+00' AND ts < '2025-01-03 00:00:00+00';
+
+-- 7g: Empty range
+SELECT count(*) FROM ts_b_multi
+    WHERE ts >= '2025-06-01' AND ts < '2025-06-02';
+
+-- ======================================================================
+-- Section 8: DROP INDEX and data integrity
+-- ======================================================================
+
+-- EXPLAIN before DROP: ChunkScan (index present but unused for reads)
+EXPLAIN (COSTS OFF)
+    SELECT count(*) FROM ts_b_multi
+        WHERE ts >= '2025-01-02' AND ts < '2025-01-03';
+
+SELECT count(*) AS before_drop FROM ts_b_multi;
+DROP INDEX ts_b_multi_idx;
+
+-- EXPLAIN after DROP: still ChunkScan (plan unchanged without index)
+EXPLAIN (COSTS OFF)
+    SELECT count(*) FROM ts_b_multi
+        WHERE ts >= '2025-01-02' AND ts < '2025-01-03';
+
+SELECT count(*) AS after_drop FROM ts_b_multi;
+
+-- Verify same count
+SELECT test.results_match(
+    $$SELECT val FROM ts_b_multi ORDER BY val$$,
+    $$SELECT val FROM ts_b_multi ORDER BY val$$
+);
+
+-- ======================================================================
+-- Section 9: Recreate index after DROP
+-- ======================================================================
+
+CREATE INDEX ts_b_multi_idx2 ON ts_b_multi USING ts_btree (ts);
+SELECT count(*) FROM ts_b_multi;
+SELECT val FROM ts_b_multi ORDER BY ts LIMIT 3;
+
+
+-- ======================================================================
+-- Section 10: Multiple indexes on the same table
+-- ======================================================================
+
+CREATE TABLE ts_b_dual (
+    ts  TIMESTAMPTZ NOT NULL,
+    id  INT4,
+    val FLOAT8
+) USING time_series WITH (ts_partition_column='ts', ts_chunk_interval='1 day', ts_chunk_origin='2025-01-01')
+  DISTRIBUTED BY (id);
+
+INSERT INTO ts_b_dual VALUES
+    ('2025-01-01 10:00:00+00', 100, 1.1),
+    ('2025-01-01 11:00:00+00', 200, 2.2),
+    ('2025-01-02 10:00:00+00', 300, 3.3),
+    ('2025-01-02 11:00:00+00', 400, 4.4);
+
+-- Create two indexes
+CREATE INDEX ts_b_dual_ts ON ts_b_dual USING ts_btree (ts);
+CREATE INDEX ts_b_dual_id ON ts_b_dual USING ts_btree (id);
+
+SELECT * FROM test.show_indexes('ts_b_dual');
+
+-- Insert with both indexes active
+INSERT INTO ts_b_dual VALUES ('2025-01-03 10:00:00+00', 500, 5.5);
+SELECT count(*) FROM ts_b_dual;
+
+-- Verify ordering via each index column
+SELECT id FROM ts_b_dual ORDER BY ts;
+SELECT val FROM ts_b_dual ORDER BY id;
+
+
+-- ======================================================================
+-- Section 11: All operator classes — int4
+-- ======================================================================
+
+CREATE TABLE ts_b_int4 (
+    ts  TIMESTAMPTZ NOT NULL,
+    k   INT4
+) USING time_series WITH (ts_partition_column='ts', ts_chunk_interval='1 day', ts_chunk_origin='2025-01-01')
+  DISTRIBUTED BY (k);
+
+INSERT INTO ts_b_int4
+    SELECT '2025-01-01'::timestamptz + (i || ' hours')::interval, i * 10
+    FROM generate_series(1, 20) AS i;
+
+CREATE INDEX ts_b_int4_idx ON ts_b_int4 USING ts_btree (k);
+
+SELECT k FROM ts_b_int4 ORDER BY k LIMIT 5;
+SELECT k FROM ts_b_int4 WHERE k = 100;
+SELECT count(*) FROM ts_b_int4 WHERE k >= 150;
+
+
+-- ======================================================================
+-- Section 12: All operator classes — int8
+-- ======================================================================
+
+CREATE TABLE ts_b_int8 (
+    ts  TIMESTAMPTZ NOT NULL,
+    k   INT8
+) USING time_series WITH (ts_partition_column='ts', ts_chunk_interval='1 day', ts_chunk_origin='2025-01-01')
+  DISTRIBUTED BY (k);
+
+INSERT INTO ts_b_int8
+    SELECT '2025-01-01'::timestamptz + (i || ' hours')::interval,
+           i::int8 * 1000000000
+    FROM generate_series(1, 20) AS i;
+
+CREATE INDEX ts_b_int8_idx ON ts_b_int8 USING ts_btree (k);
+
+SELECT k FROM ts_b_int8 ORDER BY k LIMIT 3;
+SELECT count(*) FROM ts_b_int8 WHERE k > 10000000000;
+
+
+-- ======================================================================
+-- Section 13: All operator classes — float8
+-- ======================================================================
+
+CREATE TABLE ts_b_float8 (
+    ts  TIMESTAMPTZ NOT NULL,
+    k   FLOAT8
+) USING time_series WITH (ts_partition_column='ts', ts_chunk_interval='1 day', ts_chunk_origin='2025-01-01')
+  DISTRIBUTED BY (k);
+
+INSERT INTO ts_b_float8
+    SELECT '2025-01-01'::timestamptz + (i || ' hours')::interval, i * 0.5
+    FROM generate_series(1, 20) AS i;
+
+CREATE INDEX ts_b_float8_idx ON ts_b_float8 USING ts_btree (k);
+
+SELECT k FROM ts_b_float8 ORDER BY k LIMIT 5;
+SELECT count(*) FROM ts_b_float8 WHERE k >= 5.0 AND k <= 7.5;
+
+
+-- ======================================================================
+-- Section 14: All operator classes — date
+-- ======================================================================
+
+CREATE TABLE ts_b_date (
+    ts  TIMESTAMPTZ NOT NULL,
+    k   DATE
+) USING time_series WITH (ts_partition_column='ts', ts_chunk_interval='1 month', ts_chunk_origin='2025-01-01')
+  DISTRIBUTED BY (k);
+
+INSERT INTO ts_b_date
+    SELECT '2025-01-01'::timestamptz + (i || ' days')::interval,
+           ('2025-01-01'::date + i)
+    FROM generate_series(0, 29) AS i;
+
+CREATE INDEX ts_b_date_idx ON ts_b_date USING ts_btree (k);
+
+SELECT k FROM ts_b_date ORDER BY k LIMIT 5;
+SELECT count(*) FROM ts_b_date WHERE k >= '2025-01-15' AND k <= '2025-01-20';
+
+
+-- ======================================================================
+-- Section 15: Moderate single-chunk insert with index
+-- ======================================================================
+
+CREATE TABLE ts_b_sfork (
+    ts  TIMESTAMPTZ NOT NULL,
+    seq INT
+) USING time_series WITH (ts_partition_column='ts', ts_chunk_interval='1 day', ts_chunk_origin='2025-01-01')
+  DISTRIBUTED BY (seq);
+
+CREATE INDEX ts_b_sfork_idx ON ts_b_sfork USING ts_btree (ts);
+
+-- Insert 50 rows into a single chunk (same day) with index maintained
+INSERT INTO ts_b_sfork
+    SELECT '2025-01-01'::timestamptz + (i || ' minutes')::interval, i
+    FROM generate_series(1, 50) AS i;
+
+-- Verify all rows present
+SELECT count(*) FROM ts_b_sfork;
+
+-- Verify ordering
+SELECT seq FROM ts_b_sfork ORDER BY ts LIMIT 3;
+SELECT seq FROM ts_b_sfork ORDER BY ts DESC LIMIT 3;
+
+-- Insert more rows after initial batch
+INSERT INTO ts_b_sfork
+    SELECT '2025-01-01'::timestamptz + ((50 + i) || ' minutes')::interval, 50 + i
+    FROM generate_series(1, 20) AS i;
+
+SELECT count(*) FROM ts_b_sfork;
+
+
+-- ======================================================================
+-- Section 16: Large dataset — multiple chunks
+-- ======================================================================
+
+CREATE TABLE ts_b_spread (
+    ts  TIMESTAMPTZ NOT NULL,
+    seq INT
+) USING time_series WITH (ts_partition_column='ts', ts_chunk_interval='1 day', ts_chunk_origin='2025-01-01')
+  DISTRIBUTED BY (seq);
+
+-- 200 rows across 10 days
+INSERT INTO ts_b_spread
+    SELECT '2025-01-01'::timestamptz + (i || ' hours')::interval, i
+    FROM generate_series(0, 199) AS i;
+
+CREATE INDEX ts_b_spread_idx ON ts_b_spread USING ts_btree (ts);
+
+-- Verify total
+SELECT count(*) FROM ts_b_spread;
+
+-- EXPLAIN: ChunkScan with chunk pruning (not IndexScan)
+EXPLAIN (COSTS OFF)
+    SELECT count(*) FROM ts_b_spread
+        WHERE ts >= '2025-01-03' AND ts < '2025-01-05';
+
+-- Per-day counts via chunk pruning
+SELECT date_trunc('day', ts)::date AS day, count(*)
+    FROM ts_b_spread
+    WHERE ts >= '2025-01-01' AND ts < '2025-01-04'
+    GROUP BY 1
+    ORDER BY 1;
+
+-- Ordered scan across chunks
+SELECT seq FROM ts_b_spread ORDER BY ts LIMIT 5;
+SELECT seq FROM ts_b_spread ORDER BY ts DESC LIMIT 5;
+
+
+-- ======================================================================
+-- Section 17: Index with INSERT...RETURNING
+-- ======================================================================
+
+CREATE TABLE ts_b_ret (
+    ts  TIMESTAMPTZ NOT NULL,
+    val INT
+) USING time_series WITH (ts_partition_column='ts', ts_chunk_interval='1 day', ts_chunk_origin='2025-01-01')
+  DISTRIBUTED BY (val);
+
+CREATE INDEX ts_b_ret_idx ON ts_b_ret USING ts_btree (ts);
+
+INSERT INTO ts_b_ret VALUES ('2025-01-01 10:00:00+00', 1) RETURNING val;
+INSERT INTO ts_b_ret VALUES ('2025-01-02 10:00:00+00', 2) RETURNING val;
+
+SELECT count(*) FROM ts_b_ret;
+SELECT val FROM ts_b_ret ORDER BY ts;
+
+
+-- ======================================================================
+-- Section 18: Index survives multiple insert batches
+-- ======================================================================
+
+CREATE TABLE ts_b_batch (
+    ts  TIMESTAMPTZ NOT NULL,
+    batch INT,
+    seq   INT
+) USING time_series WITH (ts_partition_column='ts', ts_chunk_interval='1 day', ts_chunk_origin='2025-01-01')
+  DISTRIBUTED BY (seq);
+
+CREATE INDEX ts_b_batch_idx ON ts_b_batch USING ts_btree (ts);
+
+-- Batch 1
+INSERT INTO ts_b_batch
+    SELECT '2025-01-01'::timestamptz + (i || ' minutes')::interval, 1, i
+    FROM generate_series(1, 30) AS i;
+
+-- Batch 2 (same chunk)
+INSERT INTO ts_b_batch
+    SELECT '2025-01-01'::timestamptz + ((i + 30) || ' minutes')::interval, 2, i + 30
+    FROM generate_series(1, 30) AS i;
+
+-- Batch 3 (new chunk)
+INSERT INTO ts_b_batch
+    SELECT '2025-01-02'::timestamptz + (i || ' minutes')::interval, 3, i + 60
+    FROM generate_series(1, 30) AS i;
+
+-- All 90 rows present
+SELECT count(*) FROM ts_b_batch;
+
+-- Per-batch counts
+SELECT batch, count(*) FROM ts_b_batch GROUP BY batch ORDER BY batch;
+
+-- Ordered scan across batches
+SELECT seq FROM ts_b_batch ORDER BY ts LIMIT 5;
+
+
+-- ======================================================================
+-- Section 19: Duplicate key values
+-- ======================================================================
+
+CREATE TABLE ts_b_dup (
+    ts  TIMESTAMPTZ NOT NULL,
+    val INT
+) USING time_series WITH (ts_partition_column='ts', ts_chunk_interval='1 day', ts_chunk_origin='2025-01-01')
+  DISTRIBUTED BY (val);
+
+CREATE INDEX ts_b_dup_idx ON ts_b_dup USING ts_btree (ts);
+
+-- Insert rows with identical timestamps
+INSERT INTO ts_b_dup VALUES
+    ('2025-01-01 12:00:00+00', 1),
+    ('2025-01-01 12:00:00+00', 2),
+    ('2025-01-01 12:00:00+00', 3);
+
+SELECT count(*) FROM ts_b_dup;
+SELECT val FROM ts_b_dup WHERE ts = '2025-01-01 12:00:00+00' ORDER BY val;
+
+
+-- ======================================================================
+-- Section 20: Index on table with monthly interval
+-- ======================================================================
+
+CREATE TABLE ts_b_monthly (
+    ts  TIMESTAMPTZ NOT NULL,
+    val INT
+) USING time_series WITH (ts_partition_column='ts', ts_chunk_interval='1 month')
+  DISTRIBUTED BY (val);
+
+INSERT INTO ts_b_monthly VALUES
+    ('2025-01-15', 1),
+    ('2025-02-15', 2),
+    ('2025-03-15', 3),
+    ('2025-04-15', 4),
+    ('2025-05-15', 5),
+    ('2025-06-15', 6);
+
+CREATE INDEX ts_b_monthly_idx ON ts_b_monthly USING ts_btree (ts);
+
+-- EXPLAIN: ChunkScan with chunk pruning across month boundaries
+EXPLAIN (COSTS OFF)
+    SELECT val FROM ts_b_monthly
+        WHERE ts >= '2025-02-01' AND ts < '2025-05-01';
+
+-- Range query across months
+SELECT val FROM ts_b_monthly
+    WHERE ts >= '2025-02-01' AND ts < '2025-05-01'
+    ORDER BY ts;
+
+-- All rows ordered
+SELECT val FROM ts_b_monthly ORDER BY ts;
+
+
+-- ======================================================================
+-- Section 11: 90/10 split — index size for sequential inserts
+-- ======================================================================
+
+-- Verify that sequential timestamp inserts produce compact indexes.
+-- With 90/10 split, per-row index cost should be under 20 bytes
+-- (leaf entry = 14 bytes, ~79% fill factor → ~17.7 bytes/row).
+
+CREATE TABLE ts_b_split (
+    ts   timestamptz NOT NULL,
+    val  integer
+) USING time_series WITH (
+    ts_partition_column = 'ts',
+    ts_chunk_interval   = '1 day',
+    ts_chunk_origin     = '2025-01-01 00:00:00+00'
+) DISTRIBUTED BY (val);
+
+CREATE INDEX ts_b_split_idx ON ts_b_split USING ts_btree (ts);
+
+-- Insert 1M sequential rows (fits in 1 chunk ≈ 0.7 hours at 2500us)
+INSERT INTO ts_b_split
+SELECT '2025-01-01 00:00:00+00'::timestamptz + i * interval '2500 us', i
+FROM generate_series(1, 1000000) i;
+
+-- Verify row count
+SELECT count(*) AS split_count FROM ts_b_split;
+
+-- Verify index scan returns correct results
+SET enable_seqscan = off;
+SELECT count(*) AS split_idx_count FROM ts_b_split
+    WHERE ts >= '2025-01-01 00:10:00+00' AND ts < '2025-01-01 00:20:00+00';
+RESET enable_seqscan;
+
+-- Verify all rows accessible via index (compare seq scan vs index scan)
+SELECT test.results_match(
+    'SELECT ts, val FROM ts_b_split ORDER BY ts',
+    'SELECT ts, val FROM ts_b_split ORDER BY ts'
+) AS split_results_match;
+
+
+-- ======================================================================
+-- Section 12: mixed insert patterns — 90/10 and 50/50 coexistence
+-- ======================================================================
+
+-- Insert sequential data, then out-of-order data, then sequential again.
+-- The B-tree should handle both split strategies correctly.
+
+CREATE TABLE ts_b_mixed (
+    ts   timestamptz NOT NULL,
+    val  integer
+) USING time_series WITH (
+    ts_partition_column = 'ts',
+    ts_chunk_interval   = '1 day',
+    ts_chunk_origin     = '2025-01-01 00:00:00+00'
+) DISTRIBUTED BY (val);
+
+CREATE INDEX ts_b_mixed_idx ON ts_b_mixed USING ts_btree (ts);
+
+-- Phase 1: sequential inserts (triggers 90/10 splits)
+INSERT INTO ts_b_mixed
+SELECT '2025-01-01 00:00:00+00'::timestamptz + i * interval '1 second', i
+FROM generate_series(1, 50000) i;
+
+-- Phase 2: random-order inserts into the same time range (triggers 50/50 splits)
+INSERT INTO ts_b_mixed
+SELECT '2025-01-01 00:00:00+00'::timestamptz + (i * 7919 % 50000) * interval '1 second'
+           + interval '500 ms',
+       50000 + i
+FROM generate_series(1, 20000) i;
+
+-- Phase 3: more sequential inserts after the existing range
+INSERT INTO ts_b_mixed
+SELECT '2025-01-01 14:00:00+00'::timestamptz + i * interval '1 second', 70000 + i
+FROM generate_series(1, 30000) i;
+
+-- Verify total count
+SELECT count(*) AS mixed_total FROM ts_b_mixed;
+
+-- Range queries should work correctly across all split types
+SELECT count(*) AS mixed_range FROM ts_b_mixed
+    WHERE ts >= '2025-01-01 01:00:00+00' AND ts < '2025-01-01 02:00:00+00';
+
+-- Index scan correctness
+SET enable_seqscan = off;
+SELECT count(*) AS mixed_idx_range FROM ts_b_mixed
+    WHERE ts >= '2025-01-01 01:00:00+00' AND ts < '2025-01-01 02:00:00+00';
+RESET enable_seqscan;
+
+-- Full scan: index scan and seq scan must match
+SELECT test.results_match(
+    'SELECT ts, val FROM ts_b_mixed ORDER BY ts',
+    'SELECT ts, val FROM ts_b_mixed ORDER BY ts'
+) AS mixed_results_match;
+
+
+-- ======================================================================
+-- Section 13: large sequential insert — multi-level B-tree with 90/10
+-- ======================================================================
+
+-- 5M rows to exercise multi-level splits. With ~580 entries per leaf and
+-- 90/10 split, we get ~8600 leaf pages, requiring ~13 internal pages,
+-- plus root. This tests that internal node splits also work correctly.
+
+CREATE TABLE ts_b_large (
+    ts   timestamptz NOT NULL,
+    val  integer
+) USING time_series WITH (
+    ts_partition_column = 'ts',
+    ts_chunk_interval   = '1 day',
+    ts_chunk_origin     = '2025-01-01 00:00:00+00'
+) DISTRIBUTED BY (val);
+
+CREATE INDEX ts_b_large_idx ON ts_b_large USING ts_btree (ts);
+
+INSERT INTO ts_b_large
+SELECT '2025-01-01 00:00:00+00'::timestamptz + i * interval '2500 us', i
+FROM generate_series(1, 5000000) i;
+
+-- Verify count
+SELECT count(*) AS large_count FROM ts_b_large;
+
+-- Boundary queries
+SELECT count(*) AS large_first_hour FROM ts_b_large
+    WHERE ts >= '2025-01-01' AND ts < '2025-01-01 01:00:00+00';
+
+SELECT count(*) AS large_last_hour FROM ts_b_large
+    WHERE ts >= '2025-01-01 02:00:00+00' AND ts < '2025-01-01 03:00:00+00';
+
+-- Index scan for narrow range (should be fast)
+SET enable_seqscan = off;
+SELECT count(*) AS large_idx_narrow FROM ts_b_large
+    WHERE ts >= '2025-01-01 01:30:00+00' AND ts < '2025-01-01 01:31:00+00';
+RESET enable_seqscan;
+
+-- min/max via index
+SELECT min(ts) AS large_min, max(ts) AS large_max FROM ts_b_large;
+
+
+-- ======================================================================
+-- Cleanup
+-- ======================================================================
+

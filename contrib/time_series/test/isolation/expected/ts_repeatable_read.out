@@ -1,0 +1,51 @@
+Parsed test spec with 3 sessions
+
+starting permutation: r_begin_rr r_count w1_insert r_count w2_insert r_count r_count_day2 r_commit r_count r_count_day2
+step r_begin_rr: BEGIN ISOLATION LEVEL REPEATABLE READ;
+step r_count: SELECT count(*) FROM ts_rr;
+count
+-----
+   50
+(1 row)
+
+step w1_insert: 
+    INSERT INTO ts_rr
+    SELECT '2025-01-01 12:00:00+00'::timestamptz + (i * interval '1 minute'), 100 + i
+    FROM generate_series(1, 50) i;
+
+step r_count: SELECT count(*) FROM ts_rr;
+count
+-----
+   50
+(1 row)
+
+step w2_insert: 
+    INSERT INTO ts_rr
+    SELECT '2025-01-02'::timestamptz + (i * interval '1 minute'), 200 + i
+    FROM generate_series(1, 50) i;
+
+step r_count: SELECT count(*) FROM ts_rr;
+count
+-----
+   50
+(1 row)
+
+step r_count_day2: SELECT count(*) FROM ts_rr WHERE ts >= '2025-01-02';
+count
+-----
+    0
+(1 row)
+
+step r_commit: COMMIT;
+step r_count: SELECT count(*) FROM ts_rr;
+count
+-----
+  150
+(1 row)
+
+step r_count_day2: SELECT count(*) FROM ts_rr WHERE ts >= '2025-01-02';
+count
+-----
+   50
+(1 row)
+

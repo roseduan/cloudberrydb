@@ -1,0 +1,21 @@
+-- Global match substitutions for time_series regression tests.
+-- Masks segment-specific info (IP, port, PID) that varies across environments.
+
+-- start_matchsubs
+# Mask segment-specific info (IP, port, PID) that varies across runs.
+m/\(seg\d+ .*?\)/
+s/\(seg\d+ .*?\)/(seg0 slice1 127.0.0.1:1234 pid=12345)/
+# Mask C source-file line numbers in elog/ereport messages: errors
+# like "(insert.c:841)" embed the elog() line, which drifts every
+# time the .c file is edited.  Normalize ":N" so tests aren't
+# sensitive to refactors.
+m/\(insert\.c:\d+\)/
+s/\(insert\.c:\d+\)/(insert.c:NNN)/
+m/\(refresh\.c:\d+\)/
+s/\(refresh\.c:\d+\)/(refresh.c:NNN)/
+-- end_matchsubs
+
+-- start_matchignore
+m/^NOTICE:  extension .* already exists, skipping$/
+m/^NOTICE:  schema .* already exists, skipping$/
+-- end_matchignore

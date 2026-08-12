@@ -1,0 +1,99 @@
+Parsed test spec with 2 sessions
+
+starting permutation: i_insert_chunk1 c_copy_chunk1 i_count c_count
+step i_insert_chunk1: 
+    INSERT INTO ts_ci
+    SELECT '2025-01-01 00:00:00+00'::timestamptz + (i * interval '1 minute'),
+           1, i
+    FROM generate_series(1, 200) i;
+
+step c_copy_chunk1: 
+    COPY (
+        SELECT '2025-01-01 12:00:00+00'::timestamptz + (i * interval '1 minute'),
+               2, i
+        FROM generate_series(1, 200) i
+    ) TO '/tmp/ts_ci_copy.csv' WITH (FORMAT csv);
+    COPY ts_ci FROM '/tmp/ts_ci_copy.csv' WITH (FORMAT csv);
+
+step i_count: SELECT count(*) FROM ts_ci WHERE sid = 1;
+count
+-----
+  200
+(1 row)
+
+step c_count: SELECT count(*) FROM ts_ci WHERE sid = 2;
+count
+-----
+  200
+(1 row)
+
+
+starting permutation: i_insert_chunk1 c_copy_chunk2 i_count c_count
+step i_insert_chunk1: 
+    INSERT INTO ts_ci
+    SELECT '2025-01-01 00:00:00+00'::timestamptz + (i * interval '1 minute'),
+           1, i
+    FROM generate_series(1, 200) i;
+
+step c_copy_chunk2: 
+    COPY (
+        SELECT '2025-01-02 12:00:00+00'::timestamptz + (i * interval '1 minute'),
+               2, i
+        FROM generate_series(1, 200) i
+    ) TO '/tmp/ts_ci_copy2.csv' WITH (FORMAT csv);
+    COPY ts_ci FROM '/tmp/ts_ci_copy2.csv' WITH (FORMAT csv);
+
+step i_count: SELECT count(*) FROM ts_ci WHERE sid = 1;
+count
+-----
+  200
+(1 row)
+
+step c_count: SELECT count(*) FROM ts_ci WHERE sid = 2;
+count
+-----
+  200
+(1 row)
+
+
+starting permutation: i_insert_chunk1 c_copy_chunk1 i_insert_chunk2 c_copy_chunk2 i_count c_count
+step i_insert_chunk1: 
+    INSERT INTO ts_ci
+    SELECT '2025-01-01 00:00:00+00'::timestamptz + (i * interval '1 minute'),
+           1, i
+    FROM generate_series(1, 200) i;
+
+step c_copy_chunk1: 
+    COPY (
+        SELECT '2025-01-01 12:00:00+00'::timestamptz + (i * interval '1 minute'),
+               2, i
+        FROM generate_series(1, 200) i
+    ) TO '/tmp/ts_ci_copy.csv' WITH (FORMAT csv);
+    COPY ts_ci FROM '/tmp/ts_ci_copy.csv' WITH (FORMAT csv);
+
+step i_insert_chunk2: 
+    INSERT INTO ts_ci
+    SELECT '2025-01-02 00:00:00+00'::timestamptz + (i * interval '1 minute'),
+           1, i
+    FROM generate_series(1, 200) i;
+
+step c_copy_chunk2: 
+    COPY (
+        SELECT '2025-01-02 12:00:00+00'::timestamptz + (i * interval '1 minute'),
+               2, i
+        FROM generate_series(1, 200) i
+    ) TO '/tmp/ts_ci_copy2.csv' WITH (FORMAT csv);
+    COPY ts_ci FROM '/tmp/ts_ci_copy2.csv' WITH (FORMAT csv);
+
+step i_count: SELECT count(*) FROM ts_ci WHERE sid = 1;
+count
+-----
+  400
+(1 row)
+
+step c_count: SELECT count(*) FROM ts_ci WHERE sid = 2;
+count
+-----
+  400
+(1 row)
+

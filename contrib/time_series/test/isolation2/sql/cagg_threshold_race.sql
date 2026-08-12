@@ -1,0 +1,171 @@
+-- ============================================================
+-- cagg_threshold_race.sql (isolation2)
+--
+-- Regression test for the L1 threshold race condition.
+--
+-- Scenario: concurrent REFRESH advances the threshold while a
+-- long-running INSERT transaction holds a stale cached copy.
+-- Without the PRE_COMMIT re-check fix, rows that fall into the
+-- newly-materialized zone (old_threshold <= ts < new_threshold)
+-- get NO L1 entry, causing permanent data loss in the CAGG view.
+--
+-- The fix: at PRE_COMMIT, cagg_l1_batch_flush() re-reads the
+-- threshold; if it advanced past the cached value, a supplemental
+-- L1 is written covering the full range of inserts.
+--
+-- Fault injection: cagg_refresh_after_commit_and_chain
+--   (fires after TX-R1 commits threshold advance, before TX-R2
+--    materializes — the window where the race occurs)
+-- ============================================================
+
+-- ============================================================
+-- Setup
+-- ============================================================
+1: SET optimizer = off;
+1: SET timezone = 'UTC';
+1: DROP EXTENSION IF EXISTS time_series CASCADE;
+1: CREATE EXTENSION time_series;
+1: SET search_path TO public, time_series;
+
+-- Source table: 1-hour buckets, 4-hour chunks
+1: CREATE TABLE race_src (
+    time TIMESTAMPTZ NOT NULL,
+    dev  INT NOT NULL,
+    val  DOUBLE PRECISION NOT NULL
+) USING time_series WITH (
+    ts_partition_column = 'time',
+    ts_chunk_interval   = '4 hour',
+    ts_chunk_origin     = '2024-01-01 00:00+00'
+)
+DISTRIBUTED BY (dev);
+
+-- Seed data: hours 00:00 through 07:30 (all above future watermark=00:00)
+1: INSERT INTO race_src
+   SELECT '2024-01-01 00:00+00'::timestamptz + (i * interval '30 min'),
+          (i % 3) + 1,
+          10.0 + i
+   FROM generate_series(0, 15) i;
+
+-- Create CAGG with 1-hour buckets
+1: CREATE MATERIALIZED VIEW race_cv WITH (time_series.continuous) AS
+   SELECT time_bucket('1 hour'::interval, time) AS bucket,
+          count(*) AS cnt,
+          avg(val)  AS avg_val
+   FROM race_src GROUP BY bucket;
+
+-- Initial REFRESH: materializes all closed buckets, sets threshold
+1: CALL time_series.refresh_continuous_aggregate('race_cv', NULL, NULL);
+
+-- Record baseline: how many buckets the CAGG has
+1: SELECT count(*) AS baseline_buckets FROM race_cv;
+
+-- Show current threshold (for debugging)
+1: SELECT DISTINCT threshold FROM time_series.cagg_invalidation_threshold
+   WHERE source_table_oid = 'race_src'::regclass;
+
+-- Setup sessions
+2: SET optimizer = off;
+2: SET timezone = 'UTC';
+2: SET search_path TO public, time_series;
+3: SET optimizer = off;
+3: SET timezone = 'UTC';
+3: SET search_path TO public, time_series;
+
+-- ============================================================
+-- Test: Threshold race with PRE_COMMIT compensation
+--
+-- Timeline:
+--   1. Session 2 starts a transaction, inserts a row at 03:30
+--      (below current threshold → gets L1 via normal path)
+--   2. Session 2 inserts a row at 04:30 (above threshold → no L1
+--      at trigger time, but tracked by full_range)
+--   3. Session 1 runs REFRESH which advances threshold past 04:30
+--      (fault injection suspends REFRESH after threshold commit)
+--   4. Session 2 inserts another row at 04:00 (above old threshold,
+--      below new threshold → the race victim)
+--   5. Session 2 COMMITs → PRE_COMMIT re-check detects threshold
+--      drift, writes supplemental L1
+--   6. Session 1 REFRESH completes
+--   7. Another REFRESH picks up the supplemental L1 → bucket 04:00
+--      is correctly materialized
+-- ============================================================
+
+-- Inject fault: suspend REFRESH after TX-R1 commits threshold
+1: SELECT gp_inject_fault('cagg_refresh_after_commit_and_chain',
+                          'suspend', dbid)
+   FROM gp_segment_configuration WHERE role = 'p' AND content = -1;
+
+-- Session 2: begin long-running INSERT transaction
+2: BEGIN;
+2: INSERT INTO race_src VALUES ('2024-01-01 03:30+00', 1, 33.0);
+2: INSERT INTO race_src VALUES ('2024-01-01 04:30+00', 1, 45.0);
+
+-- Session 1: start REFRESH (will suspend after advancing threshold)
+-- Need new data above current watermark so REFRESH has work to do
+1: INSERT INTO race_src VALUES ('2024-01-01 05:30+00', 2, 55.0);
+-- Use `>` (async without 500ms blocking-detect) instead of `&`: the
+-- `&` flag forces the iso2 framework's [sql_isolation_testcase.py:315]
+-- 500ms poll, which races against the fault dispatcher (gp_inject_fault
+-- propagation is documented as "false-negative ok" in faultinjector.c).
+-- We don't need that early sanity check anyway -- the
+-- `gp_wait_until_triggered_fault` below is the load-bearing assertion
+-- that the refresh actually reached the suspend point.
+1>: CALL time_series.refresh_continuous_aggregate('race_cv', NULL, NULL);
+
+-- Wait for REFRESH to hit the fault point (threshold committed)
+3: SELECT gp_wait_until_triggered_fault('cagg_refresh_after_commit_and_chain', 1, dbid)
+   FROM gp_segment_configuration WHERE role = 'p' AND content = -1;
+
+-- Session 2: insert the race-victim row (above old threshold, below new)
+-- and commit — PRE_COMMIT re-check should detect threshold drift
+2: INSERT INTO race_src VALUES ('2024-01-01 04:00+00', 1, 40.0);
+2: COMMIT;
+
+-- Resume REFRESH
+3: SELECT gp_inject_fault('cagg_refresh_after_commit_and_chain',
+                          'reset', dbid)
+   FROM gp_segment_configuration WHERE role = 'p' AND content = -1;
+
+-- Wait for REFRESH to complete
+1<:
+
+-- Now run a second REFRESH to consume the supplemental L1
+1: CALL time_series.refresh_continuous_aggregate('race_cv', NULL, NULL);
+
+-- ============================================================
+-- Verification: the race-victim bucket (04:00) must be present
+-- ============================================================
+
+-- Count rows in source at bucket 04:00
+1: SELECT time_bucket('1 hour'::interval, time) AS bucket,
+          count(*) AS src_cnt
+   FROM race_src
+   WHERE time >= '2024-01-01 04:00+00' AND time < '2024-01-01 05:00+00'
+   GROUP BY bucket;
+
+-- Count rows in CAGG at bucket 04:00
+-- This MUST show cnt > 0 (the fix ensures L1 was written)
+1: SELECT bucket, cnt FROM race_cv
+   WHERE bucket = '2024-01-01 04:00+00';
+
+-- Full diff: source vs CAGG (should be 0 for all closed buckets)
+-- Only check closed buckets (below current threshold)
+1: SELECT count(*) AS diff_count FROM (
+   (SELECT bucket, cnt FROM race_cv
+    EXCEPT
+    SELECT time_bucket('1 hour'::interval, time), count(*)
+    FROM race_src GROUP BY 1)
+   UNION ALL
+   (SELECT time_bucket('1 hour'::interval, time), count(*)
+    FROM race_src GROUP BY 1
+    EXCEPT
+    SELECT bucket, cnt FROM race_cv)
+   ) x
+   WHERE bucket < (SELECT DISTINCT threshold FROM time_series.cagg_invalidation_threshold
+                    WHERE source_table_oid = 'race_src'::regclass);
+
+-- ============================================================
+-- Cleanup
+-- ============================================================
+1: DROP VIEW race_cv CASCADE;
+1: DROP TABLE race_src CASCADE;

@@ -1,0 +1,868 @@
+-- ============================================================
+-- cagg_smoke.sql
+-- End-to-end lifecycle test for Continuous Aggregates.
+--
+-- Walks through the full CAGG lifecycle in one file:
+--   CREATE → REFRESH → real-time → backfill → multi-CAGG →
+--   streaming append → time range filter → drop single CAGG →
+--   TRUNCATE → re-populate → DROP + cleanup
+--
+-- Every step verifies symmetric EXCEPT = 0 (CAGG↔direct, both directions).
+-- ============================================================
+SET optimizer = off;
+SET timezone = 'UTC';
+DROP EXTENSION IF EXISTS time_series CASCADE;
+NOTICE:  extension "time_series" does not exist, skipping
+CREATE EXTENSION time_series;
+WARNING:  referential integrity (FOREIGN KEY) constraints are not supported in Apache Cloudberry, will not be enforced
+SET search_path TO public, time_series;
+-- ============================================================
+-- Phase 1: CREATE
+-- ============================================================
+\echo '=== Phase 1: CREATE ==='
+=== Phase 1: CREATE ===
+CREATE TABLE sensor (
+    time        TIMESTAMPTZ       NOT NULL,
+    device_id   INT               NOT NULL,
+    temperature DOUBLE PRECISION,
+    humidity    DOUBLE PRECISION
+) USING time_series WITH (
+    ts_partition_column = 'time',
+    ts_chunk_interval   = '4 hour',
+    ts_chunk_origin     = '2020-01-01'
+) DISTRIBUTED BY (device_id);
+-- 5000 rows: 10 devices × 10 hours × 50 rows per (device, hour)
+INSERT INTO sensor
+SELECT '2024-01-01 00:00+00'::timestamptz
+         + (hr || ' hour')::interval
+         + (dev * 3 || ' minute')::interval
+         + (m || ' minute')::interval,
+       dev,
+       20.0 + dev * 1.5 + hr * 0.3 + m * 0.1,
+       50.0 + dev * 2.0 - hr * 0.5 + m * 0.05
+FROM generate_series(1, 10) dev,
+     generate_series(0, 9)  hr,
+     generate_series(1, 50) m;
+CREATE MATERIALIZED VIEW sensor_hourly
+WITH (time_series.continuous) AS
+  SELECT time_bucket('1 hour'::interval, time) AS bucket,
+         device_id,
+         count(*) AS cnt,
+         avg(temperature) AS avg_temp,
+         min(humidity) AS min_hum,
+         max(humidity) AS max_hum
+  FROM sensor
+  GROUP BY bucket, device_id;
+NOTICE:  continuous aggregate "sensor_hourly" successfully created
+DETAIL:  Materialization table: time_series._mat_sensor_hourly_1
+-- Two more CAGGs on the SAME source table (different bucket widths)
+CREATE MATERIALIZED VIEW sensor_2hourly
+WITH (time_series.continuous) AS
+  SELECT time_bucket('2 hour'::interval, time) AS bucket,
+         device_id,
+         count(*) AS cnt,
+         avg(temperature) AS avg_temp,
+         min(humidity) AS min_hum,
+         max(humidity) AS max_hum
+  FROM sensor
+  GROUP BY bucket,device_id;
+NOTICE:  continuous aggregate "sensor_2hourly" successfully created
+DETAIL:  Materialization table: time_series._mat_sensor_2hourly_2
+CREATE MATERIALIZED VIEW sensor_daily
+WITH (time_series.continuous) AS
+  SELECT time_bucket('1 day'::interval, time) AS bucket,
+         device_id,
+         count(*) AS cnt,
+         avg(temperature) AS avg_temp,
+         min(humidity) AS min_hum,
+         max(humidity) AS max_hum
+  FROM sensor
+  GROUP BY bucket,device_id;
+NOTICE:  continuous aggregate "sensor_daily" successfully created
+DETAIL:  Materialization table: time_series._mat_sensor_daily_3
+-- Verify all 3 CAGGs exist in catalog
+SELECT user_view_name, mat_table_name, materialized_only
+FROM time_series.continuous_agg
+WHERE user_view_name IN ('sensor_hourly', 'sensor_2hourly', 'sensor_daily')
+ORDER BY user_view_name;
+ user_view_name |    mat_table_name     | materialized_only 
+----------------+-----------------------+-------------------
+ sensor_2hourly | _mat_sensor_2hourly_2 | f
+ sensor_daily   | _mat_sensor_daily_3   | f
+ sensor_hourly  | _mat_sensor_hourly_1  | f
+(3 rows)
+
+-- ============================================================
+-- Phase 2: Full REFRESH
+-- ============================================================
+\echo '=== Phase 2: Full REFRESH ==='
+=== Phase 2: Full REFRESH ===
+-- Refresh all 3 CAGGs
+CALL time_series.refresh_continuous_aggregate('sensor_hourly', NULL, NULL);
+NOTICE:  refreshing continuous aggregate "sensor_hourly"
+CALL time_series.refresh_continuous_aggregate('sensor_2hourly', NULL, NULL);
+NOTICE:  refreshing continuous aggregate "sensor_2hourly"
+CALL time_series.refresh_continuous_aggregate('sensor_daily', NULL, NULL);
+NOTICE:  refreshing continuous aggregate "sensor_daily"
+-- Mat rows for each
+SELECT count(*) AS hourly_rows FROM sensor_hourly;
+ hourly_rows 
+-------------
+         107
+(1 row)
+
+SELECT count(*) AS two_hourly_rows FROM sensor_2hourly;
+ two_hourly_rows 
+-----------------
+              57
+(1 row)
+
+SELECT count(*) AS daily_rows FROM sensor_daily;
+ daily_rows 
+------------
+         10
+(1 row)
+
+-- Watermark per CAGG:
+-- Data: last data point at ~10:20.
+-- sensor_hourly:  time_bucket('1h', 10:20)  = 10:00
+-- sensor_2hourly: time_bucket('2h', 10:20)  = 10:00
+-- sensor_daily:   time_bucket('1d', 10:20)  = 2024-01-01 00:00
+-- Each CAGG's watermark = start of its own last bucket.
+SELECT c.user_view_name, MAX(w.watermark) AS wm_value
+FROM time_series.cagg_watermark w
+JOIN time_series.continuous_agg c ON w.cagg_id = c.cagg_id
+WHERE c.user_view_name IN ('sensor_hourly', 'sensor_2hourly', 'sensor_daily')
+GROUP BY c.user_view_name
+ORDER BY c.user_view_name;
+ user_view_name |           wm_value           
+----------------+------------------------------
+ sensor_2hourly | Mon Jan 01 10:00:00 2024 UTC
+ sensor_daily   | Mon Jan 01 00:00:00 2024 UTC
+ sensor_hourly  | Mon Jan 01 10:00:00 2024 UTC
+(3 rows)
+
+-- Threshold = MAX(all watermarks) for this source table.
+-- MAX(10:00, 10:00, 00:00) = 10:00
+SELECT threshold AS th_value
+FROM time_series.cagg_invalidation_threshold
+WHERE source_table_oid = 'sensor'::regclass
+LIMIT 1;
+           th_value           
+------------------------------
+ Mon Jan 01 10:00:00 2024 UTC
+(1 row)
+
+-- L1 should be empty after all REFRESHes
+SELECT count(*) AS l1_after_refresh FROM time_series.cagg_invalidation_log;
+ l1_after_refresh 
+------------------
+                0
+(1 row)
+
+-- L2 should be empty for all CAGGs
+SELECT count(*) AS l2_after_refresh FROM time_series.cagg_materialization_log
+WHERE cagg_id IN (SELECT cagg_id FROM time_series.continuous_agg
+                  WHERE user_view_name IN ('sensor_hourly', 'sensor_2hourly', 'sensor_daily'));
+ l2_after_refresh 
+------------------
+                0
+(1 row)
+
+-- Symmetric EXCEPT = 0: CAGG must match direct query in BOTH directions
+SELECT count(*) AS diff_full FROM (
+  (SELECT bucket, device_id, cnt,
+          round(avg_temp::numeric, 10) AS avg_temp, min_hum, max_hum
+   FROM sensor_hourly
+   EXCEPT
+   SELECT time_bucket('1 hour'::interval, time), device_id, count(*),
+          round(avg(temperature)::numeric, 10), min(humidity), max(humidity)
+   FROM sensor GROUP BY 1, 2)
+  UNION ALL
+  (SELECT time_bucket('1 hour'::interval, time), device_id, count(*),
+          round(avg(temperature)::numeric, 10), min(humidity), max(humidity)
+   FROM sensor GROUP BY 1, 2
+   EXCEPT
+   SELECT bucket, device_id, cnt,
+          round(avg_temp::numeric, 10), min_hum, max_hum
+   FROM sensor_hourly)
+) x;
+ diff_full 
+-----------
+         0
+(1 row)
+
+-- ============================================================
+-- Phase 2b: EXPLAIN plan shape
+-- ============================================================
+\echo '=== Phase 2b: EXPLAIN plan ==='
+=== Phase 2b: EXPLAIN plan ===
+-- Real-time mode (default): should show Append with two branches
+-- (mat table + source aggregation).
+--
+-- Pin enable_hashagg=off so the source branch's aggregate node is
+-- deterministically GroupAggregate.  This case verifies the plan
+-- SHAPE (Append + mat branch + source-agg branch + pushed-down time
+-- filter), NOT the cost-driven choice between HashAggregate and
+-- GroupAggregate.  That choice flaps near the planner cost boundary
+-- (it depends on row estimates / work_mem / environment), so leaving
+-- it unpinned made the expected plan output non-deterministic.
+SET enable_hashagg = off;
+EXPLAIN (COSTS OFF) SELECT * FROM sensor_hourly WHERE device_id = 1;
+                                                                                                                QUERY PLAN                                                                                                                
+------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+ Gather Motion 1:1  (slice1; segments: 1)
+   ->  Append
+         ->  Seq Scan on _mat_sensor_hourly_1
+               Filter: ((bucket < 'Mon Jan 01 10:00:00 2024 UTC'::timestamp with time zone) AND (device_id = 1))
+         ->  GroupAggregate
+               Group Key: (time_bucket('@ 1 hour'::interval, sensor."time")), sensor.device_id
+               ->  Sort
+                     Sort Key: (time_bucket('@ 1 hour'::interval, sensor."time"))
+                     ->  Custom Scan (ChunkScan) on sensor
+                           Filter: (("time" >= 'Mon Jan 01 10:00:00 2024 UTC'::timestamp with time zone) AND (device_id = 1) AND (time_bucket('@ 1 hour'::interval, "time") >= 'Mon Jan 01 10:00:00 2024 UTC'::timestamp with time zone))
+                           Storage: Time-Series Chunk
+ Optimizer: Postgres query optimizer
+(12 rows)
+
+RESET enable_hashagg;
+-- ============================================================
+-- Phase 3: Real-time visibility (before REFRESH)
+--
+-- Insert new data beyond watermark.  Compare actual values from
+-- three perspectives:
+--   A. Source table direct query (ground truth)
+--   B. CAGG with materialized_only=true (should NOT see new data)
+--   C. CAGG with real-time mode (default, should see new data)
+-- ============================================================
+\echo '=== Phase 3: Real-time visibility ==='
+=== Phase 3: Real-time visibility ===
+-- Insert 10 rows for device_id=99 above the current watermark, spanning
+-- buckets 10:00 and 11:00 (data range 10:10..11:40).  Originally placed
+-- in 2099 + DELETE-cleanup; rewritten because hypertable is append-only
+-- (no DELETE).  Phase 4's bounded refresh below is extended to 12:00 so
+-- both buckets get materialized together — watermark stays well-defined
+-- for later assertions.  device_id=99 is unique to Phase 3 so it doesn't
+-- collide with later phases that use devices 1-10.
+INSERT INTO sensor
+SELECT '2024-01-01 10:00+00'::timestamptz + (i * 10 || ' minute')::interval,
+       99,
+       40.0 + i * 1.5,
+       85.0 + i * 0.7
+FROM generate_series(1, 10) i;
+-- A. Source table ground truth: what the aggregation should look like
+\echo '--- A: source table direct query (ground truth) ---'
+--- A: source table direct query (ground truth) ---
+SELECT time_bucket('1 hour'::interval, time) AS bucket,
+       device_id, count(*) AS cnt,
+       avg(temperature) AS avg_temp,
+       min(humidity) AS min_hum, max(humidity) AS max_hum
+FROM sensor WHERE device_id = 99 GROUP BY 1, 2;
+            bucket            | device_id | cnt | avg_temp | min_hum | max_hum 
+------------------------------+-----------+-----+----------+---------+---------
+ Mon Jan 01 10:00:00 2024 UTC |        99 |   5 |     44.5 |    85.7 |    88.5
+ Mon Jan 01 11:00:00 2024 UTC |        99 |   5 |       52 |    89.2 |      92
+(2 rows)
+
+-- B. CAGG with materialized_only=true: new data should be INVISIBLE
+--    (mat table hasn't been refreshed for this range)
+\echo '--- B: materialized_only=true (no real-time branch) ---'
+--- B: materialized_only=true (no real-time branch) ---
+ALTER VIEW sensor_hourly SET (time_series.materialized_only = true);
+SELECT bucket, device_id, cnt, avg_temp, min_hum, max_hum
+FROM sensor_hourly WHERE device_id = 99;
+ bucket | device_id | cnt | avg_temp | min_hum | max_hum 
+--------+-----------+-----+----------+---------+---------
+(0 rows)
+
+-- C. CAGG with real-time mode: new data should be VISIBLE
+--    (direct_view branch aggregates from source in real-time)
+\echo '--- C: real-time mode (UNION ALL, default) ---'
+--- C: real-time mode (UNION ALL, default) ---
+ALTER VIEW sensor_hourly SET (time_series.materialized_only = false);
+SELECT bucket, device_id, cnt, avg_temp, min_hum, max_hum
+FROM sensor_hourly WHERE device_id = 99;
+            bucket            | device_id | cnt | avg_temp | min_hum | max_hum 
+------------------------------+-----------+-----+----------+---------+---------
+ Mon Jan 01 10:00:00 2024 UTC |        99 |   5 |     44.5 |    85.7 |    88.5
+ Mon Jan 01 11:00:00 2024 UTC |        99 |   5 |       52 |    89.2 |      92
+(2 rows)
+
+-- D. Values must match source exactly (EXCEPT = 0)
+\echo '--- D: EXCEPT = 0 (real-time values match source) ---'
+--- D: EXCEPT = 0 (real-time values match source) ---
+SELECT count(*) AS diff_realtime FROM (
+  (SELECT bucket, device_id, cnt,
+          round(avg_temp::numeric, 10) AS avg_temp, min_hum, max_hum
+   FROM sensor_hourly
+   EXCEPT
+   SELECT time_bucket('1 hour'::interval, time), device_id, count(*),
+          round(avg(temperature)::numeric, 10), min(humidity), max(humidity)
+   FROM sensor GROUP BY 1, 2)
+  UNION ALL
+  (SELECT time_bucket('1 hour'::interval, time), device_id, count(*),
+          round(avg(temperature)::numeric, 10), min(humidity), max(humidity)
+   FROM sensor GROUP BY 1, 2
+   EXCEPT
+   SELECT bucket, device_id, cnt,
+          round(avg_temp::numeric, 10), min_hum, max_hum
+   FROM sensor_hourly)
+) x;
+ diff_realtime 
+---------------
+             0
+(1 row)
+
+-- No cleanup needed: device_id=99 is unique to Phase 3 and data lives
+-- entirely in bucket 10:00 — later phases use different devices/hours,
+-- so the Phase 3 data is naturally inert for subsequent assertions.
+-- ============================================================
+-- Phase 4: Backfill + Incremental REFRESH
+--
+-- Insert data into already-materialized range (backfill).
+-- Compare from three perspectives:
+--   A. L1 invalidation log has entries for the backfilled rows
+--   B. After incremental REFRESH, materialized_only=true matches
+--      source (proves mat table was actually updated)
+--   C. Real-time mode also matches source (EXCEPT = 0)
+-- ============================================================
+\echo '=== Phase 4: Backfill ==='
+=== Phase 4: Backfill ===
+-- Insert 10 rows into already-materialized range (backfill)
+INSERT INTO sensor
+SELECT '2024-01-01 02:00+00'::timestamptz + (i * 30 || ' minute')::interval,
+       (i % 10) + 1,
+       900.0 + i * 5.0,
+       100.0 + i * 3.0
+FROM generate_series(1, 10) i;
+-- A. L1 should have entries for the backfilled rows
+\echo '--- A: L1 invalidation log has backfill entries ---'
+--- A: L1 invalidation log has backfill entries ---
+SELECT count(*) > 0 AS has_l1 FROM time_series.cagg_invalidation_log;
+ has_l1 
+--------
+ t
+(1 row)
+
+-- Incremental REFRESH covering backfill range + Phase 3's device_id=99
+-- rows in buckets 10:00 and 11:00 (range extended to 12:00, was 11:00
+-- in the original heap-table test).
+CALL time_series.refresh_continuous_aggregate('sensor_hourly',
+  '2024-01-01 02:00+00', '2024-01-01 12:00+00');
+NOTICE:  refreshing continuous aggregate "sensor_hourly"
+-- B. materialized_only=true: backfill must be IN the mat table
+--    (proves incremental REFRESH actually wrote to mat table,
+--     not just relying on real-time branch)
+\echo '--- B: materialized_only=true (mat table updated) ---'
+--- B: materialized_only=true (mat table updated) ---
+ALTER VIEW sensor_hourly SET (time_series.materialized_only = true);
+-- The hot bucket (containing source max(time)) is excluded from mat
+-- by design (hot-bucket-exclusion fix), so mat mirrors source MINUS
+-- the hot bucket.  Compute the hot-bucket boundary INDEPENDENTLY
+-- from the source table (time_bucket of source max), NOT from the
+-- fix's cagg_watermark catalog -- otherwise the test would use the
+-- fix's own output as its oracle and a mis-set watermark would
+-- escape detection.
+SELECT time_bucket('1 hour'::interval, max(time)) AS hot_start
+  FROM sensor \gset
+-- Verify the fix's watermark landed on the independently-derived
+-- boundary (the check a watermark-as-oracle test would skip).
+SELECT min(watermark) = :'hot_start'::timestamptz AS watermark_at_hot_start
+  FROM time_series.cagg_watermark
+ WHERE cagg_id = (SELECT cagg_id FROM time_series.continuous_agg
+                   WHERE user_view_name = 'sensor_hourly');
+ watermark_at_hot_start 
+------------------------
+ t
+(1 row)
+
+-- diff_backfill_mat = 0 still asserts that every stable bucket --
+-- including the just-backfilled ones at 02:00, which are well below
+-- the hot bucket -- is present and correct in mat.
+SELECT count(*) AS diff_backfill_mat FROM (
+  (SELECT bucket, device_id, cnt,
+          round(avg_temp::numeric, 10) AS avg_temp, min_hum, max_hum
+   FROM sensor_hourly
+   EXCEPT
+   SELECT time_bucket('1 hour'::interval, time), device_id, count(*),
+          round(avg(temperature)::numeric, 10), min(humidity), max(humidity)
+   FROM sensor
+   WHERE time < :'hot_start'::timestamptz
+   GROUP BY 1, 2)
+  UNION ALL
+  (SELECT time_bucket('1 hour'::interval, time), device_id, count(*),
+          round(avg(temperature)::numeric, 10), min(humidity), max(humidity)
+   FROM sensor
+   WHERE time < :'hot_start'::timestamptz
+   GROUP BY 1, 2
+   EXCEPT
+   SELECT bucket, device_id, cnt,
+          round(avg_temp::numeric, 10), min_hum, max_hum
+   FROM sensor_hourly)
+) x;
+ diff_backfill_mat 
+-------------------
+                 0
+(1 row)
+
+-- C. real-time mode: EXCEPT = 0
+\echo '--- C: real-time mode (EXCEPT = 0) ---'
+--- C: real-time mode (EXCEPT = 0) ---
+ALTER VIEW sensor_hourly SET (time_series.materialized_only = false);
+SELECT count(*) AS diff_backfill FROM (
+  (SELECT bucket, device_id, cnt,
+          round(avg_temp::numeric, 10) AS avg_temp, min_hum, max_hum
+   FROM sensor_hourly
+   EXCEPT
+   SELECT time_bucket('1 hour'::interval, time), device_id, count(*),
+          round(avg(temperature)::numeric, 10), min(humidity), max(humidity)
+   FROM sensor GROUP BY 1, 2)
+  UNION ALL
+  (SELECT time_bucket('1 hour'::interval, time), device_id, count(*),
+          round(avg(temperature)::numeric, 10), min(humidity), max(humidity)
+   FROM sensor GROUP BY 1, 2
+   EXCEPT
+   SELECT bucket, device_id, cnt,
+          round(avg_temp::numeric, 10), min_hum, max_hum
+   FROM sensor_hourly)
+) x;
+ diff_backfill 
+---------------
+             0
+(1 row)
+
+-- ============================================================
+-- Phase 5: Multi-CAGG consistency
+--
+-- sensor_2hourly and sensor_daily were only refreshed in Phase 2
+-- (before backfill). Refresh them and verify all 3 CAGGs match
+-- source at their respective granularities.
+-- ============================================================
+\echo '=== Phase 5: Multi-CAGG consistency ==='
+=== Phase 5: Multi-CAGG consistency ===
+CALL time_series.refresh_continuous_aggregate('sensor_2hourly', NULL, NULL);
+NOTICE:  refreshing continuous aggregate "sensor_2hourly"
+CALL time_series.refresh_continuous_aggregate('sensor_daily', NULL, NULL);
+NOTICE:  refreshing continuous aggregate "sensor_daily"
+\echo '--- sensor_hourly ---'
+--- sensor_hourly ---
+SELECT count(*) AS diff_hourly FROM (
+  (SELECT bucket, device_id, cnt,
+          round(avg_temp::numeric, 10) AS avg_temp, min_hum, max_hum
+   FROM sensor_hourly
+   EXCEPT
+   SELECT time_bucket('1 hour'::interval, time), device_id, count(*),
+          round(avg(temperature)::numeric, 10), min(humidity), max(humidity)
+   FROM sensor GROUP BY 1, 2)
+  UNION ALL
+  (SELECT time_bucket('1 hour'::interval, time), device_id, count(*),
+          round(avg(temperature)::numeric, 10), min(humidity), max(humidity)
+   FROM sensor GROUP BY 1, 2
+   EXCEPT
+   SELECT bucket, device_id, cnt,
+          round(avg_temp::numeric, 10), min_hum, max_hum
+   FROM sensor_hourly)
+) x;
+ diff_hourly 
+-------------
+           0
+(1 row)
+
+\echo '--- sensor_2hourly ---'
+--- sensor_2hourly ---
+SELECT count(*) AS diff_2hourly FROM (
+  (SELECT bucket, device_id, cnt,
+          round(avg_temp::numeric, 10) AS avg_temp, min_hum, max_hum
+   FROM sensor_2hourly
+   EXCEPT
+   SELECT time_bucket('2 hour'::interval, time), device_id, count(*),
+          round(avg(temperature)::numeric, 10), min(humidity), max(humidity)
+   FROM sensor GROUP BY 1, 2)
+  UNION ALL
+  (SELECT time_bucket('2 hour'::interval, time), device_id, count(*),
+          round(avg(temperature)::numeric, 10), min(humidity), max(humidity)
+   FROM sensor GROUP BY 1, 2
+   EXCEPT
+   SELECT bucket, device_id, cnt,
+          round(avg_temp::numeric, 10), min_hum, max_hum
+   FROM sensor_2hourly)
+) x;
+ diff_2hourly 
+--------------
+            0
+(1 row)
+
+\echo '--- sensor_daily ---'
+--- sensor_daily ---
+SELECT count(*) AS diff_daily FROM (
+  (SELECT bucket, device_id, cnt,
+          round(avg_temp::numeric, 10) AS avg_temp, min_hum, max_hum
+   FROM sensor_daily
+   EXCEPT
+   SELECT time_bucket('1 day'::interval, time), device_id, count(*),
+          round(avg(temperature)::numeric, 10), min(humidity), max(humidity)
+   FROM sensor GROUP BY 1, 2)
+  UNION ALL
+  (SELECT time_bucket('1 day'::interval, time), device_id, count(*),
+          round(avg(temperature)::numeric, 10), min(humidity), max(humidity)
+   FROM sensor GROUP BY 1, 2
+   EXCEPT
+   SELECT bucket, device_id, cnt,
+          round(avg_temp::numeric, 10), min_hum, max_hum
+   FROM sensor_daily)
+) x;
+ diff_daily 
+------------
+          0
+(1 row)
+
+-- ============================================================
+-- Phase 6: Streaming append + multi-round REFRESH
+--
+-- Simulates real-world continuous data ingestion:
+--   Round 1: INSERT new batch → REFRESH → watermark advances
+--   Round 2: INSERT newer batch → REFRESH → watermark advances again
+--   Verifies watermark monotonically advances with each round.
+-- ============================================================
+\echo '=== Phase 6: Streaming append ==='
+=== Phase 6: Streaming append ===
+-- Record watermark before streaming
+SELECT MAX(w.watermark) AS wm_before_stream
+FROM time_series.cagg_watermark w
+JOIN time_series.continuous_agg c ON w.cagg_id = c.cagg_id
+WHERE c.user_view_name = 'sensor_hourly';
+       wm_before_stream       
+------------------------------
+ Mon Jan 01 11:00:00 2024 UTC
+(1 row)
+
+-- Round 1: Insert hours 12-13 (5 devices × 2 hours = 10 rows)
+\echo '--- Round 1: INSERT hours 12-13 ---'
+--- Round 1: INSERT hours 12-13 ---
+INSERT INTO sensor
+SELECT '2024-01-01 00:00+00'::timestamptz
+         + (hr || ' hour')::interval
+         + (dev * 6 || ' minute')::interval,
+       dev,
+       20.0 + dev + hr * 0.1,
+       50.0 + dev - hr * 0.1
+FROM generate_series(1, 5) dev,
+     generate_series(12, 13) hr;
+CALL time_series.refresh_continuous_aggregate('sensor_hourly', NULL, NULL);
+NOTICE:  refreshing continuous aggregate "sensor_hourly"
+-- Watermark should have advanced past the original 10:00
+SELECT MAX(w.watermark) AS wm_after_round1
+FROM time_series.cagg_watermark w
+JOIN time_series.continuous_agg c ON w.cagg_id = c.cagg_id
+WHERE c.user_view_name = 'sensor_hourly';
+       wm_after_round1        
+------------------------------
+ Mon Jan 01 13:00:00 2024 UTC
+(1 row)
+
+SELECT count(*) AS diff_round1 FROM (
+  (SELECT bucket, device_id, cnt,
+          round(avg_temp::numeric, 10) AS avg_temp, min_hum, max_hum
+   FROM sensor_hourly
+   EXCEPT
+   SELECT time_bucket('1 hour'::interval, time), device_id, count(*),
+          round(avg(temperature)::numeric, 10), min(humidity), max(humidity)
+   FROM sensor GROUP BY 1, 2)
+  UNION ALL
+  (SELECT time_bucket('1 hour'::interval, time), device_id, count(*),
+          round(avg(temperature)::numeric, 10), min(humidity), max(humidity)
+   FROM sensor GROUP BY 1, 2
+   EXCEPT
+   SELECT bucket, device_id, cnt,
+          round(avg_temp::numeric, 10), min_hum, max_hum
+   FROM sensor_hourly)
+) x;
+ diff_round1 
+-------------
+           0
+(1 row)
+
+-- Round 2: Insert hours 16-17 (5 devices × 2 hours = 10 rows)
+\echo '--- Round 2: INSERT hours 16-17 ---'
+--- Round 2: INSERT hours 16-17 ---
+INSERT INTO sensor
+SELECT '2024-01-01 00:00+00'::timestamptz
+         + (hr || ' hour')::interval
+         + (dev * 6 || ' minute')::interval,
+       dev,
+       20.0 + dev + hr * 0.1,
+       50.0 + dev - hr * 0.1
+FROM generate_series(1, 5) dev,
+     generate_series(16, 17) hr;
+CALL time_series.refresh_continuous_aggregate('sensor_hourly', NULL, NULL);
+NOTICE:  refreshing continuous aggregate "sensor_hourly"
+-- Watermark should have advanced further
+SELECT MAX(w.watermark) AS wm_after_round2
+FROM time_series.cagg_watermark w
+JOIN time_series.continuous_agg c ON w.cagg_id = c.cagg_id
+WHERE c.user_view_name = 'sensor_hourly';
+       wm_after_round2        
+------------------------------
+ Mon Jan 01 17:00:00 2024 UTC
+(1 row)
+
+SELECT count(*) AS diff_round2 FROM (
+  (SELECT bucket, device_id, cnt,
+          round(avg_temp::numeric, 10) AS avg_temp, min_hum, max_hum
+   FROM sensor_hourly
+   EXCEPT
+   SELECT time_bucket('1 hour'::interval, time), device_id, count(*),
+          round(avg(temperature)::numeric, 10), min(humidity), max(humidity)
+   FROM sensor GROUP BY 1, 2)
+  UNION ALL
+  (SELECT time_bucket('1 hour'::interval, time), device_id, count(*),
+          round(avg(temperature)::numeric, 10), min(humidity), max(humidity)
+   FROM sensor GROUP BY 1, 2
+   EXCEPT
+   SELECT bucket, device_id, cnt,
+          round(avg_temp::numeric, 10), min_hum, max_hum
+   FROM sensor_hourly)
+) x;
+ diff_round2 
+-------------
+           0
+(1 row)
+
+-- ============================================================
+-- Phase 7: Time range filter across mat/live boundary
+--
+-- Users commonly query CAGGs with WHERE bucket BETWEEN for
+-- dashboards. This tests the UNION ALL view correctly merges
+-- materialized and live data when the filter spans the watermark.
+-- ============================================================
+\echo '=== Phase 7: Time range filter ==='
+=== Phase 7: Time range filter ===
+-- Insert 10 rows beyond watermark (hours 22-23, not yet refreshed)
+INSERT INTO sensor
+SELECT '2024-01-01 00:00+00'::timestamptz
+         + (hr || ' hour')::interval
+         + (dev * 6 || ' minute')::interval,
+       dev,
+       20.0 + dev + hr * 0.1,
+       50.0 + dev - hr * 0.1
+FROM generate_series(1, 5) dev,
+     generate_series(22, 23) hr;
+-- Query spanning mat (< watermark ~17:00) and live (>= watermark)
+\echo '--- A: EXCEPT = 0 across mat/live boundary ---'
+--- A: EXCEPT = 0 across mat/live boundary ---
+SELECT count(*) AS diff_range_filter FROM (
+  (SELECT bucket, device_id, cnt,
+          round(avg_temp::numeric, 10) AS avg_temp, min_hum, max_hum
+   FROM sensor_hourly
+   WHERE bucket >= '2024-01-01 15:00+00' AND bucket < '2024-01-02 01:00+00'
+   EXCEPT
+   SELECT time_bucket('1 hour'::interval, time), device_id, count(*),
+          round(avg(temperature)::numeric, 10), min(humidity), max(humidity)
+   FROM sensor
+   WHERE time >= '2024-01-01 15:00+00' AND time < '2024-01-02 01:00+00'
+   GROUP BY 1, 2)
+  UNION ALL
+  (SELECT time_bucket('1 hour'::interval, time), device_id, count(*),
+          round(avg(temperature)::numeric, 10), min(humidity), max(humidity)
+   FROM sensor
+   WHERE time >= '2024-01-01 15:00+00' AND time < '2024-01-02 01:00+00'
+   GROUP BY 1, 2
+   EXCEPT
+   SELECT bucket, device_id, cnt,
+          round(avg_temp::numeric, 10), min_hum, max_hum
+   FROM sensor_hourly
+   WHERE bucket >= '2024-01-01 15:00+00' AND bucket < '2024-01-02 01:00+00')
+) x;
+ diff_range_filter 
+-------------------
+                 0
+(1 row)
+
+-- materialized_only should miss the live portion (hours >= 22)
+\echo '--- B: materialized_only misses live data ---'
+--- B: materialized_only misses live data ---
+ALTER VIEW sensor_hourly SET (time_series.materialized_only = true);
+SELECT count(*) AS mat_only_future
+FROM sensor_hourly
+WHERE bucket >= '2024-01-01 22:00+00';
+ mat_only_future 
+-----------------
+               0
+(1 row)
+
+-- real-time mode sees all data including live portion
+\echo '--- C: real-time mode sees live data ---'
+--- C: real-time mode sees live data ---
+ALTER VIEW sensor_hourly SET (time_series.materialized_only = false);
+SELECT count(*) AS realtime_future
+FROM sensor_hourly
+WHERE bucket >= '2024-01-01 22:00+00';
+ realtime_future 
+-----------------
+              10
+(1 row)
+
+-- ============================================================
+-- Phase 8: Drop single CAGG
+--
+-- Drop sensor_daily while sensor_hourly and sensor_2hourly remain.
+-- Verifies:
+--   A. Dropped CAGG removed from catalog
+--   B. Remaining CAGGs still queryable and correct
+--   C. Source table trigger still works for remaining CAGGs
+-- ============================================================
+\echo '=== Phase 8: Drop single CAGG ==='
+=== Phase 8: Drop single CAGG ===
+DROP VIEW sensor_daily;
+-- A. sensor_daily gone, others remain
+\echo '--- A: catalog after drop ---'
+--- A: catalog after drop ---
+SELECT user_view_name FROM time_series.continuous_agg
+WHERE user_view_name IN ('sensor_hourly', 'sensor_2hourly', 'sensor_daily')
+ORDER BY user_view_name;
+ user_view_name 
+----------------
+ sensor_2hourly
+ sensor_hourly
+(2 rows)
+
+-- B. Remaining CAGGs still correct after REFRESH
+\echo '--- B: remaining CAGGs still correct ---'
+--- B: remaining CAGGs still correct ---
+CALL time_series.refresh_continuous_aggregate('sensor_hourly', NULL, NULL);
+NOTICE:  refreshing continuous aggregate "sensor_hourly"
+CALL time_series.refresh_continuous_aggregate('sensor_2hourly', NULL, NULL);
+NOTICE:  refreshing continuous aggregate "sensor_2hourly"
+SELECT count(*) AS diff_after_drop FROM (
+  (SELECT bucket, device_id, cnt,
+          round(avg_temp::numeric, 10) AS avg_temp, min_hum, max_hum
+   FROM sensor_hourly
+   EXCEPT
+   SELECT time_bucket('1 hour'::interval, time), device_id, count(*),
+          round(avg(temperature)::numeric, 10), min(humidity), max(humidity)
+   FROM sensor GROUP BY 1, 2)
+  UNION ALL
+  (SELECT time_bucket('1 hour'::interval, time), device_id, count(*),
+          round(avg(temperature)::numeric, 10), min(humidity), max(humidity)
+   FROM sensor GROUP BY 1, 2
+   EXCEPT
+   SELECT bucket, device_id, cnt,
+          round(avg_temp::numeric, 10), min_hum, max_hum
+   FROM sensor_hourly)
+) x;
+ diff_after_drop 
+-----------------
+               0
+(1 row)
+
+-- C. Trigger still fires for remaining CAGGs
+\echo '--- C: trigger still works ---'
+--- C: trigger still works ---
+INSERT INTO sensor VALUES ('2024-01-01 01:30+00', 1, 100.0, 100.0);
+SELECT count(*) > 0 AS has_l1_after_drop
+FROM time_series.cagg_invalidation_log;
+ has_l1_after_drop 
+-------------------
+ t
+(1 row)
+
+-- ============================================================
+-- Phase 9: TRUNCATE
+-- ============================================================
+\echo '=== Phase 9: TRUNCATE ==='
+=== Phase 9: TRUNCATE ===
+TRUNCATE sensor;
+CALL time_series.refresh_continuous_aggregate('sensor_hourly', NULL, NULL);
+NOTICE:  refreshing continuous aggregate "sensor_hourly"
+-- Mat table should be empty
+SELECT count(*) AS after_truncate FROM sensor_hourly;
+ after_truncate 
+----------------
+              0
+(1 row)
+
+-- ============================================================
+-- Phase 10: Re-populate and verify from scratch
+-- ============================================================
+\echo '=== Phase 10: Re-populate ==='
+=== Phase 10: Re-populate ===
+INSERT INTO sensor
+SELECT '2024-06-01 00:00+00'::timestamptz + (i || ' hour')::interval,
+       (i % 10) + 1, random() * 100, random() * 100
+FROM generate_series(1, 200) i;
+CALL time_series.refresh_continuous_aggregate('sensor_hourly', NULL, NULL);
+NOTICE:  refreshing continuous aggregate "sensor_hourly"
+SELECT count(*) AS diff_repopulate FROM (
+  (SELECT bucket, device_id, cnt,
+          round(avg_temp::numeric, 10) AS avg_temp,
+          round(min_hum::numeric, 10), round(max_hum::numeric, 10)
+   FROM sensor_hourly
+   EXCEPT
+   SELECT time_bucket('1 hour'::interval, time), device_id, count(*),
+          round(avg(temperature)::numeric, 10),
+          round(min(humidity)::numeric, 10), round(max(humidity)::numeric, 10)
+   FROM sensor GROUP BY 1, 2)
+  UNION ALL
+  (SELECT time_bucket('1 hour'::interval, time), device_id, count(*),
+          round(avg(temperature)::numeric, 10),
+          round(min(humidity)::numeric, 10), round(max(humidity)::numeric, 10)
+   FROM sensor GROUP BY 1, 2
+   EXCEPT
+   SELECT bucket, device_id, cnt,
+          round(avg_temp::numeric, 10),
+          round(min_hum::numeric, 10), round(max_hum::numeric, 10)
+   FROM sensor_hourly)
+) x;
+ diff_repopulate 
+-----------------
+               0
+(1 row)
+
+-- ============================================================
+-- Phase 11: DROP + cleanup verification
+-- ============================================================
+\echo '=== Phase 11: DROP ==='
+=== Phase 11: DROP ===
+DROP TABLE sensor CASCADE;
+NOTICE:  drop cascades to 6 other objects
+DETAIL:  drop cascades to view _partial_view_1
+drop cascades to view _direct_view_1
+drop cascades to view sensor_hourly
+drop cascades to view _partial_view_2
+drop cascades to view _direct_view_2
+drop cascades to view sensor_2hourly
+NOTICE:  view "sensor_2hourly" does not exist, skipping
+NOTICE:  view "sensor_hourly" does not exist, skipping
+-- After DROP, ALL remaining CAGG artifacts should be gone
+-- (sensor_daily was already dropped in Phase 8)
+SELECT count(*) AS orphan_catalog FROM time_series.continuous_agg
+WHERE user_view_name IN ('sensor_hourly', 'sensor_2hourly', 'sensor_daily');
+ orphan_catalog 
+----------------
+              0
+(1 row)
+
+SELECT count(*) AS orphan_watermark FROM time_series.cagg_watermark
+WHERE cagg_id IN (SELECT cagg_id FROM time_series.continuous_agg
+                  WHERE user_view_name IN ('sensor_hourly', 'sensor_2hourly', 'sensor_daily'));
+ orphan_watermark 
+------------------
+                0
+(1 row)
+
+SELECT count(*) AS orphan_threshold FROM time_series.cagg_invalidation_threshold
+WHERE source_table_oid NOT IN (SELECT oid FROM pg_class WHERE relkind = 'r');
+ orphan_threshold 
+------------------
+                0
+(1 row)
+
+SELECT count(*) AS orphan_views FROM pg_class
+WHERE relname IN ('sensor_hourly', 'sensor_2hourly', 'sensor_daily');
+ orphan_views 
+--------------
+            0
+(1 row)
+
+\echo '=== SMOKE TEST PASSED ==='
+=== SMOKE TEST PASSED ===

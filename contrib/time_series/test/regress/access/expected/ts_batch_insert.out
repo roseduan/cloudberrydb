@@ -1,0 +1,126 @@
+-- ts_batch_insert.sql
+--
+-- Regression for the batch-insert MAXALIGN bug.
+--
+-- Background: ts_tableam.c batches multiple rows into one heap page and
+-- writes a single WAL record via ts_wal_multi_insert().  The batch size
+-- bookkeeping originally accumulated `tup->t_len + sizeof(ItemIdData)`.
+-- PG heap pages store tuples at 8-byte aligned offsets, so the true cost
+-- per tuple is `MAXALIGN(t_len) + sizeof(ItemIdData)` — up to 7 bytes
+-- more.  With many unaligned wide tuples, the accumulated under-estimate
+-- caused PageAddItem to fail inside a critical section → PANIC and
+-- segment crash.
+--
+-- This test forces the pattern: wide-schema rows (17 cols) with varlena
+-- columns whose lengths vary from unaligned short strings to longer
+-- strings, inserted in one INSERT of 10K rows.  With the MAXALIGN fix
+-- all rows land and compression succeeds.
+\i sql/include/setup.sql
+-- Shared setup for time_series regression tests.
+-- Include this at the top of every test file via:
+--   \ir include/setup.sql
+CREATE EXTENSION IF NOT EXISTS time_series;
+SET optimizer = off;
+SET timezone = 'UTC';
+SET datestyle = 'ISO';
+SET extra_float_digits = 0;
+CREATE SCHEMA IF NOT EXISTS test;
+CREATE TABLE ts_batch_insert_wide (
+    ts          timestamptz      NOT NULL,
+    i2          smallint         NOT NULL,
+    i4          integer          NOT NULL,
+    i8          bigint           NOT NULL,
+    f4          real             NOT NULL,
+    f8          double precision NOT NULL,
+    flag        boolean          NOT NULL,
+    tag         text             NOT NULL,
+    region      text             NOT NULL,
+    host        text             NOT NULL,
+    note        text,
+    num_exact   numeric(12, 4)   NOT NULL,
+    latency_us  integer          NOT NULL,
+    uptime      bigint           NOT NULL,
+    first_seen  date             NOT NULL,
+    last_reboot timestamptz      NOT NULL,
+    duration    interval         NOT NULL
+)
+USING time_series
+WITH (ts_partition_column = 'ts',
+      ts_chunk_interval   = '1 day',
+      ts_chunk_origin     = '2025-01-01');
+NOTICE:  Table doesn't have 'DISTRIBUTED BY' clause -- Using column named 'ts' as the Apache Cloudberry data distribution key for this table.
+HINT:  The 'DISTRIBUTED BY' clause determines the distribution of data. Make sure column(s) chosen are the optimal data distribution key to minimize skew.
+-- Insert 10 000 rows across 3 chunks with deliberately unaligned text
+-- lengths (3..17 bytes modulo 7 → 7 distinct varlena sizes, most not
+-- divisible by 8).  This makes t_len mostly non-MAXALIGN-aligned.
+INSERT INTO ts_batch_insert_wide
+SELECT '2025-01-01 00:00:00+00'::timestamptz + (s * interval '1 minute'),
+       ((s * 7) % 32767)::smallint,
+       s % 1000,
+       s::bigint * 1000,
+       ((s % 97) * 0.5)::real,
+       ((s % 1009) * 0.25)::double precision,
+       (s % 2 = 0),
+       repeat('t', (s % 5) + 2),                -- 2..6 bytes
+       CASE s % 5 WHEN 0 THEN 'us-east' WHEN 1 THEN 'us-west'
+                  WHEN 2 THEN 'eu-west' WHEN 3 THEN 'ap-south' ELSE 'ap-north' END,
+       '10.' || ((s / 256) % 256) || '.' || (s % 256) || '.1',
+       CASE WHEN s % 4 = 0 THEN NULL ELSE repeat('n', (s % 11) + 3) END,
+       ((s % 9999) * 0.0001)::numeric(12, 4),
+       (s * 17) % 10000,
+       s::bigint * 60,
+       '2024-12-01'::date + ((s % 30) || ' days')::interval,
+       '2025-01-01 00:00:00+00'::timestamptz - (s * interval '3 seconds'),
+       ((s % 3600) || ' seconds')::interval
+  FROM generate_series(1, 10000) s;
+-- All rows must be present (10K × 3 segments should round-trip fully).
+SELECT count(*) AS n_rows FROM ts_batch_insert_wide;
+ n_rows 
+--------
+  10000
+(1 row)
+
+-- Compress and verify round-trip over the batch-insert heap.
+SELECT time_series.set_compress_config(
+    'ts_batch_insert_wide'::regclass,
+    segmentby => 'region',
+    orderby   => 'ts'
+);
+ set_compress_config 
+---------------------
+ 
+(1 row)
+
+SELECT time_series.compress_chunks('ts_batch_insert_wide'::regclass) > 0
+    AS at_least_one_chunk_compressed;
+ at_least_one_chunk_compressed 
+-------------------------------
+ t
+(1 row)
+
+SELECT count(*) AS n_rows_after_compress FROM ts_batch_insert_wide;
+ n_rows_after_compress 
+-----------------------
+                 10000
+(1 row)
+
+SELECT region, count(*)
+  FROM ts_batch_insert_wide
+ GROUP BY region
+ ORDER BY region;
+  region  | count 
+----------+-------
+ ap-north |  2000
+ ap-south |  2000
+ eu-west  |  2000
+ us-east  |  2000
+ us-west  |  2000
+(5 rows)
+
+-- Clean up catalog state so downstream tests see a pristine ts_compress_config
+-- / ts_compressed_chunk (DROP TABLE does not currently cascade to these).
+DELETE FROM time_series.ts_compressed_chunk
+ WHERE table_oid = 'ts_batch_insert_wide'::regclass;
+DELETE FROM time_series.ts_compress_config
+ WHERE table_oid = 'ts_batch_insert_wide'::regclass;
+DROP TABLE ts_batch_insert_wide;

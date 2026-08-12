@@ -1,0 +1,13 @@
+# Ignore all runtime artefacts; bench/ tracks only source (scripts + docs).
+#
+# data/ — input data files for the loader (.gz inputs + their decompressed
+#         siblings).  Not tracked because TSBS data files are large and
+#         reproducible from `tsbs_generate_data`; README documents how.
+# sql/  — per-run scratch (generated .bin, extracted .sql, loader logs,
+#         per-query stdout).  bench.sh wipes and recreates on every run.
+# results_*.tsv — bench summary TSVs written by bench.sh to the bench
+#         root so they survive sql/ wipes.  Per-run output, not source.
+
+data/
+sql/
+results_*.tsv

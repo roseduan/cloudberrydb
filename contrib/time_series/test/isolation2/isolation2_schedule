@@ -1,0 +1,146 @@
+# time_series CAGG isolation2 tests
+# Aligned with the reference cagg concurrency isolation specs
+
+# INSERT + SELECT during REFRESH
+test: cagg_insert
+
+# Concurrent REFRESH serialization via advisory lock
+test: cagg_concurrent_refresh
+
+# Two CAGGs on same source: concurrent INSERT/UPDATE/REFRESH
+test: cagg_multi_iso
+
+# Concurrent invalidation threshold updates
+test: cagg_concurrent_invalidation
+
+# Watermark visibility across sessions
+test: cagg_watermark_concurrent_update
+
+# Concurrent L1→L2 migration: two CAGGs on same source, TX1 overlap via fault injection
+# Verifies CBDB 2PC prepared-state visibility prevents L1 row conflicts
+test: cagg_concurrent_l1_migration
+
+# Planner-time walker (constify watermark + time_bucket pushdown) under
+# concurrent REFRESH: prepared-plan replan + cross-session snapshot
+test: cagg_planning_replan
+
+# L1 threshold race: concurrent REFRESH advances threshold while a
+# long-running INSERT holds stale cached copy.  PRE_COMMIT re-check
+# writes supplemental L1 to prevent permanent data loss.
+test: cagg_threshold_race
+
+# Threshold reconcile race: another cagg's refresh on the same source
+# must not move the threshold BACKWARD while a refresh is mid-flight
+# (between TX1 threshold advance and watermark advance).  Monotonic
+# reconcile (GREATEST) keeps the in-flight window protected so the
+# concurrent INSERT writes L1 and the next refresh repairs the bucket.
+test: cagg_threshold_reconcile_race
+
+# Three-layer chaos self-heal loop: catch-up gap check keeps wm
+# from advancing past mat holes, subsequent refresh fills the hole,
+# catch-up then advances wm.  Regression for the "unmaterialized
+# gap" ereport → no-op DEBUG downgrade in refresh.c.  Policy
+# expand-back (layer ②) is covered by regress RUN-06b.
+test: cagg_refresh_self_heal
+
+# Cold-start watermark pin: a backfill below every future policy
+# window parks its invalidation in the ledgers with no consumer, the
+# catch-up gap probe fails on the orphan bucket forever, and the
+# watermark stays pinned at -infinity (12h soak SOAK-20260721_161133,
+# cv_1hour).  Regression for the ledger-driven policy expand-back:
+# pending L1/L2 entries below the window pull window_start down to
+# the orphan's bucket floor, the refresh consumes them, and the
+# watermark lifts off -infinity within one tick.  Runs the real
+# policy path via run_job; no chaos needed (pure scheduling
+# starvation, deterministic).
+test: cagg_orphan_backfill_below_window
+
+# Batch-boundary abort semantics: an 'error' fault BETWEEN batches
+# (cagg_policy_batch_boundary injector) rolls back the just-finished
+# batch's chain-committed materialization too -- zero partial leakage,
+# failed run recorded in bgw_job_stat, watermark held at -infinity,
+# union view stays correct, and the next policy run fully self-heals.
+# Companion of cagg_orphan_backfill_below_window (hole taxonomy §9.10).
+test: cagg_hole_batch_boundary
+
+# Island formation + window-slide self-heal, end-to-end through the
+# real policy path: an occurrence-gated 'error' on
+# cagg_refresh_after_commit_and_chain aborts DURING batch 2 -- AFTER
+# its chain commit made batch 1 durable -- leaving a genuine mat
+# island with a hole below it (hole class 1b).  Shrinking
+# start_offset then slides the next window above the hole (class 2
+# geometry); the hole's ledger residues pull window_start back down
+# and the run self-heals.  Companion of cagg_hole_batch_boundary and
+# cagg_orphan_backfill_below_window (hole taxonomy §9.10).
+test: cagg_hole_island_self_heal
+
+# Cross-CAGG ABBA deadlock at the batch boundary (SOAK-20260723_170208,
+# doc/bugs/cagg-batched-refresh-cross-cagg-abba-deadlock.md, FIXED
+# 2026-07-24): a batched policy refresh used to return from each batch
+# with the batch's TX2 UNCOMMITTED (it chain-committed only inside the
+# NEXT batch), so at the boundary the session still held TX2's
+# ExclusiveLocks (GDD-off UPDATE/DELETE upgrade) on
+# cagg_materialization_log et al while the next batch's TX1 acquired
+# the source-level advisory.  A concurrent same-source refresh took the
+# advisory inside that window and blocked on L2 on every segment -> a
+# coordinator+segment ABBA cycle invisible to the per-node deadlock
+# detector (froze the soak for 13h+).  Fix: TX2 chain-commits at batch
+# end, so boundaries are lock-clean and TX1 never waits while holding
+# TX2 locks (lock order stays acyclic: TX1 adv->L2->threshold, TX2
+# L2->threshold; a draft that also gave TX2 the advisory was reverted
+# -- it serialized same-source caggs and broke cagg_concurrent_refresh).
+# Pins: boundary holds no L2/watermark locks, a same-source refresh
+# runs to completion WHILE the policy is frozen at the boundary (on
+# the buggy build that CALL wedged forever), and both CAGGs end
+# bit-exact.
+test: cagg_batched_refresh_abba_deadlock
+
+# Teardown: stop the per-DB scheduler so the next run can drop isolation2test
+test: cagg_teardown
+# Reader-vs-reclaim race regression: smgrtruncate must not fire while
+# any ChunkScan still references the heap fork.  Uses the
+# ts_chunk_scan_after_status_load fault injector to wedge a reader
+# inside ts_chunk_scan_begin after it has taken the per-chunk advisory
+# Share, then verifies concurrent compress blocks on Exclusive until
+# the reader is released and observes all 400 source rows.
+test: compress_reclaim_reader_race
+
+# Compress-vs-INSERT no-deadlock regression: compress must set chunk
+# status via direct catalog RowExclusiveLock, not a SQL UPDATE
+# (table-level ExclusiveLock under GDD-off), so a concurrent
+# chunk-creating INSERT holding RowExclusiveLock on ts_chunk does not
+# block / cross-segment-deadlock with compress.
+test: compress_insert_no_deadlock
+
+# Compress-vs-INSERT data-loss regression: a row that commits while
+# compress is blocked on the per-chunk advisory ExclusiveLock must still be
+# compressed.  Before the fix, the heap scan filtered tuples with a
+# distributed snapshot fixed before the lock wait, so the just-committed
+# row was invisible, never written to PAX, and then truncated by reclaim --
+# a silent loss of a committed source row.  Fix: scan with SnapshotSelf.
+test: compress_insert_visibility_loss
+
+# Recompress-vs-reader double-count regression: ts_chunk_scan_begin
+# caches chunk statuses (SnapshotSelf) BEFORE taking the per-chunk
+# Share locks.  A recompress that commits in that window has already
+# renamed its merged PAX into place; the reader then follows the stale
+# PARTIAL cache down the PAX+heap path and counts the late row twice
+# (PAX has it post-merge, heap still has it — reclaim is fenced behind
+# the reader's Share).  The double-count lands in the CAGG mat and
+# never self-heals because compress emits no invalidation.  Fix:
+# re-read statuses under the Share barrier.  Uses the
+# ts_chunk_scan_before_share fault injector to pin the reader in the
+# race window deterministically.
+test: recompress_reader_double_count
+
+# Crash during recompress must not destroy the already-committed PAX
+# file.  The WAL sidecar records the ".new" writes under the LIVE
+# filename and redo opens it with O_TRUNC, so commit-blind crash
+# recovery replays a half-written image over data the previous
+# compress had committed -- while that compress's catalog row still
+# points there, making every later scan follow the catalog into a
+# truncated file (SIGSEGV, no self-heal).  Two adjacent fault points
+# in the post-write/pre-rename window make the crash deterministic:
+# suspend, flush the WAL with pg_switch_wal, then panic before
+# rename(2).
+test: recompress_crash_destroys_live_file

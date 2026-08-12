@@ -1,0 +1,99 @@
+Parsed test spec with 2 sessions
+
+starting permutation: r_count_day2 w_begin w_insert_chunk2 r_count_day2 w_commit r_count_day2
+step r_count_day2: SELECT count(*) FROM ts_isi WHERE ts >= '2025-01-02' AND ts < '2025-01-03';
+count
+-----
+  100
+(1 row)
+
+step w_begin: BEGIN;
+step w_insert_chunk2: 
+    INSERT INTO ts_isi
+    SELECT '2025-01-02 12:00:00+00'::timestamptz + (i * interval '1 minute'), 500 + i
+    FROM generate_series(1, 100) i;
+
+step r_count_day2: SELECT count(*) FROM ts_isi WHERE ts >= '2025-01-02' AND ts < '2025-01-03';
+count
+-----
+  100
+(1 row)
+
+step w_commit: COMMIT;
+step r_count_day2: SELECT count(*) FROM ts_isi WHERE ts >= '2025-01-02' AND ts < '2025-01-03';
+count
+-----
+  200
+(1 row)
+
+
+starting permutation: r_count_all w_begin w_insert_chunk4 r_count_all r_count_day4 w_commit r_count_all r_count_day4
+step r_count_all: SELECT count(*) FROM ts_isi;
+count
+-----
+  300
+(1 row)
+
+step w_begin: BEGIN;
+step w_insert_chunk4: 
+    INSERT INTO ts_isi
+    SELECT '2025-01-04'::timestamptz + (i * interval '1 minute'), 600 + i
+    FROM generate_series(1, 100) i;
+
+step r_count_all: SELECT count(*) FROM ts_isi;
+count
+-----
+  300
+(1 row)
+
+step r_count_day4: SELECT count(*) FROM ts_isi WHERE ts >= '2025-01-04';
+count
+-----
+    0
+(1 row)
+
+step w_commit: COMMIT;
+step r_count_all: SELECT count(*) FROM ts_isi;
+count
+-----
+  400
+(1 row)
+
+step r_count_day4: SELECT count(*) FROM ts_isi WHERE ts >= '2025-01-04';
+count
+-----
+  100
+(1 row)
+
+
+starting permutation: r_min_max w_begin w_insert_chunk2 w_insert_chunk4 r_min_max w_commit r_min_max
+step r_min_max: SELECT min(val), max(val) FROM ts_isi;
+min|max
+---+---
+  1|400
+(1 row)
+
+step w_begin: BEGIN;
+step w_insert_chunk2: 
+    INSERT INTO ts_isi
+    SELECT '2025-01-02 12:00:00+00'::timestamptz + (i * interval '1 minute'), 500 + i
+    FROM generate_series(1, 100) i;
+
+step w_insert_chunk4: 
+    INSERT INTO ts_isi
+    SELECT '2025-01-04'::timestamptz + (i * interval '1 minute'), 600 + i
+    FROM generate_series(1, 100) i;
+
+step r_min_max: SELECT min(val), max(val) FROM ts_isi;
+min|max
+---+---
+  1|400
+(1 row)
+
+step w_commit: COMMIT;
+step r_min_max: SELECT min(val), max(val) FROM ts_isi;
+min|max
+---+---
+  1|700
+(1 row)
+

@@ -1,0 +1,257 @@
+-- ts_sparse_chunks.sql — sparse fork numbers (~10K-wide chunk-number range)
+--
+-- Defense against SMgrRelation per-fork array bugs.  Each chunk is a
+-- separate fork file; jumping from fork 4 to fork 10004 forces
+-- ts_ensure_fork_capacity to extend the per-fork book-keeping arrays
+-- to ~10K entries.  Bugs in that path (off-by-one realloc, memory
+-- leak on extension, missing init of intermediate slots) show up here
+-- because intermediate forks 5..10003 do NOT exist on disk.
+--
+-- 4 rows, 4 distinct chunks, ChunkScan must enumerate just the present
+-- chunks and not touch the absent ones.
+\i sql/include/setup.sql
+-- Shared setup for time_series regression tests.
+-- Include this at the top of every test file via:
+--   \ir include/setup.sql
+CREATE EXTENSION IF NOT EXISTS time_series;
+NOTICE:  extension "time_series" already exists, skipping
+SET optimizer = off;
+SET timezone = 'UTC';
+SET datestyle = 'ISO';
+SET extra_float_digits = 0;
+CREATE SCHEMA IF NOT EXISTS test;
+NOTICE:  schema "test" already exists, skipping
+\i sql/include/consistency.sql
+-- contrib/time_series/test/regress/access/sql/include/consistency.sql
+--
+-- Catalog ↔ catalog consistency invariant checker.
+--
+-- Defines test.ts_check_consistency(rel regclass) which returns 'OK' when
+-- the time_series catalogs are mutually consistent for the given table,
+-- or a comma-separated list of detected problems otherwise.
+--
+-- Usage (include after setup.sql):
+--   \ir include/setup.sql
+--   \ir include/consistency.sql
+--   ...test body...
+--   SELECT test.ts_check_consistency('mytab'::regclass);   -- expect: OK
+--
+-- Invariants checked (status codes from ts_compress.h):
+--   (a) status = COMPRESSED (1)  → ts_compressed_chunk has a matching row
+--   (b) status = PARTIAL    (2)  → ts_compressed_chunk has a matching row
+--   (c) ts_compressed_chunk row  → ts_chunk has a matching row
+--   (d) status = ACTIVE     (0)  → ts_compressed_chunk has NO matching row
+--
+-- Each row of ts_chunk / ts_compressed_chunk is per-segment, so we project
+-- to DISTINCT chunk_number to make the check segment-count independent.
+CREATE OR REPLACE FUNCTION test.ts_check_consistency(rel regclass)
+RETURNS text
+LANGUAGE SQL
+STABLE AS $$
+WITH
+chunk_status AS (
+    SELECT DISTINCT chunk_number, status
+    FROM time_series.ts_chunk
+    WHERE table_oid = rel
+),
+compressed_present AS (
+    SELECT DISTINCT chunk_number
+    FROM time_series.ts_compressed_chunk
+    WHERE table_oid = rel
+),
+problems AS (
+    -- (a) COMPRESSED requires compressed_chunk row
+    SELECT format('COMPRESSED_without_meta:%s', chunk_number) AS msg
+    FROM chunk_status
+    WHERE status = 1
+      AND chunk_number NOT IN (SELECT chunk_number FROM compressed_present)
+
+    UNION ALL
+    -- (b) PARTIAL also requires compressed_chunk row
+    SELECT format('PARTIAL_without_meta:%s', chunk_number)
+    FROM chunk_status
+    WHERE status = 2
+      AND chunk_number NOT IN (SELECT chunk_number FROM compressed_present)
+
+    UNION ALL
+    -- (c) compressed_chunk row must have a backing ts_chunk row
+    SELECT format('orphan_compressed_meta:%s', chunk_number)
+    FROM compressed_present
+    WHERE chunk_number NOT IN (SELECT chunk_number FROM chunk_status)
+
+    UNION ALL
+    -- (d) ACTIVE must NOT have a compressed_chunk row
+    SELECT format('ACTIVE_with_compressed_meta:%s', chunk_number)
+    FROM chunk_status
+    WHERE status = 0
+      AND chunk_number IN (SELECT chunk_number FROM compressed_present)
+)
+SELECT COALESCE(string_agg(msg, ', ' ORDER BY msg), 'OK')
+FROM problems;
+$$;
+COMMENT ON FUNCTION test.ts_check_consistency(regclass) IS
+'Verifies time_series catalog consistency for the given table; returns OK or a list of problems.';
+CREATE TABLE sparse_t (ts timestamptz, k int) USING time_series
+WITH (ts_partition_column = 'ts',
+      ts_chunk_interval   = '1 hour',
+      ts_chunk_origin     = '2025-01-01')
+DISTRIBUTED BY (k);
+-- Hours 0 / 100 / 1000 / 10000 → chunks far apart (TS_FIRST_CHUNKNUM
+-- offset; exact chunk number depends on origin but the spread is the
+-- point).
+INSERT INTO sparse_t
+SELECT '2025-01-01'::timestamptz + (h || ' hours')::interval, k
+FROM (VALUES (0, 1), (100, 2), (1000, 3), (10000, 4)) AS v(h, k);
+SELECT count(*) AS total_rows FROM sparse_t;
+ total_rows 
+------------
+          4
+(1 row)
+
+SELECT count(DISTINCT chunk_number) AS distinct_chunks
+FROM time_series.ts_chunk WHERE table_oid = 'sparse_t'::regclass;
+ distinct_chunks 
+-----------------
+               4
+(1 row)
+
+SELECT test.ts_check_consistency('sparse_t'::regclass) AS state_active;
+ state_active 
+--------------
+ OK
+(1 row)
+
+-- Full scan: ChunkScan must visit every present chunk and skip absent
+-- intermediate fork numbers.  Result must be all 4 rows in ts order.
+SELECT k FROM sparse_t ORDER BY ts;
+ k 
+---
+ 1
+ 2
+ 3
+ 4
+(4 rows)
+
+-- Targeted scans hitting different chunks; tests that fork-pruning
+-- works correctly across the sparse layout.
+SELECT count(*) AS late_rows FROM sparse_t WHERE ts >= '2025-06-01';
+ late_rows 
+-----------
+         1
+(1 row)
+
+SELECT k FROM sparse_t WHERE ts BETWEEN '2025-01-01' AND '2025-12-31'
+ORDER BY ts;
+ k 
+---
+ 1
+ 2
+ 3
+(3 rows)
+
+SELECT k FROM sparse_t WHERE ts >= '2026-01-01' ORDER BY ts;
+ k 
+---
+ 4
+(1 row)
+
+-- ts_extract_time_bounds: bound extraction via opfamily strategy lookup
+-- ----------------------------------------------------------------------
+-- These cases exercise the planner-side bound extraction without
+-- relying on operator-name string matching.  Resolving the comparison
+-- via get_op_btree_interpretation lets the same code path handle
+-- Var-on-right ("const OP var") and bound types that share an
+-- opfamily with the column type.
+--
+-- Var-on-right (const on left): mirrored strategy must produce the
+-- same chunk pruning as Var-on-left.  Both queries hit exactly the
+-- h=10000 row (= k=4).
+SELECT k FROM sparse_t WHERE '2026-01-01' <= ts ORDER BY ts;
+ k 
+---
+ 4
+(1 row)
+
+SELECT k FROM sparse_t WHERE ts >= '2026-01-01' ORDER BY ts;
+ k 
+---
+ 4
+(1 row)
+
+-- Equality predicate: BTEqualStrategyNumber overwrites both bounds.
+SELECT k FROM sparse_t WHERE ts = '2025-01-01 00:00:00+00' ORDER BY ts;
+ k 
+---
+ 1
+(1 row)
+
+-- Both bounds combined as strict inequalities; opfamily lookup must
+-- correctly distinguish BTLessStrategyNumber from BTLessEqualStrategyNumber.
+-- Inclusive '2025-01-05 04:00:00' would include k=2; strict '<' excludes it.
+SELECT k FROM sparse_t
+WHERE ts > '2025-01-01 00:00:00+00'
+  AND ts < '2025-01-05 04:00:00+00'
+ORDER BY ts;
+ k 
+---
+(0 rows)
+
+SELECT k FROM sparse_t
+WHERE ts > '2025-01-01 00:00:00+00'
+  AND ts <= '2025-01-05 04:00:00+00'
+ORDER BY ts;
+ k 
+---
+ 2
+(1 row)
+
+-- Mixed orientations on the same scan: one bound Var-on-left, the
+-- other Var-on-right.  Result must match the canonical Var-on-left form.
+SELECT k FROM sparse_t
+WHERE ts >= '2025-01-01 00:00:00+00'
+  AND '2025-12-31'::timestamptz > ts
+ORDER BY ts;
+ k 
+---
+ 1
+ 2
+ 3
+(3 rows)
+
+-- Compress & re-read: state machine still works with sparse forks.
+SELECT time_series.set_compress_config('sparse_t'::regclass, NULL, 'ts');
+ set_compress_config 
+---------------------
+ 
+(1 row)
+
+SELECT time_series.compress_chunks('sparse_t'::regclass) > 0 AS sparse_compressed;
+ sparse_compressed 
+-------------------
+ t
+(1 row)
+
+SELECT count(*) AS rows_after_compress FROM sparse_t;
+ rows_after_compress 
+---------------------
+                   4
+(1 row)
+
+SELECT k FROM sparse_t ORDER BY ts;
+ k 
+---
+ 1
+ 2
+ 3
+ 4
+(4 rows)
+
+SELECT test.ts_check_consistency('sparse_t'::regclass) AS state_after_compress;
+ state_after_compress 
+----------------------
+ OK
+(1 row)
+
+DELETE FROM time_series.ts_compressed_chunk WHERE table_oid = 'sparse_t'::regclass;
+DELETE FROM time_series.ts_compress_config WHERE table_oid = 'sparse_t'::regclass;
+DROP TABLE sparse_t;

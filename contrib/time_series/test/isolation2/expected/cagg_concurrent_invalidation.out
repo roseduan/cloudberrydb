@@ -1,0 +1,379 @@
+-- ============================================================
+-- cagg_concurrent_invalidation.sql (isolation2)
+-- Isolation pattern: based on the reference cagg concurrency test
+--
+-- Tests concurrent REFRESH on two different CAGGs sharing the
+-- same source table.  Both sessions update the watermark/threshold
+-- concurrently.  Verifies:
+--   1. Both watermarks are updated correctly (no skip)
+--   2. Concurrent INSERT during REFRESH doesn't leak invalid
+--      threshold values into other sessions
+-- ============================================================
+
+1: SET optimizer = off;
+SET
+1: SET timezone = 'UTC';
+SET
+1: DROP EXTENSION IF EXISTS time_series CASCADE;
+DROP
+1: CREATE EXTENSION time_series;
+CREATE
+1: SET search_path TO public, time_series;
+SET
+
+1: CREATE TABLE temperature (time TIMESTAMPTZ NOT NULL, val FLOAT8) USING time_series WITH ( ts_partition_column = 'time', ts_chunk_interval   = '4 hour', ts_chunk_origin     = '2020-01-01' ) DISTRIBUTED BY (time);
+CREATE
+
+-- Initial data: year 2000
+1: INSERT INTO temperature SELECT '2000-01-01'::timestamptz + (i * interval '1 min'), (i % 100)::float8 FROM generate_series(1, 1440) i;
+ERROR:  timestamp is before the chunk origin  (seg0 172.19.0.2:7002 pid=74516)
+HINT:  Use a ts_chunk_origin that is at or before the earliest timestamp in your data.
+
+-- Two CAGGs on same source
+1: CREATE MATERIALIZED VIEW cagg_1 WITH (time_series.continuous) AS SELECT time_bucket('4 hour'::interval, time) AS bucket, avg(val) AS avg_val FROM temperature GROUP BY 1;
+CREATE
+
+1: CREATE MATERIALIZED VIEW cagg_2 WITH (time_series.continuous) AS SELECT time_bucket('4 hour'::interval, time) AS bucket, avg(val) AS avg_val FROM temperature GROUP BY 1;
+CREATE
+
+-- Initial REFRESH for both
+1: CALL time_series.refresh_continuous_aggregate('cagg_1', NULL, NULL);
+CALL
+1: CALL time_series.refresh_continuous_aggregate('cagg_2', NULL, NULL);
+CALL
+
+-- Add new data in year 2020
+1: INSERT INTO temperature SELECT '2020-01-01'::timestamptz + (i * interval '1 min'), (i % 100)::float8 FROM generate_series(1, 1440) i;
+INSERT 1440
+
+-- chunk-count sanity.  The year 2000 INSERT above is expected to ERROR
+-- ("timestamp is before the chunk origin") because ts_chunk_origin is
+-- 2020-01-01 — only the year 2020 data (24h / 4h = 6 chunks, with the
+-- last minute spilling into a 7th chunk) actually lands in the table.
+-- Pin "≥ 6 chunks" as the multi-chunk floor; Test 4 below adds a few
+-- more chunks via 2022/2024/2025 INSERTs in distant time ranges.
+1: SELECT count(DISTINCT chunk_number) >= 6 AS source_spans_at_least_6_chunks FROM time_series.ts_chunk WHERE table_oid = 'temperature'::regclass;
+ source_spans_at_least_6_chunks 
+--------------------------------
+ t                              
+(1 row)
+
+2: SET optimizer = off;
+SET
+2: SET timezone = 'UTC';
+SET
+2: SET search_path TO public, time_series;
+SET
+
+-- ============================================================
+-- Test 1: Two sessions REFRESH different CAGGs concurrently.
+--         Both should complete, both watermarks should advance.
+--
+-- Corresponds to upstream permutation:
+--   "s3_lock_invalidation" "s1_run_update" "s2_run_update"
+--   "s3_release_invalidation" "s3_check_watermarks"
+--
+-- We simulate blocking by having session 1 hold cagg_1's advisory
+-- lock, forcing session 2's REFRESH to potentially overlap with
+-- session 1's operations on the shared L1 table.
+-- ============================================================
+
+-- Watermarks before: should still be around year 2000 range
+1: SELECT bool_and(watermark < '2020-01-01'::timestamptz) AS wm_before_2020 FROM time_series.cagg_watermark;
+ wm_before_2020 
+----------------
+ t              
+(1 row)
+
+-- Both sessions REFRESH their respective CAGGs with 2020 window
+1: CALL time_series.refresh_continuous_aggregate('cagg_1', '2020-01-01', '2025-01-01');
+CALL
+2: CALL time_series.refresh_continuous_aggregate('cagg_2', '2020-01-01', '2025-01-01');
+CALL
+
+-- Both watermarks should now be in 2025 range
+1: SELECT count(DISTINCT watermark > '2020-01-01'::timestamptz) AS all_advanced FROM time_series.cagg_watermark;
+ all_advanced 
+--------------
+ 1            
+(1 row)
+
+-- Both CAGGs should have 2020 data
+1: SELECT count(*) AS cagg_1_2020 FROM cagg_1 WHERE bucket >= '2020-01-01';
+ cagg_1_2020 
+-------------
+ 7           
+(1 row)
+1: SELECT count(*) AS cagg_2_2020 FROM cagg_2 WHERE bucket >= '2020-01-01';
+ cagg_2_2020 
+-------------
+ 7           
+(1 row)
+
+-- Both EXCEPT = 0
+1: SELECT count(*) AS diff_cagg1 FROM ( (SELECT bucket, round(avg_val::numeric, 6) FROM cagg_1 EXCEPT SELECT time_bucket('4 hour'::interval, time), round(avg(val)::numeric, 6) FROM temperature GROUP BY 1) UNION ALL (SELECT time_bucket('4 hour'::interval, time), round(avg(val)::numeric, 6) FROM temperature GROUP BY 1 EXCEPT SELECT bucket, round(avg_val::numeric, 6) FROM cagg_1) ) x;
+ diff_cagg1 
+------------
+ 0          
+(1 row)
+
+1: SELECT count(*) AS diff_cagg2 FROM ( (SELECT bucket, round(avg_val::numeric, 6) FROM cagg_2 EXCEPT SELECT time_bucket('4 hour'::interval, time), round(avg(val)::numeric, 6) FROM temperature GROUP BY 1) UNION ALL (SELECT time_bucket('4 hour'::interval, time), round(avg(val)::numeric, 6) FROM temperature GROUP BY 1 EXCEPT SELECT bucket, round(avg_val::numeric, 6) FROM cagg_2) ) x;
+ diff_cagg2 
+------------
+ 0          
+(1 row)
+
+-- ============================================================
+-- Test 2: INSERT new data while REFRESH is happening.
+--         The INSERT's trigger should see a consistent threshold
+--         (not a partially-updated value from the concurrent REFRESH).
+--
+-- Corresponds to upstream permutation:
+--   "s2_insert_new_data_2022" "s3_lock_invalidation_tuple_found"
+--   "s2_insert_new_data_2023" "s1_run_update"
+--   "s3_release_invalidation_tuple_found"
+-- ============================================================
+
+-- Session 1 REFRESHes cagg_1
+1: CALL time_series.refresh_continuous_aggregate('cagg_1', NULL, NULL);
+CALL
+
+-- Session 2 concurrently inserts data from 2022 and 2023
+2: INSERT INTO temperature SELECT '2022-01-01'::timestamptz + (i * interval '1 min'), (i % 50)::float8 FROM generate_series(1, 100) i;
+INSERT 100
+
+2: INSERT INTO temperature SELECT '2023-01-01'::timestamptz + (i * interval '1 min'), (i % 50)::float8 FROM generate_series(1, 100) i;
+INSERT 100
+
+-- REFRESH both to pick up all new data
+1: CALL time_series.refresh_continuous_aggregate('cagg_1', NULL, NULL);
+CALL
+1: CALL time_series.refresh_continuous_aggregate('cagg_2', NULL, NULL);
+CALL
+
+-- Both should be consistent with source
+1: SELECT count(*) AS diff2_cagg1 FROM ( (SELECT bucket, round(avg_val::numeric, 6) FROM cagg_1 EXCEPT SELECT time_bucket('4 hour'::interval, time), round(avg(val)::numeric, 6) FROM temperature GROUP BY 1) UNION ALL (SELECT time_bucket('4 hour'::interval, time), round(avg(val)::numeric, 6) FROM temperature GROUP BY 1 EXCEPT SELECT bucket, round(avg_val::numeric, 6) FROM cagg_1) ) x;
+ diff2_cagg1 
+-------------
+ 0           
+(1 row)
+
+1: SELECT count(*) AS diff2_cagg2 FROM ( (SELECT bucket, round(avg_val::numeric, 6) FROM cagg_2 EXCEPT SELECT time_bucket('4 hour'::interval, time), round(avg(val)::numeric, 6) FROM temperature GROUP BY 1) UNION ALL (SELECT time_bucket('4 hour'::interval, time), round(avg(val)::numeric, 6) FROM temperature GROUP BY 1 EXCEPT SELECT bucket, round(avg_val::numeric, 6) FROM cagg_2) ) x;
+ diff2_cagg2 
+-------------
+ 0           
+(1 row)
+
+-- ============================================================
+-- Test 3: Fault injection — INSERT during REFRESH mid-flight [P0]
+--         Pause REFRESH before watermark advance, INSERT,
+--         then resume. Verifies L1 consistency.
+-- ============================================================
+
+1: INSERT INTO temperature SELECT '2024-06-01'::timestamptz + (i * interval '1 min'), i::float8 FROM generate_series(1, 100) i;
+INSERT 100
+
+-- Pause REFRESH before watermark advance
+1: SELECT gp_inject_fault('cagg_refresh_before_watermark_advance', 'suspend', dbid) FROM gp_segment_configuration WHERE role = 'p' AND content = -1;
+ gp_inject_fault 
+-----------------
+ Success:        
+(1 row)
+
+-- Session 1 starts REFRESH
+1>: CALL time_series.refresh_continuous_aggregate('cagg_1', NULL, NULL);  <waiting ...>
+
+-- Wait for REFRESH to hit fault point (mat data written, watermark not yet advanced)
+2: SELECT gp_wait_until_triggered_fault('cagg_refresh_before_watermark_advance', 1, dbid) FROM gp_segment_configuration WHERE role = 'p' AND content = -1;
+ gp_wait_until_triggered_fault 
+-------------------------------
+ Success:                      
+(1 row)
+
+-- Session 2 inserts new data — trigger sees OLD watermark (consistent)
+2: INSERT INTO temperature SELECT '2024-07-01'::timestamptz + (i * interval '1 min'), i::float8 FROM generate_series(1, 50) i;
+INSERT 50
+
+-- L1 should have entries from session 2's insert
+2: SELECT count(*) > 0 AS l1_from_concurrent_insert FROM time_series.cagg_invalidation_log;
+ l1_from_concurrent_insert 
+---------------------------
+ f                         
+(1 row)
+
+-- Resume REFRESH
+2: SELECT gp_inject_fault('cagg_refresh_before_watermark_advance', 'resume', dbid) FROM gp_segment_configuration WHERE role = 'p' AND content = -1;
+ gp_inject_fault 
+-----------------
+ Success:        
+(1 row)
+1<:  <... completed>
+CALL
+
+2: SELECT gp_inject_fault('cagg_refresh_before_watermark_advance', 'reset', dbid) FROM gp_segment_configuration WHERE role = 'p' AND content = -1;
+ gp_inject_fault 
+-----------------
+ Success:        
+(1 row)
+
+-- One more REFRESH to pick up the concurrent insert's L1
+1: CALL time_series.refresh_continuous_aggregate('cagg_1', NULL, NULL);
+CALL
+
+-- Final: EXCEPT = 0
+1: SELECT count(*) AS diff_fault FROM ( (SELECT bucket, round(avg_val::numeric, 6) FROM cagg_1 EXCEPT SELECT time_bucket('4 hour'::interval, time), round(avg(val)::numeric, 6) FROM temperature GROUP BY 1) UNION ALL (SELECT time_bucket('4 hour'::interval, time), round(avg(val)::numeric, 6) FROM temperature GROUP BY 1 EXCEPT SELECT bucket, round(avg_val::numeric, 6) FROM cagg_1) ) x;
+ diff_fault 
+------------
+ 0          
+(1 row)
+
+-- ============================================================
+-- Test 4: Concurrent INSERTs into MULTIPLE distant chunks while
+--         REFRESH is fault-suspended [P0]
+--
+-- Test 3 covers a single concurrent INSERT into one chunk during
+-- mid-REFRESH pause.  Real production workloads see streaming ingest
+-- writing to MULTIPLE chunks simultaneously (backfill jobs hitting
+-- historical buckets across years + real-time append hitting the
+-- latest chunk) while a batch refresh is mid-flight.
+--
+-- Permutation (extension of Test 3):
+--   1. Settle to a known-clean state (refresh drains L1).
+--   2. Suspend REFRESH at the same fault point as Test 3.
+--   3. Session 1 starts REFRESH (1&:) — blocks at the fault point.
+--   4. Session 2 INSERTs into THREE distinct chunks at 2021-03-15,
+--      2023-08-20, and 2025-11-25 — each year is hours-of-days away
+--      from the others and from the chunks that previous tests
+--      populated, so they land in fresh chunks (4-hour chunk_interval
+--      with 2020-01-01 origin → each year is ~2190 chunk slots from
+--      its neighbor).  All three timestamps are AFTER the origin so
+--      they don't hit the "before chunk origin" error.
+--   5. Assert L1 captured invalidation entries spanning all three
+--      target time ranges (via min/max/bool_or on lowest_modified).
+--   6. Resume + reset fault, wait for session 1 to finish (1<:).
+--   7. One more REFRESH, then EXCEPT = 0 confirms every concurrent
+--      INSERT made it into the mat table.
+-- ============================================================
+
+-- Settle to known state: full refresh drains L1.
+1: CALL time_series.refresh_continuous_aggregate('cagg_1', NULL, NULL);
+CALL
+1: SELECT count(*) AS l1_baseline FROM time_series.cagg_invalidation_log;
+ l1_baseline 
+-------------
+ 0           
+(1 row)
+
+-- Re-arm fault.
+1: SELECT gp_inject_fault('cagg_refresh_before_watermark_advance', 'suspend', dbid) FROM gp_segment_configuration WHERE role = 'p' AND content = -1;
+ gp_inject_fault 
+-----------------
+ Success:        
+(1 row)
+
+-- Seed L1 work so the next refresh actually reaches the fault point.
+-- Post hot-bucket-exclusion fix, refresh with no L1/unmat work is a
+-- no-op (n_intervals == 0) and returns before hitting any fault.
+1: INSERT INTO temperature VALUES ('2024-06-01 12:30+00'::timestamptz, 9999.0);
+INSERT 1
+
+-- Start REFRESH in background; it will park at the fault point after
+-- writing mat data but before advancing the watermark.
+1>: CALL time_series.refresh_continuous_aggregate('cagg_1', NULL, NULL);  <waiting ...>
+
+-- Wait for the background REFRESH to reach the suspended fault.
+2: SELECT gp_wait_until_triggered_fault('cagg_refresh_before_watermark_advance', 1, dbid) FROM gp_segment_configuration WHERE role = 'p' AND content = -1;
+ gp_wait_until_triggered_fault 
+-------------------------------
+ Success:                      
+(1 row)
+
+-- Concurrent INSERTs into 3 distant chunks.  Each year's data sits in
+-- a chunk whose chunk_number is thousands of slots away from the
+-- others (4h interval × 365d × N years = ~2190 chunks/year).  The
+-- trigger must record an L1 entry for each chunk independently.
+-- Use explicit `+00` on every timestamp literal because session 2's
+-- timezone is the cluster default (not UTC like session 1's).  Without
+-- the offset, `'2021-03-15'::timestamptz` parses against session 2's
+-- local tz and the stored UTC value shifts by several hours, throwing
+-- off the spot-check WHERE clauses in session 1 below.
+2: INSERT INTO temperature SELECT '2021-03-15 00:00+00'::timestamptz + (i * interval '1 min'), i::float8 FROM generate_series(1, 30) i;
+INSERT 30
+
+2: INSERT INTO temperature SELECT '2023-08-20 00:00+00'::timestamptz + (i * interval '1 min'), i::float8 + 1000 FROM generate_series(1, 30) i;
+INSERT 30
+
+2: INSERT INTO temperature SELECT '2025-11-25 00:00+00'::timestamptz + (i * interval '1 min'), i::float8 + 2000 FROM generate_series(1, 30) i;
+INSERT 30
+
+-- L1 must have entries covering the 2021 and 2023 INSERTs.  The 2025
+-- INSERT is ABOVE the current watermark (Test 3 advanced it to
+-- ~2024-07 via `refresh ... NULL, NULL`), so it is NOT recorded in
+-- L1 by design — above-watermark INSERTs are picked up by the
+-- real-time aggregation branch and the next refresh's watermark
+-- advance, not via the L1 → L2 path.  Verify (a) the two below-
+-- watermark rows are captured and (b) the above-watermark row does
+-- NOT show up in L1 (a regression that ignored the threshold would
+-- write it spuriously).
+2: SELECT bool_or(lowest_modified >= '2021-01-01 00:00+00'::timestamptz AND lowest_modified <  '2022-01-01 00:00+00'::timestamptz) AS l1_captured_2021, bool_or(lowest_modified >= '2023-01-01 00:00+00'::timestamptz AND lowest_modified <  '2024-01-01 00:00+00'::timestamptz) AS l1_captured_2023, NOT bool_or(lowest_modified >= '2025-01-01 00:00+00'::timestamptz) AS l1_correctly_skipped_above_watermark_2025 FROM time_series.cagg_invalidation_log;
+ l1_captured_2021 | l1_captured_2023 | l1_correctly_skipped_above_watermark_2025 
+------------------+------------------+-------------------------------------------
+ t                | t                | t                                         
+(1 row)
+
+-- Resume + cleanup fault.
+2: SELECT gp_inject_fault('cagg_refresh_before_watermark_advance', 'resume', dbid) FROM gp_segment_configuration WHERE role = 'p' AND content = -1;
+ gp_inject_fault 
+-----------------
+ Success:        
+(1 row)
+1<:  <... completed>
+CALL
+2: SELECT gp_inject_fault('cagg_refresh_before_watermark_advance', 'reset', dbid) FROM gp_segment_configuration WHERE role = 'p' AND content = -1;
+ gp_inject_fault 
+-----------------
+ Success:        
+(1 row)
+
+-- Pick up the three concurrent INSERTs.
+1: CALL time_series.refresh_continuous_aggregate('cagg_1', NULL, NULL);
+CALL
+
+-- Final bit-equivalence.  If ANY of the three concurrent INSERTs was
+-- missed by the trigger / dropped by the L1 → L2 path / not picked
+-- up by the next refresh, this diff is non-zero.
+1: SELECT count(*) AS diff_multi_chunk FROM ( (SELECT bucket, round(avg_val::numeric, 6) FROM cagg_1 EXCEPT SELECT time_bucket('4 hour'::interval, time), round(avg(val)::numeric, 6) FROM temperature GROUP BY 1) UNION ALL (SELECT time_bucket('4 hour'::interval, time), round(avg(val)::numeric, 6) FROM temperature GROUP BY 1 EXCEPT SELECT bucket, round(avg_val::numeric, 6) FROM cagg_1) ) x;
+ diff_multi_chunk 
+------------------
+ 0                
+(1 row)
+
+-- Per-target-year row presence check.  Use date_part year over the
+-- whole table to avoid any boundary/timezone ambiguity with the
+-- timestamptz literals: we just need to know "is there data anywhere
+-- in 2021 / 2023 / 2025 that came from Test 4?"  This catches any
+-- silent INSERT drop that the earlier EXCEPT diff would miss when
+-- BOTH source and CAGG drop the rows symmetrically.
+1: SELECT count(*) > 0 AS has_rows_in_2021 FROM temperature WHERE date_part('year', time AT TIME ZONE 'UTC') = 2021;
+ has_rows_in_2021 
+------------------
+ t                
+(1 row)
+1: SELECT count(*) > 0 AS has_rows_in_2023_aug FROM temperature WHERE date_part('year', time AT TIME ZONE 'UTC') = 2023 AND date_part('month', time AT TIME ZONE 'UTC') = 8;
+ has_rows_in_2023_aug 
+----------------------
+ t                    
+(1 row)
+1: SELECT count(*) > 0 AS has_rows_in_2025 FROM temperature WHERE date_part('year', time AT TIME ZONE 'UTC') = 2025;
+ has_rows_in_2025 
+------------------
+ t                
+(1 row)
+
+-- Cleanup
+1: DROP TABLE temperature CASCADE;
+DROP
+1: DROP EXTENSION time_series CASCADE;
+DROP
+1q: ... <quitting>
+2q: ... <quitting>

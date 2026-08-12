@@ -1,0 +1,174 @@
+-- ============================================================
+-- cagg_planning_replan.sql (isolation2)
+--
+-- Concurrent-correctness for the two planner-time walkers added in
+-- commit b70dbcd17 (watermark constify + time_bucket pushdown):
+--
+--   - PREPARE p AS SELECT ... FROM cv WHERE bucket >= $1;
+--     The plan caches a constified watermark value at PREPARE time.
+--     If another session REFRESHes (advancing watermark), the cached
+--     plan would be using a stale const.  Test: EXECUTE p must still
+--     return correct rows regardless of when watermark advanced —
+--     live branch always re-aggregates from source.
+--
+--   - Concurrent SELECT FROM cv during REFRESH: result must match
+--     equivalent direct source aggregation, both before, during, and
+--     after the REFRESH completes.
+--
+-- Setup uses 3 sessions:
+--   1: setup + initial state
+--   2: reader (SELECT / PREPARE / EXECUTE)
+--   3: writer (INSERT + REFRESH)
+-- ============================================================
+
+-- ============================================================
+-- Setup
+-- ============================================================
+1: SET optimizer = off;
+SET
+1: SET timezone = 'UTC';
+SET
+1: DROP EXTENSION IF EXISTS time_series CASCADE;
+DROP
+1: CREATE EXTENSION time_series;
+CREATE
+1: SET search_path TO public, time_series;
+SET
+
+1: CREATE TABLE m ( time TIMESTAMPTZ NOT NULL, device_id INT NOT NULL, val INT ) USING time_series WITH ( ts_partition_column = 'time', ts_chunk_interval   = '4 hour', ts_chunk_origin     = '2020-01-01' ) DISTRIBUTED BY (device_id);
+CREATE
+
+1: INSERT INTO m SELECT '2024-06-01 00:00+00'::timestamptz + (i * interval '30 min'), (i % 5) + 1, i FROM generate_series(0, 95) i;
+INSERT 96
+-- 48 hours of data, 30 min spacing, 5 devices
+
+1: CREATE MATERIALIZED VIEW cv WITH (time_series.continuous) AS SELECT time_bucket('1 hour'::interval, time) AS bucket, device_id, count(*) AS cnt, sum(val) AS s FROM m GROUP BY bucket, device_id;
+CREATE
+
+-- Refresh first 24 hours; remaining 24 hours stays in live branch
+1: CALL refresh_continuous_aggregate( 'cv', '2024-06-01 00:00+00'::timestamptz, '2024-06-02 00:00+00'::timestamptz);
+CALL
+
+-- ============================================================
+-- TEST 1: Reader prepares; writer refreshes more; reader executes.
+--         Result must be correct regardless of watermark progression.
+-- ============================================================
+
+-- Session 2 prepares the query against current watermark
+2: SET optimizer = off;
+SET
+2: SET timezone = 'UTC';
+SET
+2: SET search_path TO public, time_series;
+SET
+2: PREPARE p_lower(timestamptz) AS SELECT count(*) AS n, sum(cnt) AS c, sum(s) AS total FROM cv WHERE bucket >= $1;
+PREPARE
+
+-- Execute once to populate plan cache
+2: EXECUTE p_lower('2024-06-02 12:00+00'::timestamptz);
+ n  | c  | total 
+----+----+-------
+ 24 | 24 | 2004  
+(1 row)
+
+-- Capture expected from source (truth)
+2: SELECT count(DISTINCT (time_bucket('1 hour'::interval, time), device_id)) AS expected_n, count(*) AS expected_c, sum(val) AS expected_total FROM m WHERE time >= '2024-06-02 12:00+00'::timestamptz;
+ expected_n | expected_c | expected_total 
+------------+------------+----------------
+ 24         | 24         | 2004           
+(1 row)
+
+-- Session 3 (writer): refresh more of the source
+3: SET optimizer = off;
+SET
+3: SET timezone = 'UTC';
+SET
+3: SET search_path TO public, time_series;
+SET
+3: CALL refresh_continuous_aggregate( 'cv', '2024-06-02 00:00+00'::timestamptz, '2024-06-02 12:00+00'::timestamptz);
+CALL
+
+-- Session 2 executes prepared again — watermark may have shifted
+-- since the cached plan was built.  PG should detect the catalog
+-- invalidation and replan, OR the cached const watermark should
+-- still produce a correct answer because live branch is authoritative.
+2: EXECUTE p_lower('2024-06-02 12:00+00'::timestamptz);
+ n  | c  | total 
+----+----+-------
+ 24 | 24 | 2004  
+(1 row)
+
+-- Re-verify against source
+2: SELECT count(DISTINCT (time_bucket('1 hour'::interval, time), device_id)) AS expected_n, count(*) AS expected_c, sum(val) AS expected_total FROM m WHERE time >= '2024-06-02 12:00+00'::timestamptz;
+ expected_n | expected_c | expected_total 
+------------+------------+----------------
+ 24         | 24         | 2004           
+(1 row)
+
+-- ============================================================
+-- TEST 2: Reader and writer run concurrently — query starts before
+--         refresh commits.  Reader's planner sees one watermark;
+--         executor sees data committed by writer.  Result must be
+--         deterministic and correct.
+-- ============================================================
+
+2: DEALLOCATE p_lower;
+DEALLOCATE
+2: BEGIN;
+BEGIN
+-- Snapshot taken here
+2: SELECT count(*) AS n_pre FROM cv WHERE bucket >= '2024-06-02 12:00+00'::timestamptz;
+ n_pre 
+-------
+ 24    
+(1 row)
+
+-- Writer commits a refresh of the remaining window
+3: CALL refresh_continuous_aggregate( 'cv', '2024-06-02 12:00+00'::timestamptz, '2024-06-03 00:00+00'::timestamptz);
+CALL
+
+-- Reader (still in same xact, snapshot frozen) — must see consistent rows
+2: SELECT count(*) AS n_in_xact FROM cv WHERE bucket >= '2024-06-02 12:00+00'::timestamptz;
+ n_in_xact 
+-----------
+ 24        
+(1 row)
+2: COMMIT;
+COMMIT
+
+-- After commit, fresh snapshot — should see refresh's effect (or
+-- equivalent live result; either is correct since live branch
+-- always recomputes from source)
+2: SELECT count(*) AS n_post FROM cv WHERE bucket >= '2024-06-02 12:00+00'::timestamptz;
+ n_post 
+--------
+ 24     
+(1 row)
+
+-- ============================================================
+-- TEST 3: Optimizer correctness — same-WHERE SELECT returns same
+--         rows as constify-disabled equivalent.
+--
+-- We emulate "constify-disabled" by using a constant >= operator
+-- directly on the mat table joined with a live-source GROUP BY.
+-- ============================================================
+
+1: SELECT count(*) AS opt_cv_n, sum(cnt) AS opt_cv_total FROM cv WHERE bucket >= '2024-06-02 06:00+00'::timestamptz AND bucket <  '2024-06-02 18:00+00'::timestamptz;
+ opt_cv_n | opt_cv_total 
+----------+--------------
+ 24       | 24           
+(1 row)
+
+1: SELECT count(*) AS source_n, count(*) AS source_total FROM ( SELECT time_bucket('1 hour'::interval, time) AS bucket, device_id, count(*) AS cnt FROM m WHERE time >= '2024-06-02 06:00+00'::timestamptz AND time <  '2024-06-02 18:00+00'::timestamptz GROUP BY bucket, device_id ) s;
+ source_n | source_total 
+----------+--------------
+ 24       | 24           
+(1 row)
+
+-- ============================================================
+-- Cleanup
+-- ============================================================
+1: DROP TABLE m CASCADE;
+DROP
+1: DROP EXTENSION time_series CASCADE;
+DROP

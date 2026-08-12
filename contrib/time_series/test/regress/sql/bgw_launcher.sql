@@ -1,0 +1,675 @@
+-- ============================================================
+-- bgw_launcher.sql
+--
+-- Multi-DB launcher orchestration tests.
+-- Adapted from TimescaleDB test/sql/bgw_launcher.sql (Apache 2.0)
+-- with the following CBDB / time_series adjustments:
+--   - No SQL start/stop/restart control plane (TSDB has
+--     `_timescaledb_functions.start_background_workers()` etc.; we
+--     use pg_terminate_backend + ALTER DATABASE SET GUC instead).
+--   - No template1-as-source coverage (CBDB demo cluster has
+--     `postgres` marked datistemplate=true, an unrelated quirk).
+--   - No DROP OWNED coverage (no separate ROLE test fixtures
+--     available in our regress harness).
+--
+-- Verified behaviours:
+--   TEST-01  launcher up, no scheduler for a DB without ext
+--   TEST-02  CREATE DATABASE + CREATE EXTENSION → scheduler auto-spawn
+--   TEST-03  pg_terminate(launcher) → launcher self-restart
+--   TEST-04  pg_terminate(scheduler) → launcher auto-respawns
+--            (STARTED→ENABLED transition + postmaster bgw_restart_time)
+--   TEST-05  stop_background_workers() → scheduler stops, no respawn
+--            (entry lands in DISABLED, launcher poll ignores it)
+--   TEST-06  start_background_workers() after stop → scheduler returns
+--   TEST-07  DROP EXTENSION in a txn + ROLLBACK keeps scheduler
+--   TEST-08  DROP EXTENSION committed → scheduler eventually exits
+--   TEST-09  Re-CREATE EXTENSION → scheduler reappears
+--   TEST-10  respawned scheduler is a fresh process (backend_start)
+--   TEST-13  DROP DATABASE → htab cleaned, no crash
+--   TEST-14  kill scheduler then kill launcher → exactly ONE
+--            scheduler per DB after launcher self-restart
+--            (regression for the orphan-scheduler bug fixed in
+--             commit c0af724e: launcher must terminate stray
+--             schedulers it has no handle for on startup)
+--   TEST-15  CREATE DATABASE … TEMPLATE db2 → new DB inherits the
+--            extension catalog rows, launcher spawns scheduler
+--            for the new DB on its next poll
+--   TEST-16  ALTER DATABASE db2 RENAME TO renamed → scheduler
+--            follows the new datname (launcher htab is keyed by
+--            dboid, which survives the rename)
+--   TEST-17  time_series.debug_bgw_scheduler_exit_status GUC is
+--            wired up and accepts SIGHUP reload (the actual exit
+--            code is observable only in postmaster log, not SQL)
+-- ============================================================
+
+\set TEST_DB2 bgw_launcher_db2
+\set TEST_DB_RENAMED bgw_launcher_renamed
+
+SET client_min_messages = WARNING;
+
+-- Make the launcher react faster so wait loops finish quickly.
+-- Default 60s would make every wait_for_worker_count loop tip-toe.
+ALTER SYSTEM SET time_series.bgw_launcher_poll_time = '500ms';
+SELECT pg_reload_conf();
+
+-- Clean up any leftovers from prior runs / failed tests.  Use DO/PERFORM
+-- so the row count (variable across runs) doesn't appear in the output.
+DO $$ BEGIN PERFORM pg_terminate_backend(pid)
+  FROM pg_stat_activity
+ WHERE datname IN ('bgw_launcher_db2','bgw_launcher_renamed')
+   AND pid <> pg_backend_pid(); END$$;
+DROP DATABASE IF EXISTS bgw_launcher_db2;
+DROP DATABASE IF EXISTS bgw_launcher_renamed;
+
+-- Counts view, keyed on the two DBs this file uses.
+CREATE OR REPLACE VIEW worker_counts AS
+SELECT
+    count(*) FILTER (WHERE backend_type = 'time_series launcher')
+        AS launcher,
+    count(*) FILTER (WHERE backend_type = 'time_series scheduler'
+                       AND datname = 'bgw_launcher_db2')
+        AS db2_sched,
+    count(*) FILTER (WHERE backend_type = 'time_series scheduler'
+                       AND datname = 'bgw_launcher_renamed')
+        AS renamed_sched
+FROM pg_stat_activity;
+
+-- Poll until a fresh scheduler for db2 is visible whose backend_start
+-- is after the snapshot timestamp.  Used by TEST-10 instead of a one-
+-- shot SELECT, because pg_stat_activity can briefly show 0 rows during
+-- a respawn cycle (the wait_worker_counts() guard sees count=1 in its
+-- internal poll, but the next outer SELECT can race with another
+-- restart and observe nothing).
+-- Exponential-backoff poll (see wait_worker_counts note below): the
+-- budget is wall-clock milliseconds, but the happy path returns within
+-- one or two short ticks instead of burning fixed 200 ms slices.
+CREATE OR REPLACE FUNCTION wait_scheduler_fresh(_after TIMESTAMPTZ,
+                                                _budget_ms INT DEFAULT 30000,
+                                                _datname NAME DEFAULT 'bgw_launcher_db2')
+RETURNS BOOLEAN LANGUAGE PLPGSQL AS $$
+DECLARE
+    r BOOLEAN;
+    slept_ms INT := 0;
+    step_ms  INT := 50;
+BEGIN
+    LOOP
+        PERFORM pg_stat_clear_snapshot();
+        SELECT (backend_start > _after) FROM pg_stat_activity
+         WHERE backend_type = 'time_series scheduler'
+           AND datname     = _datname
+         INTO r;
+        IF r THEN RETURN TRUE; END IF;
+        EXIT WHEN slept_ms >= _budget_ms;
+        PERFORM pg_sleep(step_ms / 1000.0);
+        slept_ms := slept_ms + step_ms;
+        step_ms  := LEAST(step_ms * 2, 1000);
+    END LOOP;
+    RETURN FALSE;
+END$$;
+
+-- Poll until a launcher with pid != _orig_pid is visible.  Used by
+-- TEST-14 / TEST-26 to confirm a launcher respawn (under a NEW pid).
+-- Exponential-backoff poll; generous 120 s budget because under
+-- back-to-back CI load the postmaster respawn + catalog rescan has
+-- been observed to take well over a minute — the budget is only ever
+-- consumed on genuinely slow runs, the happy path returns in seconds.
+CREATE OR REPLACE FUNCTION wait_launcher_fresh(_orig_pid INT,
+                                               _budget_ms INT DEFAULT 120000)
+RETURNS BOOLEAN LANGUAGE PLPGSQL AS $$
+DECLARE
+    p int;
+    slept_ms INT := 0;
+    step_ms  INT := 50;
+BEGIN
+    LOOP
+        PERFORM pg_stat_clear_snapshot();
+        SELECT pid FROM pg_stat_activity
+         WHERE backend_type = 'time_series launcher'
+         INTO p;
+        IF p IS NOT NULL AND p <> _orig_pid THEN RETURN TRUE; END IF;
+        EXIT WHEN slept_ms >= _budget_ms;
+        PERFORM pg_sleep(step_ms / 1000.0);
+        slept_ms := slept_ms + step_ms;
+        step_ms  := LEAST(step_ms * 2, 1000);
+    END LOOP;
+    RETURN FALSE;
+END$$;
+
+-- Wait for a specific (launcher, db2_sched, renamed_sched) state.
+-- Exponential-backoff poll: budget is wall-clock milliseconds; steps
+-- start at 50 ms and double up to a 1 s cap, and the stats snapshot is
+-- cleared BEFORE each probe so a stale pg_stat_activity view can never
+-- produce a false negative.  Compared with the previous fixed-200 ms
+-- ticks this makes the happy path return in one or two short ticks
+-- (CI saves 20-30 s per run) while the FAILURE budget can stay
+-- generous — it is only consumed on genuinely slow runs, exactly the
+-- runs that used to time out and fail the whole suite (bgw_launcher
+-- TEST-14 under back-to-back load: launcher respawn + multi-DB
+-- scheduler convergence was observed to need > 60 s).
+CREATE OR REPLACE FUNCTION wait_worker_counts(_launcher INT,
+                                              _db2 INT,
+                                              _renamed INT,
+                                              _budget_ms INT DEFAULT 30000)
+RETURNS BOOLEAN LANGUAGE PLPGSQL AS $$
+DECLARE
+    match INT;
+    slept_ms INT := 0;
+    step_ms  INT := 50;
+BEGIN
+    LOOP
+        PERFORM pg_stat_clear_snapshot();
+        SELECT 1 FROM worker_counts
+         WHERE launcher      = _launcher
+           AND db2_sched     = _db2
+           AND renamed_sched = _renamed
+         INTO match;
+        IF match IS NOT NULL THEN
+            RETURN TRUE;
+        END IF;
+        EXIT WHEN slept_ms >= _budget_ms;
+        PERFORM pg_sleep(step_ms / 1000.0);
+        slept_ms := slept_ms + step_ms;
+        step_ms  := LEAST(step_ms * 2, 1000);
+    END LOOP;
+    RETURN FALSE;
+END$$;
+
+-- ============================================================
+-- TEST-01: Steady state: launcher running, no scheduler for db2
+--          (because db2 doesn't exist yet).
+-- ============================================================
+\echo '=== TEST-01: launcher up, no scheduler for unknown DB ==='
+SELECT wait_worker_counts(1, 0, 0) AS test_01_ok;
+
+-- ============================================================
+-- TEST-02: CREATE DATABASE + CREATE EXTENSION → scheduler auto-spawn.
+-- ============================================================
+\echo '=== TEST-02: CREATE EXTENSION in new DB → scheduler auto-spawn ==='
+CREATE DATABASE bgw_launcher_db2;
+\c bgw_launcher_db2
+SET client_min_messages = WARNING;
+CREATE EXTENSION time_series;
+\c contrib_regression
+SET client_min_messages = WARNING;
+SELECT wait_worker_counts(1, 1, 0) AS test_02_ok;
+
+-- ============================================================
+-- TEST-03: pg_terminate(launcher) → launcher self-restarts via
+-- postmaster (bgw_scheduler_restart_time, default 5s).
+-- ============================================================
+\echo '=== TEST-03: pg_terminate(launcher) → self-restart ==='
+DO $$ BEGIN PERFORM pg_terminate_backend(pid)
+  FROM pg_stat_activity
+ WHERE backend_type = 'time_series launcher'; END$$;
+-- Allow up to ~12s (60 ticks × 200ms) for postmaster to respawn the
+-- launcher AND for the launcher to spawn the db2 scheduler again.
+SELECT wait_worker_counts(1, 1, 0, 60000) AS test_03_ok;
+
+-- ============================================================
+-- TEST-04: pg_terminate(scheduler) → launcher auto-respawns.
+--
+-- Validates the STARTED→ENABLED transition in
+-- scheduler_state_trans_automatic(): when GetBackgroundWorkerPid()
+-- returns BGWH_STOPPED the launcher's next poll transits the entry
+-- to ENABLED, which in turn re-runs enabled_to_allocated →
+-- allocated_to_started to respawn the scheduler.  Postmaster-level
+-- bgw_restart_time (guc_bgw_scheduler_restart_time_sec, default 5s)
+-- provides defense-in-depth: if the launcher's poll misses a cycle
+-- postmaster still respawns via the BGW slot.
+-- ============================================================
+\echo '=== TEST-04: pg_terminate(scheduler) → launcher auto-respawns ==='
+SELECT backend_start AS test_04_orig_start
+  FROM pg_stat_activity
+ WHERE backend_type = 'time_series scheduler'
+   AND datname = 'bgw_launcher_db2' \gset
+DO $$ BEGIN PERFORM pg_terminate_backend(pid)
+  FROM pg_stat_activity
+ WHERE backend_type = 'time_series scheduler'
+   AND datname = 'bgw_launcher_db2'; END$$;
+-- No explicit start_background_workers() here — launcher must auto-respawn.
+-- Budget 300 (60 sec) covers launcher poll + postmaster respawn worst case.
+SELECT wait_worker_counts(1, 1, 0, 60000) AS test_04_auto_respawn_ok;
+-- Verify the respawn produced a genuinely fresh backend
+SELECT wait_scheduler_fresh(:'test_04_orig_start'::timestamptz, 30000) AS test_04_fresh;
+
+-- ============================================================
+-- TEST-05: stop_background_workers() stops scheduler and prevents respawn.
+--
+-- Mirrors TimescaleDB upstream's stop path.  BGW_MSG_STOP lands the
+-- per-DB launcher entry in DISABLED via message_stop_action(); the
+-- automatic poll loop ignores DISABLED entries so no respawn happens
+-- until an explicit start/restart message.
+-- ============================================================
+\echo '=== TEST-05: stop_background_workers() disables scheduler ==='
+\c bgw_launcher_db2
+SET client_min_messages = WARNING;
+SELECT time_series.stop_background_workers() AS test_05_stop_returned_true;
+\c contrib_regression
+SET client_min_messages = WARNING;
+-- Count must reach 0 and stay 0 (no auto-respawn from DISABLED).
+SELECT wait_worker_counts(1, 0, 0, 30000) AS test_05_ok;
+
+-- ============================================================
+-- TEST-06: start_background_workers() after stop → scheduler returns.
+-- ============================================================
+\echo '=== TEST-06: start_background_workers() restores scheduler ==='
+\c bgw_launcher_db2
+SET client_min_messages = WARNING;
+SELECT time_series.start_background_workers() AS test_06_started;
+\c contrib_regression
+SET client_min_messages = WARNING;
+SELECT wait_worker_counts(1, 1, 0, 30000) AS test_06_ok;
+
+-- ============================================================
+-- TEST-07: DROP EXTENSION inside a txn that ROLLBACKs → scheduler
+-- continues running.
+-- ============================================================
+\echo '=== TEST-07: DROP EXTENSION in txn + ROLLBACK keeps scheduler ==='
+\c bgw_launcher_db2
+SET client_min_messages = WARNING;
+BEGIN;
+DROP EXTENSION time_series;
+ROLLBACK;
+\c contrib_regression
+SET client_min_messages = WARNING;
+SELECT wait_worker_counts(1, 1, 0, 30000) AS test_07_ok;
+
+-- ============================================================
+-- TEST-08: DROP EXTENSION committed → scheduler exits.  The
+-- running scheduler receives a relcache invalidation on bgw_job
+-- (the catalog rows are being dropped), wakes from WaitLatch, runs
+-- extension_installed_in_this_db() in its jobs_list_needs_update
+-- branch, sees the extension is gone, and proc_exit(0)s.  The
+-- launcher's continuing polls spawn schedulers that immediately
+-- self-exit via the same check on their startup path.
+-- ============================================================
+\echo '=== TEST-08: DROP EXTENSION → scheduler exits promptly ==='
+\c bgw_launcher_db2
+SET client_min_messages = WARNING;
+DROP EXTENSION time_series;
+\c contrib_regression
+SET client_min_messages = WARNING;
+SELECT wait_worker_counts(1, 0, 0, 60000) AS test_08_ok;
+
+-- ============================================================
+-- TEST-09: Re-CREATE EXTENSION → scheduler reappears.
+-- ============================================================
+\echo '=== TEST-09: re-CREATE EXTENSION → scheduler reappears ==='
+\c bgw_launcher_db2
+SET client_min_messages = WARNING;
+CREATE EXTENSION time_series;
+\c contrib_regression
+SET client_min_messages = WARNING;
+SELECT wait_worker_counts(1, 1, 0, 30000) AS test_09_ok;
+
+-- ============================================================
+-- TEST-10: pg_terminate(scheduler) AGAIN, this time verify that the
+-- respawned scheduler is a fresh process (backend_start moves
+-- forward).  Without this check the count assertion alone would be
+-- satisfied by a stale entry from a previous run.  Mirrors upstream
+-- bgw_launcher.sql's `backend_start > orig_backend_start` checks.
+-- ============================================================
+\echo '=== TEST-10: respawned scheduler is a fresh process ==='
+SELECT backend_start AS scheduler_start
+  FROM pg_stat_activity
+ WHERE backend_type = 'time_series scheduler'
+   AND datname = 'bgw_launcher_db2' \gset
+DO $$ BEGIN PERFORM pg_terminate_backend(pid)
+  FROM pg_stat_activity
+ WHERE backend_type = 'time_series scheduler'
+   AND datname = 'bgw_launcher_db2'; END$$;
+\c bgw_launcher_db2
+SET client_min_messages = WARNING;
+SELECT time_series.start_background_workers();
+\c contrib_regression
+SET client_min_messages = WARNING;
+SELECT wait_worker_counts(1, 1, 0, 30000) AS test_10_count_ok;
+-- The new scheduler's backend_start must be later than the killed one.
+SELECT wait_scheduler_fresh(:'scheduler_start'::timestamptz, 30000) AS test_10_fresh;
+
+-- ============================================================
+-- TEST-14: Regression for the duplicate-scheduler bug.
+--
+-- Scenario (mirrors TimescaleDB's bgw_scheduler_restart.sql):
+--   1. Scheduler is running for db2 (steady state from TEST-12).
+--   2. Kill the scheduler.  Launcher respawns it through a new
+--      worker handle — at this point launcher holds a handle for
+--      the NEW scheduler only; the old (now-dead) handle is gone.
+--   3. Kill the launcher.  Postmaster restarts the launcher.
+--   4. If the launcher does NOT clean up orphan schedulers on
+--      startup, the previous-respawn scheduler is still running
+--      and the new launcher spawns *another* one → 2 schedulers
+--      per DB.  Our fix (terminate stray '%scheduler%' backends
+--      on launcher startup) guarantees exactly one.
+-- ============================================================
+\echo '=== TEST-14: launcher restart leaves exactly one scheduler ==='
+-- (a) force the launcher to refresh its handle for db2.  Killing the
+-- scheduler leaves the launcher's per-DB entry DISABLED — send a START
+-- so the entry is back to STARTED before we move on to (b).
+DO $$ BEGIN PERFORM pg_terminate_backend(pid)
+  FROM pg_stat_activity
+ WHERE backend_type = 'time_series scheduler'
+   AND datname = 'bgw_launcher_db2'; END$$;
+\c bgw_launcher_db2
+SET client_min_messages = WARNING;
+SELECT time_series.start_background_workers();
+\c contrib_regression
+SET client_min_messages = WARNING;
+SELECT wait_worker_counts(1, 1, 0, 30000) AS test_14_setup_ok;
+-- snapshot launcher pid
+SELECT pid AS launcher_pid
+  FROM pg_stat_activity
+ WHERE backend_type = 'time_series launcher' \gset
+-- (b) kill the launcher; postmaster will respawn it
+DO $$ BEGIN PERFORM pg_terminate_backend(pid)
+  FROM pg_stat_activity
+ WHERE backend_type = 'time_series launcher'; END$$;
+-- give launcher up to ~12s to come back and re-discover db2.
+-- The crucial invariant: db2_sched == 1, NOT 2.
+SELECT wait_worker_counts(1, 1, 0, 120000) AS test_14_one_scheduler_ok;
+-- launcher pid must have changed (proves we actually restarted)
+SELECT (pid <> :'launcher_pid'::int) AS test_14_launcher_fresh
+  FROM pg_stat_activity
+ WHERE backend_type = 'time_series launcher';
+-- explicit count assertion: 1 scheduler for db2 (not 2)
+SELECT count(*) AS test_14_scheduler_count
+  FROM pg_stat_activity
+ WHERE backend_type = 'time_series scheduler'
+   AND datname = 'bgw_launcher_db2';
+
+-- ============================================================
+-- TEST-15: CREATE DATABASE … TEMPLATE bgw_launcher_db2
+--
+-- The cloned database inherits all catalog rows from the template
+-- (including pg_extension's entry for time_series).  The launcher's
+-- next poll should detect the new database and spawn a scheduler.
+-- ============================================================
+\echo '=== TEST-15: CREATE DATABASE with templated extension → scheduler ==='
+-- (a) drain connections to db2 so it can serve as a template.
+-- stop_background_workers() lands db2's launcher entry in DISABLED
+-- and terminates the running scheduler synchronously (no respawn).
+\c bgw_launcher_db2
+SET client_min_messages = WARNING;
+SELECT time_series.stop_background_workers();
+\c contrib_regression
+SET client_min_messages = WARNING;
+-- Kill any lingering non-scheduler client connections to db2 so
+-- CREATE DATABASE TEMPLATE can lock it.
+DO $$ BEGIN PERFORM pg_terminate_backend(pid)
+  FROM pg_stat_activity
+ WHERE datname = 'bgw_launcher_db2'
+   AND pid <> pg_backend_pid(); END$$;
+SELECT wait_worker_counts(1, 0, 0, 30000) AS test_15_drained_ok;
+-- (b) clone
+CREATE DATABASE bgw_launcher_db3 TEMPLATE bgw_launcher_db2;
+-- (c) re-enable db2; launcher should now spawn schedulers for BOTH db2 and db3.
+-- db3 is brand-new so populate adds + ENABLEs it automatically; db2's launcher
+-- entry stayed DISABLED across (a)'s stop, so it needs an explicit START
+-- message.
+\c bgw_launcher_db2
+SET client_min_messages = WARNING;
+SELECT time_series.start_background_workers();
+\c contrib_regression
+SET client_min_messages = WARNING;
+-- (d) poll until a scheduler for db3 appears.  We can't use
+-- wait_worker_counts() because the helper only tracks db2 and renamed;
+-- inline a one-off loop here.
+DO $$
+DECLARE n INT;
+BEGIN
+  FOR i IN 1..60 LOOP
+    SELECT count(*) FROM pg_stat_activity
+     WHERE backend_type = 'time_series scheduler'
+       AND datname     = 'bgw_launcher_db3'
+     INTO n;
+    IF n = 1 THEN RETURN; END IF;
+    PERFORM pg_sleep(0.2);
+    PERFORM pg_stat_clear_snapshot();
+  END LOOP;
+  RAISE EXCEPTION 'TEST-15: db3 scheduler did not appear (got %)', n;
+END$$;
+SELECT count(*) AS test_15_db3_sched
+  FROM pg_stat_activity
+ WHERE backend_type = 'time_series scheduler'
+   AND datname     = 'bgw_launcher_db3';
+-- (e) drop db3, keep db2 for the next test
+DO $$ BEGIN PERFORM pg_terminate_backend(pid)
+  FROM pg_stat_activity
+ WHERE datname = 'bgw_launcher_db3'
+   AND pid <> pg_backend_pid(); END$$;
+DROP DATABASE bgw_launcher_db3;
+SELECT wait_worker_counts(1, 1, 0, 30000) AS test_15_cleanup_ok;
+
+-- ============================================================
+-- TEST-16: ALTER DATABASE RENAME
+--
+-- The launcher's per-DB htab is keyed by dboid, which survives a
+-- rename.  After re-enabling the scheduler we should see exactly
+-- one scheduler whose datname is the new name.
+-- ============================================================
+\echo '=== TEST-16: ALTER DATABASE RENAME tracks new datname ==='
+-- (a) drain db2 (RENAME requires no other backends connected).
+-- stop_background_workers() stops the scheduler and blocks respawn.
+\c bgw_launcher_db2
+SET client_min_messages = WARNING;
+SELECT time_series.stop_background_workers();
+\c contrib_regression
+SET client_min_messages = WARNING;
+DO $$ BEGIN PERFORM pg_terminate_backend(pid)
+  FROM pg_stat_activity
+ WHERE datname = 'bgw_launcher_db2'
+   AND pid <> pg_backend_pid(); END$$;
+SELECT wait_worker_counts(1, 0, 0, 30000) AS test_16_drained_ok;
+-- (b) rename
+ALTER DATABASE bgw_launcher_db2 RENAME TO bgw_launcher_renamed;
+-- (c) re-enable via explicit START; launcher entry stayed DISABLED across (a).
+-- The launcher htab is keyed by dboid, which survives the rename, so the
+-- start message lands on the correct entry under the new datname.
+\c bgw_launcher_renamed
+SET client_min_messages = WARNING;
+SELECT time_series.start_background_workers();
+\c contrib_regression
+SET client_min_messages = WARNING;
+-- (d) scheduler appears under the new name
+SELECT wait_worker_counts(1, 0, 1, 60000) AS test_16_ok;
+
+-- ============================================================
+-- TEST-17: debug_bgw_scheduler_exit_status GUC plumbing.
+--
+-- Mirrors TSDB's bgw_scheduler_restart.sql which only verifies the
+-- GUC can be set and reloaded — the actual non-zero exit-code path
+-- is observable only in the postmaster log, not via SQL.
+-- ============================================================
+\echo '=== TEST-17: debug_bgw_scheduler_exit_status GUC SIGHUP roundtrip ==='
+SHOW time_series.debug_bgw_scheduler_exit_status;
+ALTER SYSTEM SET time_series.debug_bgw_scheduler_exit_status TO 1;
+SELECT pg_reload_conf();
+-- Give postmaster a moment to dispatch SIGHUP to backends.
+SELECT pg_sleep(0.5);
+SHOW time_series.debug_bgw_scheduler_exit_status;
+ALTER SYSTEM RESET time_series.debug_bgw_scheduler_exit_status;
+SELECT pg_reload_conf();
+
+-- ============================================================
+-- TEST-18: time_series.stop_background_workers() terminates the
+-- per-DB scheduler.  Mirrors upstream's stop_background_workers test.
+-- BGW_MSG_STOP lands the entry in DISABLED so no respawn occurs.
+-- ============================================================
+\echo '=== TEST-18: stop_background_workers() terminates per-DB scheduler ==='
+\c bgw_launcher_renamed
+SET client_min_messages = WARNING;
+SELECT time_series.stop_background_workers() AS test_18_stop_returned_true;
+\c contrib_regression
+SET client_min_messages = WARNING;
+SELECT wait_worker_counts(1, 0, 0, 60000) AS test_18_post_stop_count_ok;
+
+-- ============================================================
+-- TEST-19: time_series.start_background_workers() asks the launcher
+-- to spawn a scheduler ASAP.  Flips a DISABLED entry back to ENABLED.
+-- ============================================================
+\echo '=== TEST-19: start_background_workers() spawns scheduler ==='
+\c bgw_launcher_renamed
+SET client_min_messages = WARNING;
+SELECT time_series.start_background_workers() AS test_19_start_returned_true;
+\c contrib_regression
+SET client_min_messages = WARNING;
+-- Note: this DB was renamed db2 → renamed in TEST-16, so the scheduler
+-- shows up under `renamed_sched`, not `db2_sched`.
+SELECT wait_worker_counts(1, 0, 1, 60000) AS test_19_post_start_count_ok;
+
+-- ============================================================
+-- TEST-20: time_series.restart_background_workers() — stop + start
+-- in one call.  Just asserts the function returns true and a
+-- scheduler is up afterwards; PID-changed verification is harder
+-- to make deterministic so we don't try.
+-- ============================================================
+\echo '=== TEST-20: restart_background_workers() ==='
+\c bgw_launcher_renamed
+SET client_min_messages = WARNING;
+SELECT time_series.restart_background_workers() AS test_20_restart_returned_true;
+\c contrib_regression
+SET client_min_messages = WARNING;
+SELECT wait_worker_counts(1, 0, 1, 60000) AS test_20_post_restart_count_ok;
+
+-- TEST-21/TEST-22 removed: those NEGATIVE tests asserted that a
+-- pg_terminate'd scheduler would NOT be auto-respawned (only an
+-- explicit START message would).  Under the current architecture the
+-- launcher DOES auto-respawn unexpectedly dead schedulers (see TEST-04);
+-- the "stays dead" invariant now only holds after an explicit STOP
+-- message, which TEST-05 already covers.  The two negatives are
+-- therefore obsolete.
+
+-- ============================================================
+-- TEST-23: Idempotency — stop / start can be called repeatedly.
+--
+-- Mirrors TSDB upstream's bgw_launcher.sql lines 60-66 (the simple
+-- 2x idempotency check; the 20x stress variant remains deferred —
+-- see the "Not ported" note in the cleanup section below).
+-- ============================================================
+\echo '=== TEST-23: stop / start idempotency ==='
+\c bgw_launcher_renamed
+SET client_min_messages = WARNING;
+-- stop twice in a row
+SELECT time_series.stop_background_workers() AS test_23_first_stop;
+SELECT time_series.stop_background_workers() AS test_23_second_stop;
+-- start twice in a row
+SELECT time_series.start_background_workers() AS test_23_first_start;
+SELECT time_series.start_background_workers() AS test_23_second_start;
+\c contrib_regression
+SET client_min_messages = WARNING;
+SELECT wait_worker_counts(1, 0, 1, 30000) AS test_23_running_after;
+
+-- ============================================================
+-- TEST-24: restart_background_workers() inside a transaction.
+--
+-- Mirrors TSDB upstream bgw_launcher.sql lines 33-54.  After the
+-- restart message is sent inside BEGIN, the new scheduler is up;
+-- by the end of the txn its backend_start has moved past the
+-- pre-restart snapshot.  We do NOT assert wait_event='virtualxid'
+-- (a TSDB-internal lock-on-txn detail that depends on the
+-- scheduler's exact wait point — fragile across implementations).
+-- ============================================================
+\echo '=== TEST-24: restart_background_workers() inside BEGIN ==='
+SELECT backend_start AS pre_restart_start
+  FROM pg_stat_activity
+ WHERE backend_type = 'time_series scheduler'
+   AND datname = 'bgw_launcher_renamed' \gset
+\c bgw_launcher_renamed
+SET client_min_messages = WARNING;
+BEGIN;
+SELECT time_series.restart_background_workers() AS test_24_restart_returned_true;
+COMMIT;
+\c contrib_regression
+SET client_min_messages = WARNING;
+SELECT wait_worker_counts(1, 0, 1, 30000) AS test_24_post_restart_running;
+SELECT wait_scheduler_fresh(:'pre_restart_start'::timestamptz, 30000,
+                            'bgw_launcher_renamed') AS test_24_backend_start_advanced;
+
+-- TEST-25 intentionally omitted — see "Not ported from TSDB"
+-- comment near the cleanup section at the end of this file
+-- (DROP EXTENSION + ROLLBACK invalidation-driven scheduler exit
+-- is a TSDB-internal behavior; ours is "lazy" and doesn't react
+-- to a rolled-back DDL — both are defensible, no parity test).
+
+-- ============================================================
+-- TEST-26: pg_cancel_backend(launcher) → launcher restarts and
+-- spawns a fresh scheduler.
+--
+-- Mirrors TSDB upstream bgw_launcher.sql lines 143-153.  Companion
+-- to TEST-14 (which uses pg_terminate / SIGTERM); this exercises
+-- the SIGINT path.  Same TSDB-aligned semantic gap: a DISABLED
+-- entry won't auto-respawn on its own, so we send an explicit
+-- start after the launcher comes back.
+-- ============================================================
+\echo '=== TEST-26: pg_cancel_backend(launcher) + start → fresh scheduler ==='
+SELECT pid AS pre_cancel_launcher_pid
+  FROM pg_stat_activity
+ WHERE backend_type = 'time_series launcher' \gset
+SELECT backend_start AS pre_cancel_sched_start
+  FROM pg_stat_activity
+ WHERE backend_type = 'time_series scheduler'
+   AND datname = 'bgw_launcher_renamed' \gset
+SELECT pg_cancel_backend(:'pre_cancel_launcher_pid'::int) AS test_26_cancel_returned_true;
+-- Wait for launcher to respawn under a new pid (postmaster
+-- restarts after bgw_scheduler_restart_time, default 5 s).
+SELECT wait_launcher_fresh(:'pre_cancel_launcher_pid'::int, 120000)
+       AS test_26_launcher_respawned;
+-- Drive the scheduler back explicitly (new launcher discovered the
+-- DB as a fresh entry → ENABLED already, but if it had been DISABLED
+-- this start would also be the right action).
+\c bgw_launcher_renamed
+SET client_min_messages = WARNING;
+SELECT time_series.start_background_workers();
+\c contrib_regression
+SET client_min_messages = WARNING;
+SELECT wait_worker_counts(1, 0, 1, 60000) AS test_26_post_cancel_running;
+
+-- ============================================================
+-- TEST-13: DROP DATABASE → launcher htab cleans up; no crash.
+-- (Renamed in TEST-16, so we drop the post-rename name.)
+-- ============================================================
+\echo '=== TEST-13: DROP DATABASE cleans up ==='
+DO $$ BEGIN PERFORM pg_terminate_backend(pid)
+  FROM pg_stat_activity
+ WHERE datname = 'bgw_launcher_renamed'
+   AND pid <> pg_backend_pid(); END$$;
+DROP DATABASE bgw_launcher_renamed;
+SELECT wait_worker_counts(1, 0, 0) AS test_13_ok;
+
+-- ============================================================
+-- Cleanup
+-- ============================================================
+-- Not ported from TSDB's bgw_launcher.sql (with stated reasons):
+--   * 20x idempotency stress on the SQL control plane —
+--     simple 2x idempotency now covered in TEST-23.  The 20x
+--     stress variant is deferred until we have a measurable
+--     flake source.
+--   * DROP EXTENSION inside BEGIN; ROLLBACK ⇒ scheduler restarts
+--     with a NEW backend_start (TSDB lines 108-141).  TSDB's
+--     scheduler reacts to the in-flight invalidations by exiting,
+--     and a NEW process starts after ROLLBACK.  Our scheduler is
+--     deliberately "lazy" — it does NOT react to a rolled-back
+--     DDL, so the same instance survives.  Both behaviours are
+--     defensible (TSDB is defensive-on-doubt, we act only on
+--     committed state).  TEST-07 already covers the survivability
+--     half; the "new process" half is not a property we promise.
+--   * DROP OWNED BY <role> drops the extension and the scheduler —
+--     requires TSDB's regress harness fixture roles
+--     (ROLE_DEFAULT_PERM_USER / ROLE_DEFAULT_PERM_USER_2) which
+--     do not exist in our pg_regress.
+--   * template1 + CREATE EXTENSION → scheduler exits because
+--     template DB — CBDB demo cluster's `postgres` database has
+--     datistemplate=true (unrelated quirk), making this scenario
+--     non-deterministic.
+--   * ALTER DATABASE … SET TABLESPACE — requires TEST_TABLESPACE
+--     fixture path not provided by our harness.
+
+DROP FUNCTION wait_scheduler_fresh(TIMESTAMPTZ, INT, NAME);
+DROP FUNCTION wait_launcher_fresh(INT, INT);
+DROP FUNCTION wait_worker_counts(INT,INT,INT,INT);
+DROP VIEW worker_counts;
+
+ALTER SYSTEM RESET time_series.bgw_launcher_poll_time;
+SELECT pg_reload_conf();
+
+\echo '=== bgw_launcher.sql complete ==='

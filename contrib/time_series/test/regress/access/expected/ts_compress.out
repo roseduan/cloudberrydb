@@ -1,0 +1,1587 @@
+-- Test: chunk compression (Phase 1)
+-- Verifies set_compress_config, compress_chunks, and metadata tracking.
+-- start_matchsubs
+-- m/Key \(table_oid\)=\(\d+\)/
+-- s/Key \(table_oid\)=\(\d+\)/Key (table_oid)=(OID)/
+-- m/Key \(table_oid, chunk_number\)=\(\d+, \d+\)/
+-- s/Key \(table_oid, chunk_number\)=\(\d+, \d+\)/Key (table_oid, chunk_number)=(OID, N)/
+-- end_matchsubs
+\i sql/include/setup.sql
+-- Shared setup for time_series regression tests.
+-- Include this at the top of every test file via:
+--   \ir include/setup.sql
+CREATE EXTENSION IF NOT EXISTS time_series;
+SET optimizer = off;
+SET timezone = 'UTC';
+SET datestyle = 'ISO';
+SET extra_float_digits = 0;
+CREATE SCHEMA IF NOT EXISTS test;
+-- ======================================================================
+-- Section 1: Verify new catalog tables exist
+-- ======================================================================
+SELECT count(*) AS config_rows FROM time_series.ts_compress_config;
+ config_rows 
+-------------
+           0
+(1 row)
+
+SELECT count(*) AS compressed_rows FROM time_series.ts_compressed_chunk;
+ compressed_rows 
+-----------------
+               0
+(1 row)
+
+-- Verify ts_chunk has status column
+SELECT column_name, data_type
+FROM information_schema.columns
+WHERE table_schema = 'time_series' AND table_name = 'ts_chunk'
+    AND column_name = 'status';
+ column_name | data_type 
+-------------+-----------
+ status      | smallint
+(1 row)
+
+-- ======================================================================
+-- Section 2: set_compress_config
+-- ======================================================================
+CREATE TABLE ts_comp_test (
+    ts timestamptz NOT NULL,
+    region text NOT NULL,
+    device_id integer NOT NULL,
+    temperature double precision,
+    humidity double precision
+) USING time_series WITH (
+    ts_partition_column = 'ts',
+    ts_chunk_interval = '1 day',
+    ts_chunk_origin = '2025-01-01 00:00:00+00'
+) DISTRIBUTED REPLICATED;
+-- 2a: Configure compression with segmentby and orderby
+SELECT time_series.set_compress_config(
+    'ts_comp_test'::regclass,
+    segmentby => 'region, device_id',
+    orderby => 'ts DESC'
+);
+ set_compress_config 
+---------------------
+ 
+(1 row)
+
+-- 2b: Verify config stored correctly
+SELECT segmentby, orderby, orderby_desc
+FROM time_series.ts_compress_config
+WHERE table_oid = 'ts_comp_test'::regclass;
+     segmentby      | orderby | orderby_desc 
+--------------------+---------+--------------
+ {region,device_id} | {ts}    | {t}
+(1 row)
+
+-- 2c: Error on non-time_series table
+\set ON_ERROR_STOP 0
+CREATE TABLE ts_comp_regular (ts timestamptz, val int) DISTRIBUTED REPLICATED;
+SELECT time_series.set_compress_config('ts_comp_regular'::regclass, segmentby => 'val');
+ERROR:  relation "ts_comp_regular" is not a time_series table
+-- 2d: Error on non-existent column
+SELECT time_series.set_compress_config('ts_comp_test'::regclass, segmentby => 'nonexistent');
+ERROR:  column "nonexistent" does not exist in relation "ts_comp_test"
+-- 2e: Error on overlapping segmentby/orderby
+SELECT time_series.set_compress_config(
+    'ts_comp_test'::regclass,
+    segmentby => 'region',
+    orderby => 'region'
+);
+ERROR:  column "region" cannot be both segmentby and orderby
+-- 2f: Error on duplicate config (PK violation)
+SELECT time_series.set_compress_config('ts_comp_test'::regclass, segmentby => 'region');
+ERROR:  duplicate key value violates unique constraint "ts_compress_config_pkey"  (seg0 172.17.0.4:7002 pid=16746)
+DETAIL:  Key (table_oid)=(48881) already exists.
+\set ON_ERROR_STOP 1
+-- ======================================================================
+-- Section 3: Insert test data spanning multiple days
+-- ======================================================================
+INSERT INTO ts_comp_test
+SELECT
+    '2025-01-01'::timestamptz + (i || ' hours')::interval,
+    CASE WHEN i % 3 = 0 THEN 'east'
+         WHEN i % 3 = 1 THEN 'west'
+         ELSE 'north' END,
+    (i % 5) + 1,
+    20.0 + (i % 10),
+    50.0 + (i % 20)
+FROM generate_series(0, 71) AS i;
+-- 3a: Verify data count
+SELECT count(*) AS total_rows FROM ts_comp_test;
+ total_rows 
+------------
+         72
+(1 row)
+
+-- 3b: Verify chunks created (3 days = 3 chunks)
+SELECT count(DISTINCT chunk_number) AS n_chunks
+FROM time_series.ts_chunk
+WHERE table_oid = 'ts_comp_test'::regclass;
+ n_chunks 
+----------
+        3
+(1 row)
+
+-- ======================================================================
+-- Section 4: Compress chunks
+-- ======================================================================
+-- 4a: Compress chunks older than 1 day
+SELECT time_series.compress_chunks('ts_comp_test'::regclass, '1 day'::interval);
+ compress_chunks 
+-----------------
+               3
+(1 row)
+
+-- 4b: Check status — first 2 days should be COMPRESSED (status=2)
+SELECT DISTINCT chunk_number, status
+FROM time_series.ts_chunk
+WHERE table_oid = 'ts_comp_test'::regclass
+ORDER BY chunk_number;
+ chunk_number | status 
+--------------+--------
+            4 |      1
+            5 |      1
+            6 |      1
+(3 rows)
+
+-- 4c: Compressed chunk metadata exists
+SELECT chunk_number, numrows
+FROM time_series.ts_compressed_chunk
+WHERE table_oid = 'ts_comp_test'::regclass
+ORDER BY chunk_number;
+ chunk_number | numrows 
+--------------+---------
+            4 |      24
+            4 |      24
+            4 |      24
+            5 |      24
+            5 |      24
+            5 |      24
+            6 |      24
+            6 |      24
+            6 |      24
+(9 rows)
+
+-- 4d: Data still readable from heap (Phase 1 preserves heap data)
+SELECT count(*) AS rows_after_compress FROM ts_comp_test;
+ rows_after_compress 
+---------------------
+                  72
+(1 row)
+
+-- 4e: Pruned scan still works
+SELECT count(*) AS day1_count FROM ts_comp_test
+WHERE ts >= '2025-01-01' AND ts < '2025-01-02';
+ day1_count 
+------------
+         24
+(1 row)
+
+-- 4f: Compress remaining (no older_than = all ACTIVE chunks)
+SELECT time_series.compress_chunks('ts_comp_test'::regclass);
+ compress_chunks 
+-----------------
+               0
+(1 row)
+
+-- 4g: All chunks should be COMPRESSED now
+SELECT DISTINCT chunk_number, status
+FROM time_series.ts_chunk
+WHERE table_oid = 'ts_comp_test'::regclass
+ORDER BY chunk_number;
+ chunk_number | status 
+--------------+--------
+            4 |      1
+            5 |      1
+            6 |      1
+(3 rows)
+
+-- 4h: Re-compress already compressed chunks does nothing (returns 0)
+SELECT time_series.compress_chunks('ts_comp_test'::regclass);
+ compress_chunks 
+-----------------
+               0
+(1 row)
+
+-- ======================================================================
+-- Section 5: ts_compressed_chunk_info
+-- ======================================================================
+SELECT chunk_number, status, numrows
+FROM time_series.ts_compressed_chunk_info('ts_comp_test'::regclass)
+ORDER BY chunk_number;
+ chunk_number | status | numrows 
+--------------+--------+---------
+            4 |      1 |      24
+            4 |      1 |      24
+            4 |      1 |      24
+            5 |      1 |      24
+            5 |      1 |      24
+            5 |      1 |      24
+            6 |      1 |      24
+            6 |      1 |      24
+            6 |      1 |      24
+(9 rows)
+
+-- ======================================================================
+-- Section 6: ts_chunk_info includes status
+-- ======================================================================
+SELECT DISTINCT chunk_number, status
+FROM time_series.ts_chunk_info('ts_comp_test'::regclass)
+ORDER BY chunk_number;
+ chunk_number | status 
+--------------+--------
+            4 |      1
+            5 |      1
+            6 |      1
+(3 rows)
+
+-- ======================================================================
+-- Section 7: Compression without segmentby/orderby config
+-- ======================================================================
+CREATE TABLE ts_comp_noseg (
+    ts timestamptz NOT NULL,
+    val integer
+) USING time_series WITH (
+    ts_partition_column = 'ts',
+    ts_chunk_interval = '1 day',
+    ts_chunk_origin = '2025-01-01 00:00:00+00'
+) DISTRIBUTED REPLICATED;
+INSERT INTO ts_comp_noseg
+SELECT '2025-01-01'::timestamptz + (i || ' hours')::interval, i
+FROM generate_series(0, 47) AS i;
+-- Compress without config — should still work (no segmentby/orderby sorting)
+SELECT time_series.compress_chunks('ts_comp_noseg'::regclass);
+ compress_chunks 
+-----------------
+               2
+(1 row)
+
+SELECT DISTINCT chunk_number, status
+FROM time_series.ts_chunk
+WHERE table_oid = 'ts_comp_noseg'::regclass
+ORDER BY chunk_number;
+ chunk_number | status 
+--------------+--------
+            4 |      1
+            5 |      1
+(2 rows)
+
+-- Data still readable
+SELECT count(*) AS noseg_rows FROM ts_comp_noseg;
+ noseg_rows 
+------------
+         48
+(1 row)
+
+-- ======================================================================
+-- Section 8: DROP TABLE cleans up compress metadata
+-- ======================================================================
+DROP TABLE ts_comp_test;
+-- Verify no orphaned compress config
+SELECT count(*) AS orphaned_config
+FROM time_series.ts_compress_config
+WHERE table_oid NOT IN (SELECT oid FROM pg_class);
+ orphaned_config 
+-----------------
+               0
+(1 row)
+
+-- Verify no orphaned compressed chunk metadata
+SELECT count(*) AS orphaned_compressed
+FROM time_series.ts_compressed_chunk
+WHERE table_oid NOT IN (SELECT oid FROM pg_class);
+ orphaned_compressed 
+---------------------
+                   0
+(1 row)
+
+-- ======================================================================
+-- Section 9: Error cases
+-- ======================================================================
+\set ON_ERROR_STOP 0
+-- 9a: Compress on non-time_series table
+CREATE TABLE ts_comp_err (ts timestamptz, val int) DISTRIBUTED REPLICATED;
+SELECT time_series.compress_chunks('ts_comp_err'::regclass);
+ERROR:  relation "ts_comp_err" is not a time_series table
+\set ON_ERROR_STOP 1
+-- ======================================================================
+-- Section 10: set_compress_config — orderby-only (no segmentby)
+-- ======================================================================
+CREATE TABLE ts_comp_ordonly (
+    ts timestamptz NOT NULL,
+    val integer
+) USING time_series WITH (
+    ts_partition_column = 'ts',
+    ts_chunk_interval = '1 day',
+    ts_chunk_origin = '2025-01-01 00:00:00+00'
+) DISTRIBUTED REPLICATED;
+SELECT time_series.set_compress_config(
+    'ts_comp_ordonly'::regclass,
+    orderby => 'ts'
+);
+ set_compress_config 
+---------------------
+ 
+(1 row)
+
+SELECT segmentby, orderby, orderby_desc
+FROM time_series.ts_compress_config
+WHERE table_oid = 'ts_comp_ordonly'::regclass;
+ segmentby | orderby | orderby_desc 
+-----------+---------+--------------
+           | {ts}    | {f}
+(1 row)
+
+-- ======================================================================
+-- Section 11: set_compress_config — one-time restriction
+-- ======================================================================
+CREATE TABLE ts_comp_once (
+    ts timestamptz NOT NULL,
+    val integer
+) USING time_series WITH (
+    ts_partition_column = 'ts',
+    ts_chunk_interval = '1 day',
+    ts_chunk_origin = '2025-01-01 00:00:00+00'
+) DISTRIBUTED REPLICATED;
+SELECT time_series.set_compress_config('ts_comp_once'::regclass, orderby => 'ts');
+ set_compress_config 
+---------------------
+ 
+(1 row)
+
+SELECT count(*) AS config_exists
+FROM time_series.ts_compress_config
+WHERE table_oid = 'ts_comp_once'::regclass;
+ config_exists 
+---------------
+             1
+(1 row)
+
+-- Second call should error
+\set ON_ERROR_STOP 0
+SELECT time_series.set_compress_config('ts_comp_once'::regclass, orderby => 'val');
+ERROR:  duplicate key value violates unique constraint "ts_compress_config_pkey"  (seg0 172.17.0.4:7002 pid=16746)
+DETAIL:  Key (table_oid)=(48898) already exists.
+\set ON_ERROR_STOP 1
+-- ======================================================================
+-- Section 12: compress_chunks — empty table (no chunks at all)
+-- ======================================================================
+CREATE TABLE ts_comp_empty (
+    ts timestamptz NOT NULL,
+    val integer
+) USING time_series WITH (
+    ts_partition_column = 'ts',
+    ts_chunk_interval = '1 day',
+    ts_chunk_origin = '2025-01-01 00:00:00+00'
+) DISTRIBUTED REPLICATED;
+-- Should return 0
+SELECT time_series.compress_chunks('ts_comp_empty'::regclass);
+ compress_chunks 
+-----------------
+               0
+(1 row)
+
+-- ======================================================================
+-- Section 13: compress_chunks — single chunk
+-- ======================================================================
+CREATE TABLE ts_comp_single (
+    ts timestamptz NOT NULL,
+    val integer
+) USING time_series WITH (
+    ts_partition_column = 'ts',
+    ts_chunk_interval = '1 day',
+    ts_chunk_origin = '2025-01-01 00:00:00+00'
+) DISTRIBUTED REPLICATED;
+INSERT INTO ts_comp_single VALUES ('2025-01-01 12:00:00+00', 1);
+SELECT time_series.compress_chunks('ts_comp_single'::regclass);
+ compress_chunks 
+-----------------
+               1
+(1 row)
+
+-- Verify compressed
+SELECT chunk_number
+FROM time_series.ts_compressed_chunk
+WHERE table_oid = 'ts_comp_single'::regclass
+ORDER BY chunk_number;
+ chunk_number 
+--------------
+            4
+            4
+            4
+(3 rows)
+
+-- Data still readable
+SELECT val FROM ts_comp_single;
+ val 
+-----
+   1
+(1 row)
+
+-- ======================================================================
+-- Section 14: compressed chunk metadata — verify pax_file path format
+-- ======================================================================
+CREATE TABLE ts_comp_meta (
+    ts timestamptz NOT NULL,
+    val integer
+) USING time_series WITH (
+    ts_partition_column = 'ts',
+    ts_chunk_interval = '1 day',
+    ts_chunk_origin = '2025-01-01 00:00:00+00'
+) DISTRIBUTED REPLICATED;
+INSERT INTO ts_comp_meta VALUES
+    ('2025-01-01 12:00:00+00', 1),
+    ('2025-01-02 12:00:00+00', 2);
+SELECT time_series.compress_chunks('ts_comp_meta'::regclass);
+ compress_chunks 
+-----------------
+               2
+(1 row)
+
+-- pax_file should match pattern ts_compressed/{relid}/chunk_{chunknum}.pax
+SELECT pax_file LIKE 'ts_compressed/%/chunk_%.pax' AS path_ok
+FROM time_series.ts_compressed_chunk
+WHERE table_oid = 'ts_comp_meta'::regclass
+ORDER BY chunk_number;
+ path_ok 
+---------
+ f
+ f
+ f
+ f
+ f
+ f
+(6 rows)
+
+-- compressed_at should be recent (within last hour)
+SELECT compressed_at > now() - interval '1 hour' AS recent_ok
+FROM time_series.ts_compressed_chunk
+WHERE table_oid = 'ts_comp_meta'::regclass
+ORDER BY chunk_number;
+ recent_ok 
+-----------
+ t
+ t
+ t
+ t
+ t
+ t
+(6 rows)
+
+-- range_start and range_end should match ts_chunk
+SELECT cc.chunk_number,
+       cc.range_start = tc.range_start AS start_match,
+       cc.range_end = tc.range_end AS end_match
+FROM time_series.ts_compressed_chunk cc
+JOIN (SELECT DISTINCT chunk_number, range_start, range_end
+      FROM time_series.ts_chunk
+      WHERE table_oid = 'ts_comp_meta'::regclass) tc
+  ON cc.chunk_number = tc.chunk_number
+WHERE cc.table_oid = 'ts_comp_meta'::regclass
+ORDER BY cc.chunk_number;
+ chunk_number | start_match | end_match 
+--------------+-------------+-----------
+            4 | t           | t
+            4 | t           | t
+            4 | t           | t
+            5 | t           | t
+            5 | t           | t
+            5 | t           | t
+(6 rows)
+
+-- ======================================================================
+-- Section 15: Multiple tables — compress one, other unaffected
+-- ======================================================================
+CREATE TABLE ts_comp_a (
+    ts timestamptz NOT NULL,
+    val integer
+) USING time_series WITH (
+    ts_partition_column = 'ts',
+    ts_chunk_interval = '1 day',
+    ts_chunk_origin = '2025-01-01 00:00:00+00'
+) DISTRIBUTED REPLICATED;
+CREATE TABLE ts_comp_b (
+    ts timestamptz NOT NULL,
+    val integer
+) USING time_series WITH (
+    ts_partition_column = 'ts',
+    ts_chunk_interval = '1 day',
+    ts_chunk_origin = '2025-01-01 00:00:00+00'
+) DISTRIBUTED REPLICATED;
+INSERT INTO ts_comp_a SELECT '2025-01-01'::timestamptz + (i || ' hours')::interval, i FROM generate_series(0, 23) AS i;
+INSERT INTO ts_comp_b SELECT '2025-01-01'::timestamptz + (i || ' hours')::interval, i FROM generate_series(0, 23) AS i;
+-- Compress only table A
+SELECT time_series.compress_chunks('ts_comp_a'::regclass);
+ compress_chunks 
+-----------------
+               1
+(1 row)
+
+-- Table A has compressed metadata
+SELECT count(*) AS a_compressed
+FROM time_series.ts_compressed_chunk
+WHERE table_oid = 'ts_comp_a'::regclass;
+ a_compressed 
+--------------
+            3
+(1 row)
+
+-- Table B has NO compressed metadata
+SELECT count(*) AS b_compressed
+FROM time_series.ts_compressed_chunk
+WHERE table_oid = 'ts_comp_b'::regclass;
+ b_compressed 
+--------------
+            0
+(1 row)
+
+-- Both tables' data still readable
+SELECT count(*) AS a_rows FROM ts_comp_a;
+ a_rows 
+--------
+     24
+(1 row)
+
+SELECT count(*) AS b_rows FROM ts_comp_b;
+ b_rows 
+--------
+     24
+(1 row)
+
+-- ======================================================================
+-- Section 16: INSERT after compression — new data works
+-- ======================================================================
+CREATE TABLE ts_comp_insert_after (
+    ts timestamptz NOT NULL,
+    val integer
+) USING time_series WITH (
+    ts_partition_column = 'ts',
+    ts_chunk_interval = '1 day',
+    ts_chunk_origin = '2025-01-01 00:00:00+00'
+) DISTRIBUTED REPLICATED;
+INSERT INTO ts_comp_insert_after VALUES ('2025-01-01 12:00:00+00', 1);
+-- Compress
+SELECT time_series.compress_chunks('ts_comp_insert_after'::regclass);
+ compress_chunks 
+-----------------
+               1
+(1 row)
+
+-- Insert into a NEW chunk (different day)
+INSERT INTO ts_comp_insert_after VALUES ('2025-01-02 12:00:00+00', 2);
+-- Both rows readable (compressed chunk from TSCP, new chunk from heap)
+SELECT val FROM ts_comp_insert_after ORDER BY val;
+ val 
+-----
+   1
+   2
+(2 rows)
+
+-- New chunk is NOT compressed
+SELECT count(*) AS compressed_chunks
+FROM time_series.ts_compressed_chunk
+WHERE table_oid = 'ts_comp_insert_after'::regclass;
+ compressed_chunks 
+-------------------
+                 3
+(1 row)
+
+-- Compress again — only the new chunk gets compressed
+SELECT time_series.compress_chunks('ts_comp_insert_after'::regclass);
+ compress_chunks 
+-----------------
+               1
+(1 row)
+
+SELECT count(*) AS compressed_after
+FROM time_series.ts_compressed_chunk
+WHERE table_oid = 'ts_comp_insert_after'::regclass;
+ compressed_after 
+------------------
+                6
+(1 row)
+
+-- ======================================================================
+-- Section 17: set_compress_config — multiple orderby columns
+-- ======================================================================
+CREATE TABLE ts_comp_multi_ord (
+    ts timestamptz NOT NULL,
+    region text NOT NULL,
+    val1 integer,
+    val2 double precision
+) USING time_series WITH (
+    ts_partition_column = 'ts',
+    ts_chunk_interval = '1 day',
+    ts_chunk_origin = '2025-01-01 00:00:00+00'
+) DISTRIBUTED REPLICATED;
+SELECT time_series.set_compress_config(
+    'ts_comp_multi_ord'::regclass,
+    segmentby => 'region',
+    orderby => 'ts DESC, val1'
+);
+ set_compress_config 
+---------------------
+ 
+(1 row)
+
+SELECT segmentby, orderby, orderby_desc
+FROM time_series.ts_compress_config
+WHERE table_oid = 'ts_comp_multi_ord'::regclass;
+ segmentby |  orderby  | orderby_desc 
+-----------+-----------+--------------
+ {region}  | {ts,val1} | {t,f}
+(1 row)
+
+-- ======================================================================
+-- Section 18: ts_compressed_chunk_info — no compressed chunks shows ACTIVE
+-- ======================================================================
+CREATE TABLE ts_comp_info_active (
+    ts timestamptz NOT NULL,
+    val integer
+) USING time_series WITH (
+    ts_partition_column = 'ts',
+    ts_chunk_interval = '1 day',
+    ts_chunk_origin = '2025-01-01 00:00:00+00'
+) DISTRIBUTED REPLICATED;
+INSERT INTO ts_comp_info_active VALUES ('2025-01-01 12:00:00+00', 1);
+-- All chunks should show status=0 (ACTIVE) with NULL pax_file
+SELECT DISTINCT chunk_number, status, pax_file IS NULL AS no_pax
+FROM time_series.ts_compressed_chunk_info('ts_comp_info_active'::regclass)
+ORDER BY chunk_number;
+ chunk_number | status | no_pax 
+--------------+--------+--------
+            4 |      0 | t
+(1 row)
+
+-- ======================================================================
+-- Section 19: DROP TABLE with both config AND compressed data
+-- ======================================================================
+CREATE TABLE ts_comp_drop_full (
+    ts timestamptz NOT NULL,
+    region text,
+    val integer
+) USING time_series WITH (
+    ts_partition_column = 'ts',
+    ts_chunk_interval = '1 day',
+    ts_chunk_origin = '2025-01-01 00:00:00+00'
+) DISTRIBUTED REPLICATED;
+SELECT time_series.set_compress_config(
+    'ts_comp_drop_full'::regclass,
+    segmentby => 'region'
+);
+ set_compress_config 
+---------------------
+ 
+(1 row)
+
+INSERT INTO ts_comp_drop_full VALUES
+    ('2025-01-01 12:00:00+00', 'east', 1),
+    ('2025-01-02 12:00:00+00', 'west', 2);
+SELECT time_series.compress_chunks('ts_comp_drop_full'::regclass);
+ compress_chunks 
+-----------------
+               2
+(1 row)
+
+-- Verify config and compressed metadata exist before DROP
+SELECT count(*) > 0 AS has_config
+FROM time_series.ts_compress_config
+WHERE table_oid = 'ts_comp_drop_full'::regclass;
+ has_config 
+------------
+ t
+(1 row)
+
+SELECT count(*) > 0 AS has_compressed
+FROM time_series.ts_compressed_chunk
+WHERE table_oid = 'ts_comp_drop_full'::regclass;
+ has_compressed 
+----------------
+ t
+(1 row)
+
+DROP TABLE ts_comp_drop_full;
+-- Both should be cleaned up
+SELECT count(*) AS config_after_drop
+FROM time_series.ts_compress_config
+WHERE table_oid NOT IN (SELECT oid FROM pg_class);
+ config_after_drop 
+-------------------
+                 0
+(1 row)
+
+SELECT count(*) AS compressed_after_drop
+FROM time_series.ts_compressed_chunk
+WHERE table_oid NOT IN (SELECT oid FROM pg_class);
+ compressed_after_drop 
+-----------------------
+                     0
+(1 row)
+
+-- ======================================================================
+-- Section 20: Different chunk intervals with compression
+-- ======================================================================
+-- Hourly chunks
+CREATE TABLE ts_comp_hourly (
+    ts timestamptz NOT NULL,
+    val integer
+) USING time_series WITH (
+    ts_partition_column = 'ts',
+    ts_chunk_interval = '1 hour',
+    ts_chunk_origin = '2025-01-01 00:00:00+00'
+) DISTRIBUTED REPLICATED;
+INSERT INTO ts_comp_hourly
+SELECT '2025-01-01 00:00:00+00'::timestamptz + (i || ' minutes')::interval, i
+FROM generate_series(0, 179) AS i;
+-- Should have 3 chunks (3 hours of data)
+SELECT count(DISTINCT chunk_number) AS hourly_chunks
+FROM time_series.ts_chunk
+WHERE table_oid = 'ts_comp_hourly'::regclass;
+ hourly_chunks 
+---------------
+             3
+(1 row)
+
+SELECT time_series.compress_chunks('ts_comp_hourly'::regclass);
+ compress_chunks 
+-----------------
+               3
+(1 row)
+
+SELECT count(*) AS hourly_compressed
+FROM time_series.ts_compressed_chunk
+WHERE table_oid = 'ts_comp_hourly'::regclass;
+ hourly_compressed 
+-------------------
+                 9
+(1 row)
+
+-- Data still correct
+SELECT count(*) AS hourly_rows FROM ts_comp_hourly;
+ hourly_rows 
+-------------
+         180
+(1 row)
+
+-- Weekly chunks
+CREATE TABLE ts_comp_weekly (
+    ts timestamptz NOT NULL,
+    val integer
+) USING time_series WITH (
+    ts_partition_column = 'ts',
+    ts_chunk_interval = '1 week',
+    ts_chunk_origin = '2025-01-06 00:00:00+00'
+) DISTRIBUTED REPLICATED;
+INSERT INTO ts_comp_weekly VALUES
+    ('2025-01-06 12:00:00+00', 1),
+    ('2025-01-13 12:00:00+00', 2),
+    ('2025-01-20 12:00:00+00', 3);
+SELECT time_series.compress_chunks('ts_comp_weekly'::regclass);
+ compress_chunks 
+-----------------
+               3
+(1 row)
+
+SELECT count(*) AS weekly_compressed
+FROM time_series.ts_compressed_chunk
+WHERE table_oid = 'ts_comp_weekly'::regclass;
+ weekly_compressed 
+-------------------
+                 9
+(1 row)
+
+SELECT count(*) AS weekly_rows FROM ts_comp_weekly;
+ weekly_rows 
+-------------
+           3
+(1 row)
+
+-- ======================================================================
+-- Section 21: ROLLBACK + re-INSERT catalog recovery
+-- ======================================================================
+CREATE TABLE ts_comp_rollback (
+    ts timestamptz NOT NULL,
+    val integer
+) USING time_series WITH (
+    ts_partition_column = 'ts',
+    ts_chunk_interval = '1 day',
+    ts_chunk_origin = '2025-01-01 00:00:00+00'
+) DISTRIBUTED BY (val);
+-- INSERT then ROLLBACK — fork files left on disk, catalog rolled back
+BEGIN;
+INSERT INTO ts_comp_rollback
+SELECT '2025-01-01 00:00:00+00'::timestamptz + (i || ' hours')::interval, i
+FROM generate_series(0, 47) AS i;
+ROLLBACK;
+-- Verify table is empty after rollback
+SELECT count(*) AS after_rollback FROM ts_comp_rollback;
+ after_rollback 
+----------------
+              0
+(1 row)
+
+-- Re-INSERT same data — should succeed despite orphaned fork files
+INSERT INTO ts_comp_rollback
+SELECT '2025-01-01 00:00:00+00'::timestamptz + (i || ' hours')::interval, i
+FROM generate_series(0, 47) AS i;
+-- All 48 rows should be visible
+SELECT count(*) AS after_reinsert FROM ts_comp_rollback;
+ after_reinsert 
+----------------
+             48
+(1 row)
+
+-- Chunks should be in catalog
+SELECT count(DISTINCT chunk_number) AS n_chunks
+FROM time_series.ts_chunk
+WHERE table_oid = 'ts_comp_rollback'::regclass;
+ n_chunks 
+----------
+        2
+(1 row)
+
+-- Pruned scan works
+SELECT count(*) AS day1 FROM ts_comp_rollback
+WHERE ts >= '2025-01-01' AND ts < '2025-01-02';
+ day1 
+------
+   24
+(1 row)
+
+-- Compress after rollback+reinsert — should only compress live tuples
+SELECT time_series.compress_chunks('ts_comp_rollback'::regclass);
+ compress_chunks 
+-----------------
+               2
+(1 row)
+
+-- Count after compress should equal count before compress (no dead tuples)
+SELECT count(*) AS after_compress FROM ts_comp_rollback;
+ after_compress 
+----------------
+             48
+(1 row)
+
+-- ======================================================================
+-- Section 22: Large data — rows exceeding TS_MAX_TUPLES_PER_GROUP (131072)
+-- ======================================================================
+CREATE TABLE ts_comp_large (
+    ts timestamptz NOT NULL,
+    region text NOT NULL,
+    val integer
+) USING time_series WITH (
+    ts_partition_column = 'ts',
+    ts_chunk_interval = '1 day',
+    ts_chunk_origin = '2025-01-01 00:00:00+00'
+) DISTRIBUTED BY (val);
+-- Insert 200K rows into a single chunk (exceeds 131072 group limit)
+INSERT INTO ts_comp_large
+SELECT '2025-01-01'::timestamptz + (i * interval '100 us'),
+       'region_' || (i % 2), i
+FROM generate_series(1, 200000) i;
+SELECT count(*) AS large_before FROM ts_comp_large;
+ large_before 
+--------------
+       200000
+(1 row)
+
+SELECT time_series.set_compress_config('ts_comp_large', segmentby => 'region', orderby => 'ts');
+ set_compress_config 
+---------------------
+ 
+(1 row)
+
+SELECT time_series.compress_chunks('ts_comp_large');
+ compress_chunks 
+-----------------
+               1
+(1 row)
+
+-- Data should be fully readable from PAX (multiple groups per region)
+SELECT count(*) AS large_after FROM ts_comp_large;
+ large_after 
+-------------
+      200000
+(1 row)
+
+SELECT region, count(*) AS cnt
+FROM ts_comp_large GROUP BY region ORDER BY region;
+  region  |  cnt   
+----------+--------
+ region_0 | 100000
+ region_1 | 100000
+(2 rows)
+
+-- ======================================================================
+-- Section 23: Partial compression — INSERT into compressed chunk
+-- ======================================================================
+CREATE TABLE ts_comp_partial (
+    ts timestamptz NOT NULL,
+    val integer
+) USING time_series WITH (
+    ts_partition_column = 'ts',
+    ts_chunk_interval = '1 day',
+    ts_chunk_origin = '2025-01-01 00:00:00+00'
+) DISTRIBUTED REPLICATED;
+-- Insert initial data and compress
+INSERT INTO ts_comp_partial VALUES
+    ('2025-01-01 06:00:00+00', 1),
+    ('2025-01-01 12:00:00+00', 2),
+    ('2025-01-01 18:00:00+00', 3);
+SELECT time_series.compress_chunks('ts_comp_partial'::regclass);
+ compress_chunks 
+-----------------
+               1
+(1 row)
+
+-- Verify compressed
+SELECT DISTINCT chunk_number, status
+FROM time_series.ts_chunk
+WHERE table_oid = 'ts_comp_partial'::regclass
+ORDER BY chunk_number;
+ chunk_number | status 
+--------------+--------
+            4 |      1
+(1 row)
+
+-- All 3 rows readable from PAX
+SELECT count(*) AS compressed_rows FROM ts_comp_partial;
+ compressed_rows 
+-----------------
+               3
+(1 row)
+
+-- INSERT into the same compressed chunk — should succeed and mark PARTIAL
+INSERT INTO ts_comp_partial VALUES
+    ('2025-01-01 08:00:00+00', 10),
+    ('2025-01-01 20:00:00+00', 20);
+-- Chunk should now be PARTIAL (status=3)
+SELECT DISTINCT chunk_number, status
+FROM time_series.ts_chunk
+WHERE table_oid = 'ts_comp_partial'::regclass
+ORDER BY chunk_number;
+ chunk_number | status 
+--------------+--------
+            4 |      2
+(1 row)
+
+-- All 5 rows readable (3 old from heap + 2 new from heap)
+SELECT count(*) AS partial_rows FROM ts_comp_partial;
+ partial_rows 
+--------------
+            5
+(1 row)
+
+SELECT val FROM ts_comp_partial ORDER BY val;
+ val 
+-----
+   1
+   2
+   3
+  10
+  20
+(5 rows)
+
+-- Recompress — PARTIAL chunk should be recompressed with all 5 rows
+SELECT time_series.compress_chunks('ts_comp_partial'::regclass);
+ compress_chunks 
+-----------------
+               1
+(1 row)
+
+-- Chunk should be COMPRESSED again
+SELECT DISTINCT chunk_number, status
+FROM time_series.ts_chunk
+WHERE table_oid = 'ts_comp_partial'::regclass
+ORDER BY chunk_number;
+ chunk_number | status 
+--------------+--------
+            4 |      1
+(1 row)
+
+-- All 5 rows still readable from PAX
+SELECT count(*) AS recompressed_rows FROM ts_comp_partial;
+ recompressed_rows 
+-------------------
+                 5
+(1 row)
+
+SELECT val FROM ts_comp_partial ORDER BY val;
+ val 
+-----
+   1
+   2
+   3
+  10
+  20
+(5 rows)
+
+-- Re-compress again does nothing (already COMPRESSED)
+SELECT time_series.compress_chunks('ts_comp_partial'::regclass);
+ compress_chunks 
+-----------------
+               0
+(1 row)
+
+-- ======================================================================
+-- Section 24: EXPLAIN shows correct chunk status counts
+-- ======================================================================
+CREATE TABLE ts_comp_explain (
+    ts timestamptz NOT NULL,
+    val integer
+) USING time_series WITH (
+    ts_partition_column = 'ts',
+    ts_chunk_interval = '1 day',
+    ts_chunk_origin = '2025-01-01 00:00:00+00'
+) DISTRIBUTED BY (val);
+INSERT INTO ts_comp_explain
+SELECT '2025-01-01'::timestamptz + (i || ' hours')::interval, i
+FROM generate_series(0, 71) AS i;
+-- 24a: All ACTIVE — EXPLAIN should show 3 active chunks
+EXPLAIN (COSTS OFF) SELECT * FROM ts_comp_explain;
+                    QUERY PLAN                    
+--------------------------------------------------
+ Gather Motion 3:1  (slice1; segments: 3)
+   ->  Custom Scan (ChunkScan) on ts_comp_explain
+         Storage: Time-Series Chunk
+         Chunks Scanned: 3
+         Active Chunks (heap): 3
+         Compressed Chunks (columnar): 0
+ Optimizer: Postgres query optimizer
+(7 rows)
+
+-- 24b: Compress first 2 days, EXPLAIN shows mixed
+SELECT time_series.compress_chunks('ts_comp_explain'::regclass, '1 day'::interval);
+ compress_chunks 
+-----------------
+               3
+(1 row)
+
+EXPLAIN (COSTS OFF) SELECT * FROM ts_comp_explain;
+                     QUERY PLAN                      
+-----------------------------------------------------
+ Gather Motion 3:1  (slice1; segments: 3)
+   ->  Custom Scan (ColumnarScan) on ts_comp_explain
+         Storage: Time-Series Chunk
+         Chunks Scanned: 3
+         Active Chunks (heap): 0
+         Compressed Chunks (columnar): 3
+ Optimizer: Postgres query optimizer
+(7 rows)
+
+-- 24c: EXPLAIN ANALYZE should also work
+EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF)
+SELECT count(*) FROM ts_comp_explain;
+                                        QUERY PLAN                                        
+------------------------------------------------------------------------------------------
+ Finalize Aggregate (actual rows=1 loops=1)
+   ->  Gather Motion 3:1  (slice1; segments: 3) (actual rows=3 loops=1)
+         ->  Partial Aggregate (actual rows=1 loops=1)
+               ->  Custom Scan (ColumnarScan) on ts_comp_explain (actual rows=27 loops=1)
+                     Storage: Time-Series Chunk
+                     Chunks Scanned: 3
+                     Active Chunks (heap): 0
+                     Compressed Chunks (columnar): 3
+ Optimizer: Postgres query optimizer
+(9 rows)
+
+-- ======================================================================
+-- Section 25: Heap-reclaim workflow
+--   1. compress_chunks writes PAX + catalog row, heap fork stays populated
+--   2. reclaim_chunk_heaps truncates the heap fork to 0 blocks
+--   3. SELECT on COMPRESSED chunk still returns all rows (via PAX)
+--   4. INSERT into a COMPRESSED chunk auto-truncates the heap fork then
+--      flips status to PARTIAL, so heap holds only the new post-compress
+--      rows and PARTIAL scan = PAX + heap without duplicates
+--   5. recompress merges PAX + heap into a new PAX file via .new + rename
+--   6. second reclaim leaves heap empty again
+--
+-- Regression guard for the "recompress duplicates rows" bug that would
+-- appear if heap truncation and prior-PAX merge weren't coordinated.
+-- ======================================================================
+CREATE TABLE ts_reclaim_t (
+    ts     timestamptz      NOT NULL,
+    id     integer          NOT NULL,
+    region text             NOT NULL,
+    val    double precision NOT NULL
+)
+USING time_series
+WITH (ts_partition_column='ts',
+      ts_chunk_interval='1 day',
+      ts_chunk_origin='2025-01-01');
+NOTICE:  Table doesn't have 'DISTRIBUTED BY' clause -- Using column named 'ts' as the Apache Cloudberry data distribution key for this table.
+HINT:  The 'DISTRIBUTED BY' clause determines the distribution of data. Make sure column(s) chosen are the optimal data distribution key to minimize skew.
+SELECT time_series.set_compress_config(
+    'ts_reclaim_t'::regclass,
+    segmentby => 'region',
+    orderby   => 'ts'
+);
+ set_compress_config 
+---------------------
+ 
+(1 row)
+
+-- Load 100 rows (all land in the 2025-01-05 chunk).
+INSERT INTO ts_reclaim_t
+SELECT '2025-01-05 00:00+00'::timestamptz + (s * interval '1 minute'),
+       s,
+       CASE s%2 WHEN 0 THEN 'east' ELSE 'west' END,
+       s * 0.1
+FROM generate_series(1, 100) s;
+SELECT count(*) AS after_insert FROM ts_reclaim_t;
+ after_insert 
+--------------
+          100
+(1 row)
+
+-- Compress the chunk.  Heap fork stays populated (not reclaimed yet).
+SELECT time_series.compress_chunks('ts_reclaim_t'::regclass) AS compressed;
+ compressed 
+------------
+          1
+(1 row)
+
+SELECT count(*) AS after_compress FROM ts_reclaim_t;
+ after_compress 
+----------------
+            100
+(1 row)
+
+-- Reclaim heap forks of COMPRESSED chunks.
+SELECT time_series.reclaim_chunk_heaps('ts_reclaim_t'::regclass) AS reclaimed;
+ reclaimed 
+-----------
+         1
+(1 row)
+
+-- Data must still be visible via PAX after heap truncation.
+SELECT count(*) AS after_reclaim FROM ts_reclaim_t;
+ after_reclaim 
+---------------
+           100
+(1 row)
+
+-- Insert 10 new rows into the (now COMPRESSED) chunk.  Auto-truncation
+-- enforces the PARTIAL invariant — heap holds only these 10 rows after
+-- INSERT, not the 100 pre-compress ones.  PARTIAL scan merges PAX + heap.
+INSERT INTO ts_reclaim_t
+SELECT '2025-01-05 12:00+00'::timestamptz + (s * interval '30 seconds'),
+       100 + s,
+       CASE s%2 WHEN 0 THEN 'east' ELSE 'west' END,
+       s * 0.01
+FROM generate_series(1, 10) s;
+SELECT DISTINCT status FROM time_series.ts_chunk
+ WHERE table_oid = 'ts_reclaim_t'::regclass;
+ status 
+--------
+      2
+(1 row)
+
+SELECT count(*) AS partial_scan_rows FROM ts_reclaim_t;     -- expect 110
+ partial_scan_rows 
+-------------------
+               110
+(1 row)
+
+SELECT min(id), max(id), count(DISTINCT id) FROM ts_reclaim_t;  -- 1..110, 110 distinct
+ min | max | count 
+-----+-----+-------
+   1 | 110 |   110
+(1 row)
+
+-- Recompress the PARTIAL chunk: merges 100 prior PAX rows + 10 heap rows.
+SELECT time_series.compress_chunks('ts_reclaim_t'::regclass) AS recompressed;
+ recompressed 
+--------------
+            1
+(1 row)
+
+SELECT count(*) AS after_recompress FROM ts_reclaim_t;
+ after_recompress 
+------------------
+              110
+(1 row)
+
+SELECT min(id), max(id), count(DISTINCT id) FROM ts_reclaim_t;
+ min | max | count 
+-----+-----+-------
+   1 | 110 |   110
+(1 row)
+
+-- Second reclaim — should succeed, no row changes.
+SELECT time_series.reclaim_chunk_heaps('ts_reclaim_t'::regclass);
+ reclaim_chunk_heaps 
+---------------------
+                   1
+(1 row)
+
+SELECT count(*) AS final FROM ts_reclaim_t;
+ final 
+-------
+   110
+(1 row)
+
+-- Explicit duplicate check: every id must appear exactly once.
+SELECT count(*) AS duplicated_ids
+  FROM (
+    SELECT id FROM ts_reclaim_t GROUP BY id HAVING count(*) > 1
+  ) dups;
+ duplicated_ids 
+----------------
+              0
+(1 row)
+
+-- ---------------------------------------------------------------------
+-- Coverage for the count-only fast-path + PARTIAL-chunk interaction.
+-- A single-chunk test misses this because the fast path is skipped when
+-- no chunk in the scan is COMPRESSED.  With one PARTIAL + multiple
+-- COMPRESSED chunks in the same scan, the fast path used to emit only
+-- the PARTIAL chunk's PAX row count and silently drop its heap rows.
+-- ---------------------------------------------------------------------
+INSERT INTO ts_reclaim_t
+SELECT '2025-01-06 00:00+00'::timestamptz + (s * interval '1 minute'),
+       1000 + s,
+       CASE s%2 WHEN 0 THEN 'east' ELSE 'west' END,
+       s * 0.001
+FROM generate_series(1, 60) s;
+INSERT INTO ts_reclaim_t
+SELECT '2025-01-07 00:00+00'::timestamptz + (s * interval '1 minute'),
+       2000 + s,
+       CASE s%2 WHEN 0 THEN 'east' ELSE 'west' END,
+       s * 0.001
+FROM generate_series(1, 60) s;
+SELECT time_series.compress_chunks('ts_reclaim_t'::regclass);
+ compress_chunks 
+-----------------
+               2
+(1 row)
+
+SELECT time_series.reclaim_chunk_heaps('ts_reclaim_t'::regclass);
+ reclaim_chunk_heaps 
+---------------------
+                   3
+(1 row)
+
+-- Sanity: 110 (chunk 1) + 60 + 60 = 230 rows
+SELECT count(*) AS three_chunks_baseline FROM ts_reclaim_t;
+ three_chunks_baseline 
+-----------------------
+                   230
+(1 row)
+
+-- Add 5 rows to ONE chunk, leaving the other two COMPRESSED — exercises
+-- the count-only path with mixed PARTIAL + COMPRESSED chunks.
+INSERT INTO ts_reclaim_t
+SELECT '2025-01-06 12:00+00'::timestamptz + (s * interval '1 second'),
+       9000 + s, 'east', s * 0.0001
+FROM generate_series(1, 5) s;
+SELECT count(*) AS mixed_partial_count FROM ts_reclaim_t;  -- expect 235
+ mixed_partial_count 
+---------------------
+                 235
+(1 row)
+
+-- Cleanup (see ts_batch_insert for rationale on manual catalog cleanup).
+DELETE FROM time_series.ts_compressed_chunk
+ WHERE table_oid = 'ts_reclaim_t'::regclass;
+DELETE FROM time_series.ts_compress_config
+ WHERE table_oid = 'ts_reclaim_t'::regclass;
+DROP TABLE ts_reclaim_t;
+-- ======================================================================
+-- Section 26: COMPRESSED → INSERT in xact → ROLLBACK
+--
+-- Inside an INSERT to a COMPRESSED chunk we run two operations:
+--   smgrtruncate(heap, 0)              -- non-transactional
+--   ts_chunk_catalog_update_status(PARTIAL)  -- transactional
+--
+-- If the user ROLLBACKs the INSERT xact:
+--   - status reverts to COMPRESSED (transactional UPDATE rolled back)
+--   - heap stays truncated (smgrtruncate is non-transactional)
+-- This is safe because the COMPRESSED contract is "PAX is authoritative;
+-- heap may be empty or non-empty redundant".  Reader sees status=COMPRESSED
+-- and reads PAX only — all rows still visible.
+-- ======================================================================
+CREATE TABLE ts_xact_rb (
+    ts  timestamptz NOT NULL,
+    id  integer
+) USING time_series WITH (
+    ts_partition_column = 'ts', ts_chunk_interval = '1 day',
+    ts_chunk_origin = '2025-01-01 00:00:00+00'
+) DISTRIBUTED REPLICATED;
+INSERT INTO ts_xact_rb
+SELECT '2025-01-01 12:00:00+00'::timestamptz + (i * interval '1 minute'), i
+FROM generate_series(1, 50) i;
+SELECT count(*) AS pre_compress FROM ts_xact_rb;
+ pre_compress 
+--------------
+           50
+(1 row)
+
+-- Compress; do NOT call reclaim, so heap fork still has the 50 rows
+SELECT time_series.compress_chunks('ts_xact_rb'::regclass) AS compressed;
+ compressed 
+------------
+          1
+(1 row)
+
+SELECT count(*) AS post_compress FROM ts_xact_rb;
+ post_compress 
+---------------
+            50
+(1 row)
+
+-- INSERT inside an explicit xact, then ROLLBACK
+BEGIN;
+INSERT INTO ts_xact_rb VALUES ('2025-01-01 23:30:00+00', 999);
+-- Inside the xact, status is PARTIAL (auto-truncate path fired)
+SELECT DISTINCT status AS status_inside_xact
+  FROM time_series.ts_chunk
+ WHERE table_oid = 'ts_xact_rb'::regclass;
+ status_inside_xact 
+--------------------
+                  2
+(1 row)
+
+ROLLBACK;
+-- After ROLLBACK: status reverts to COMPRESSED
+SELECT DISTINCT status AS status_after_rollback
+  FROM time_series.ts_chunk
+ WHERE table_oid = 'ts_xact_rb'::regclass;
+ status_after_rollback 
+-----------------------
+                     1
+(1 row)
+
+-- All 50 original rows still visible — PAX is authoritative; truncated
+-- heap doesn't matter for COMPRESSED-state scans.
+SELECT count(*) AS post_rollback FROM ts_xact_rb;
+ post_rollback 
+---------------
+            50
+(1 row)
+
+-- Cleanup
+DELETE FROM time_series.ts_compressed_chunk
+ WHERE table_oid = 'ts_xact_rb'::regclass;
+DROP TABLE ts_xact_rb;
+-- ======================================================================
+-- Section 27: multi-row INSERT into multiple COMPRESSED chunks
+--
+-- Bug regression: a single INSERT statement that visits multiple
+-- COMPRESSED chunks must flip each chunk's status to PARTIAL exactly
+-- once and not raise "tuple already updated by self".
+--
+-- Root cause: ts_chunk_catalog_is_compressed used GetTransactionSnapshot
+-- which doesn't see own-xact uncommitted UPDATEs.  After the first row
+-- of a chunk took the auto-truncate branch (which sets ts_ins_blkno =
+-- InvalidBlockNumber), the next row re-entered the slow path; the
+-- snapshot still returned status = COMPRESSED, the auto-truncate
+-- branch fired again, and update_status hit the same ts_chunk row in
+-- the same command → TM_SelfModified.
+--
+-- Fix: ts_chunk_catalog_is_compressed now uses SnapshotSelf, plus the
+-- slow-path predicate no longer treats blkno-Invalid as "needs catalog
+-- work" (only as "needs buffer refresh", handled separately by
+-- ts_chunk_get_insert_buffer).
+-- ======================================================================
+CREATE TABLE ts_reins (
+    ts          timestamptz      NOT NULL,
+    device_id   integer          NOT NULL,
+    region      text             NOT NULL,
+    val         double precision
+) USING time_series WITH (
+    ts_partition_column='ts', ts_chunk_interval='1 day',
+    ts_chunk_origin='2025-01-01 00:00:00+00'
+) DISTRIBUTED REPLICATED;
+SELECT time_series.set_compress_config(
+    'ts_reins'::regclass,
+    segmentby => 'region',
+    orderby   => 'ts'
+);
+ set_compress_config 
+---------------------
+ 
+(1 row)
+
+-- 5 chunks (Jan 5..9), 5 regions, 50 rows per (chunk, region)
+INSERT INTO ts_reins
+SELECT '2025-01-05 00:00:00+00'::timestamptz + (m * interval '1 hour'),
+       d,
+       (ARRAY['us-east','us-west','eu-west','ap-south','ap-north'])[1 + ((d-1) % 5)],
+       1.0
+FROM generate_series(0, 5*24 - 1) m,    -- 120 hourly slots over 5 days
+     generate_series(1, 50) d;          -- 50 device IDs
+SELECT count(*) AS pre_compress FROM ts_reins;
+ pre_compress 
+--------------
+         6000
+(1 row)
+
+SELECT time_series.compress_chunks('ts_reins'::regclass) AS chunks_compressed;
+ chunks_compressed 
+-------------------
+                 5
+(1 row)
+
+-- Re-INSERT spanning all 5 COMPRESSED chunks in ONE statement.  Used
+-- to fail with "tuple already updated by self".
+INSERT INTO ts_reins
+SELECT '2025-01-05 00:00:00+00'::timestamptz + (m * interval '1 hour'),
+       d,
+       (ARRAY['us-east','us-west','eu-west','ap-south','ap-north'])[1 + ((d-1) % 5)],
+       2.0
+FROM generate_series(0, 5*24 - 1) m,
+     generate_series(1, 50) d;
+SELECT count(*) AS post_reinsert FROM ts_reins;
+ post_reinsert 
+---------------
+         12000
+(1 row)
+
+-- All 5 chunks should be PARTIAL (auto-truncate fired exactly once each)
+SELECT DISTINCT status AS status_after_reinsert
+  FROM time_series.ts_chunk
+ WHERE table_oid = 'ts_reins'::regclass;
+ status_after_reinsert 
+-----------------------
+                     2
+(1 row)
+
+-- Recompress should merge prior PAX + new heap → no row loss, no dup
+SELECT time_series.compress_chunks('ts_reins'::regclass) AS recompressed;
+ recompressed 
+--------------
+            5
+(1 row)
+
+SELECT count(*) AS post_recompress FROM ts_reins;
+ post_recompress 
+-----------------
+           12000
+(1 row)
+
+-- Cleanup
+DELETE FROM time_series.ts_compressed_chunk WHERE table_oid='ts_reins'::regclass;
+DELETE FROM time_series.ts_compress_config  WHERE table_oid='ts_reins'::regclass;
+DROP TABLE ts_reins;
+-- ======================================================================
+-- Section 28: COPY (multi_insert path) into COMPRESSED chunks
+--
+-- Same auto-truncate / status-flip logic as Section 27 must apply
+-- when rows arrive through ts_heap_multi_insert (COPY, INSERT…SELECT
+-- with bulk insert state).  Without this, COPY into a COMPRESSED
+-- chunk would silently drop the new rows: heap is appended, but
+-- status stays COMPRESSED and the scan path reads PAX only.
+-- ======================================================================
+CREATE TABLE ts_copy (
+    ts        timestamptz       NOT NULL,
+    region    text              NOT NULL,
+    val       double precision
+) USING time_series WITH (
+    ts_partition_column='ts', ts_chunk_interval='1 day',
+    ts_chunk_origin='2025-01-01 00:00:00+00'
+) DISTRIBUTED REPLICATED;
+SELECT time_series.set_compress_config(
+    'ts_copy'::regclass,
+    segmentby => 'region',
+    orderby   => 'ts'
+);
+ set_compress_config 
+---------------------
+ 
+(1 row)
+
+-- Initial load via INSERT, then compress
+INSERT INTO ts_copy
+SELECT '2025-01-05 00:00:00+00'::timestamptz + (m * interval '1 hour'),
+       (ARRAY['us-east','us-west','eu-west'])[1 + (m % 3)],
+       1.0
+FROM generate_series(0, 3*24 - 1) m;       -- 3 chunks (Jan 5,6,7) × 24 hrs
+SELECT count(*) AS pre_compress FROM ts_copy;
+ pre_compress 
+--------------
+           72
+(1 row)
+
+SELECT time_series.compress_chunks('ts_copy'::regclass) AS chunks_compressed;
+ chunks_compressed 
+-------------------
+                 3
+(1 row)
+
+-- COPY into the now-COMPRESSED chunks via the multi_insert path
+COPY ts_copy (ts, region, val) FROM STDIN WITH (FORMAT csv);
+-- All rows must be visible: 72 (pre) + 6 (COPY) = 78
+SELECT count(*) AS post_copy FROM ts_copy;
+ post_copy 
+-----------
+        78
+(1 row)
+
+-- All 3 chunks should now be PARTIAL (auto-truncate fired in multi_insert)
+SELECT DISTINCT status AS status_after_copy
+  FROM time_series.ts_chunk
+ WHERE table_oid = 'ts_copy'::regclass;
+ status_after_copy 
+-------------------
+                 2
+(1 row)
+
+-- Sanity: the 6 newly-COPYed rows have val = 2.0
+SELECT count(*) AS new_rows FROM ts_copy WHERE val = 2.0;
+ new_rows 
+----------
+        6
+(1 row)
+
+-- Recompress to merge prior PAX + new heap rows back, no loss / no dup
+SELECT time_series.compress_chunks('ts_copy'::regclass) AS recompressed;
+ recompressed 
+--------------
+            3
+(1 row)
+
+SELECT count(*) AS post_recompress FROM ts_copy;
+ post_recompress 
+-----------------
+              78
+(1 row)
+
+SELECT count(*) AS new_rows_after_recompress FROM ts_copy WHERE val = 2.0;
+ new_rows_after_recompress 
+---------------------------
+                         6
+(1 row)
+
+-- Cleanup
+DELETE FROM time_series.ts_compressed_chunk WHERE table_oid='ts_copy'::regclass;
+DELETE FROM time_series.ts_compress_config  WHERE table_oid='ts_copy'::regclass;
+DROP TABLE ts_copy;
+-- ======================================================================
+-- Section 29: Verify no leftover metadata after all tests
+-- ======================================================================
+SELECT count(*) AS final_config
+FROM time_series.ts_compress_config
+WHERE table_oid NOT IN (SELECT oid FROM pg_class);
+ final_config 
+--------------
+            0
+(1 row)
+
+SELECT count(*) AS final_compressed
+FROM time_series.ts_compressed_chunk
+WHERE table_oid NOT IN (SELECT oid FROM pg_class);
+ final_compressed 
+------------------
+                0
+(1 row)
+
+-- ======================================================================
+-- Cleanup
+-- ======================================================================
+RESET timezone;
+RESET optimizer;
+RESET datestyle;
+RESET extra_float_digits;

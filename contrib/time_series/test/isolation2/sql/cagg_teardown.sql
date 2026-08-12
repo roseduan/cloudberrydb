@@ -1,0 +1,19 @@
+-- ============================================================
+-- cagg_teardown.sql  (MUST be the LAST test in isolation2_schedule)
+--
+-- Stops the per-database time_series scheduler so the NEXT isolation2
+-- run can recreate isolation2test.  Mirrors
+-- test/regress/sql/bgw_teardown.sql:
+--
+--   The launcher spawns a resident scheduler in every database that has
+--   the time_series extension installed; that scheduler keeps an open
+--   connection to isolation2test.  pg_isolation2_regress drops the test
+--   database at the START of every run with a plain DROP DATABASE (no
+--   WITH FORCE), which fails with "database is being accessed by other
+--   users" whenever the scheduler is still connected.  Disabling the
+--   scheduler for this database (so any worker the launcher respawns
+--   exits immediately) and terminating the live one leaves isolation2test
+--   with no resident backend, so consecutive isolation2 runs succeed.
+-- ============================================================
+1: ALTER DATABASE isolation2test SET time_series.bgw_scheduler_disable = on;
+1: DO $$ BEGIN PERFORM pg_terminate_backend(pid) FROM pg_stat_activity WHERE backend_type = 'time_series scheduler' AND datname = current_database(); END $$;

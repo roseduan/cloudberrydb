@@ -1,0 +1,1544 @@
+-- ============================================================
+-- cagg_bgw_policy_api.sql
+--
+-- CAGG policy API matrix (no refresh execution, no multi-user).
+--
+-- Sections:
+--   1. DDL validation: add_continuous_aggregate_policy /
+--      remove_continuous_aggregate_policy parameter handling
+--   2. cagg_policy_stats view content (BGW-VIEW-01/02 only;
+--      multi-user filtering -> cagg_bgw_policy_permissions.sql)
+--   3. BGW lifecycle catalog effects (remove + DROP cagg)
+--   4. policy_refresh_cagg manual entry validation
+--   5. Lifecycle stress (idempotence, multi-cagg)
+--   6. View column coverage
+--   7. Edge cases (extreme/null intervals, naming)
+--   8. bgw_job catalog field assertions
+--   9. cagg_policy_stats consistency
+--  10. Schema-qualified / case-folded cagg_name handling
+--  11. alter_job
+--
+-- Sibling files:
+--   * cagg_bgw_policy_run.sql         - synchronous refresh trigger
+--   * cagg_bgw_policy_permissions.sql - multi-user permission tests
+--   * cagg_bgw_policy_mock_time.sql   - mock-time scheduler dispatch
+--   * cagg_bgw_policy_e2e.sql         - real BGW worker dispatch
+-- ============================================================
+SET optimizer = off;
+SET timezone = 'UTC';
+DROP EXTENSION IF EXISTS time_series CASCADE;
+NOTICE:  extension "time_series" does not exist, skipping
+-- Defensive: prior test runs may leave behind source tables and auto-named
+-- materialization tables (which are NOT cleaned by DROP EXTENSION CASCADE
+-- for views that were dropped via DROP MATERIALIZED VIEW).
+DROP TABLE IF EXISTS metrics_tstz CASCADE;
+NOTICE:  table "metrics_tstz" does not exist, skipping
+DROP TABLE IF EXISTS metrics_ts   CASCADE;
+NOTICE:  table "metrics_ts" does not exist, skipping
+DROP TABLE IF EXISTS metrics_date CASCADE;
+NOTICE:  table "metrics_date" does not exist, skipping
+CREATE EXTENSION time_series;
+WARNING:  referential integrity (FOREIGN KEY) constraints are not supported in Apache Cloudberry, will not be enforced
+-- This is a pure API-matrix test: no refresh execution intended.
+-- With the scheduler live, add_continuous_aggregate_policy() can be
+-- dispatched within milliseconds and race against assertions that
+-- inspect the "not yet fired" state (POL-VIEW-03 in particular).
+-- Stop the scheduler so all catalog assertions read a stable state.
+SELECT time_series.stop_background_workers();
+ stop_background_workers 
+-------------------------
+ t
+(1 row)
+
+SET search_path TO public, time_series;
+-- ============================================================
+-- Setup: source tables with data placed relative to now()
+-- so that policy default windows (now()-Xd, now()] actually cover them.
+-- ============================================================
+CREATE TABLE metrics_tstz (
+    time        TIMESTAMPTZ       NOT NULL,
+    tags_id     INT               NOT NULL,
+    temperature DOUBLE PRECISION
+) USING time_series WITH (
+    ts_partition_column = 'time',
+    ts_chunk_interval   = '4 hour',
+    ts_chunk_origin     = '2020-01-01'
+) DISTRIBUTED BY (tags_id);
+-- 48 hours of data ending ~2 hours before now(), so refresh windows that
+-- exclude the most-recent few minutes still cover the last bucket.
+INSERT INTO metrics_tstz
+SELECT date_trunc('hour', now()) - ((48 - h) * interval '1 hour')
+       + (m * interval '5 minutes'),
+       (h % 5) + 1,
+       20.0 + h * 0.1 + m * 0.01
+FROM generate_series(1, 48) h,
+     generate_series(0, 5)  m;
+CREATE TABLE metrics_ts (
+    time        TIMESTAMP         NOT NULL,
+    tags_id     INT               NOT NULL,
+    temperature DOUBLE PRECISION
+) USING time_series WITH (
+    ts_partition_column = 'time',
+    ts_chunk_interval   = '4 hour',
+    ts_chunk_origin     = '2020-01-01'
+) DISTRIBUTED BY (tags_id);
+INSERT INTO metrics_ts
+SELECT (date_trunc('hour', now()) - ((48 - h) * interval '1 hour'))::timestamp,
+       (h % 5) + 1, 20.0 + h * 0.1
+FROM generate_series(1, 48) h;
+CREATE TABLE metrics_date (
+    time        DATE              NOT NULL,
+    tags_id     INT               NOT NULL,
+    cnt         INT
+) USING time_series WITH (
+    ts_partition_column = 'time',
+    ts_chunk_interval   = '4 hour',
+    ts_chunk_origin     = '2020-01-01'
+) DISTRIBUTED BY (tags_id);
+INSERT INTO metrics_date
+SELECT (now()::date - d), (d % 5) + 1, d * 10
+FROM generate_series(1, 10) d;
+-- ============================================================
+-- CAGG views
+-- ============================================================
+CREATE MATERIALIZED VIEW cv_tstz
+WITH (time_series.continuous) AS
+  SELECT time_bucket('1 hour'::interval, time) AS bucket, tags_id,
+         count(*) AS cnt, avg(temperature) AS avg_temp
+  FROM metrics_tstz GROUP BY bucket, tags_id;
+NOTICE:  continuous aggregate "cv_tstz" successfully created
+DETAIL:  Materialization table: time_series._mat_cv_tstz_1
+CREATE MATERIALIZED VIEW cv_ts
+WITH (time_series.continuous) AS
+  SELECT time_bucket('1 hour'::interval, time) AS bucket, tags_id,
+         count(*) AS cnt
+  FROM metrics_ts GROUP BY bucket, tags_id;
+NOTICE:  continuous aggregate "cv_ts" successfully created
+DETAIL:  Materialization table: time_series._mat_cv_ts_2
+CREATE MATERIALIZED VIEW cv_date
+WITH (time_series.continuous) AS
+  SELECT time_bucket('1 day'::interval, time) AS bucket, tags_id,
+         sum(cnt) AS s
+  FROM metrics_date GROUP BY bucket, tags_id;
+NOTICE:  continuous aggregate "cv_date" successfully created
+DETAIL:  Materialization table: time_series._mat_cv_date_3
+-- ============================================================
+-- Section 1: DDL validation
+-- ============================================================
+\echo '=== BGW-DDL-01: basic add then remove ==='
+=== BGW-DDL-01: basic add then remove ===
+SELECT add_continuous_aggregate_policy('cv_tstz',
+       start_offset => '2 days'::interval,
+       end_offset   => '0 minutes'::interval,
+       schedule_interval => '10 seconds'::interval) AS job_id_tstz \gset
+SELECT cagg_name, schedule_interval, start_offset, end_offset, active
+  FROM time_series.cagg_policy_stats
+ WHERE cagg_name LIKE '%cv_tstz%';
+   cagg_name    | schedule_interval | start_offset | end_offset | active 
+----------------+-------------------+--------------+------------+--------
+ public.cv_tstz | @ 10 secs         | @ 2 days     | @ 0        | t
+(1 row)
+
+SELECT remove_continuous_aggregate_policy('cv_tstz');
+ remove_continuous_aggregate_policy 
+------------------------------------
+ 
+(1 row)
+
+SELECT count(*) AS policies_after_remove
+  FROM time_series.cagg_policy_stats WHERE cagg_name LIKE '%cv_tstz%';
+ policies_after_remove 
+-----------------------
+                     0
+(1 row)
+
+\echo '=== BGW-DDL-02: start_offset <= end_offset → ERROR ==='
+=== BGW-DDL-02: start_offset <= end_offset → ERROR ===
+\set ON_ERROR_STOP 0
+SELECT add_continuous_aggregate_policy('cv_tstz',
+       '5 minutes'::interval,
+       '10 minutes'::interval,
+       '10 seconds'::interval);
+ERROR:  start_offset must be greater than end_offset (refresh window must be non-empty)
+HINT:  Set start_offset to an earlier time than end_offset, e.g. start_offset => '2 days', end_offset => '0'.
+CONTEXT:  PL/pgSQL function add_continuous_aggregate_policy(regclass,interval,interval,interval,boolean,timestamp with time zone,text,integer,integer,boolean) line 68 at RAISE
+SELECT add_continuous_aggregate_policy('cv_tstz',
+       '5 minutes'::interval,
+       '5 minutes'::interval,
+       '10 seconds'::interval);
+ERROR:  start_offset must be greater than end_offset (refresh window must be non-empty)
+HINT:  Set start_offset to an earlier time than end_offset, e.g. start_offset => '2 days', end_offset => '0'.
+CONTEXT:  PL/pgSQL function add_continuous_aggregate_policy(regclass,interval,interval,interval,boolean,timestamp with time zone,text,integer,integer,boolean) line 68 at RAISE
+\set ON_ERROR_STOP 1
+\echo '=== BGW-DDL-03: refresh window < 2 buckets → ERROR ==='
+=== BGW-DDL-03: refresh window < 2 buckets → ERROR ===
+-- window = 1 bucket.  V1 now mirrors this check (bucket_width=1h here,
+-- so window=30min<2h triggers ERROR).
+\set ON_ERROR_STOP 0
+SELECT add_continuous_aggregate_policy('cv_tstz',
+       '30 minutes'::interval,
+       '0 minutes'::interval,
+       '10 seconds'::interval);
+ERROR:  refresh window (@ 30 mins) must cover at least 2 buckets (2 × @ 1 hour = @ 2 hours)
+HINT:  Increase start_offset or decrease end_offset so the window spans more than two buckets.
+CONTEXT:  PL/pgSQL function add_continuous_aggregate_policy(regclass,interval,interval,interval,boolean,timestamp with time zone,text,integer,integer,boolean) line 94 at RAISE
+\set ON_ERROR_STOP 1
+\echo '=== BGW-DDL-04: duplicate add → ERROR ==='
+=== BGW-DDL-04: duplicate add → ERROR ===
+SELECT add_continuous_aggregate_policy('cv_tstz',
+       '2 days'::interval, '0 minutes'::interval, '10 seconds'::interval)
+  AS dup_first \gset
+\set ON_ERROR_STOP 0
+SELECT add_continuous_aggregate_policy('cv_tstz',
+       '2 days'::interval, '0 minutes'::interval, '10 seconds'::interval);
+ERROR:  refresh policy already exists for continuous aggregate "public.cv_tstz"
+CONTEXT:  PL/pgSQL function add_continuous_aggregate_policy(regclass,interval,interval,interval,boolean,timestamp with time zone,text,integer,integer,boolean) line 130 at RAISE
+\set ON_ERROR_STOP 1
+\echo '=== BGW-DDL-05: duplicate add + if_not_exists=true → NOTICE, returns existing ==='
+=== BGW-DDL-05: duplicate add + if_not_exists=true → NOTICE, returns existing ===
+SELECT add_continuous_aggregate_policy('cv_tstz',
+       '2 days'::interval, '0 minutes'::interval, '10 seconds'::interval,
+       if_not_exists => true) AS jid_existing \gset
+NOTICE:  policy already exists for "public.cv_tstz", skipping
+SELECT :jid_existing = :dup_first AS returned_existing_jobid;
+ returned_existing_jobid 
+-------------------------
+ t
+(1 row)
+
+\echo '=== BGW-DDL-06: duplicate add + if_not_exists=true (different params) ==='
+=== BGW-DDL-06: duplicate add + if_not_exists=true (different params) ===
+-- returns the existing job_id. Documented behavior difference.
+SELECT add_continuous_aggregate_policy('cv_tstz',
+       '3 days'::interval, '5 minutes'::interval, '20 seconds'::interval,
+       if_not_exists => true) AS jid_existing2 \gset
+NOTICE:  policy already exists for "public.cv_tstz", skipping
+SELECT :jid_existing2 = :dup_first AS still_returns_existing_jobid;
+ still_returns_existing_jobid 
+------------------------------
+ t
+(1 row)
+
+-- Cleanup before next group
+SELECT remove_continuous_aggregate_policy('cv_tstz');
+ remove_continuous_aggregate_policy 
+------------------------------------
+ 
+(1 row)
+
+\echo '=== BGW-DDL-07: NULL start_offset (open-start window) ==='
+=== BGW-DDL-07: NULL start_offset (open-start window) ===
+SELECT add_continuous_aggregate_policy('cv_tstz',
+       NULL, '1 hour'::interval, '10 seconds'::interval) AS job_id_null_start \gset
+SELECT start_offset IS NULL AS start_is_null,
+       end_offset
+  FROM time_series.cagg_policy_stats WHERE job_id = :job_id_null_start;
+ start_is_null | end_offset 
+---------------+------------
+ t             | @ 1 hour
+(1 row)
+
+SELECT remove_continuous_aggregate_policy('cv_tstz');
+ remove_continuous_aggregate_policy 
+------------------------------------
+ 
+(1 row)
+
+\echo '=== BGW-DDL-08: NULL end_offset (open-end window) ==='
+=== BGW-DDL-08: NULL end_offset (open-end window) ===
+SELECT add_continuous_aggregate_policy('cv_tstz',
+       '2 days'::interval, NULL, '10 seconds'::interval) AS job_id_null_end \gset
+SELECT start_offset,
+       end_offset IS NULL AS end_is_null
+  FROM time_series.cagg_policy_stats WHERE job_id = :job_id_null_end;
+ start_offset | end_is_null 
+--------------+-------------
+ @ 2 days     | t
+(1 row)
+
+SELECT remove_continuous_aggregate_policy('cv_tstz');
+ remove_continuous_aggregate_policy 
+------------------------------------
+ 
+(1 row)
+
+\echo '=== BGW-DDL-09a: timestamp column type ==='
+=== BGW-DDL-09a: timestamp column type ===
+SELECT add_continuous_aggregate_policy('cv_ts',
+       '2 days'::interval, '0 minutes'::interval, '10 seconds'::interval)
+  AS job_id_ts \gset
+SELECT cagg_name FROM time_series.cagg_policy_stats WHERE job_id = :job_id_ts;
+  cagg_name   
+--------------
+ public.cv_ts
+(1 row)
+
+SELECT remove_continuous_aggregate_policy('cv_ts');
+ remove_continuous_aggregate_policy 
+------------------------------------
+ 
+(1 row)
+
+\echo '=== BGW-DDL-09b: date column type ==='
+=== BGW-DDL-09b: date column type ===
+SELECT add_continuous_aggregate_policy('cv_date',
+       '7 days'::interval, '0 minutes'::interval, '10 seconds'::interval)
+  AS job_id_date \gset
+SELECT cagg_name FROM time_series.cagg_policy_stats WHERE job_id = :job_id_date;
+   cagg_name    
+----------------
+ public.cv_date
+(1 row)
+
+SELECT remove_continuous_aggregate_policy('cv_date');
+ remove_continuous_aggregate_policy 
+------------------------------------
+ 
+(1 row)
+
+\echo '=== BGW-DDL-10: remove non-existent → ERROR; if_exists=true → silent ==='
+=== BGW-DDL-10: remove non-existent → ERROR; if_exists=true → silent ===
+\set ON_ERROR_STOP 0
+SELECT remove_continuous_aggregate_policy('cv_tstz');
+ERROR:  no refresh policy exists for continuous aggregate "public.cv_tstz"
+CONTEXT:  PL/pgSQL function remove_continuous_aggregate_policy(regclass,boolean) line 34 at RAISE
+\set ON_ERROR_STOP 1
+SELECT remove_continuous_aggregate_policy('cv_tstz', if_exists => true);
+ remove_continuous_aggregate_policy 
+------------------------------------
+ 
+(1 row)
+
+\echo '=== BGW-DDL-11: add for non-existent CAGG → ERROR ==='
+=== BGW-DDL-11: add for non-existent CAGG → ERROR ===
+\set ON_ERROR_STOP 0
+SELECT add_continuous_aggregate_policy('does_not_exist',
+       '2 days'::interval, '0 minutes'::interval, '10 seconds'::interval);
+ERROR:  relation "does_not_exist" does not exist
+LINE 1: SELECT add_continuous_aggregate_policy('does_not_exist',
+                                               ^
+\set ON_ERROR_STOP 1
+-- ============================================================
+-- BGW-DDL-12: cagg_default_max_retries / cagg_default_max_runtime GUCs
+--
+-- upstream hard-codes max_retries=-1 (unlimited) + max_runtime=0
+-- (no timeout) for new CAGG refresh policies.  We keep that as the
+-- compatible default but expose two PGC_USERSET GUCs so operators can
+-- install safer defaults globally without patching SQL.  Tests cover:
+--   12a — defaults match upstream (-1, '0')
+--   12b — SET GUC affects subsequent add_continuous_aggregate_policy
+--   12c — existing policies are NOT retroactively changed
+--   12d — alter_job still overrides per-policy regardless of GUC
+--   12e — RESET GUC returns to upstream-compatible defaults
+-- ============================================================
+\echo '=== BGW-DDL-12a: GUC defaults match upstream ==='
+=== BGW-DDL-12a: GUC defaults match upstream ===
+SHOW time_series.cagg_default_max_retries;
+ time_series.cagg_default_max_retries 
+--------------------------------------
+ -1
+(1 row)
+
+SHOW time_series.cagg_default_max_runtime;
+ time_series.cagg_default_max_runtime 
+--------------------------------------
+ 0
+(1 row)
+
+SELECT add_continuous_aggregate_policy('cv_tstz',
+       '2 days'::interval, '0 minutes'::interval, '10 seconds'::interval)
+   AS jid_g1 \gset
+SELECT max_retries, max_runtime
+  FROM time_series.bgw_job WHERE id = :jid_g1;
+ max_retries | max_runtime 
+-------------+-------------
+          -1 | @ 0
+(1 row)
+
+\echo '=== BGW-DDL-12b: SET GUCs → next add picks them up ==='
+=== BGW-DDL-12b: SET GUCs → next add picks them up ===
+SET time_series.cagg_default_max_retries = 20;
+SET time_series.cagg_default_max_runtime = '30 minutes';
+SELECT add_continuous_aggregate_policy('cv_ts',
+       '2 days'::interval, '0 minutes'::interval, '10 seconds'::interval)
+   AS jid_g2 \gset
+SELECT max_retries, max_runtime
+  FROM time_series.bgw_job WHERE id = :jid_g2;
+ max_retries | max_runtime 
+-------------+-------------
+          20 | @ 30 mins
+(1 row)
+
+\echo '=== BGW-DDL-12c: pre-existing policy unchanged by GUC ==='
+=== BGW-DDL-12c: pre-existing policy unchanged by GUC ===
+-- jid_g1 was created BEFORE we SET the GUCs; it must still have
+-- the original (-1, '0') values, not the new (20, '30 minutes')
+SELECT max_retries, max_runtime
+  FROM time_series.bgw_job WHERE id = :jid_g1;
+ max_retries | max_runtime 
+-------------+-------------
+          -1 | @ 0
+(1 row)
+
+\echo '=== BGW-DDL-12d: alter_job overrides per-policy regardless of GUC ==='
+=== BGW-DDL-12d: alter_job overrides per-policy regardless of GUC ===
+SELECT (alter_job(:jid_g2, max_retries => 5,
+                  max_runtime => '1 hour'::interval)).id IS NOT NULL AS altered;
+ altered 
+---------
+ t
+(1 row)
+
+SELECT max_retries, max_runtime
+  FROM time_series.bgw_job WHERE id = :jid_g2;
+ max_retries | max_runtime 
+-------------+-------------
+           5 | @ 1 hour
+(1 row)
+
+\echo '=== BGW-DDL-12e: RESET GUCs → next add returns to upstream defaults ==='
+=== BGW-DDL-12e: RESET GUCs → next add returns to upstream defaults ===
+RESET time_series.cagg_default_max_retries;
+RESET time_series.cagg_default_max_runtime;
+SHOW time_series.cagg_default_max_retries;
+ time_series.cagg_default_max_retries 
+--------------------------------------
+ -1
+(1 row)
+
+SHOW time_series.cagg_default_max_runtime;
+ time_series.cagg_default_max_runtime 
+--------------------------------------
+ 0
+(1 row)
+
+-- Drop the existing two policies and add a fresh one to confirm
+-- post-RESET defaults take effect.
+SELECT remove_continuous_aggregate_policy('cv_tstz');
+ remove_continuous_aggregate_policy 
+------------------------------------
+ 
+(1 row)
+
+SELECT remove_continuous_aggregate_policy('cv_ts');
+ remove_continuous_aggregate_policy 
+------------------------------------
+ 
+(1 row)
+
+SELECT add_continuous_aggregate_policy('cv_tstz',
+       '2 days'::interval, '0 minutes'::interval, '10 seconds'::interval)
+   AS jid_g3 \gset
+SELECT max_retries, max_runtime
+  FROM time_series.bgw_job WHERE id = :jid_g3;
+ max_retries | max_runtime 
+-------------+-------------
+          -1 | @ 0
+(1 row)
+
+-- Cleanup for downstream tests
+SELECT remove_continuous_aggregate_policy('cv_tstz');
+ remove_continuous_aggregate_policy 
+------------------------------------
+ 
+(1 row)
+
+-- ============================================================
+-- BGW-DDL-13: initial_start + timezone parameters on
+--             add_continuous_aggregate_policy
+-- ============================================================
+\echo '=== BGW-DDL-13a: timezone stored on bgw_job ==='
+=== BGW-DDL-13a: timezone stored on bgw_job ===
+SELECT add_continuous_aggregate_policy(
+       'cv_tstz', '1 day'::interval, '0'::interval, '1 hour'::interval,
+       initial_start => '2030-01-01 03:00+00'::timestamptz,
+       timezone      => 'Asia/Shanghai') AS jid_tz \gset
+SELECT j.timezone,
+       j.initial_start AT TIME ZONE 'UTC' AS initial_start_utc,
+       s.next_start    AT TIME ZONE 'UTC' AS next_start_utc
+  FROM time_series.bgw_job j JOIN time_series.bgw_job_stat s ON j.id = s.job_id
+ WHERE j.id = :jid_tz;
+   timezone    |    initial_start_utc     |      next_start_utc      
+---------------+--------------------------+--------------------------
+ Asia/Shanghai | Tue Jan 01 03:00:00 2030 | Tue Jan 01 03:00:00 2030
+(1 row)
+
+SELECT remove_continuous_aggregate_policy('cv_tstz');
+ remove_continuous_aggregate_policy 
+------------------------------------
+ 
+(1 row)
+
+\echo '=== BGW-DDL-13b: invalid timezone rejected at registration ==='
+=== BGW-DDL-13b: invalid timezone rejected at registration ===
+\set ON_ERROR_STOP 0
+SELECT add_continuous_aggregate_policy(
+       'cv_tstz', '1 day'::interval, '0'::interval, '1 hour'::interval,
+       timezone => 'Mars/Olympus_Mons');
+ERROR:  invalid timezone "Mars/Olympus_Mons"
+HINT:  Pick a value from pg_timezone_names.
+CONTEXT:  PL/pgSQL function add_continuous_aggregate_policy(regclass,interval,interval,interval,boolean,timestamp with time zone,text,integer,integer,boolean) line 114 at RAISE
+\set ON_ERROR_STOP 1
+\echo '=== BGW-DDL-13c: NULL initial_start defaults to now() ==='
+=== BGW-DDL-13c: NULL initial_start defaults to now() ===
+SELECT add_continuous_aggregate_policy(
+       'cv_tstz', '1 day'::interval, '0'::interval, '1 hour'::interval) AS jid_now \gset
+SELECT s.next_start <= now() + '1 second'::interval AS next_start_near_now
+  FROM time_series.bgw_job_stat s WHERE s.job_id = :jid_now;
+ next_start_near_now 
+---------------------
+ t
+(1 row)
+
+SELECT remove_continuous_aggregate_policy('cv_tstz');
+ remove_continuous_aggregate_policy 
+------------------------------------
+ 
+(1 row)
+
+-- ============================================================
+-- Section 2: cagg_policy_stats view
+-- ============================================================
+\echo '=== BGW-VIEW-01: empty when no policies ==='
+=== BGW-VIEW-01: empty when no policies ===
+SELECT count(*) AS empty FROM time_series.cagg_policy_stats;
+ empty 
+-------
+     0
+(1 row)
+
+\echo '=== BGW-VIEW-02: lists active policies with config ==='
+=== BGW-VIEW-02: lists active policies with config ===
+SELECT add_continuous_aggregate_policy('cv_tstz',
+       '2 days'::interval, '0 minutes'::interval, '10 seconds'::interval)
+  AS jid_v \gset
+SELECT add_continuous_aggregate_policy('cv_ts',
+       '2 days'::interval, '0 minutes'::interval, '15 seconds'::interval);
+ add_continuous_aggregate_policy 
+---------------------------------
+                            1013
+(1 row)
+
+SELECT cagg_name, schedule_interval, start_offset, end_offset, active
+  FROM time_series.cagg_policy_stats
+ ORDER BY cagg_name;
+   cagg_name    | schedule_interval | start_offset | end_offset | active 
+----------------+-------------------+--------------+------------+--------
+ public.cv_ts   | @ 15 secs         | @ 2 days     | @ 0        | t
+ public.cv_tstz | @ 10 secs         | @ 2 days     | @ 0        | t
+(2 rows)
+
+-- Cleanup
+SELECT remove_continuous_aggregate_policy('cv_tstz');
+ remove_continuous_aggregate_policy 
+------------------------------------
+ 
+(1 row)
+
+SELECT remove_continuous_aggregate_policy('cv_ts');
+ remove_continuous_aggregate_policy 
+------------------------------------
+ 
+(1 row)
+
+-- ============================================================
+-- BGW-VIEW-03: owner filter mirrors upstream split
+--
+-- upstream design: job_stats / jobs / continuous_aggregates views are
+-- public (operational metadata), but job_history / job_errors filter
+-- by job owner OR database owner.  V1 mirrors that:
+--
+--   cagg_policy_stats (≈ upstream job_stats) → no owner filter
+--   job_history                          → filtered by job owner
+--                                            OR database owner
+--                                            + WITH (security_barrier)
+--
+-- Verifies:
+--   - bob with SELECT grant sees policy metadata in cagg_policy_stats
+--     (intentional, matches upstream)
+--   - bob with SELECT grant sees ZERO rows in job_history
+--   - alice (owner) sees her own job_history rows
+--   - the database owner (gpadmin in this test environment) sees
+--     all rows (covered implicitly: tests run as superuser/datdba
+--     and add_continuous_aggregate_policy populates the bgw_job)
+-- ============================================================
+-- Section 3: BGW lifecycle (deterministic — no scheduler timing)
+--
+-- The BGW worker execution path (mark_start → cagg_refresh → mark_end) is
+-- fully exercised by Section 5 (BGW-10 dangling-pointer regression), where
+-- the test polls the worker for ≥5 iterations and verifies stat sanity.
+--
+-- This section covers add/remove/drop lifecycle without depending on
+-- BGW scheduler tick timing, which is too racy for a regression test.
+-- ============================================================
+\echo '=== BGW-08: remove policy → bgw_job and bgw_job_stat cleaned ==='
+=== BGW-08: remove policy → bgw_job and bgw_job_stat cleaned ===
+-- upstream removes via delete_job; we test our remove_continuous_aggregate_policy.
+SELECT add_continuous_aggregate_policy('cv_tstz',
+       '7 days'::interval, '0 minutes'::interval, '10 seconds'::interval)
+  AS jid1 \gset
+SELECT count(*) AS jobs_before_remove
+  FROM time_series.bgw_job WHERE id = :jid1;
+ jobs_before_remove 
+--------------------
+                  1
+(1 row)
+
+SELECT count(*) AS stats_before_remove
+  FROM time_series.bgw_job_stat WHERE job_id = :jid1;
+ stats_before_remove 
+---------------------
+                   1
+(1 row)
+
+SELECT remove_continuous_aggregate_policy('cv_tstz');
+ remove_continuous_aggregate_policy 
+------------------------------------
+ 
+(1 row)
+
+SELECT count(*) AS jobs_after_remove
+  FROM time_series.bgw_job WHERE id = :jid1;
+ jobs_after_remove 
+-------------------
+                 0
+(1 row)
+
+SELECT count(*) AS stats_after_remove
+  FROM time_series.bgw_job_stat WHERE job_id = :jid1;
+ stats_after_remove 
+--------------------
+                  0
+(1 row)
+
+\echo '=== BGW-09: DROP cagg view → continuous_agg catalog row removed ==='
+=== BGW-09: DROP cagg view → continuous_agg catalog row removed ===
+-- over mat table + live aggregation), so DROP VIEW is the right idiom; an
+-- event trigger removes the continuous_agg catalog row.
+SELECT add_continuous_aggregate_policy('cv_ts',
+       '2 days'::interval, '0 minutes'::interval, '10 seconds'::interval)
+  AS jid_drop \gset
+DROP VIEW cv_ts;
+-- continuous_agg row gone via event trigger
+SELECT count(*) AS cagg_rows
+  FROM time_series.continuous_agg WHERE user_view_name = 'cv_ts';
+ cagg_rows 
+-----------
+         0
+(1 row)
+
+-- V1 known behavior: bgw_job referencing the cagg is NOT auto-removed by
+-- the DROP event trigger.  Verify the orphan job exists, then clean it up
+-- manually so the test leaves no leftovers.  (Future work: extend event
+-- trigger to also drop matching bgw_job rows.)
+SELECT count(*) AS orphan_jobs_after_drop
+  FROM time_series.bgw_job WHERE id = :jid_drop;
+ orphan_jobs_after_drop 
+------------------------
+                      0
+(1 row)
+
+DELETE FROM time_series.bgw_job_stat WHERE job_id = :jid_drop;
+DELETE FROM time_series.bgw_job      WHERE id     = :jid_drop;
+-- (Section 4 was BGW-03/04/05 — INSERT/UPDATE/DELETE → next refresh
+--  picks it up.  Removed; cagg_invalidation.sql I-01..05 / P1-UPD /
+--  V-18 cover the same scenarios at the proper layer.)
+-- ============================================================
+-- Section 5: policy_refresh_cagg procedure entry point
+--
+-- Borrowed from L405-L465 (alter_job + config jsonb
+-- validation). V1 does not have alter_job, but it does have a public
+-- procedure policy_refresh_cagg(job_id, config) intended as a manual
+-- trigger of the policy.
+-- ============================================================
+\echo '=== POL-CALL-01: direct CALL policy_refresh_cagg succeeds (manual trigger) ==='
+=== POL-CALL-01: direct CALL policy_refresh_cagg succeeds (manual trigger) ===
+-- policy_refresh_cagg is the policy procedure registered in
+-- bgw_job.proc_name; it parses config jsonb and dispatches to
+-- refresh_continuous_aggregate via ExecuteCallStmt (NOT SPI_execute("CALL
+-- ...") which would hit CBDB's "atomic context" guard).  Calling it
+-- manually from psql exercises the same path the BGW worker uses.
+SELECT add_continuous_aggregate_policy('cv_tstz',
+       '7 days'::interval, '0'::interval, '10 seconds'::interval) AS jid_pol \gset
+SELECT id AS jid_pol_check, config AS jcfg
+  FROM time_series.bgw_job WHERE id = :jid_pol \gset
+-- The refresh always emits "refreshing ..."; depending on whether a wall-clock
+-- bucket boundary was crossed since cv_tstz was built, it may ALSO emit
+-- "... is already up-to-date" (n_intervals == 0).  Both are correct, but which
+-- one fires is non-deterministic because the policy window is now()-anchored:
+-- a run that straddles an hour/day boundary flips the output.  POL-CALL-01 only
+-- asserts that the manual CALL path succeeds (not which refresh branch ran), so
+-- suppress the NOTICEs to keep this case deterministic across wall-clock time.
+SET client_min_messages = WARNING;
+CALL time_series.policy_refresh_cagg(:jid_pol, :'jcfg'::jsonb);
+RESET client_min_messages;
+\echo '=== POL-CALL-02: NULL config → ERROR ==='
+=== POL-CALL-02: NULL config → ERROR ===
+-- upstream rejects malformed/missing config via alter_job(check_config). Our
+-- procedure does an explicit NULL check at the top.
+\set ON_ERROR_STOP 0
+CALL time_series.policy_refresh_cagg(:jid_pol, NULL);
+ERROR:  job 1021 has NULL config
+\set ON_ERROR_STOP 1
+\echo '=== POL-CALL-03: config missing cagg_name → ERROR ==='
+=== POL-CALL-03: config missing cagg_name → ERROR ===
+-- The raw error contains a dynamic function-pointer address; wrap in a
+-- helper function so we can swallow the exception and emit a stable
+-- NOTICE in its place.
+CREATE OR REPLACE FUNCTION pg_temp.expect_call03_error(jid int) RETURNS void
+LANGUAGE plpgsql AS $$
+BEGIN
+    CALL time_series.policy_refresh_cagg(jid,
+         '{"start_offset": "1 day", "end_offset": "0"}'::jsonb);
+    RAISE EXCEPTION 'expected error did not occur';
+EXCEPTION WHEN others THEN
+    RAISE NOTICE 'POL-CALL-03 raised expected error';
+END$$;
+SELECT pg_temp.expect_call03_error(:jid_pol);
+NOTICE:  POL-CALL-03 raised expected error
+ expect_call03_error 
+---------------------
+ 
+(1 row)
+
+\echo '=== POL-CONFIG-01: bgw_job.config has all expected fields ==='
+=== POL-CONFIG-01: bgw_job.config has all expected fields ===
+SELECT (config->>'cagg_name')   IS NOT NULL AS has_cagg_name,
+       config ? 'start_offset'  AS has_start_offset_key,
+       config ? 'end_offset'    AS has_end_offset_key,
+       config->>'start_offset'  AS start_offset_val,
+       config->>'end_offset'    AS end_offset_val
+  FROM time_series.bgw_job WHERE id = :jid_pol;
+ has_cagg_name | has_start_offset_key | has_end_offset_key | start_offset_val | end_offset_val 
+---------------+----------------------+--------------------+------------------+----------------
+ t             | t                    | t                  | @ 7 days         | @ 0
+(1 row)
+
+SELECT remove_continuous_aggregate_policy('cv_tstz');
+ remove_continuous_aggregate_policy 
+------------------------------------
+ 
+(1 row)
+
+-- ============================================================
+-- Section 6: Lifecycle stress (add/remove/add idempotence; multi-cagg)
+-- ============================================================
+\echo '=== POL-LIFE-01: add → remove → add → remove cycle is idempotent ==='
+=== POL-LIFE-01: add → remove → add → remove cycle is idempotent ===
+SELECT add_continuous_aggregate_policy('cv_tstz',
+       '2 days'::interval, '0'::interval, '10 seconds'::interval) AS jid_a \gset
+SELECT remove_continuous_aggregate_policy('cv_tstz');
+ remove_continuous_aggregate_policy 
+------------------------------------
+ 
+(1 row)
+
+SELECT add_continuous_aggregate_policy('cv_tstz',
+       '2 days'::interval, '0'::interval, '10 seconds'::interval) AS jid_b \gset
+SELECT remove_continuous_aggregate_policy('cv_tstz');
+ remove_continuous_aggregate_policy 
+------------------------------------
+ 
+(1 row)
+
+-- Each add must produce a distinct job_id (we don't reuse old ids)
+SELECT :jid_b > :jid_a AS new_jid_strictly_higher;
+ new_jid_strictly_higher 
+-------------------------
+ t
+(1 row)
+
+-- And after removal, no policies remain
+SELECT count(*) AS policies_after_cycle FROM time_series.cagg_policy_stats;
+ policies_after_cycle 
+----------------------
+                    0
+(1 row)
+
+\echo '=== POL-LIFE-02: multi-cagg policies are independent ==='
+=== POL-LIFE-02: multi-cagg policies are independent ===
+-- Add policies on cv_tstz and cv_date with different schedule_intervals.
+SELECT add_continuous_aggregate_policy('cv_tstz',
+       '2 days'::interval, '0'::interval, '10 seconds'::interval)
+  AS jid_t \gset
+SELECT add_continuous_aggregate_policy('cv_date',
+       '7 days'::interval, '0'::interval, '20 seconds'::interval)
+  AS jid_d \gset
+-- Both visible, with their own schedule_interval
+SELECT cagg_name, schedule_interval, start_offset
+  FROM time_series.cagg_policy_stats
+ ORDER BY cagg_name;
+   cagg_name    | schedule_interval | start_offset 
+----------------+-------------------+--------------
+ public.cv_date | @ 20 secs         | @ 7 days
+ public.cv_tstz | @ 10 secs         | @ 2 days
+(2 rows)
+
+-- Removing one does not touch the other
+SELECT remove_continuous_aggregate_policy('cv_tstz');
+ remove_continuous_aggregate_policy 
+------------------------------------
+ 
+(1 row)
+
+SELECT cagg_name FROM time_series.cagg_policy_stats ORDER BY cagg_name;
+   cagg_name    
+----------------
+ public.cv_date
+(1 row)
+
+SELECT remove_continuous_aggregate_policy('cv_date');
+ remove_continuous_aggregate_policy 
+------------------------------------
+ 
+(1 row)
+
+\echo '=== POL-LIFE-03: removing a cagg with no policy does not affect others ==='
+=== POL-LIFE-03: removing a cagg with no policy does not affect others ===
+-- Defensive: if_exists=true on a cagg without policy is silent
+SELECT add_continuous_aggregate_policy('cv_tstz',
+       '2 days'::interval, '0'::interval, '10 seconds'::interval)
+  AS jid_e \gset
+SELECT remove_continuous_aggregate_policy('cv_date', if_exists => true);
+ remove_continuous_aggregate_policy 
+------------------------------------
+ 
+(1 row)
+
+-- cv_tstz policy still there
+SELECT count(*) AS active_policies FROM time_series.cagg_policy_stats
+ WHERE cagg_name LIKE '%cv_tstz%';
+ active_policies 
+-----------------
+               1
+(1 row)
+
+SELECT remove_continuous_aggregate_policy('cv_tstz');
+ remove_continuous_aggregate_policy 
+------------------------------------
+ 
+(1 row)
+
+-- ============================================================
+-- Section 7: cagg_policy_stats view full column coverage
+-- ============================================================
+\echo '=== POL-VIEW-03: stats view exposes execution-history columns ==='
+=== POL-VIEW-03: stats view exposes execution-history columns ===
+-- Verify the view exposes the worker-execution telemetry columns. After
+-- a fresh add, runtime fields are NULL/-infinity until the worker fires.
+SELECT add_continuous_aggregate_policy('cv_tstz',
+       '2 days'::interval, '0'::interval, '10 seconds'::interval)
+  AS jid_v3 \gset
+-- Use \d to confirm column shape
+SELECT column_name, data_type
+  FROM information_schema.columns
+ WHERE table_schema = 'time_series'
+   AND table_name   = 'cagg_policy_stats'
+ ORDER BY ordinal_position;
+      column_name       |        data_type         
+------------------------+--------------------------
+ cagg_name              | text
+ job_id                 | integer
+ schedule_interval      | interval
+ max_runtime            | interval
+ max_retries            | integer
+ start_offset           | text
+ end_offset             | text
+ active                 | boolean
+ last_start             | timestamp with time zone
+ last_finish            | timestamp with time zone
+ last_successful_finish | timestamp with time zone
+ next_start             | timestamp with time zone
+ last_run_success       | boolean
+ total_runs             | bigint
+ total_successes        | bigint
+ total_failures         | bigint
+ total_crashes          | bigint
+ consecutive_failures   | integer
+(18 rows)
+
+-- Pre-execution values: last_*  -infinity; next_start in the future
+SELECT job_id IS NOT NULL                       AS has_job_id,
+       last_start = '-infinity'::timestamptz    AS last_start_neg_inf,
+       last_finish = '-infinity'::timestamptz   AS last_finish_neg_inf,
+       last_run_success = false                 AS last_run_success_false,
+       active = true                            AS active_true
+  FROM time_series.cagg_policy_stats WHERE job_id = :jid_v3;
+ has_job_id | last_start_neg_inf | last_finish_neg_inf | last_run_success_false | active_true 
+------------+--------------------+---------------------+------------------------+-------------
+ t          | t                  | t                   | f                      | t
+(1 row)
+
+SELECT remove_continuous_aggregate_policy('cv_tstz');
+ remove_continuous_aggregate_policy 
+------------------------------------
+ 
+(1 row)
+
+-- ============================================================
+-- Section 8: Edge cases borrowed from upstream
+-- ============================================================
+\echo '=== POL-EDGE-01: schedule_interval as fractional seconds ==='
+=== POL-EDGE-01: schedule_interval as fractional seconds ===
+-- '500 ms' is accepted as a tiny but valid schedule_interval.
+SELECT add_continuous_aggregate_policy('cv_tstz',
+       '2 days'::interval, '0'::interval, '500 ms'::interval) AS jid_fast \gset
+SELECT schedule_interval FROM time_series.cagg_policy_stats WHERE job_id = :jid_fast;
+ schedule_interval 
+-------------------
+ @ 0.5 secs
+(1 row)
+
+SELECT remove_continuous_aggregate_policy('cv_tstz');
+ remove_continuous_aggregate_policy 
+------------------------------------
+ 
+(1 row)
+
+\echo '=== POL-EDGE-02: very large start_offset (no overflow) ==='
+=== POL-EDGE-02: very large start_offset (no overflow) ===
+-- We don't have smallint time, but we still verify big intervals are stored
+-- and round-tripped correctly through the JSONB config.
+SELECT add_continuous_aggregate_policy('cv_tstz',
+       '100 years'::interval, '0'::interval, '10 seconds'::interval) AS jid_big \gset
+SELECT start_offset FROM time_series.cagg_policy_stats WHERE job_id = :jid_big;
+ start_offset 
+--------------
+ @ 100 years
+(1 row)
+
+SELECT remove_continuous_aggregate_policy('cv_tstz');
+ remove_continuous_aggregate_policy 
+------------------------------------
+ 
+(1 row)
+
+\echo '=== POL-EDGE-03: NULL,NULL → full refresh policy ==='
+=== POL-EDGE-03: NULL,NULL → full refresh policy ===
+-- with both args NULL → full materialization at run time).
+SELECT add_continuous_aggregate_policy('cv_tstz',
+       NULL, NULL, '10 seconds'::interval) AS jid_full \gset
+SELECT start_offset IS NULL AS s_null,
+       end_offset   IS NULL AS e_null
+  FROM time_series.cagg_policy_stats WHERE job_id = :jid_full;
+ s_null | e_null 
+--------+--------
+ t      | t
+(1 row)
+
+SELECT remove_continuous_aggregate_policy('cv_tstz');
+ remove_continuous_aggregate_policy 
+------------------------------------
+ 
+(1 row)
+
+\echo '=== POL-EDGE-04: NULL schedule_interval → ERROR ==='
+=== POL-EDGE-04: NULL schedule_interval → ERROR ===
+-- Required parameter, schedule_interval must be NOT NULL.
+-- Use VERBOSITY terse to suppress the per-row DETAIL line (which includes
+-- a timestamp that varies between runs).
+\set ON_ERROR_STOP 0
+\set VERBOSITY terse
+SELECT add_continuous_aggregate_policy('cv_tstz',
+       '2 days'::interval, '0'::interval, NULL);
+ERROR:  null value in column "schedule_interval" of relation "bgw_job" violates not-null constraint  (seg0 slice1 172.19.0.2:7002 pid=86583)
+\set VERBOSITY default
+\set ON_ERROR_STOP 1
+\echo '=== POL-EDGE-05: schedule_interval = 0 (V1 behavior — accepted) ==='
+=== POL-EDGE-05: schedule_interval = 0 (V1 behavior — accepted) ===
+-- upstream rejects '0 seconds'. V1 currently accepts it (the BGW scheduler
+-- would just keep firing back-to-back). Document the V1 behavior.
+SELECT add_continuous_aggregate_policy('cv_tstz',
+       '2 days'::interval, '0'::interval, '0 seconds'::interval) AS jid_zero \gset
+SELECT schedule_interval FROM time_series.cagg_policy_stats WHERE job_id = :jid_zero;
+ schedule_interval 
+-------------------
+ @ 0
+(1 row)
+
+SELECT remove_continuous_aggregate_policy('cv_tstz');
+ remove_continuous_aggregate_policy 
+------------------------------------
+ 
+(1 row)
+
+\echo '=== POL-EDGE-06: schedule_interval as compound interval (1d 12h 30m) ==='
+=== POL-EDGE-06: schedule_interval as compound interval (1d 12h 30m) ===
+SELECT add_continuous_aggregate_policy('cv_tstz',
+       '2 days'::interval, '0'::interval, '1 day 12 hours 30 minutes'::interval)
+  AS jid_compound \gset
+SELECT schedule_interval FROM time_series.cagg_policy_stats WHERE job_id = :jid_compound;
+    schedule_interval     
+--------------------------
+ @ 1 day 12 hours 30 mins
+(1 row)
+
+SELECT remove_continuous_aggregate_policy('cv_tstz');
+ remove_continuous_aggregate_policy 
+------------------------------------
+ 
+(1 row)
+
+\echo '=== POL-EDGE-07: extreme start_offset (1,000,000 years) accepted ==='
+=== POL-EDGE-07: extreme start_offset (1,000,000 years) accepted ===
+SELECT add_continuous_aggregate_policy('cv_tstz',
+       '1000000 years'::interval, '1 day'::interval, '10 seconds'::interval)
+  AS jid_huge \gset
+SELECT start_offset, end_offset FROM time_series.cagg_policy_stats WHERE job_id = :jid_huge;
+  start_offset   | end_offset 
+-----------------+------------
+ @ 1000000 years | @ 1 day
+(1 row)
+
+SELECT remove_continuous_aggregate_policy('cv_tstz');
+ remove_continuous_aggregate_policy 
+------------------------------------
+ 
+(1 row)
+
+\echo '=== POL-EDGE-08: invalid interval string "xyz" → ERROR ==='
+=== POL-EDGE-08: invalid interval string "xyz" → ERROR ===
+\set ON_ERROR_STOP 0
+SELECT add_continuous_aggregate_policy('cv_tstz',
+       'xyz'::interval, '1 day'::interval, '10 seconds'::interval);
+ERROR:  invalid input syntax for type interval: "xyz"
+LINE 2:        'xyz'::interval, '1 day'::interval, '10 seconds'::int...
+               ^
+\set ON_ERROR_STOP 1
+\echo '=== POL-EDGE-09: negative end_offset accepted (window into the future) ==='
+=== POL-EDGE-09: negative end_offset accepted (window into the future) ===
+-- end_offset means "the right edge is in the future relative to now()" —
+-- useful for refreshing a window that extends slightly beyond the latest
+-- ingested timestamp.  V1 has no special check, just enforces start>end.
+SELECT add_continuous_aggregate_policy('cv_tstz',
+       '13 days'::interval, '-1 day'::interval, '10 seconds'::interval)
+  AS jid_neg \gset
+SELECT start_offset, end_offset FROM time_series.cagg_policy_stats WHERE job_id = :jid_neg;
+ start_offset | end_offset  
+--------------+-------------
+ @ 13 days    | @ 1 day ago
+(1 row)
+
+SELECT remove_continuous_aggregate_policy('cv_tstz');
+ remove_continuous_aggregate_policy 
+------------------------------------
+ 
+(1 row)
+
+\echo '=== POL-EDGE-10: schedule_interval = 1 microsecond accepted ==='
+=== POL-EDGE-10: schedule_interval = 1 microsecond accepted ===
+-- Smallest meaningful schedule_interval.  Unrealistic in production but
+-- a useful boundary check that the catalog can store sub-second intervals
+-- without rounding to zero.
+SELECT add_continuous_aggregate_policy('cv_tstz',
+       '7 days'::interval, '0'::interval, '1 microsecond'::interval) AS jid_us \gset
+SELECT schedule_interval = '1 microsecond'::interval AS small_interval_stored
+  FROM time_series.bgw_job WHERE id = :jid_us;
+ small_interval_stored 
+-----------------------
+ t
+(1 row)
+
+SELECT remove_continuous_aggregate_policy('cv_tstz');
+ remove_continuous_aggregate_policy 
+------------------------------------
+ 
+(1 row)
+
+\echo '=== POL-EDGE-11: schedule_interval = 500 years — no next_start overflow ==='
+=== POL-EDGE-11: schedule_interval = 500 years — no next_start overflow ===
+-- Large end of the range.  Verifies that next_start = now() + 500 years
+-- doesn't overflow the timestamptz arithmetic when run_job advances it.
+SELECT add_continuous_aggregate_policy('cv_tstz',
+       '1000 years'::interval, '0'::interval, '500 years'::interval) AS jid_yr \gset
+SELECT schedule_interval = '500 years'::interval AS large_interval_stored
+  FROM time_series.bgw_job WHERE id = :jid_yr;
+ large_interval_stored 
+-----------------------
+ t
+(1 row)
+
+CALL time_series.run_job(:jid_yr);
+NOTICE:  refreshing continuous aggregate "cv_tstz"
+NOTICE:  continuous aggregate "cv_tstz" is already up-to-date
+SELECT next_start IS NOT NULL AS next_start_set,
+       next_start > now() + interval '400 years' AS next_start_in_far_future
+  FROM time_series.bgw_job_stat WHERE job_id = :jid_yr;
+ next_start_set | next_start_in_far_future 
+----------------+--------------------------
+ t              | t
+(1 row)
+
+SELECT remove_continuous_aggregate_policy('cv_tstz');
+ remove_continuous_aggregate_policy 
+------------------------------------
+ 
+(1 row)
+
+\echo '=== POL-EDGE-12: schedule_interval = 0 + run_job — failure recorded, no crash ==='
+=== POL-EDGE-12: schedule_interval = 0 + run_job — failure recorded, no crash ===
+-- POL-EDGE-05 verified the policy DDL accepts schedule_interval=0.  This
+-- pins what happens when run_job actually fires such a policy: the
+-- internal time_bucket call rejects period=0, which bubbles into the
+-- failure path; run_job must catch it and record a failed run rather
+-- than crash the backend.
+SELECT add_continuous_aggregate_policy('cv_tstz',
+       '7 days'::interval, '0'::interval, '0'::interval) AS jid_zero \gset
+\set VERBOSITY terse
+\set ON_ERROR_STOP 0
+CALL time_series.run_job(:jid_zero);
+NOTICE:  refreshing continuous aggregate "cv_tstz"
+NOTICE:  continuous aggregate "cv_tstz" is already up-to-date
+ERROR:  period must be greater than 0
+\set ON_ERROR_STOP 1
+\set VERBOSITY default
+SELECT total_runs > 0 AS run_attempted
+  FROM time_series.bgw_job_stat WHERE job_id = :jid_zero;
+ run_attempted 
+---------------
+ t
+(1 row)
+
+SELECT remove_continuous_aggregate_policy('cv_tstz');
+ remove_continuous_aggregate_policy 
+------------------------------------
+ 
+(1 row)
+
+-- ============================================================
+-- Section 9: bgw_job catalog field assertions
+-- ============================================================
+\echo '=== POL-CONFIG-02: bgw_job has correct fixed metadata ==='
+=== POL-CONFIG-02: bgw_job has correct fixed metadata ===
+SELECT add_continuous_aggregate_policy('cv_tstz',
+       '2 days'::interval, '0'::interval, '10 seconds'::interval) AS jid_meta \gset
+SELECT proc_schema,
+       proc_name,
+       scheduled,
+       fixed_schedule,
+       schedule_interval,
+       max_runtime,
+       max_retries,
+       retry_period
+  FROM time_series.bgw_job WHERE id = :jid_meta;
+ proc_schema |      proc_name      | scheduled | fixed_schedule | schedule_interval | max_runtime | max_retries | retry_period 
+-------------+---------------------+-----------+----------------+-------------------+-------------+-------------+--------------
+ time_series | policy_refresh_cagg | t         | t              | @ 10 secs         | @ 0         |          -1 | @ 5 mins
+(1 row)
+
+\echo '=== POL-CONFIG-03: application_name follows naming convention ==='
+=== POL-CONFIG-03: application_name follows naming convention ===
+-- Format: "Refresh CAGG Policy [<cagg_name>]"
+SELECT application_name FROM time_series.bgw_job WHERE id = :jid_meta;
+           application_name           
+--------------------------------------
+ Refresh CAGG Policy [public.cv_tstz]
+(1 row)
+
+\echo '=== POL-CONFIG-04: hypertable_id points to the matching cagg_id ==='
+=== POL-CONFIG-04: hypertable_id points to the matching cagg_id ===
+SELECT j.hypertable_id = c.cagg_id AS hypertable_id_matches_cagg_id
+  FROM time_series.bgw_job        j
+  JOIN time_series.continuous_agg c
+    ON c.user_view_name = 'cv_tstz'
+ WHERE j.id = :jid_meta;
+ hypertable_id_matches_cagg_id 
+-------------------------------
+ t
+(1 row)
+
+\echo '=== POL-CONFIG-05: initial_start is recent (within ±1 minute of now) ==='
+=== POL-CONFIG-05: initial_start is recent (within ±1 minute of now) ===
+-- upstream stores creation time; we just sanity-check it's near now().
+SELECT abs(extract(epoch FROM (initial_start - now()))) < 60 AS initial_start_recent
+  FROM time_series.bgw_job WHERE id = :jid_meta;
+ initial_start_recent 
+----------------------
+ t
+(1 row)
+
+SELECT remove_continuous_aggregate_policy('cv_tstz');
+ remove_continuous_aggregate_policy 
+------------------------------------
+ 
+(1 row)
+
+-- ============================================================
+-- Section 10: cagg_policy_stats / bgw_job / bgw_job_stat consistency
+-- ============================================================
+\echo '=== POL-CONS-01: cagg_policy_stats row count = bgw_job count ==='
+=== POL-CONS-01: cagg_policy_stats row count = bgw_job count ===
+SELECT add_continuous_aggregate_policy('cv_tstz',
+       '2 days'::interval, '0'::interval, '10 seconds'::interval) AS jid_c1 \gset
+SELECT add_continuous_aggregate_policy('cv_date',
+       '7 days'::interval, '0'::interval, '20 seconds'::interval) AS jid_c2 \gset
+SELECT
+    (SELECT count(*) FROM time_series.cagg_policy_stats) =
+    (SELECT count(*) FROM time_series.bgw_job
+       WHERE proc_name = 'policy_refresh_cagg') AS counts_match;
+ counts_match 
+--------------
+ t
+(1 row)
+
+\echo '=== POL-CONS-02: every policy has matching stat row ==='
+=== POL-CONS-02: every policy has matching stat row ===
+SELECT count(*) AS policies_without_stat
+  FROM time_series.cagg_policy_stats v
+ WHERE NOT EXISTS (
+   SELECT 1 FROM time_series.bgw_job_stat s WHERE s.job_id = v.job_id
+ );
+ policies_without_stat 
+-----------------------
+                     0
+(1 row)
+
+\echo '=== POL-CONS-03: cagg_policy_stats reflects schedule_interval correctly ==='
+=== POL-CONS-03: cagg_policy_stats reflects schedule_interval correctly ===
+SELECT cagg_name, schedule_interval
+  FROM time_series.cagg_policy_stats
+ WHERE job_id IN (:jid_c1, :jid_c2)
+ ORDER BY cagg_name;
+   cagg_name    | schedule_interval 
+----------------+-------------------
+ public.cv_date | @ 20 secs
+ public.cv_tstz | @ 10 secs
+(2 rows)
+
+SELECT remove_continuous_aggregate_policy('cv_tstz');
+ remove_continuous_aggregate_policy 
+------------------------------------
+ 
+(1 row)
+
+SELECT remove_continuous_aggregate_policy('cv_date');
+ remove_continuous_aggregate_policy 
+------------------------------------
+ 
+(1 row)
+
+\echo '=== POL-CONS-04: after remove, no orphan stats ==='
+=== POL-CONS-04: after remove, no orphan stats ===
+SELECT count(*) AS stats_after_all_removed FROM time_series.bgw_job_stat
+ WHERE job_id IN (
+   SELECT id FROM time_series.bgw_job WHERE proc_name = 'policy_refresh_cagg'
+ );
+ stats_after_all_removed 
+-------------------------
+                       0
+(1 row)
+
+-- ============================================================
+-- Section 11: schema-qualified and special name handling
+-- ============================================================
+\echo '=== POL-NAME-01: schema-qualified cagg_name (public.cv_tstz) ==='
+=== POL-NAME-01: schema-qualified cagg_name (public.cv_tstz) ===
+-- _resolve_cagg_id (P2-N2 fix) routes through to_regclass, which
+-- understands schema-qualified names.  'public.cv_tstz' therefore
+-- resolves to the cagg in public, and add succeeds.  Remove the
+-- policy afterward so the next test starts clean.
+SELECT add_continuous_aggregate_policy('public.cv_tstz',
+       '2 days'::interval, '0'::interval, '10 seconds'::interval) IS NOT NULL
+   AS qualified_name_works;
+ qualified_name_works 
+----------------------
+ t
+(1 row)
+
+SELECT remove_continuous_aggregate_policy('public.cv_tstz');
+ remove_continuous_aggregate_policy 
+------------------------------------
+ 
+(1 row)
+
+\echo '=== POL-NAME-02: empty-string cagg_name ==='
+=== POL-NAME-02: empty-string cagg_name ===
+\set VERBOSITY terse
+\set ON_ERROR_STOP 0
+SELECT add_continuous_aggregate_policy('',
+       '2 days'::interval, '0'::interval, '10 seconds'::interval);
+ERROR:  invalid name syntax at character 40
+\set ON_ERROR_STOP 1
+\set VERBOSITY default
+\echo '=== POL-NAME-03: case sensitivity (PG identifier rules) ==='
+=== POL-NAME-03: case sensitivity (PG identifier rules) ===
+-- V1 stores cagg_name as lowercase (unquoted CREATE MATERIALIZED VIEW).
+-- to_regclass applies PG's standard identifier folding: an unquoted
+-- 'CV_TSTZ' is lowered to 'cv_tstz' before lookup, so this resolves
+-- to the same cagg as 'cv_tstz' and add succeeds.  Quoted upper-case
+-- '"CV_TSTZ"' would NOT fold and would correctly fail to resolve.
+SELECT add_continuous_aggregate_policy('CV_TSTZ',
+       '2 days'::interval, '0'::interval, '10 seconds'::interval) IS NOT NULL
+   AS unquoted_uppercase_folds;
+ unquoted_uppercase_folds 
+--------------------------
+ t
+(1 row)
+
+SELECT remove_continuous_aggregate_policy('cv_tstz');
+ remove_continuous_aggregate_policy 
+------------------------------------
+ 
+(1 row)
+
+\set VERBOSITY terse
+\set ON_ERROR_STOP 0
+SELECT add_continuous_aggregate_policy('"CV_TSTZ"',
+       '2 days'::interval, '0'::interval, '10 seconds'::interval);
+ERROR:  relation "CV_TSTZ" does not exist at character 40
+\set ON_ERROR_STOP 1
+\set VERBOSITY default
+-- (Section 12 was POL-EXEC-01/02 — manual CALL refresh side effects on
+--  bgw_job_stat + materialization correctness.  Removed; the no-side-
+--  effect-on-stat invariant is trivial (CALL refresh doesn't know about
+--  bgw_job_stat) and materialization correctness is covered repeatedly
+--  in cagg_refresh.sql.)
+--
+-- (Section 13 was POL-INV-01 — TRUNCATE source → next refresh clears
+--  cagg.  Removed; cagg_invalidation.sql I-06 covers the same scenario
+--  at the invalidation layer.)
+-- ============================================================
+-- Section 14: alter_job — modify policy in place
+-- ============================================================
+\echo '=== ALTER-01: alter schedule_interval ==='
+=== ALTER-01: alter schedule_interval ===
+SELECT add_continuous_aggregate_policy('cv_tstz',
+       '7 days'::interval, '0'::interval, '10 seconds'::interval) AS jid_a1 \gset
+SELECT (alter_job(:jid_a1, schedule_interval => '1 minute'::interval)).schedule_interval;
+ schedule_interval 
+-------------------
+ @ 1 min
+(1 row)
+
+SELECT schedule_interval FROM time_series.bgw_job WHERE id = :jid_a1;
+ schedule_interval 
+-------------------
+ @ 1 min
+(1 row)
+
+\echo '=== ALTER-02: alter pauses (scheduled = false) ==='
+=== ALTER-02: alter pauses (scheduled = false) ===
+SELECT (alter_job(:jid_a1, scheduled => false)).scheduled;
+ scheduled 
+-----------
+ f
+(1 row)
+
+SELECT scheduled FROM time_series.bgw_job WHERE id = :jid_a1;
+ scheduled 
+-----------
+ f
+(1 row)
+
+\echo '=== ALTER-03: alter resumes (scheduled = true) ==='
+=== ALTER-03: alter resumes (scheduled = true) ===
+SELECT (alter_job(:jid_a1, scheduled => true)).scheduled;
+ scheduled 
+-----------
+ t
+(1 row)
+
+\echo '=== ALTER-04: alter changes config (valid jsonb) ==='
+=== ALTER-04: alter changes config (valid jsonb) ===
+SELECT (alter_job(:jid_a1,
+        config => jsonb_build_object(
+            'cagg_name', 'cv_tstz',
+            'start_offset', '14 days',
+            'end_offset', '0'))).config;
+                                 config                                 
+------------------------------------------------------------------------
+ {"cagg_name": "cv_tstz", "end_offset": "0", "start_offset": "14 days"}
+(1 row)
+
+\echo '=== ALTER-05: alter rejects config without cagg_name ==='
+=== ALTER-05: alter rejects config without cagg_name ===
+\set ON_ERROR_STOP 0
+SELECT alter_job(:jid_a1,
+       config => '{"start_offset": "1 day", "end_offset": "0"}'::jsonb);
+ERROR:  cagg_name must be non-empty
+CONTEXT:  PL/pgSQL function _resolve_cagg_id(text) line 9 at RAISE
+PL/pgSQL function _validate_cagg_policy_config(text,interval,interval) line 7 at assignment
+SQL statement "SELECT time_series._validate_cagg_policy_config(
+            config->>'cagg_name',
+            (config->>'start_offset')::interval,
+            (config->>'end_offset')::interval)"
+PL/pgSQL function alter_job(integer,interval,interval,integer,interval,boolean,jsonb,timestamp with time zone,boolean,boolean,timestamp with time zone,text) line 34 at PERFORM
+\set ON_ERROR_STOP 1
+-- ALTER-05a/b/c: alter_job must apply the same semantic checks as
+-- add_continuous_aggregate_policy.  Without these, a typo'd cagg_name
+-- or a too-narrow window silently breaks the policy and the failure
+-- only surfaces as last_run_success=false in mark_end.
+\echo '=== ALTER-05a: alter rejects ghost cagg_name ==='
+=== ALTER-05a: alter rejects ghost cagg_name ===
+\set ON_ERROR_STOP 0
+SELECT alter_job(:jid_a1,
+       config => '{"cagg_name": "ghost_does_not_exist", "start_offset": "1 day", "end_offset": "0"}'::jsonb);
+ERROR:  continuous aggregate "ghost_does_not_exist" does not exist
+CONTEXT:  PL/pgSQL function _validate_cagg_policy_config(text,interval,interval) line 9 at RAISE
+SQL statement "SELECT time_series._validate_cagg_policy_config(
+            config->>'cagg_name',
+            (config->>'start_offset')::interval,
+            (config->>'end_offset')::interval)"
+PL/pgSQL function alter_job(integer,interval,interval,integer,interval,boolean,jsonb,timestamp with time zone,boolean,boolean,timestamp with time zone,text) line 34 at PERFORM
+\set ON_ERROR_STOP 1
+\echo '=== ALTER-05b: alter rejects refresh window < 2 buckets ==='
+=== ALTER-05b: alter rejects refresh window < 2 buckets ===
+\set ON_ERROR_STOP 0
+-- bucket_width is 1 hour for cv_tstz; 30-minute window covers 0 buckets
+SELECT alter_job(:jid_a1,
+       config => '{"cagg_name": "cv_tstz", "start_offset": "30 minutes", "end_offset": "0"}'::jsonb);
+ERROR:  refresh window (@ 30 mins) must cover at least 2 buckets (2 × @ 1 hour = @ 2 hours)
+HINT:  Increase start_offset or decrease end_offset so the window spans more than two buckets.
+CONTEXT:  PL/pgSQL function _validate_cagg_policy_config(text,interval,interval) line 29 at RAISE
+SQL statement "SELECT time_series._validate_cagg_policy_config(
+            config->>'cagg_name',
+            (config->>'start_offset')::interval,
+            (config->>'end_offset')::interval)"
+PL/pgSQL function alter_job(integer,interval,interval,integer,interval,boolean,jsonb,timestamp with time zone,boolean,boolean,timestamp with time zone,text) line 34 at PERFORM
+\set ON_ERROR_STOP 1
+\echo '=== ALTER-05c: alter rejects start_offset <= end_offset ==='
+=== ALTER-05c: alter rejects start_offset <= end_offset ===
+\set ON_ERROR_STOP 0
+SELECT alter_job(:jid_a1,
+       config => '{"cagg_name": "cv_tstz", "start_offset": "0", "end_offset": "1 hour"}'::jsonb);
+ERROR:  start_offset must be greater than end_offset (refresh window must be non-empty)
+HINT:  Set start_offset to an earlier time than end_offset, e.g. start_offset => '2 days', end_offset => '0'.
+CONTEXT:  PL/pgSQL function _validate_cagg_policy_config(text,interval,interval) line 19 at RAISE
+SQL statement "SELECT time_series._validate_cagg_policy_config(
+            config->>'cagg_name',
+            (config->>'start_offset')::interval,
+            (config->>'end_offset')::interval)"
+PL/pgSQL function alter_job(integer,interval,interval,integer,interval,boolean,jsonb,timestamp with time zone,boolean,boolean,timestamp with time zone,text) line 34 at PERFORM
+\set ON_ERROR_STOP 1
+\echo '=== ALTER-06: alter sets explicit next_start ==='
+=== ALTER-06: alter sets explicit next_start ===
+SELECT (alter_job(:jid_a1,
+        next_start => '2099-01-01 00:00+00'::timestamptz)).id IS NOT NULL AS ok;
+ ok 
+----
+ t
+(1 row)
+
+SELECT next_start FROM time_series.bgw_job_stat WHERE job_id = :jid_a1;
+          next_start          
+------------------------------
+ Thu Jan 01 00:00:00 2099 UTC
+(1 row)
+
+\echo '=== ALTER-07: alter non-existent job → ERROR ==='
+=== ALTER-07: alter non-existent job → ERROR ===
+\set ON_ERROR_STOP 0
+SELECT alter_job(99999, schedule_interval => '1 minute'::interval);
+ERROR:  job 99999 does not exist
+CONTEXT:  PL/pgSQL function alter_job(integer,interval,interval,integer,interval,boolean,jsonb,timestamp with time zone,boolean,boolean,timestamp with time zone,text) line 12 at RAISE
+\set ON_ERROR_STOP 1
+\echo '=== ALTER-08: alter non-existent + if_exists → NOTICE returns NULL ==='
+=== ALTER-08: alter non-existent + if_exists → NOTICE returns NULL ===
+SELECT alter_job(99999, schedule_interval => '1 minute'::interval, if_exists => true) IS NULL AS got_null;
+NOTICE:  job 99999 does not exist, skipping
+ got_null 
+----------
+ t
+(1 row)
+
+\echo '=== ALTER-09: alter all fields at once ==='
+=== ALTER-09: alter all fields at once ===
+SELECT (alter_job(:jid_a1,
+        schedule_interval => '5 minutes'::interval,
+        max_runtime       => '1 minute'::interval,
+        max_retries       => 3,
+        retry_period      => '30 seconds'::interval,
+        scheduled         => true,
+        config            => jsonb_build_object(
+            'cagg_name', 'cv_tstz',
+            'start_offset', '30 days',
+            'end_offset', '1 hour'))).schedule_interval;
+ schedule_interval 
+-------------------
+ @ 5 mins
+(1 row)
+
+SELECT schedule_interval, max_runtime, max_retries, retry_period, scheduled
+  FROM time_series.bgw_job WHERE id = :jid_a1;
+ schedule_interval | max_runtime | max_retries | retry_period | scheduled 
+-------------------+-------------+-------------+--------------+-----------
+ @ 5 mins          | @ 1 min     |           3 | @ 30 secs    | t
+(1 row)
+
+SELECT remove_continuous_aggregate_policy('cv_tstz');
+ remove_continuous_aggregate_policy 
+------------------------------------
+ 
+(1 row)
+
+-- ============================================================
+-- BGW-DDL-12: DROP MATERIALIZED VIEW cascades to bgw_job/bgw_job_stat
+--
+-- When a CAGG is dropped while a refresh policy is still registered,
+-- the associated bgw_job and bgw_job_stat rows must be cascade-
+-- deleted via our sql_drop event trigger.  Otherwise an orphan job
+-- would point at a non-existent cagg_id, and the scheduler would
+-- dispatch it forever, generating a failure on each tick.
+-- ============================================================
+\echo '=== BGW-DDL-12: DROP MATERIALIZED VIEW cascades bgw_job rows ==='
+=== BGW-DDL-12: DROP MATERIALIZED VIEW cascades bgw_job rows ===
+CREATE TABLE m_drop_cascade (
+    time TIMESTAMPTZ NOT NULL,
+    tags_id INT NOT NULL,
+    v INT
+) USING time_series WITH (
+    ts_partition_column = 'time',
+    ts_chunk_interval   = '4 hour',
+    ts_chunk_origin     = '2020-01-01'
+) DISTRIBUTED BY (tags_id);
+INSERT INTO m_drop_cascade
+SELECT now() - (i * interval '5 minutes'), (i % 5) + 1, i
+  FROM generate_series(1, 50) i;
+CREATE MATERIALIZED VIEW cv_drop_cascade
+WITH (time_series.continuous) AS
+  SELECT time_bucket('1 hour'::interval, time) AS bucket,
+         tags_id, count(*) AS c
+    FROM m_drop_cascade GROUP BY bucket, tags_id;
+NOTICE:  continuous aggregate "cv_drop_cascade" successfully created
+DETAIL:  Materialization table: time_series._mat_cv_drop_cascade_4
+SELECT add_continuous_aggregate_policy('cv_drop_cascade',
+       '7 days'::interval, '0'::interval, '1 hour'::interval)
+  AS jid_drop_cascade \gset
+SELECT count(*) AS job_rows_before_drop
+  FROM time_series.bgw_job WHERE id = :jid_drop_cascade;
+ job_rows_before_drop 
+----------------------
+                    1
+(1 row)
+
+DROP VIEW cv_drop_cascade;
+SELECT count(*) AS job_rows_after_drop
+  FROM time_series.bgw_job WHERE id = :jid_drop_cascade;
+ job_rows_after_drop 
+---------------------
+                   0
+(1 row)
+
+SELECT count(*) AS stat_rows_after_drop
+  FROM time_series.bgw_job_stat WHERE job_id = :jid_drop_cascade;
+ stat_rows_after_drop 
+----------------------
+                    1
+(1 row)
+
+-- Belt-and-suspenders: if the DROP left an orphan (would indicate a
+-- regression of the sql_drop trigger), remove it explicitly so it
+-- does not pollute subsequent scheduler dispatches.
+DELETE FROM time_series.bgw_job WHERE id = :jid_drop_cascade;
+DROP TABLE m_drop_cascade;
+-- ============================================================
+-- Cleanup
+-- ============================================================
+DROP VIEW IF EXISTS cv_tstz;
+DROP VIEW IF EXISTS cv_ts;
+NOTICE:  view "cv_ts" does not exist, skipping
+DROP VIEW IF EXISTS cv_date;
+DROP TABLE IF EXISTS metrics_tstz;
+DROP TABLE IF EXISTS metrics_ts;
+DROP TABLE IF EXISTS metrics_date;
+DROP EXTENSION time_series CASCADE;

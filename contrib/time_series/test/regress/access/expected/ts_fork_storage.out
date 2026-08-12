@@ -1,0 +1,132 @@
+-- Test: time_series Table AM with fork storage
+-- Requires: time_series extension with version >= 1.2
+-- start_matchsubs
+-- m/\(seg\d+ .*\)/
+-- s/\(seg\d+ .*\)/(seg0 slice1 127.0.0.1:1234 pid=12345)/
+-- end_matchsubs
+\i sql/include/setup.sql
+-- Shared setup for time_series regression tests.
+-- Include this at the top of every test file via:
+--   \ir include/setup.sql
+CREATE EXTENSION IF NOT EXISTS time_series;
+SET optimizer = off;
+SET timezone = 'UTC';
+SET datestyle = 'ISO';
+SET extra_float_digits = 0;
+CREATE SCHEMA IF NOT EXISTS test;
+-- Test 1: Verify time_series AM registered
+SELECT amname FROM pg_am WHERE amname = 'time_series';
+   amname    
+-------------
+ time_series
+(1 row)
+
+-- Test 2: CREATE TABLE USING time_series
+CREATE TABLE ts_reg (
+    ts TIMESTAMPTZ NOT NULL,
+    device INT,
+    value DOUBLE PRECISION
+) USING time_series WITH (ts_partition_column='ts', ts_chunk_interval='1 month')
+  DISTRIBUTED BY (device);
+SELECT reloptions FROM pg_class WHERE relname = 'ts_reg';
+                      reloptions                      
+------------------------------------------------------
+ {ts_partition_column=ts,"ts_chunk_interval=1 month"}
+(1 row)
+
+-- Test 3: Verify access method on the table
+SELECT amname FROM pg_am a JOIN pg_class c ON c.relam = a.oid
+    WHERE c.relname = 'ts_reg';
+   amname    
+-------------
+ time_series
+(1 row)
+
+-- Test 4: INSERT routing to forks
+INSERT INTO ts_reg VALUES
+    ('2025-01-10 12:00:00+00', 1, 10.0),
+    ('2025-01-20 08:00:00+00', 2, 20.0),
+    ('2025-02-15 16:00:00+00', 3, 30.0),
+    ('2025-03-05 10:00:00+00', 4, 40.0);
+-- Test 5: Full scan
+SELECT device, value FROM ts_reg ORDER BY device;
+ device | value 
+--------+-------
+      1 |    10
+      2 |    20
+      3 |    30
+      4 |    40
+(4 rows)
+
+-- Test 6: Time-pruned scan (February only)
+SELECT device, value FROM ts_reg
+    WHERE ts >= '2025-02-01' AND ts < '2025-03-01'
+    ORDER BY device;
+ device | value 
+--------+-------
+      3 |    30
+(1 row)
+
+-- Test 7: Time-pruned scan (January only)
+SELECT device, value FROM ts_reg
+    WHERE ts >= '2025-01-01' AND ts < '2025-02-01'
+    ORDER BY device;
+ device | value 
+--------+-------
+      1 |    10
+      2 |    20
+(2 rows)
+
+-- Test 8: EXPLAIN shows ChunkScan
+EXPLAIN (COSTS OFF) SELECT * FROM ts_reg
+    WHERE ts >= '2025-02-01' AND ts < '2025-03-01';
+                                                                 QUERY PLAN                                                                 
+--------------------------------------------------------------------------------------------------------------------------------------------
+ Gather Motion 3:1  (slice1; segments: 3)
+   ->  Custom Scan (ChunkScan) on ts_reg
+         Filter: ((ts >= '2025-02-01 00:00:00+00'::timestamp with time zone) AND (ts < '2025-03-01 00:00:00+00'::timestamp with time zone))
+         Storage: Time-Series Chunk
+         Chunks Scanned: 3
+         Active Chunks (heap): 3
+         Compressed Chunks (columnar): 0
+ Optimizer: Postgres query optimizer
+(8 rows)
+
+-- Test 9: INSERT...RETURNING works
+INSERT INTO ts_reg VALUES ('2025-04-01 00:00:00+00', 5, 50.0) RETURNING device;
+ device 
+--------
+      5
+(1 row)
+
+-- Test 10: Count after all inserts
+SELECT count(*) FROM ts_reg;
+ count 
+-------
+     5
+(1 row)
+
+-- Test 11: NULL timestamp rejected
+CREATE TABLE ts_null_test (
+    ts TIMESTAMPTZ,
+    v INT
+) USING time_series WITH (ts_partition_column='ts', ts_chunk_interval='1 month')
+  DISTRIBUTED BY (v);
+INSERT INTO ts_null_test VALUES (NULL, 1);
+ERROR:  time-series column cannot be NULL  (seg1 172.17.0.4:7003 pid=20744)
+-- Test 12: Missing ts_partition_column rejected
+CREATE TABLE ts_bad (
+    id INT,
+    v DOUBLE PRECISION
+) USING time_series WITH (ts_chunk_interval='1 month')
+  DISTRIBUTED BY (id);
+ERROR:  time_series tables require ts_partition_column option  (seg0 172.17.0.4:7002 pid=20743)
+-- Test 13: Wrong column type rejected (Cloudberry rejects non-heap AM for
+-- distributed tables with incompatible column types at the AM layer)
+CREATE TABLE ts_bad_type (
+    ts TEXT NOT NULL,
+    v INT
+) USING time_series WITH (ts_partition_column='ts', ts_chunk_interval='1 month')
+  DISTRIBUTED BY (v);
+ERROR:  ts_partition_column "ts" must be timestamptz, timestamp, or date  (seg0 172.17.0.4:7002 pid=20743)
+-- Cleanup

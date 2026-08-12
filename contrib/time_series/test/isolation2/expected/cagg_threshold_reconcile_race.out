@@ -1,0 +1,215 @@
+-- ============================================================
+-- cagg_threshold_reconcile_race.sql (isolation2)
+--
+-- Regression test for the threshold-backward-movement race.
+--
+-- Before the fix, TX2's final reconcile did an UNCONDITIONAL
+--   SET threshold = MAX(watermark)
+-- which could move the threshold BACKWARD while ANOTHER cagg's
+-- refresh on the same source was mid-flight (between its TX1
+-- threshold advance and its watermark advance).  A row inserted
+-- in that window read the lowered threshold, skipped L1, missed
+-- the in-flight materialization snapshot, and ended up below the
+-- advanced watermark with no invalidation record — permanently
+-- lost from the mid-flight CAGG.
+--
+-- The fix makes the threshold MONOTONIC (reconcile uses GREATEST)
+-- and clamps TX2's materialization boundary to the committed
+-- threshold.
+--
+-- Post-fix timeline (this test):
+--   1. cv_b REFRESH: TX1 threshold -> 14:00, TX2 materializes
+--      [11:00,14:00) (bucket 13:00 empty at snapshot), then
+--      SUSPENDS before watermark advance (fault injection).
+--   2. cv_a no-op refresh (old window): its reconcile is now
+--      GREATEST -> threshold STAYS at 14:00.
+--   3. INSERT row at 13:30 commits: PRE_COMMIT flush reads
+--      threshold = 14:00 -> 13:30 < 14:00 -> L1 IS written.
+--   4. cv_b resumes: watermark -> 14:00.  Bucket 13:00 is
+--      transiently stale in cv_b (its snapshot predated the row)
+--      but the L1 entry guarantees repair.
+--   5. The next refresh of cv_b consumes the L1/L2 entry and
+--      re-materializes bucket 13:00 -> no data loss.
+--
+-- Fault: cagg_refresh_before_watermark_advance (QD, refresh.c)
+-- ============================================================
+
+-- ============================================================
+-- Setup
+-- ============================================================
+1: SET optimizer = off;
+SET
+1: SET timezone = 'UTC';
+SET
+1: SELECT gp_inject_fault('all', 'reset', dbid) FROM gp_segment_configuration WHERE role = 'p';
+ gp_inject_fault 
+-----------------
+ Success:        
+ Success:        
+ Success:        
+ Success:        
+(4 rows)
+1: DROP EXTENSION IF EXISTS time_series CASCADE;
+DROP
+1: CREATE EXTENSION time_series;
+CREATE
+1: SET search_path TO public, time_series;
+SET
+
+1: CREATE TABLE race2_src ( time TIMESTAMPTZ NOT NULL, dev  INT NOT NULL, val  DOUBLE PRECISION NOT NULL ) USING time_series WITH ( ts_partition_column = 'time', ts_chunk_interval   = '4 hour', ts_chunk_origin     = '2024-01-01 00:00+00' ) DISTRIBUTED BY (dev);
+CREATE
+
+-- Seed: rows at 10:30 and 11:30 (boundary will be 11:00)
+1: INSERT INTO race2_src VALUES ('2024-01-01 10:30+00', 1, 10.0), ('2024-01-01 11:30+00', 2, 11.0);
+INSERT 2
+
+-- Two CAGGs on the SAME source (required for the race)
+1: CREATE MATERIALIZED VIEW race2_cv_a WITH (time_series.continuous) AS SELECT time_bucket('1 hour'::interval, time) AS bucket, count(*) AS cnt FROM race2_src GROUP BY bucket;
+CREATE
+1: CREATE MATERIALIZED VIEW race2_cv_b WITH (time_series.continuous) AS SELECT time_bucket('1 hour'::interval, time) AS bucket, count(*) AS cnt FROM race2_src GROUP BY bucket;
+CREATE
+
+-- Initial refresh both: watermarks -> 11:00, threshold -> 11:00
+1: CALL time_series.refresh_continuous_aggregate('race2_cv_a', NULL, NULL);
+CALL
+1: CALL time_series.refresh_continuous_aggregate('race2_cv_b', NULL, NULL);
+CALL
+
+1: SELECT DISTINCT threshold FROM time_series.cagg_invalidation_threshold WHERE source_table_oid = 'race2_src'::regclass;
+ threshold                    
+------------------------------
+ Mon Jan 01 11:00:00 2024 UTC 
+(1 row)
+
+-- New data at 14:30: boundary becomes 14:00 (no L1: above threshold)
+1: INSERT INTO race2_src VALUES ('2024-01-01 14:30+00', 3, 14.0);
+INSERT 1
+
+-- Other sessions
+2: SET optimizer = off;
+SET
+2: SET timezone = 'UTC';
+SET
+2: SET search_path TO public, time_series;
+SET
+3: SET optimizer = off;
+SET
+3: SET timezone = 'UTC';
+SET
+3: SET search_path TO public, time_series;
+SET
+
+-- ============================================================
+-- Race
+-- ============================================================
+
+-- Suspend cv_b's refresh after materialization, before watermark advance
+1: SELECT gp_inject_fault('cagg_refresh_before_watermark_advance', 'suspend', dbid) FROM gp_segment_configuration WHERE role = 'p' AND content = -1;
+ gp_inject_fault 
+-----------------
+ Success:        
+(1 row)
+
+-- cv_b refresh in background:
+--   TX1: threshold -> 14:00
+--   TX2: materializes [11:00,14:00); bucket 13:00 EMPTY at snapshot
+--   ... suspends ...
+1&: CALL time_series.refresh_continuous_aggregate('race2_cv_b', NULL, NULL);  <waiting ...>
+
+3: SELECT gp_wait_until_triggered_fault('cagg_refresh_before_watermark_advance', 1, dbid) FROM gp_segment_configuration WHERE role = 'p' AND content = -1;
+ gp_wait_until_triggered_fault 
+-------------------------------
+ Success:                      
+(1 row)
+
+-- Threshold at cv_b's TX1 estimate (14:00)
+2: SELECT DISTINCT threshold FROM time_series.cagg_invalidation_threshold WHERE source_table_oid = 'race2_src'::regclass;
+ threshold                    
+------------------------------
+ Mon Jan 01 14:00:00 2024 UTC 
+(1 row)
+
+-- cv_a no-op refresh (old window, nothing dirty).  Pre-fix, its TX2
+-- reconcile dropped threshold back to MAX(watermark) = 11:00.
+2: CALL time_series.refresh_continuous_aggregate('race2_cv_a', '2024-01-01 00:00+00', '2024-01-01 06:00+00');
+CALL
+
+-- FIX: threshold is monotonic — must STILL be 14:00
+2: SELECT DISTINCT threshold FROM time_series.cagg_invalidation_threshold WHERE source_table_oid = 'race2_src'::regclass;
+ threshold                    
+------------------------------
+ Mon Jan 01 14:00:00 2024 UTC 
+(1 row)
+
+-- INSERT at 13:30 while cv_b is mid-flight: PRE_COMMIT reads
+-- threshold=14:00 -> 13:30 < 14:00 -> L1 IS written
+2: INSERT INTO race2_src VALUES ('2024-01-01 13:30+00', 4, 13.0);
+INSERT 1
+
+-- FIX: exactly one invalidation entry recorded
+2: SELECT count(*) AS l1_entries FROM time_series.cagg_invalidation_log WHERE source_table_oid = 'race2_src'::regclass;
+ l1_entries 
+------------
+ 1          
+(1 row)
+
+-- Resume cv_b: watermark -> 14:00, commits
+3: SELECT gp_inject_fault('cagg_refresh_before_watermark_advance', 'reset', dbid) FROM gp_segment_configuration WHERE role = 'p' AND content = -1;
+ gp_inject_fault 
+-----------------
+ Success:        
+(1 row)
+1<:  <... completed>
+CALL
+
+-- ============================================================
+-- Verification
+-- ============================================================
+
+-- Source HAS one row in bucket 13:00
+1: SELECT time_bucket('1 hour'::interval, time) AS bucket, count(*) AS src_cnt FROM race2_src WHERE time >= '2024-01-01 13:00+00' AND time < '2024-01-01 14:00+00' GROUP BY 1;
+ bucket                       | src_cnt 
+------------------------------+---------
+ Mon Jan 01 13:00:00 2024 UTC | 1       
+(1 row)
+
+-- Transient state: cv_b's mat snapshot predated the 13:30 row, so the
+-- bucket is briefly absent here — the L1 entry guarantees repair below.
+1: SELECT bucket, cnt FROM race2_cv_b WHERE bucket = '2024-01-01 13:00+00';
+ bucket | cnt 
+--------+-----
+(0 rows)
+
+-- cv_a sees it via its LIVE branch (watermark still 11:00)
+1: SELECT bucket, cnt FROM race2_cv_a WHERE bucket = '2024-01-01 13:00+00';
+ bucket                       | cnt 
+------------------------------+-----
+ Mon Jan 01 13:00:00 2024 UTC | 1   
+(1 row)
+
+-- REPAIR: the next refresh consumes the L1/L2 entry and
+-- re-materializes bucket 13:00
+1: CALL time_series.refresh_continuous_aggregate('race2_cv_b', NULL, NULL);
+CALL
+1: SELECT bucket, cnt FROM race2_cv_b WHERE bucket = '2024-01-01 13:00+00';
+ bucket                       | cnt 
+------------------------------+-----
+ Mon Jan 01 13:00:00 2024 UTC | 1   
+(1 row)
+
+-- Full diff source vs cv_b below cv_b's watermark: must be 0
+1: SELECT count(*) AS lost_buckets FROM ( SELECT time_bucket('1 hour'::interval, time) AS bucket, count(*) AS cnt FROM race2_src GROUP BY 1 EXCEPT SELECT bucket, cnt FROM race2_cv_b ) x WHERE bucket < '2024-01-01 14:00+00';
+ lost_buckets 
+--------------
+ 0            
+(1 row)
+
+-- ============================================================
+-- Cleanup
+-- ============================================================
+1: DROP VIEW race2_cv_a CASCADE;
+DROP
+1: DROP VIEW race2_cv_b CASCADE;
+DROP
+1: DROP TABLE race2_src CASCADE;
+DROP

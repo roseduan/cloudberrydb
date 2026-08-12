@@ -1,0 +1,612 @@
+-- ts_compress_ddl.sql
+--
+-- Interactions between DDL statements and the compress / reclaim flow.
+-- Each section runs the standard ACTIVE → COMPRESSED → reclaim cycle,
+-- then exercises a specific DDL operation, and verifies the data is
+-- still readable / the catalog is consistent.
+--
+-- Mirrors what upstream compression_ddl.sql, compression_constraints.sql
+-- and chunk_utils_compression.sql cover for the hypertable side.
+\i sql/include/setup.sql
+-- Shared setup for time_series regression tests.
+-- Include this at the top of every test file via:
+--   \ir include/setup.sql
+CREATE EXTENSION IF NOT EXISTS time_series;
+WARNING:  referential integrity (FOREIGN KEY) constraints are not supported in Apache Cloudberry, will not be enforced
+SET optimizer = off;
+SET timezone = 'UTC';
+SET datestyle = 'ISO';
+SET extra_float_digits = 0;
+CREATE SCHEMA IF NOT EXISTS test;
+-- start_ignore
+-- ============================================================
+-- Shared file-counting helpers (used by ts_drop_truncate_files.sql
+-- and ts_drop_pax_files.sql).  Wrapped in start_ignore..end_ignore
+-- so every OTHER test that \i's this setup file is unaffected by
+-- the CREATE FUNCTION output added here.  gpdiff.pl recognises
+-- these markers and skips the enclosed lines during diff.
+-- ============================================================
+CREATE OR REPLACE FUNCTION test.ts_chunk_files_per_seg(rfile oid)
+RETURNS TABLE(seg int, cnt int)
+LANGUAGE sql EXECUTE ON ALL SEGMENTS AS $$
+    SELECT gp_execution_segment(),
+           count(*)::int
+    FROM pg_ls_dir('base/' || (SELECT oid::text FROM pg_database
+                                WHERE datname = current_database()))
+    WHERE pg_ls_dir LIKE rfile::text || '_ts_%';
+$$;
+CREATE OR REPLACE FUNCTION test.ts_chunk_files_total(rfile oid)
+RETURNS bigint
+LANGUAGE sql AS $$
+    SELECT COALESCE(sum(cnt)::bigint, 0)
+      FROM test.ts_chunk_files_per_seg(rfile);
+$$;
+CREATE OR REPLACE FUNCTION test.ts_pax_files_per_seg(relid oid)
+RETURNS TABLE(seg int, cnt int)
+LANGUAGE sql EXECUTE ON ALL SEGMENTS AS $$
+    SELECT gp_execution_segment(),
+           (SELECT count(*)::int
+              FROM pg_ls_dir(
+                'base/' || (SELECT oid::text FROM pg_database
+                            WHERE datname = current_database())
+                || '/ts_compressed/' || relid::text,
+                TRUE, FALSE));
+$$;
+CREATE OR REPLACE FUNCTION test.ts_pax_files_total(relid oid)
+RETURNS bigint
+LANGUAGE sql AS $$
+    SELECT COALESCE(sum(cnt)::bigint, 0)
+      FROM test.ts_pax_files_per_seg(relid);
+$$;
+-- end_ignore
+-- ======================================================================
+-- Section 1: ALTER TABLE ADD COLUMN on a table with COMPRESSED chunks
+--
+-- After the column is added, scanning the COMPRESSED chunk should
+-- return NULL for the new column on rows that pre-date it (the PAX
+-- file doesn't carry the column at all).  New INSERTs after the
+-- ALTER should populate the column normally and survive recompress.
+-- ======================================================================
+CREATE TABLE ts_d_addcol (
+    ts   timestamptz NOT NULL,
+    val  integer
+) USING time_series WITH (
+    ts_partition_column='ts', ts_chunk_interval='1 day',
+    ts_chunk_origin='2025-01-01 00:00:00+00'
+) DISTRIBUTED REPLICATED;
+SELECT time_series.set_compress_config('ts_d_addcol'::regclass, orderby => 'ts');
+ set_compress_config 
+---------------------
+ 
+(1 row)
+
+INSERT INTO ts_d_addcol VALUES
+    ('2025-01-01 01:00+00', 1), ('2025-01-01 02:00+00', 2),
+    ('2025-01-01 03:00+00', 3);
+SELECT time_series.compress_chunks('ts_d_addcol'::regclass);
+ compress_chunks 
+-----------------
+               1
+(1 row)
+
+SELECT time_series.reclaim_chunk_heaps('ts_d_addcol'::regclass);
+ reclaim_chunk_heaps 
+---------------------
+                   1
+(1 row)
+
+-- Add a new column AFTER chunks are already COMPRESSED + reclaimed
+ALTER TABLE ts_d_addcol ADD COLUMN tag text;
+-- Old rows should report tag = NULL; row count unchanged
+SELECT count(*) AS rows, count(tag) AS tag_non_null FROM ts_d_addcol;
+ rows | tag_non_null 
+------+--------------
+    3 |            0
+(1 row)
+
+SELECT ts, val, tag FROM ts_d_addcol ORDER BY ts;
+           ts           | val | tag 
+------------------------+-----+-----
+ 2025-01-01 01:00:00+00 |   1 | 
+ 2025-01-01 02:00:00+00 |   2 | 
+ 2025-01-01 03:00:00+00 |   3 | 
+(3 rows)
+
+-- INSERT new row with tag value → goes into PARTIAL state
+INSERT INTO ts_d_addcol VALUES ('2025-01-01 04:00+00', 4, 'new');
+SELECT count(*) AS rows, count(tag) AS tag_non_null FROM ts_d_addcol;
+ rows | tag_non_null 
+------+--------------
+    4 |            1
+(1 row)
+
+-- Recompress: PAX-resident old rows still see NULL, heap row sees 'new'
+SELECT time_series.compress_chunks('ts_d_addcol'::regclass);
+ compress_chunks 
+-----------------
+               1
+(1 row)
+
+SELECT ts, val, tag FROM ts_d_addcol ORDER BY ts;
+           ts           | val | tag 
+------------------------+-----+-----
+ 2025-01-01 01:00:00+00 |   1 | 
+ 2025-01-01 02:00:00+00 |   2 | 
+ 2025-01-01 03:00:00+00 |   3 | 
+ 2025-01-01 04:00:00+00 |   4 | new
+(4 rows)
+
+DELETE FROM time_series.ts_compressed_chunk WHERE table_oid='ts_d_addcol'::regclass;
+DELETE FROM time_series.ts_compress_config  WHERE table_oid='ts_d_addcol'::regclass;
+DROP TABLE ts_d_addcol;
+-- ======================================================================
+-- Section 2: ALTER TABLE ALTER COLUMN TYPE — must error on compressed
+--
+-- Changing a column's type would invalidate the PAX file because the
+-- on-disk byte format is per-column type-specialised (Gorilla for
+-- floats, delta-delta for ints, dictionary/ZSTD for varlena).  Once a
+-- chunk is compressed, ALTER COLUMN TYPE must error; reads must keep
+-- returning the original rows from PAX.
+-- ======================================================================
+CREATE TABLE ts_d_altertype (
+    ts   timestamptz NOT NULL,
+    val  integer,
+    tag  text
+) USING time_series WITH (
+    ts_partition_column='ts', ts_chunk_interval='1 day',
+    ts_chunk_origin='2025-01-01 00:00:00+00'
+) DISTRIBUTED REPLICATED;
+SELECT time_series.set_compress_config('ts_d_altertype'::regclass,
+    segmentby => 'tag', orderby => 'ts');
+ set_compress_config 
+---------------------
+ 
+(1 row)
+
+INSERT INTO ts_d_altertype VALUES
+    ('2025-01-01 01:00+00', 1, 'a'),
+    ('2025-01-01 02:00+00', 2, 'a');
+SELECT time_series.compress_chunks('ts_d_altertype'::regclass);
+ compress_chunks 
+-----------------
+               1
+(1 row)
+
+-- (a) Partition column ALTER TYPE is always blocked (pre-existing guard).
+\set ON_ERROR_STOP 0
+ALTER TABLE ts_d_altertype ALTER COLUMN ts TYPE timestamp;
+ERROR:  cannot alter type of partition column "ts" on a time_series table
+\set ON_ERROR_STOP 1
+-- (b) Non-partition column ALTER TYPE blocked because the table now has
+--     compressed chunks (new guard).
+\set ON_ERROR_STOP 0
+ALTER TABLE ts_d_altertype ALTER COLUMN val TYPE bigint;
+ERROR:  cannot alter type of column "val" on a time_series table with compressed chunks  (seg0 172.17.0.2:7002 pid=6854)
+HINT:  Drop or recreate the table; time_series v1 has no in-place decompress path.
+\set ON_ERROR_STOP 1
+-- Reads must still work after the blocked ALTER attempts.
+SELECT count(*) AS rows FROM ts_d_altertype;
+ rows 
+------
+    2
+(1 row)
+
+SELECT val, tag FROM ts_d_altertype ORDER BY ts;
+ val | tag 
+-----+-----
+   1 | a
+   2 | a
+(2 rows)
+
+DELETE FROM time_series.ts_compressed_chunk WHERE table_oid='ts_d_altertype'::regclass;
+DELETE FROM time_series.ts_compress_config  WHERE table_oid='ts_d_altertype'::regclass;
+DROP TABLE ts_d_altertype;
+-- ======================================================================
+-- Section 2b: ALTER TABLE SET / RESET on routing-defining reloptions
+--
+-- ts_partition_column / ts_chunk_interval / ts_chunk_origin determine
+-- which fork an INSERT lands in.  Changing them after any chunk exists
+-- would route new rows to a different fork than the existing rows for
+-- the same time range — silent data split.  Must error once chunks
+-- exist; must succeed on an empty table.
+-- ======================================================================
+CREATE TABLE ts_d_relopt (
+    ts   timestamptz NOT NULL,
+    val  integer
+) USING time_series WITH (
+    ts_partition_column='ts', ts_chunk_interval='1 day',
+    ts_chunk_origin='2025-01-01 00:00:00+00'
+) DISTRIBUTED REPLICATED;
+-- (a) On an empty table (no chunks yet) changing routing options is OK.
+ALTER TABLE ts_d_relopt SET (ts_chunk_interval='12 hour');
+ALTER TABLE ts_d_relopt SET (ts_chunk_origin='2025-02-01 00:00:00+00');
+-- (b) Insert rows so a chunk gets created.
+INSERT INTO ts_d_relopt VALUES ('2025-02-01 01:00+00', 1);
+-- (c) With chunks present, the same SET must now error.
+\set ON_ERROR_STOP 0
+ALTER TABLE ts_d_relopt SET (ts_chunk_interval='1 hour');
+ERROR:  cannot change time_series option "ts_chunk_interval" on a table with existing chunks  (seg0 172.17.0.2:7002 pid=6854)
+HINT:  This option is routing-sensitive; new rows would land in different chunks than existing rows.
+ALTER TABLE ts_d_relopt SET (ts_chunk_origin='2025-01-01 00:00:00+00');
+ERROR:  cannot change time_series option "ts_chunk_origin" on a table with existing chunks  (seg0 172.17.0.2:7002 pid=6854)
+HINT:  This option is routing-sensitive; new rows would land in different chunks than existing rows.
+ALTER TABLE ts_d_relopt SET (ts_partition_column='ts');
+ERROR:  cannot change time_series option "ts_partition_column" on a table with existing chunks  (seg1 172.17.0.2:7003 pid=6855)
+HINT:  This option is routing-sensitive; new rows would land in different chunks than existing rows.
+\set ON_ERROR_STOP 1
+-- (d) RESET also blocked (same routing semantics).
+\set ON_ERROR_STOP 0
+ALTER TABLE ts_d_relopt RESET (ts_chunk_interval);
+ERROR:  cannot change time_series option "ts_chunk_interval" on a table with existing chunks  (seg0 172.17.0.2:7002 pid=6854)
+HINT:  This option is routing-sensitive; new rows would land in different chunks than existing rows.
+\set ON_ERROR_STOP 1
+-- Existing row still readable, options unchanged.
+SELECT count(*) AS rows FROM ts_d_relopt;
+ rows 
+------
+    1
+(1 row)
+
+SELECT ts, val FROM ts_d_relopt ORDER BY ts;
+           ts           | val 
+------------------------+-----
+ 2025-02-01 01:00:00+00 |   1
+(1 row)
+
+DROP TABLE ts_d_relopt;
+-- ======================================================================
+-- Section 3: TRUNCATE TABLE on a table with COMPRESSED chunks
+--
+-- TRUNCATE drops all heap forks and creates a new relfilenode.  It
+-- does NOT know about our extension's PAX sidecar files or catalog
+-- rows.  Verify the table appears empty after TRUNCATE and that
+-- subsequent INSERT works again.
+-- ======================================================================
+CREATE TABLE ts_d_trunc (
+    ts   timestamptz NOT NULL,
+    val  integer
+) USING time_series WITH (
+    ts_partition_column='ts', ts_chunk_interval='1 day',
+    ts_chunk_origin='2025-01-01 00:00:00+00'
+) DISTRIBUTED REPLICATED;
+SELECT time_series.set_compress_config('ts_d_trunc'::regclass, orderby => 'ts');
+ set_compress_config 
+---------------------
+ 
+(1 row)
+
+INSERT INTO ts_d_trunc
+SELECT '2025-01-01 00:00+00'::timestamptz + (i * interval '1 hour'), i
+FROM generate_series(1, 10) i;
+SELECT time_series.compress_chunks('ts_d_trunc'::regclass);
+ compress_chunks 
+-----------------
+               1
+(1 row)
+
+SELECT count(*) AS pre_truncate FROM ts_d_trunc;
+ pre_truncate 
+--------------
+           10
+(1 row)
+
+TRUNCATE TABLE ts_d_trunc;
+SELECT count(*) AS post_truncate FROM ts_d_trunc;
+ post_truncate 
+---------------
+             0
+(1 row)
+
+-- Insert again after truncate — should work
+INSERT INTO ts_d_trunc VALUES ('2025-01-02 01:00+00', 100);
+SELECT count(*) AS post_insert FROM ts_d_trunc;
+ post_insert 
+-------------
+           1
+(1 row)
+
+SELECT * FROM ts_d_trunc;
+           ts           | val 
+------------------------+-----
+ 2025-01-02 01:00:00+00 | 100
+(1 row)
+
+DELETE FROM time_series.ts_compressed_chunk WHERE table_oid='ts_d_trunc'::regclass;
+DELETE FROM time_series.ts_compress_config  WHERE table_oid='ts_d_trunc'::regclass;
+DROP TABLE ts_d_trunc;
+-- ======================================================================
+-- Section 4: VACUUM on a compressed table
+--
+-- VACUUM takes ShareUpdateExclusiveLock — compatible with our
+-- AccessShareLock — and works against the user-relation main fork
+-- (which is empty for time_series tables; data lives in extension
+-- forks).  Should be a no-op for our forks but must not break SELECT.
+-- ======================================================================
+CREATE TABLE ts_d_vacuum (
+    ts   timestamptz NOT NULL,
+    val  integer
+) USING time_series WITH (
+    ts_partition_column='ts', ts_chunk_interval='1 day',
+    ts_chunk_origin='2025-01-01 00:00:00+00'
+) DISTRIBUTED REPLICATED;
+SELECT time_series.set_compress_config('ts_d_vacuum'::regclass, orderby => 'ts');
+ set_compress_config 
+---------------------
+ 
+(1 row)
+
+INSERT INTO ts_d_vacuum
+SELECT '2025-01-01 00:00+00'::timestamptz + (i * interval '1 hour'), i
+FROM generate_series(1, 10) i;
+SELECT time_series.compress_chunks('ts_d_vacuum'::regclass);
+ compress_chunks 
+-----------------
+               1
+(1 row)
+
+SELECT time_series.reclaim_chunk_heaps('ts_d_vacuum'::regclass);
+ reclaim_chunk_heaps 
+---------------------
+                   1
+(1 row)
+
+VACUUM ts_d_vacuum;
+SELECT count(*) AS post_vacuum FROM ts_d_vacuum;
+ post_vacuum 
+-------------
+          10
+(1 row)
+
+-- VACUUM on the extension catalog tables too
+VACUUM time_series.ts_chunk;
+VACUUM time_series.ts_compressed_chunk;
+SELECT count(*) AS post_catalog_vacuum FROM ts_d_vacuum;
+ post_catalog_vacuum 
+---------------------
+                  10
+(1 row)
+
+DELETE FROM time_series.ts_compressed_chunk WHERE table_oid='ts_d_vacuum'::regclass;
+DELETE FROM time_series.ts_compress_config  WHERE table_oid='ts_d_vacuum'::regclass;
+DROP TABLE ts_d_vacuum;
+-- ======================================================================
+-- Section 5: ANALYZE on a compressed table
+--
+-- ANALYZE samples rows to update planner stats.  For time_series,
+-- the sample comes from heap forks (our scan path); after compress
+-- + reclaim heap is empty, so ANALYZE will see no rows from the
+-- relation main fork — but should not error.  The ColumnarScan
+-- custom-scan picks up its own per-chunk stats from
+-- ts_compressed_chunk anyway.
+-- ======================================================================
+CREATE TABLE ts_d_analyze (
+    ts   timestamptz NOT NULL,
+    val  integer
+) USING time_series WITH (
+    ts_partition_column='ts', ts_chunk_interval='1 day',
+    ts_chunk_origin='2025-01-01 00:00:00+00'
+) DISTRIBUTED REPLICATED;
+SELECT time_series.set_compress_config('ts_d_analyze'::regclass, orderby => 'ts');
+ set_compress_config 
+---------------------
+ 
+(1 row)
+
+INSERT INTO ts_d_analyze
+SELECT '2025-01-01 00:00+00'::timestamptz + (i * interval '1 hour'), i
+FROM generate_series(1, 50) i;
+SELECT time_series.compress_chunks('ts_d_analyze'::regclass);
+ compress_chunks 
+-----------------
+               3
+(1 row)
+
+ANALYZE ts_d_analyze;
+SELECT count(*) AS post_analyze FROM ts_d_analyze;
+ post_analyze 
+--------------
+           50
+(1 row)
+
+DELETE FROM time_series.ts_compressed_chunk WHERE table_oid='ts_d_analyze'::regclass;
+DELETE FROM time_series.ts_compress_config  WHERE table_oid='ts_d_analyze'::regclass;
+DROP TABLE ts_d_analyze;
+-- ======================================================================
+-- Section 6: DROP COLUMN on a partition column — must be rejected
+--
+-- The ts_partition_column drives chunk routing; dropping it would
+-- leave existing chunks orphaned and break INSERT routing.  The
+-- ProcessUtility hook in ts_ddl.c (check_alter_table_drop_column
+-- equivalent) rejects this.
+-- ======================================================================
+CREATE TABLE ts_d_dropcol (
+    ts   timestamptz NOT NULL,
+    val  integer,
+    tag  text
+) USING time_series WITH (
+    ts_partition_column='ts', ts_chunk_interval='1 day',
+    ts_chunk_origin='2025-01-01 00:00:00+00'
+) DISTRIBUTED REPLICATED;
+INSERT INTO ts_d_dropcol VALUES ('2025-01-01 01:00+00', 1, 'a');
+\set ON_ERROR_STOP 0
+ALTER TABLE ts_d_dropcol DROP COLUMN ts;
+ERROR:  cannot drop partition column "ts" of a time_series table
+\set ON_ERROR_STOP 1
+-- Dropping a non-partition column should still work
+ALTER TABLE ts_d_dropcol DROP COLUMN tag;
+SELECT * FROM ts_d_dropcol;
+           ts           | val 
+------------------------+-----
+ 2025-01-01 01:00:00+00 |   1
+(1 row)
+
+DROP TABLE ts_d_dropcol;
+-- ======================================================================
+-- Section 7: DROP TABLE on a table with COMPRESSED chunks (regression)
+--
+-- Already covered by ts_compress.sql Section 28's final orphan
+-- check (final_config = 0, final_compressed = 0), but a focused
+-- standalone test here makes the contract explicit.
+-- ======================================================================
+CREATE TABLE ts_d_drop (
+    ts   timestamptz NOT NULL,
+    val  integer
+) USING time_series WITH (
+    ts_partition_column='ts', ts_chunk_interval='1 day',
+    ts_chunk_origin='2025-01-01 00:00:00+00'
+) DISTRIBUTED REPLICATED;
+SELECT time_series.set_compress_config('ts_d_drop'::regclass, orderby => 'ts');
+ set_compress_config 
+---------------------
+ 
+(1 row)
+
+INSERT INTO ts_d_drop
+SELECT '2025-01-01 00:00+00'::timestamptz + (i * interval '1 hour'), i
+FROM generate_series(1, 5) i;
+SELECT time_series.compress_chunks('ts_d_drop'::regclass);
+ compress_chunks 
+-----------------
+               1
+(1 row)
+
+-- Capture the relid before drop
+SELECT 'ts_d_drop'::regclass::oid AS relid \gset
+-- Verify rows exist for this relid in all three catalog tables
+SELECT (SELECT count(*) FROM time_series.ts_chunk            WHERE table_oid = :relid) AS chunk_rows,
+       (SELECT count(*) FROM time_series.ts_compress_config  WHERE table_oid = :relid) AS config_rows,
+       (SELECT count(*) FROM time_series.ts_compressed_chunk WHERE table_oid = :relid) > 0 AS has_cchunk;
+ chunk_rows | config_rows | has_cchunk 
+------------+-------------+------------
+          3 |           1 | t
+(1 row)
+
+DROP TABLE ts_d_drop;
+-- After DROP, all three catalogs should be cleaned up by the
+-- ts_ddl.c ProcessUtility hook
+SELECT (SELECT count(*) FROM time_series.ts_chunk            WHERE table_oid = :relid) AS chunk_rows_after,
+       (SELECT count(*) FROM time_series.ts_compress_config  WHERE table_oid = :relid) AS config_rows_after,
+       (SELECT count(*) FROM time_series.ts_compressed_chunk WHERE table_oid = :relid) AS cchunk_rows_after;
+ chunk_rows_after | config_rows_after | cchunk_rows_after 
+------------------+-------------------+-------------------
+                0 |                 0 |                 0
+(1 row)
+
+-- ======================================================================
+-- Section: Permission checks on compression SQL surface
+--
+-- Every C-level entry point that takes a table Oid must reject calls
+-- from a non-owner with ACLCHECK_NOT_OWNER, and the segment-side
+-- internal helpers (prefixed `_ts_`) must be REVOKE'd from PUBLIC.
+-- Without these two guards any authenticated user could compress /
+-- reclaim / truncate arbitrary time_series tables (DoS + data loss
+-- via _ts_truncate_chunk_fork on an uncompressed chunk).
+-- ======================================================================
+DROP ROLE IF EXISTS ts_noperm;
+CREATE ROLE ts_noperm LOGIN;
+NOTICE:  resource queue required -- using default resource queue "pg_default"
+-- Grant schema access so the caller can even NAME time_series.foo();
+-- ownership on the target table stays with the owner, so every SQL
+-- entry point below must reject ts_noperm.
+GRANT USAGE ON SCHEMA time_series TO ts_noperm;
+CREATE TABLE ts_perm_t (ts timestamptz NOT NULL, val int)
+    USING time_series WITH (
+        ts_partition_column='ts', ts_chunk_interval='1 day',
+        ts_chunk_origin='2025-01-01 00:00:00+00'
+    ) DISTRIBUTED REPLICATED;
+SELECT time_series.set_compress_config('ts_perm_t'::regclass, orderby => 'ts');
+ set_compress_config 
+---------------------
+ 
+(1 row)
+
+INSERT INTO ts_perm_t VALUES ('2025-01-01 12:00+00', 1);
+-- Every call below is expected to error; keep the session alive.
+\set ON_ERROR_STOP 0
+-- ---- user-facing functions: non-owner must fail with must-be-owner ----
+SET ROLE ts_noperm;
+-- Owner-only writes
+SELECT time_series.set_compress_config('ts_perm_t'::regclass, orderby => 'ts');
+ERROR:  must be owner of table ts_perm_t
+SELECT time_series.compress_chunks('ts_perm_t');
+ERROR:  must be owner of table ts_perm_t
+SELECT time_series.compress_chunk('ts_perm_t', 1);
+ERROR:  must be owner of table ts_perm_t
+SELECT time_series.reclaim_chunk_heaps('ts_perm_t');
+ERROR:  must be owner of table ts_perm_t
+-- Owner-only metadata reads
+SELECT count(*) FROM time_series.ts_chunk_info('ts_perm_t');
+ERROR:  must be owner of table ts_perm_t  (seg2 slice1 172.17.0.2:7004 pid=6856)
+SELECT count(*) FROM time_series.ts_compressed_chunk_info('ts_perm_t');
+ERROR:  must be owner of table ts_perm_t  (seg2 slice1 172.17.0.2:7004 pid=6856)
+RESET ROLE;
+-- ---- internal segment-side helpers: PUBLIC has no EXECUTE ----
+SET ROLE ts_noperm;
+SELECT time_series._ts_compress_write_chunks('ts_perm_t', ARRAY[1]::int[]);
+ERROR:  permission denied for function _ts_compress_write_chunks
+SELECT time_series._ts_reclaim_chunk_heaps_segment('ts_perm_t', ARRAY[1]::int[]);
+ERROR:  permission denied for function _ts_reclaim_chunk_heaps_segment
+SELECT time_series._ts_truncate_chunk_fork('ts_perm_t', 1);
+ERROR:  permission denied for function _ts_truncate_chunk_fork
+RESET ROLE;
+\set ON_ERROR_STOP 1
+-- ---- Owner still can call everything (sanity check) ----
+SELECT time_series.compress_chunks('ts_perm_t') AS compressed_count;
+ compressed_count 
+------------------
+                1
+(1 row)
+
+DROP TABLE ts_perm_t;
+REVOKE USAGE ON SCHEMA time_series FROM ts_noperm;
+DROP ROLE ts_noperm;
+-- ======================================================================
+-- set_compress_config with a column name containing a single quote
+--
+-- PG identifiers may legally contain any character except NUL, and a
+-- double-quoted identifier containing an apostrophe (e.g. "a'b") is
+-- perfectly valid — the apostrophe is a literal character inside the
+-- double-quoted form (only doubled double-quotes are special).
+-- insert_compress_config used to build the segmentby / orderby arrays
+-- via naive appendStringInfo(&cmd, "'%s'", name), which pastes the
+-- apostrophe straight into the SQL text and derails SPI parsing.
+-- quote_literal fixes it.  This case exercises the fix; before the
+-- fix the set_compress_config call fails with a SPI syntax error.
+-- ======================================================================
+CREATE TABLE ts_weird_cols (
+    ts timestamptz NOT NULL,
+    "a'b" int         -- legal 3-char identifier: a, ', b
+) USING time_series
+  WITH (ts_partition_column='ts',
+        ts_chunk_interval='1 hour',
+        ts_chunk_origin='2025-01-01')
+  DISTRIBUTED REPLICATED;
+-- The SQL literal 'a''b' parses to the 3-char string a'b, which is
+-- the name of the column above.  Must round-trip through the SPI
+-- INSERT into ts_compress_config without a parse error.
+SELECT time_series.set_compress_config(
+           'ts_weird_cols'::regclass,
+           'a''b',  -- SQL literal → C string a'b (matches column name)
+           'ts');
+ set_compress_config 
+---------------------
+ 
+(1 row)
+
+-- Verify the config row landed with the correct segmentby name.
+SELECT segmentby AS segmentby_after_apos
+  FROM time_series.ts_compress_config
+ WHERE table_oid = 'ts_weird_cols'::regclass;
+ segmentby_after_apos 
+----------------------
+ {a'b}
+(1 row)
+
+DROP TABLE ts_weird_cols;
+-- ======================================================================
+-- Cleanup
+-- ======================================================================
+RESET timezone;
+RESET optimizer;
+RESET datestyle;
+RESET extra_float_digits;

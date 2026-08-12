@@ -1,0 +1,151 @@
+Parsed test spec with 3 sessions
+
+starting permutation: r1_begin_rr r1_count r2_count w_begin w_insert_chunk1 r1_count r2_count w_commit r1_count r2_count r1_commit r1_count
+step r1_begin_rr: BEGIN ISOLATION LEVEL REPEATABLE READ;
+step r1_count: SELECT count(*) FROM ts_mrw;
+count
+-----
+  100
+(1 row)
+
+step r2_count: SELECT count(*) FROM ts_mrw;
+count
+-----
+  100
+(1 row)
+
+step w_begin: BEGIN;
+step w_insert_chunk1: 
+    INSERT INTO ts_mrw
+    SELECT '2025-01-01 12:00:00+00'::timestamptz + (i * interval '1 minute'), 500 + i
+    FROM generate_series(1, 100) i;
+
+step r1_count: SELECT count(*) FROM ts_mrw;
+count
+-----
+  100
+(1 row)
+
+step r2_count: SELECT count(*) FROM ts_mrw;
+count
+-----
+  100
+(1 row)
+
+step w_commit: COMMIT;
+step r1_count: SELECT count(*) FROM ts_mrw;
+count
+-----
+  100
+(1 row)
+
+step r2_count: SELECT count(*) FROM ts_mrw;
+count
+-----
+  200
+(1 row)
+
+step r1_commit: COMMIT;
+step r1_count: SELECT count(*) FROM ts_mrw;
+count
+-----
+  200
+(1 row)
+
+
+starting permutation: r1_begin_rr r1_sum w_begin w_insert_chunk2 r2_max r1_sum w_commit r2_max r1_sum r1_commit r1_sum
+step r1_begin_rr: BEGIN ISOLATION LEVEL REPEATABLE READ;
+step r1_sum: SELECT sum(val) FROM ts_mrw;
+ sum
+----
+5050
+(1 row)
+
+step w_begin: BEGIN;
+step w_insert_chunk2: 
+    INSERT INTO ts_mrw
+    SELECT '2025-01-02'::timestamptz + (i * interval '1 minute'), 1000 + i
+    FROM generate_series(1, 100) i;
+
+step r2_max: SELECT max(val) FROM ts_mrw;
+max
+---
+100
+(1 row)
+
+step r1_sum: SELECT sum(val) FROM ts_mrw;
+ sum
+----
+5050
+(1 row)
+
+step w_commit: COMMIT;
+step r2_max: SELECT max(val) FROM ts_mrw;
+ max
+----
+1100
+(1 row)
+
+step r1_sum: SELECT sum(val) FROM ts_mrw;
+ sum
+----
+5050
+(1 row)
+
+step r1_commit: COMMIT;
+step r1_sum: SELECT sum(val) FROM ts_mrw;
+   sum
+------
+110100
+(1 row)
+
+
+starting permutation: w_begin w_insert_chunk1 r1_count r2_count w_insert_chunk2 r1_count r2_count w_commit r1_count r2_count
+step w_begin: BEGIN;
+step w_insert_chunk1: 
+    INSERT INTO ts_mrw
+    SELECT '2025-01-01 12:00:00+00'::timestamptz + (i * interval '1 minute'), 500 + i
+    FROM generate_series(1, 100) i;
+
+step r1_count: SELECT count(*) FROM ts_mrw;
+count
+-----
+  100
+(1 row)
+
+step r2_count: SELECT count(*) FROM ts_mrw;
+count
+-----
+  100
+(1 row)
+
+step w_insert_chunk2: 
+    INSERT INTO ts_mrw
+    SELECT '2025-01-02'::timestamptz + (i * interval '1 minute'), 1000 + i
+    FROM generate_series(1, 100) i;
+
+step r1_count: SELECT count(*) FROM ts_mrw;
+count
+-----
+  100
+(1 row)
+
+step r2_count: SELECT count(*) FROM ts_mrw;
+count
+-----
+  100
+(1 row)
+
+step w_commit: COMMIT;
+step r1_count: SELECT count(*) FROM ts_mrw;
+count
+-----
+  300
+(1 row)
+
+step r2_count: SELECT count(*) FROM ts_mrw;
+count
+-----
+  300
+(1 row)
+

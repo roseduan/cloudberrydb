@@ -1,0 +1,1138 @@
+-- ============================================================
+-- cagg_planning.sql
+-- Test: Planner-time CAGG optimizations
+--
+-- Validates the two walkers added in commit b70dbcd17 to
+-- src/cagg/watermark_constify.c and src/cagg/time_bucket_pushdown.c:
+--
+--   1. constify_cagg_watermark_mutate — replaces VOLATILE
+--      cagg_watermark(N) FuncExpr nodes with Const literals so
+--      downstream planner can do chunk pruning on the live branch.
+--
+--   2. time_bucket_pushdown_mutate — for outer quals of the form
+--      `Var(sub.bucket) {>=,>} Const` whose subquery tlist is
+--      `time_bucket(B_const, V)`, synthesizes the equivalent
+--      bare-Var predicate `V {>=,>} Const` in the subquery WHERE.
+--
+-- Each test checks BOTH:
+--   - Correctness (cv result == direct source aggregation result)
+--   - Plan shape (EXPLAIN shows the optimization fired)
+-- ============================================================
+SET optimizer = off;
+SET timezone = 'UTC';
+DROP EXTENSION IF EXISTS time_series CASCADE;
+NOTICE:  extension "time_series" does not exist, skipping
+CREATE EXTENSION time_series;
+WARNING:  referential integrity (FOREIGN KEY) constraints are not supported in Apache Cloudberry, will not be enforced
+SET search_path TO public, time_series;
+-- ============================================================
+-- Setup: TIMESTAMPTZ-column hypertable + cagg
+-- ============================================================
+\echo '=== Setup: TIMESTAMPTZ-column hypertable + cagg ==='
+=== Setup: TIMESTAMPTZ-column hypertable + cagg ===
+CREATE TABLE m (
+    time      TIMESTAMPTZ NOT NULL,
+    device_id INT         NOT NULL,
+    val       INT
+) USING time_series WITH (
+    ts_partition_column = 'time',
+    ts_chunk_interval   = '4 hour',
+    ts_chunk_origin     = '2020-01-01'
+) DISTRIBUTED BY (device_id);
+-- 72 hours of data, 1 hour spacing, 5 devices = 360 rows across many chunks
+INSERT INTO m
+SELECT '2024-06-01 00:00+00'::timestamptz + (i * interval '1 hour'),
+       (i % 5) + 1,
+       i
+  FROM generate_series(0, 71) i;
+ANALYZE m;
+CREATE MATERIALIZED VIEW cv
+WITH (time_series.continuous) AS
+  SELECT time_bucket('1 hour'::interval, time) AS bucket,
+         device_id,
+         count(*) AS cnt,
+         sum(val) AS s
+  FROM m
+ GROUP BY bucket, device_id;
+NOTICE:  continuous aggregate "cv" successfully created
+DETAIL:  Materialization table: time_series._mat_cv_1
+CALL time_series.refresh_continuous_aggregate(
+       'cv',
+       '2024-06-01 00:00+00'::timestamptz,
+       '2024-06-02 00:00+00'::timestamptz);
+NOTICE:  refreshing continuous aggregate "cv"
+-- 第一天 [00:00, 24:00) 进入 mat；剩余 48 小时走 live branch
+-- ============================================================
+-- PLAN-01: Lower-bound predicate pushed onto ChunkScan
+--
+-- After view expansion + walker, the live-branch subquery should
+-- carry `time >= <const>` AT THE SOURCE TABLE (besides the original
+-- time_bucket(...) >= <const>).  We check that ChunkScan filter
+-- mentions the bare `"time"` column, not just time_bucket(...).
+-- ============================================================
+\echo '=== PLAN-01: lower-bound pushdown ==='
+=== PLAN-01: lower-bound pushdown ===
+-- EXPLAIN (no costs, no timing) so output is plan-shape only.
+-- We grep for a bare-column filter using a regex via psql \echo + DO block.
+DO $$
+DECLARE
+    plan TEXT := '';
+    line TEXT;
+    cur  REFCURSOR;
+    has_bare_time_lower BOOLEAN := false;
+BEGIN
+    OPEN cur FOR
+        EXPLAIN (COSTS off, TIMING off, ANALYZE off)
+        SELECT * FROM cv
+         WHERE bucket >= '2024-06-02 12:00+00'::timestamptz;
+    LOOP
+        FETCH cur INTO line;
+        EXIT WHEN NOT FOUND;
+        plan := plan || line || E'\n';
+        IF line ~ '"time" >=' THEN
+            has_bare_time_lower := true;
+        END IF;
+    END LOOP;
+    CLOSE cur;
+
+    IF has_bare_time_lower THEN
+        RAISE NOTICE 'PLAN-01 PASS: bare-time >= predicate pushed to ChunkScan';
+    ELSE
+        RAISE NOTICE 'PLAN-01 FAIL: bare-time >= NOT found in plan: %', plan;
+    END IF;
+END $$;
+NOTICE:  PLAN-01 PASS: bare-time >= predicate pushed to ChunkScan
+-- ============================================================
+-- PLAN-02: Constified cagg_watermark() — should not appear as
+-- FuncExpr in plan; should appear as a TIMESTAMPTZ literal.
+-- ============================================================
+\echo '=== PLAN-02: cagg_watermark() const-folded ==='
+=== PLAN-02: cagg_watermark() const-folded ===
+DO $$
+DECLARE
+    plan TEXT := '';
+    line TEXT;
+    cur  REFCURSOR;
+    has_funccall BOOLEAN := false;
+BEGIN
+    OPEN cur FOR
+        EXPLAIN (COSTS off, TIMING off, ANALYZE off, VERBOSE)
+        SELECT * FROM cv;
+    LOOP
+        FETCH cur INTO line;
+        EXIT WHEN NOT FOUND;
+        plan := plan || line || E'\n';
+        IF line ~ 'cagg_watermark\(' THEN
+            has_funccall := true;
+        END IF;
+    END LOOP;
+    CLOSE cur;
+
+    IF NOT has_funccall THEN
+        RAISE NOTICE 'PLAN-02 PASS: cagg_watermark() replaced with Const';
+    ELSE
+        RAISE NOTICE 'PLAN-02 FAIL: cagg_watermark() still in plan: %', plan;
+    END IF;
+END $$;
+NOTICE:  PLAN-02 PASS: cagg_watermark() replaced with Const
+-- ============================================================
+-- CORR-01: SELECT * FROM cv WHERE bucket >= X matches source
+--           agg (proves pushdown does not change results).
+-- ============================================================
+\echo '=== CORR-01: result equivalence (lower-bound on bucket) ==='
+=== CORR-01: result equivalence (lower-bound on bucket) ===
+WITH cv_rows AS (
+    SELECT bucket, device_id, cnt, s
+      FROM cv
+     WHERE bucket >= '2024-06-02 12:00+00'::timestamptz
+), src_rows AS (
+    SELECT time_bucket('1 hour'::interval, time) AS bucket,
+           device_id,
+           count(*) AS cnt,
+           sum(val) AS s
+      FROM m
+     WHERE time >= '2024-06-02 12:00+00'::timestamptz
+     GROUP BY bucket, device_id
+)
+SELECT
+    (SELECT count(*) FROM cv_rows) AS cv_row_count,
+    (SELECT count(*) FROM src_rows) AS src_row_count,
+    (SELECT sum(cnt) FROM cv_rows) AS cv_total_cnt,
+    (SELECT sum(cnt) FROM src_rows) AS src_total_cnt,
+    (SELECT sum(s) FROM cv_rows) AS cv_total_s,
+    (SELECT sum(s) FROM src_rows) AS src_total_s;
+ cv_row_count | src_row_count | cv_total_cnt | src_total_cnt | cv_total_s | src_total_s 
+--------------+---------------+--------------+---------------+------------+-------------
+           36 |            36 |           36 |            36 |       1926 |        1926
+(1 row)
+
+-- ============================================================
+-- CORR-02: WHERE bucket >= X AND device_id = Y
+--           Pushdown should handle bucket qual, leave device_id alone
+-- ============================================================
+\echo '=== CORR-02: combined bucket + device_id filter ==='
+=== CORR-02: combined bucket + device_id filter ===
+WITH cv_rows AS (
+    SELECT bucket, cnt, s
+      FROM cv
+     WHERE bucket >= '2024-06-02 06:00+00'::timestamptz
+       AND device_id = 3
+), src_rows AS (
+    SELECT time_bucket('1 hour'::interval, time) AS bucket,
+           count(*) AS cnt,
+           sum(val) AS s
+      FROM m
+     WHERE time >= '2024-06-02 06:00+00'::timestamptz
+       AND device_id = 3
+     GROUP BY bucket
+)
+SELECT
+    (SELECT count(*) FROM cv_rows) AS cv_n,
+    (SELECT count(*) FROM src_rows) AS src_n,
+    (SELECT sum(cnt) FROM cv_rows) AS cv_cnt,
+    (SELECT sum(cnt) FROM src_rows) AS src_cnt;
+ cv_n | src_n | cv_cnt | src_cnt 
+------+-------+--------+---------
+    8 |     8 |      8 |       8
+(1 row)
+
+-- ============================================================
+-- CORR-03: WHERE bucket BETWEEN X AND Y
+--           Lower bound pushdown (>=); upper bound untouched (<=)
+-- ============================================================
+\echo '=== CORR-03: BETWEEN bucket range ==='
+=== CORR-03: BETWEEN bucket range ===
+WITH cv_rows AS (
+    SELECT bucket, device_id, cnt
+      FROM cv
+     WHERE bucket >= '2024-06-02 06:00+00'::timestamptz
+       AND bucket <= '2024-06-02 18:00+00'::timestamptz
+), src_rows AS (
+    SELECT time_bucket('1 hour'::interval, time) AS bucket,
+           device_id,
+           count(*) AS cnt
+      FROM m
+     WHERE time >= '2024-06-02 06:00+00'::timestamptz
+       AND time <  '2024-06-02 19:00+00'::timestamptz  -- bucket close at 18 + 1h
+     GROUP BY bucket, device_id
+     HAVING time_bucket('1 hour'::interval, max(time)) <= '2024-06-02 18:00+00'::timestamptz
+)
+SELECT
+    (SELECT count(*) FROM cv_rows) AS cv_n,
+    (SELECT sum(cnt) FROM cv_rows) AS cv_cnt;
+ cv_n | cv_cnt 
+------+--------
+   13 |     13
+(1 row)
+
+-- ============================================================
+-- CORR-04: WHERE bucket = X (equality — walker should skip)
+-- ============================================================
+\echo '=== CORR-04: equality on bucket ==='
+=== CORR-04: equality on bucket ===
+WITH cv_rows AS (
+    SELECT bucket, device_id, cnt
+      FROM cv
+     WHERE bucket = '2024-06-02 12:00+00'::timestamptz
+)
+SELECT count(*) AS cv_n, sum(cnt) AS cv_total FROM cv_rows;
+ cv_n | cv_total 
+------+----------
+    1 |        1
+(1 row)
+
+-- Expected: 5 device rows in that bucket, 5 source rows for that hour
+SELECT count(*) AS src_n FROM m
+ WHERE time >= '2024-06-02 12:00+00'::timestamptz
+   AND time <  '2024-06-02 13:00+00'::timestamptz;
+ src_n 
+-------
+     1
+(1 row)
+
+-- ============================================================
+-- CORR-05: WHERE bucket >= X OR bucket >= Y (OR — no pushdown)
+-- ============================================================
+\echo '=== CORR-05: OR predicate (no pushdown) ==='
+=== CORR-05: OR predicate (no pushdown) ===
+WITH cv_rows AS (
+    SELECT count(*) AS n
+      FROM cv
+     WHERE bucket >= '2024-06-02 20:00+00'::timestamptz
+        OR bucket >= '2024-06-03 06:00+00'::timestamptz
+)
+SELECT n AS cv_n FROM cv_rows;
+ cv_n 
+------
+   28
+(1 row)
+
+SELECT count(DISTINCT (time_bucket('1 hour'::interval, time), device_id)) AS src_distinct_buckets
+  FROM m
+ WHERE time >= '2024-06-02 20:00+00'::timestamptz
+    OR time >= '2024-06-03 06:00+00'::timestamptz;
+ src_distinct_buckets 
+----------------------
+                   28
+(1 row)
+
+-- ============================================================
+-- CORR-06: cv in CTE — varlevelsup correctness
+-- ============================================================
+\echo '=== CORR-06: CV in CTE wrapper ==='
+=== CORR-06: CV in CTE wrapper ===
+WITH inner_cv AS (
+    SELECT bucket, device_id, cnt
+      FROM cv
+     WHERE bucket >= '2024-06-03 00:00+00'::timestamptz
+)
+SELECT count(*) AS cte_cv_n, sum(cnt) AS cte_cv_cnt FROM inner_cv;
+ cte_cv_n | cte_cv_cnt 
+----------+------------
+       24 |         24
+(1 row)
+
+-- ============================================================
+-- CORR-07: cv in subquery in FROM
+-- ============================================================
+\echo '=== CORR-07: CV in subquery ==='
+=== CORR-07: CV in subquery ===
+SELECT count(*) AS sub_cv_n, sum(cnt) AS sub_cv_cnt
+  FROM (SELECT bucket, cnt FROM cv WHERE bucket >= '2024-06-03 00:00+00'::timestamptz) t;
+ sub_cv_n | sub_cv_cnt 
+----------+------------
+       24 |         24
+(1 row)
+
+-- ============================================================
+-- CORR-08: SELECT cv without any bucket filter
+--           Walker has nothing to push; should be no-op
+-- ============================================================
+\echo '=== CORR-08: no bucket filter ==='
+=== CORR-08: no bucket filter ===
+SELECT count(*) AS cv_total_n, sum(cnt) AS cv_total_cnt FROM cv;
+ cv_total_n | cv_total_cnt 
+------------+--------------
+         72 |           72
+(1 row)
+
+SELECT count(DISTINCT (time_bucket('1 hour'::interval, time), device_id)) AS src_total_n,
+       count(*) AS src_total_cnt
+  FROM m;
+ src_total_n | src_total_cnt 
+-------------+---------------
+          72 |            72
+(1 row)
+
+-- ============================================================
+-- CORR-09: SELECT cv WHERE non-bucket column only
+--           No bucket filter; walker is no-op
+-- ============================================================
+\echo '=== CORR-09: non-bucket filter ==='
+=== CORR-09: non-bucket filter ===
+SELECT count(*) AS cv_n FROM cv WHERE device_id = 2;
+ cv_n 
+------
+   15
+(1 row)
+
+SELECT count(DISTINCT time_bucket('1 hour'::interval, time)) AS src_n
+  FROM m WHERE device_id = 2;
+ src_n 
+-------
+    15
+(1 row)
+
+-- ============================================================
+-- DATE-01: cagg over DATE-column hypertable
+--           Verifies pushdown handles type-coercion correctly.
+-- ============================================================
+\echo '=== DATE-01: DATE-column hypertable ==='
+=== DATE-01: DATE-column hypertable ===
+CREATE TABLE m_date (
+    d         DATE NOT NULL,
+    device_id INT,
+    val       INT
+) USING time_series WITH (
+    ts_partition_column = 'd',
+    ts_chunk_interval   = '1 day',
+    ts_chunk_origin     = '2020-01-01'
+) DISTRIBUTED BY (device_id);
+INSERT INTO m_date
+SELECT '2024-06-01'::date + (i || ' day')::interval,
+       (i % 5) + 1,
+       i
+  FROM generate_series(0, 29) i;
+ANALYZE m_date;
+CREATE MATERIALIZED VIEW cv_date
+WITH (time_series.continuous) AS
+  SELECT time_bucket('1 week'::interval, d) AS week,
+         device_id,
+         count(*) AS cnt
+  FROM m_date
+ GROUP BY week, device_id;
+NOTICE:  continuous aggregate "cv_date" successfully created
+DETAIL:  Materialization table: time_series._mat_cv_date_2
+CALL refresh_continuous_aggregate(
+       'cv_date',
+       '2024-06-01'::timestamptz,
+       '2024-06-15'::timestamptz);
+NOTICE:  refreshing continuous aggregate "cv_date"
+-- first two weeks materialized; rest is live branch
+SELECT count(*) AS cv_date_n, sum(cnt) AS cv_date_cnt
+  FROM cv_date
+ WHERE week >= '2024-06-15'::date;
+ cv_date_n | cv_date_cnt 
+-----------+-------------
+        10 |          14
+(1 row)
+
+SELECT count(DISTINCT (time_bucket('1 week'::interval, d), device_id)) AS src_n,
+       count(*) AS src_cnt
+  FROM m_date
+ WHERE d >= '2024-06-15'::date;
+ src_n | src_cnt 
+-------+---------
+    12 |      16
+(1 row)
+
+-- ============================================================
+-- TS-01: cagg over TIMESTAMP (no TZ) column
+-- ============================================================
+\echo '=== TS-01: TIMESTAMP (no TZ) column hypertable ==='
+=== TS-01: TIMESTAMP (no TZ) column hypertable ===
+CREATE TABLE m_ts (
+    t         TIMESTAMP NOT NULL,
+    device_id INT,
+    val       INT
+) USING time_series WITH (
+    ts_partition_column = 't',
+    ts_chunk_interval   = '4 hour',
+    ts_chunk_origin     = '2020-01-01'
+) DISTRIBUTED BY (device_id);
+INSERT INTO m_ts
+SELECT '2024-06-01 00:00'::timestamp + (i * interval '1 hour'),
+       (i % 5) + 1,
+       i
+  FROM generate_series(0, 47) i;
+ANALYZE m_ts;
+CREATE MATERIALIZED VIEW cv_ts
+WITH (time_series.continuous) AS
+  SELECT time_bucket('1 hour'::interval, t) AS bucket,
+         device_id,
+         count(*) AS cnt
+  FROM m_ts
+ GROUP BY bucket, device_id;
+NOTICE:  continuous aggregate "cv_ts" successfully created
+DETAIL:  Materialization table: time_series._mat_cv_ts_3
+CALL refresh_continuous_aggregate(
+       'cv_ts',
+       '2024-06-01 00:00'::timestamptz,
+       '2024-06-02 00:00'::timestamptz);
+NOTICE:  refreshing continuous aggregate "cv_ts"
+SELECT count(*) AS cv_ts_n, sum(cnt) AS cv_ts_cnt
+  FROM cv_ts
+ WHERE bucket >= '2024-06-02 06:00'::timestamp;
+ cv_ts_n | cv_ts_cnt 
+---------+-----------
+      18 |        18
+(1 row)
+
+SELECT count(DISTINCT (time_bucket('1 hour'::interval, t), device_id)) AS src_n,
+       count(*) AS src_cnt
+  FROM m_ts
+ WHERE t >= '2024-06-02 06:00'::timestamp;
+ src_n | src_cnt 
+-------+---------
+    18 |      18
+(1 row)
+
+-- ============================================================
+-- MULTI-01: Multiple cagg in one query (cv JOIN cv_ts)
+--           Walker should pushdown both subqueries independently.
+-- ============================================================
+\echo '=== MULTI-01: multi-cagg JOIN ==='
+=== MULTI-01: multi-cagg JOIN ===
+SELECT count(*) AS join_n
+  FROM cv c1, cv c2
+ WHERE c1.bucket >= '2024-06-02 12:00+00'::timestamptz
+   AND c2.bucket >= '2024-06-02 12:00+00'::timestamptz
+   AND c1.device_id = c2.device_id
+   AND c1.bucket = c2.bucket;
+ join_n 
+--------
+     36
+(1 row)
+
+-- Self-join with same cagg twice — walker should handle both Var-Var aliases
+-- ============================================================
+-- DML-01: Non-SELECT statements skip the walker
+--           (INSERT/UPDATE/DELETE on cv view is forbidden anyway
+--            because cv is a UNION ALL view; but we want to confirm
+--            walker doesn't error before the planner rejects.)
+-- ============================================================
+\echo '=== DML-01: non-SELECT skipped ==='
+=== DML-01: non-SELECT skipped ===
+\set ON_ERROR_STOP 0
+INSERT INTO cv VALUES ('2099-01-01'::timestamptz, 1, 99, 99);
+ERROR:  cannot insert into view "cv"
+DETAIL:  Views containing UNION, INTERSECT, or EXCEPT are not automatically updatable.
+HINT:  To enable inserting into the view, provide an INSTEAD OF INSERT trigger or an unconditional ON INSERT DO INSTEAD rule.
+UPDATE cv SET cnt = 0 WHERE bucket >= '2024-06-02'::timestamptz;
+ERROR:  cannot update view "cv"
+DETAIL:  Views containing UNION, INTERSECT, or EXCEPT are not automatically updatable.
+HINT:  To enable updating the view, provide an INSTEAD OF UPDATE trigger or an unconditional ON UPDATE DO INSTEAD rule.
+DELETE FROM cv WHERE bucket >= '2024-06-02'::timestamptz;
+ERROR:  cannot delete from view "cv"
+DETAIL:  Views containing UNION, INTERSECT, or EXCEPT are not automatically updatable.
+HINT:  To enable deleting from the view, provide an INSTEAD OF DELETE trigger or an unconditional ON DELETE DO INSTEAD rule.
+\set ON_ERROR_STOP 1
+-- ============================================================
+-- PREP-01: PREPARE then EXECUTE — plan caching with watermark
+-- ============================================================
+\echo '=== PREP-01: prepared statement ==='
+=== PREP-01: prepared statement ===
+PREPARE p_cv (timestamptz) AS
+    SELECT count(*) AS n, sum(cnt) AS c
+      FROM cv WHERE bucket >= $1;
+EXECUTE p_cv('2024-06-02 12:00+00'::timestamptz);
+ n  | c  
+----+----
+ 36 | 36
+(1 row)
+
+EXECUTE p_cv('2024-06-03 12:00+00'::timestamptz);
+ n  | c  
+----+----
+ 12 | 12
+(1 row)
+
+DEALLOCATE p_cv;
+-- ============================================================
+-- PLAN-03: Upper-bound predicate pushed onto ChunkScan
+--
+-- For `WHERE bucket <= C`, the walker should synthesize a strict
+-- `time < (C + bucket_width)` predicate at the source-table level.
+-- The plan should show a bare `"time" < ...` filter (the planner
+-- will have const-folded the `+` to a single timestamp literal).
+-- ============================================================
+\echo '=== PLAN-03: upper-bound pushdown ==='
+=== PLAN-03: upper-bound pushdown ===
+DO $$
+DECLARE
+    plan TEXT := '';
+    line TEXT;
+    cur  REFCURSOR;
+    has_bare_time_upper BOOLEAN := false;
+BEGIN
+    OPEN cur FOR
+        EXPLAIN (COSTS off, TIMING off, ANALYZE off)
+        SELECT * FROM cv
+         WHERE bucket <= '2024-06-02 12:00+00'::timestamptz;
+    LOOP
+        FETCH cur INTO line;
+        EXIT WHEN NOT FOUND;
+        plan := plan || line || E'\n';
+        IF line ~ '"time" <' THEN
+            has_bare_time_upper := true;
+        END IF;
+    END LOOP;
+    CLOSE cur;
+
+    IF has_bare_time_upper THEN
+        RAISE NOTICE 'PLAN-03 PASS: bare-time < predicate pushed to ChunkScan';
+    ELSE
+        RAISE NOTICE 'PLAN-03 FAIL: bare-time < NOT found in plan: %', plan;
+    END IF;
+END $$;
+NOTICE:  PLAN-03 PASS: bare-time < predicate pushed to ChunkScan
+-- ============================================================
+-- CORR-10: Upper-bound correctness — `bucket <= X` cv vs source
+-- ============================================================
+\echo '=== CORR-10: upper-bound result equivalence ==='
+=== CORR-10: upper-bound result equivalence ===
+WITH cv_rows AS (
+    SELECT bucket, device_id, cnt, s
+      FROM cv
+     WHERE bucket <= '2024-06-02 12:00+00'::timestamptz
+), src_rows AS (
+    SELECT time_bucket('1 hour'::interval, time) AS bucket,
+           device_id,
+           count(*) AS cnt,
+           sum(val) AS s
+      FROM m
+     WHERE time_bucket('1 hour'::interval, time) <= '2024-06-02 12:00+00'::timestamptz
+     GROUP BY bucket, device_id
+)
+SELECT
+    (SELECT count(*) FROM cv_rows) AS cv_n,
+    (SELECT count(*) FROM src_rows) AS src_n,
+    (SELECT sum(cnt) FROM cv_rows) AS cv_cnt,
+    (SELECT sum(cnt) FROM src_rows) AS src_cnt;
+ cv_n | src_n | cv_cnt | src_cnt 
+------+-------+--------+---------
+   37 |    37 |     37 |      37
+(1 row)
+
+-- ============================================================
+-- CORR-11: Strict upper-bound `bucket < X`
+-- ============================================================
+\echo '=== CORR-11: strict upper-bound (bucket < X) ==='
+=== CORR-11: strict upper-bound (bucket < X) ===
+WITH cv_rows AS (
+    SELECT bucket
+      FROM cv
+     WHERE bucket < '2024-06-02 12:00+00'::timestamptz
+), src_rows AS (
+    SELECT DISTINCT time_bucket('1 hour'::interval, time) AS bucket
+      FROM m
+     WHERE time_bucket('1 hour'::interval, time) < '2024-06-02 12:00+00'::timestamptz
+)
+SELECT
+    (SELECT count(*) FROM cv_rows) AS cv_n,
+    (SELECT count(*) FROM src_rows) AS src_n;
+ cv_n | src_n 
+------+-------
+   36 |    36
+(1 row)
+
+-- ============================================================
+-- CORR-12: BETWEEN both bounds — verifies lower + upper coexist
+-- ============================================================
+\echo '=== CORR-12: BETWEEN both bounds ==='
+=== CORR-12: BETWEEN both bounds ===
+WITH cv_rows AS (
+    SELECT bucket, device_id, cnt
+      FROM cv
+     WHERE bucket >= '2024-06-02 06:00+00'::timestamptz
+       AND bucket <= '2024-06-02 18:00+00'::timestamptz
+), src_rows AS (
+    SELECT time_bucket('1 hour'::interval, time) AS bucket, device_id,
+           count(*) AS cnt
+      FROM m
+     WHERE time_bucket('1 hour'::interval, time) >= '2024-06-02 06:00+00'::timestamptz
+       AND time_bucket('1 hour'::interval, time) <= '2024-06-02 18:00+00'::timestamptz
+     GROUP BY bucket, device_id
+)
+SELECT
+    (SELECT count(*) FROM cv_rows) AS cv_n,
+    (SELECT count(*) FROM src_rows) AS src_n,
+    (SELECT sum(cnt) FROM cv_rows) AS cv_total,
+    (SELECT sum(cnt) FROM src_rows) AS src_total;
+ cv_n | src_n | cv_total | src_total 
+------+-------+----------+-----------
+   13 |    13 |       13 |        13
+(1 row)
+
+-- ============================================================
+-- DATE-02: Upper bound on DATE column (date + interval → timestamp)
+--          Most complex type combination for the walker.
+-- ============================================================
+\echo '=== DATE-02: DATE-column upper bound ==='
+=== DATE-02: DATE-column upper bound ===
+SELECT count(*) AS cv_date_n, sum(cnt) AS cv_date_cnt
+  FROM cv_date
+ WHERE week <= '2024-06-22'::date;
+ cv_date_n | cv_date_cnt 
+-----------+-------------
+        17 |          23
+(1 row)
+
+SELECT count(DISTINCT (time_bucket('1 week'::interval, d), device_id)) AS src_n,
+       count(*) AS src_cnt
+  FROM m_date
+ WHERE time_bucket('1 week'::interval, d) <= '2024-06-22'::timestamptz;
+ src_n | src_cnt 
+-------+---------
+    17 |      23
+(1 row)
+
+-- ============================================================
+-- TS-02: Upper bound on TIMESTAMP (no TZ) column
+-- ============================================================
+\echo '=== TS-02: TIMESTAMP (no TZ) upper bound ==='
+=== TS-02: TIMESTAMP (no TZ) upper bound ===
+SELECT count(*) AS cv_ts_n, sum(cnt) AS cv_ts_cnt
+  FROM cv_ts
+ WHERE bucket <= '2024-06-02 06:00'::timestamp;
+ cv_ts_n | cv_ts_cnt 
+---------+-----------
+      31 |        31
+(1 row)
+
+SELECT count(DISTINCT (time_bucket('1 hour'::interval, t), device_id)) AS src_n,
+       count(*) AS src_cnt
+  FROM m_ts
+ WHERE time_bucket('1 hour'::interval, t) <= '2024-06-02 06:00'::timestamp;
+ src_n | src_cnt 
+-------+---------
+    31 |      31
+(1 row)
+
+-- ============================================================
+-- COMM-01: Commutator form — `Const op Var` should also push.
+--          User writes the comparison with constant on the LEFT;
+--          walker should match via get_commutator.
+-- ============================================================
+\echo '=== COMM-01: commutator form Const op Var ==='
+=== COMM-01: commutator form Const op Var ===
+-- `'2024-06-02 12:00' >= bucket` is equivalent to `bucket <= '2024-06-02 12:00'`
+DO $$
+DECLARE
+    plan TEXT := '';
+    line TEXT;
+    cur  REFCURSOR;
+    has_bare_time_upper BOOLEAN := false;
+BEGIN
+    OPEN cur FOR
+        EXPLAIN (COSTS off, TIMING off, ANALYZE off)
+        SELECT * FROM cv
+         WHERE '2024-06-02 12:00+00'::timestamptz >= bucket;
+    LOOP
+        FETCH cur INTO line;
+        EXIT WHEN NOT FOUND;
+        plan := plan || line || E'\n';
+        IF line ~ '"time" <' THEN
+            has_bare_time_upper := true;
+        END IF;
+    END LOOP;
+    CLOSE cur;
+
+    IF has_bare_time_upper THEN
+        RAISE NOTICE 'COMM-01 PASS: commutator form pushed';
+    ELSE
+        RAISE NOTICE 'COMM-01 FAIL: commutator form NOT pushed: %', plan;
+    END IF;
+END $$;
+NOTICE:  COMM-01 PASS: commutator form pushed
+-- Correctness vs symmetric form
+WITH commuted AS (
+    SELECT count(*) AS n, sum(cnt) AS c FROM cv
+     WHERE '2024-06-02 12:00+00'::timestamptz >= bucket
+), regular AS (
+    SELECT count(*) AS n, sum(cnt) AS c FROM cv
+     WHERE bucket <= '2024-06-02 12:00+00'::timestamptz
+)
+SELECT (SELECT n FROM commuted) AS commuted_n,
+       (SELECT n FROM regular) AS regular_n,
+       (SELECT c FROM commuted) AS commuted_c,
+       (SELECT c FROM regular) AS regular_c;
+ commuted_n | regular_n | commuted_c | regular_c 
+------------+-----------+------------+-----------
+         37 |        37 |         37 |        37
+(1 row)
+
+-- ============================================================
+-- COMM-02: Lower-bound commutator form
+-- ============================================================
+\echo '=== COMM-02: commutator form for lower bound ==='
+=== COMM-02: commutator form for lower bound ===
+-- `'2024-06-02 12:00' <= bucket` is equivalent to `bucket >= '2024-06-02 12:00'`
+WITH commuted AS (
+    SELECT count(*) AS n FROM cv
+     WHERE '2024-06-02 12:00+00'::timestamptz <= bucket
+), regular AS (
+    SELECT count(*) AS n FROM cv
+     WHERE bucket >= '2024-06-02 12:00+00'::timestamptz
+)
+SELECT (SELECT n FROM commuted) AS commuted_n,
+       (SELECT n FROM regular) AS regular_n;
+ commuted_n | regular_n 
+------------+-----------
+         36 |        36
+(1 row)
+
+-- ============================================================
+-- TIGHT-01: Boundary-aligned strict `<` uses tight `t < C` not `t < C+B`.
+--           Value must be AFTER the watermark so the live branch isn't
+--           eliminated by the planner (otherwise there's no ChunkScan
+--           to push the bare-time predicate onto).
+-- ============================================================
+\echo '=== TIGHT-01: boundary-aligned strict < (TIMESTAMPTZ) ==='
+=== TIGHT-01: boundary-aligned strict < (TIMESTAMPTZ) ===
+DO $$
+DECLARE
+    plan TEXT := '';
+    line TEXT;
+    cur  REFCURSOR;
+    bound_value TEXT := NULL;
+BEGIN
+    OPEN cur FOR
+        EXPLAIN (COSTS off, TIMING off, ANALYZE off)
+        SELECT * FROM cv
+         WHERE bucket < '2024-06-03 00:00+00'::timestamptz;
+    LOOP
+        FETCH cur INTO line;
+        EXIT WHEN NOT FOUND;
+        plan := plan || line || E'\n';
+        IF line ~ '"time" <' THEN
+            bound_value := substring(line FROM '"time" < ''([^'']+)''');
+        END IF;
+    END LOOP;
+    CLOSE cur;
+
+    IF bound_value IS NULL THEN
+        RAISE NOTICE 'TIGHT-01 FAIL: no "time" < pushed';
+    ELSIF bound_value LIKE '%Jun 03 00:00:00 2024%' THEN
+        RAISE NOTICE 'TIGHT-01 PASS: tight bound used (= user value exactly)';
+    ELSIF bound_value LIKE '%Jun 03 01:00:00 2024%' THEN
+        RAISE NOTICE 'TIGHT-01 FAIL: loose bound used (= user value + 1h)';
+    ELSE
+        RAISE NOTICE 'TIGHT-01 UNEXPECTED: %', bound_value;
+    END IF;
+END $$;
+NOTICE:  TIGHT-01 PASS: tight bound used (= user value exactly)
+-- ============================================================
+-- TIGHT-02: Non-aligned value uses loose `t < C + B`
+-- ============================================================
+\echo '=== TIGHT-02: non-aligned strict < (TIMESTAMPTZ) ==='
+=== TIGHT-02: non-aligned strict < (TIMESTAMPTZ) ===
+DO $$
+DECLARE
+    plan TEXT := '';
+    line TEXT;
+    cur  REFCURSOR;
+    bound_value TEXT := NULL;
+BEGIN
+    OPEN cur FOR
+        EXPLAIN (COSTS off, TIMING off, ANALYZE off)
+        SELECT * FROM cv
+         WHERE bucket < '2024-06-03 12:30+00'::timestamptz;
+    LOOP
+        FETCH cur INTO line;
+        EXIT WHEN NOT FOUND;
+        plan := plan || line || E'\n';
+        IF line ~ '"time" <' THEN
+            bound_value := substring(line FROM '"time" < ''([^'']+)''');
+        END IF;
+    END LOOP;
+    CLOSE cur;
+
+    IF bound_value LIKE '%Jun 03 13:30:00 2024%' THEN
+        RAISE NOTICE 'TIGHT-02 PASS: loose bound used (= user value + 1h)';
+    ELSE
+        RAISE NOTICE 'TIGHT-02 UNEXPECTED: %', bound_value;
+    END IF;
+END $$;
+NOTICE:  TIGHT-02 PASS: loose bound used (= user value + 1h)
+-- ============================================================
+-- ORIGIN-01: 3-arg time_bucket with origin — walker should still work
+--            but tightness optimization is skipped (boundaries shifted).
+-- ============================================================
+\echo '=== ORIGIN-01: time_bucket with origin ==='
+=== ORIGIN-01: time_bucket with origin ===
+CREATE MATERIALIZED VIEW cv_orig
+WITH (time_series.continuous) AS
+  SELECT time_bucket('1 hour'::interval, time, '2024-01-01 00:30+00'::timestamptz) AS bucket,
+         device_id, count(*) AS cnt
+    FROM m GROUP BY bucket, device_id;
+NOTICE:  continuous aggregate "cv_orig" successfully created
+DETAIL:  Materialization table: time_series._mat_cv_orig_4
+CALL refresh_continuous_aggregate('cv_orig',
+       '2024-06-01 00:00+00'::timestamptz,
+       '2024-06-02 00:00+00'::timestamptz);
+NOTICE:  refreshing continuous aggregate "cv_orig"
+-- Correctness check: cv_orig with WHERE bucket >= X matches source
+WITH cv_rows AS (
+    SELECT bucket, device_id, cnt FROM cv_orig
+     WHERE bucket >= '2024-06-02 12:30+00'::timestamptz
+), src_rows AS (
+    SELECT time_bucket('1 hour'::interval, time,
+                       '2024-01-01 00:30+00'::timestamptz) AS bucket,
+           device_id, count(*) AS cnt
+      FROM m
+     WHERE time_bucket('1 hour'::interval, time,
+                       '2024-01-01 00:30+00'::timestamptz) >= '2024-06-02 12:30+00'::timestamptz
+     GROUP BY bucket, device_id
+)
+SELECT
+    (SELECT count(*) FROM cv_rows) AS cv_n,
+    (SELECT count(*) FROM src_rows) AS src_n,
+    (SELECT sum(cnt) FROM cv_rows) AS cv_cnt,
+    (SELECT sum(cnt) FROM src_rows) AS src_cnt;
+ cv_n | src_n | cv_cnt | src_cnt 
+------+-------+--------+---------
+   35 |    35 |     35 |      35
+(1 row)
+
+-- ============================================================
+-- MONTH-01: Month interval should skip upper-bound optimization
+--           (variable length).  Lower-bound still works.  Result correct.
+-- ============================================================
+\echo '=== MONTH-01: month-interval bucket — upper bound skipped ==='
+=== MONTH-01: month-interval bucket — upper bound skipped ===
+CREATE TABLE m_month (
+    time TIMESTAMPTZ NOT NULL,
+    device_id INT,
+    val INT
+) USING time_series WITH (
+    ts_partition_column = 'time',
+    ts_chunk_interval   = '7 day',
+    ts_chunk_origin     = '2020-01-01'
+) DISTRIBUTED BY (device_id);
+INSERT INTO m_month
+SELECT '2024-01-01 00:00+00'::timestamptz + (i * interval '5 day'),
+       (i % 3) + 1, i
+  FROM generate_series(0, 30) i;
+ANALYZE m_month;
+CREATE MATERIALIZED VIEW cv_month
+WITH (time_series.continuous) AS
+  SELECT time_bucket('1 month'::interval, time) AS bucket,
+         device_id, count(*) AS cnt
+    FROM m_month GROUP BY bucket, device_id;
+NOTICE:  continuous aggregate "cv_month" successfully created
+DETAIL:  Materialization table: time_series._mat_cv_month_5
+CALL refresh_continuous_aggregate('cv_month',
+       '2024-01-01 00:00+00'::timestamptz,
+       '2024-03-01 00:00+00'::timestamptz);
+NOTICE:  refreshing continuous aggregate "cv_month"
+-- Walker should NOT push bare-time upper bound (month interval skipped).
+DO $$
+DECLARE
+    plan TEXT := '';
+    line TEXT;
+    cur  REFCURSOR;
+    has_bare_time_upper BOOLEAN := false;
+BEGIN
+    OPEN cur FOR
+        EXPLAIN (COSTS off, TIMING off, ANALYZE off)
+        SELECT * FROM cv_month
+         WHERE bucket <= '2024-03-01 00:00+00'::timestamptz;
+    LOOP
+        FETCH cur INTO line;
+        EXIT WHEN NOT FOUND;
+        plan := plan || line || E'\n';
+        IF line ~ '"time" <' THEN
+            has_bare_time_upper := true;
+        END IF;
+    END LOOP;
+    CLOSE cur;
+
+    IF has_bare_time_upper THEN
+        RAISE NOTICE 'MONTH-01 NOTE: month-interval upper bound was pushed';
+    ELSE
+        RAISE NOTICE 'MONTH-01 PASS: month-interval upper bound skipped (safe)';
+    END IF;
+END $$;
+NOTICE:  MONTH-01 PASS: month-interval upper bound skipped (safe)
+-- Correctness still holds: cv_month matches source aggregation.
+WITH cv_rows AS (
+    SELECT count(*) AS n, sum(cnt) AS c FROM cv_month
+     WHERE bucket <= '2024-03-01 00:00+00'::timestamptz
+), src_rows AS (
+    SELECT count(*) AS n, sum(c) AS c FROM (
+        SELECT time_bucket('1 month'::interval, time) AS bucket,
+               device_id, count(*) AS c
+          FROM m_month
+         WHERE time_bucket('1 month'::interval, time) <= '2024-03-01 00:00+00'::timestamptz
+         GROUP BY bucket, device_id
+    ) s
+)
+SELECT (SELECT n FROM cv_rows) AS cv_n,
+       (SELECT n FROM src_rows) AS src_n,
+       (SELECT c FROM cv_rows) AS cv_c,
+       (SELECT c FROM src_rows) AS src_c;
+ cv_n | src_n | cv_c | src_c 
+------+-------+------+-------
+    9 |     9 |   19 |    19
+(1 row)
+
+-- ============================================================
+-- EXTREME-01: Timestamp value close to year 9000 — overflow guard
+--             should make walker skip optimization without crash.
+-- ============================================================
+\echo '=== EXTREME-01: extreme timestamp value ==='
+=== EXTREME-01: extreme timestamp value ===
+\set ON_ERROR_STOP 0
+-- Query with extreme RHS.  Should not crash; result is irrelevant
+-- (since source data is from 2024).
+SELECT count(*) FROM cv
+ WHERE bucket <= '9999-12-31 23:59+00'::timestamptz;
+ count 
+-------
+    72
+(1 row)
+
+\set ON_ERROR_STOP 1
+\echo '>>> EXTREME-01 PASS if no crash above'
+>>> EXTREME-01 PASS if no crash above
+-- ============================================================
+-- TIGHT-03: DATE column tightness — value on 1-week boundary
+--           uses tight `d < value`, no `+ interval`.
+-- ============================================================
+\echo '=== TIGHT-03: DATE column boundary-aligned tightness ==='
+=== TIGHT-03: DATE column boundary-aligned tightness ===
+DO $$
+DECLARE
+    plan TEXT := '';
+    line TEXT;
+    cur  REFCURSOR;
+    bound_value TEXT := NULL;
+BEGIN
+    OPEN cur FOR
+        EXPLAIN (COSTS off, TIMING off, ANALYZE off)
+        SELECT * FROM cv_date
+         WHERE week < '2024-06-29'::date;  -- day 8946 from epoch = 7*1278 ✓
+    LOOP
+        FETCH cur INTO line;
+        EXIT WHEN NOT FOUND;
+        plan := plan || line || E'\n';
+        IF line ~ '\(d <' THEN
+            bound_value := substring(line FROM '\(d < ''([^'']+)''');
+        END IF;
+    END LOOP;
+    CLOSE cur;
+
+    IF bound_value IS NULL THEN
+        RAISE NOTICE 'TIGHT-03 SKIP: no "d <" predicate pushed';
+    ELSIF bound_value LIKE '%2024-06-29%' OR bound_value LIKE '%06-29-2024%' THEN
+        RAISE NOTICE 'TIGHT-03 PASS: tight bound (= user date exactly: %)', bound_value;
+    ELSE
+        RAISE NOTICE 'TIGHT-03 NOTE: bound = % (may be loose form)', bound_value;
+    END IF;
+END $$;
+NOTICE:  TIGHT-03 PASS: tight bound (= user date exactly: 06-29-2024)
+-- ============================================================
+-- TIGHT-04: Commutator form + boundary aligned + strict <
+--           `'X' > bucket` is commutator of `bucket < 'X'`.
+--           Walker should match commutator AND apply tightness.
+-- ============================================================
+\echo '=== TIGHT-04: commutator + tightness combo ==='
+=== TIGHT-04: commutator + tightness combo ===
+DO $$
+DECLARE
+    plan TEXT := '';
+    line TEXT;
+    cur  REFCURSOR;
+    bound_value TEXT := NULL;
+BEGIN
+    OPEN cur FOR
+        EXPLAIN (COSTS off, TIMING off, ANALYZE off)
+        SELECT * FROM cv
+         WHERE '2024-06-03 00:00+00'::timestamptz > bucket;
+    LOOP
+        FETCH cur INTO line;
+        EXIT WHEN NOT FOUND;
+        plan := plan || line || E'\n';
+        IF line ~ '"time" <' THEN
+            bound_value := substring(line FROM '"time" < ''([^'']+)''');
+        END IF;
+    END LOOP;
+    CLOSE cur;
+
+    IF bound_value IS NULL THEN
+        RAISE NOTICE 'TIGHT-04 FAIL: no "time" < pushed (commutator may have failed)';
+    ELSIF bound_value LIKE '%Jun 03 00:00:00 2024%' THEN
+        RAISE NOTICE 'TIGHT-04 PASS: tight bound via commutator (= value exactly)';
+    ELSIF bound_value LIKE '%Jun 03 01:00:00 2024%' THEN
+        RAISE NOTICE 'TIGHT-04 NOTE: commutator works but tightness not applied (= value + 1h)';
+    ELSE
+        RAISE NOTICE 'TIGHT-04 UNEXPECTED: %', bound_value;
+    END IF;
+END $$;
+NOTICE:  TIGHT-04 PASS: tight bound via commutator (= value exactly)
+-- ============================================================
+-- TZ-01: 5-arg time_bucket with timezone — walker accepts the
+--        extra arguments and pushdown still works correctly.
+-- ============================================================
+\echo '=== TZ-01: time_bucket with timezone (5-arg variant) ==='
+=== TZ-01: time_bucket with timezone (5-arg variant) ===
+CREATE MATERIALIZED VIEW cv_tz
+WITH (time_series.continuous) AS
+  SELECT time_bucket('1 hour'::interval, time,
+                     'Asia/Shanghai'::text,
+                     '2024-01-01 00:00+00'::timestamptz,
+                     NULL::interval) AS bucket,
+         device_id, count(*) AS cnt
+    FROM m GROUP BY bucket, device_id;
+NOTICE:  continuous aggregate "cv_tz" successfully created
+DETAIL:  Materialization table: time_series._mat_cv_tz_6
+CALL refresh_continuous_aggregate('cv_tz',
+       '2024-06-01 00:00+00'::timestamptz,
+       '2024-06-02 00:00+00'::timestamptz);
+NOTICE:  refreshing continuous aggregate "cv_tz"
+-- Correctness vs source.
+WITH cv_rows AS (
+    SELECT count(*) AS n, sum(cnt) AS c
+      FROM cv_tz
+     WHERE bucket >= '2024-06-02 12:00+00'::timestamptz
+), src_rows AS (
+    SELECT count(*) AS n, sum(c) AS c FROM (
+        SELECT time_bucket('1 hour'::interval, time,
+                           'Asia/Shanghai'::text,
+                           '2024-01-01 00:00+00'::timestamptz,
+                           NULL::interval) AS bucket,
+               device_id, count(*) AS c
+          FROM m
+         WHERE time_bucket('1 hour'::interval, time,
+                           'Asia/Shanghai'::text,
+                           '2024-01-01 00:00+00'::timestamptz,
+                           NULL::interval) >= '2024-06-02 12:00+00'::timestamptz
+         GROUP BY bucket, device_id
+    ) s
+)
+SELECT (SELECT n FROM cv_rows) AS cv_n,
+       (SELECT n FROM src_rows) AS src_n,
+       (SELECT c FROM cv_rows) AS cv_c,
+       (SELECT c FROM src_rows) AS src_c;
+ cv_n | src_n | cv_c | src_c 
+------+-------+------+-------
+   36 |    36 |   36 |    36
+(1 row)
+
+DROP VIEW cv_tz CASCADE;
+DROP TABLE m_month CASCADE;
+NOTICE:  drop cascades to 3 other objects
+DETAIL:  drop cascades to view _partial_view_5
+drop cascades to view _direct_view_5
+drop cascades to view cv_month
+NOTICE:  view "cv_month" does not exist, skipping
+DROP VIEW cv_orig CASCADE;
+-- ============================================================
+-- IDEMP-01: Run the same query twice — walker should not crash
+--           even if it runs twice on the same parse tree.
+-- ============================================================
+\echo '=== IDEMP-01: repeated execution ==='
+=== IDEMP-01: repeated execution ===
+SELECT count(*) FROM cv WHERE bucket >= '2024-06-02 12:00+00'::timestamptz;
+ count 
+-------
+    36
+(1 row)
+
+SELECT count(*) FROM cv WHERE bucket >= '2024-06-02 12:00+00'::timestamptz;
+ count 
+-------
+    36
+(1 row)
+
+SELECT count(*) FROM cv WHERE bucket >= '2024-06-02 12:00+00'::timestamptz;
+ count 
+-------
+    36
+(1 row)
+
+-- ============================================================
+-- Cleanup
+-- ============================================================
+\echo '=== Cleanup ==='
+=== Cleanup ===
+DROP TABLE m CASCADE;
+NOTICE:  drop cascades to 3 other objects
+DETAIL:  drop cascades to view _partial_view_1
+drop cascades to view _direct_view_1
+drop cascades to view cv
+NOTICE:  view "cv" does not exist, skipping
+DROP TABLE m_date CASCADE;
+NOTICE:  drop cascades to 3 other objects
+DETAIL:  drop cascades to view _partial_view_2
+drop cascades to view _direct_view_2
+drop cascades to view cv_date
+NOTICE:  view "cv_date" does not exist, skipping
+DROP TABLE m_ts CASCADE;
+NOTICE:  drop cascades to 3 other objects
+DETAIL:  drop cascades to view _partial_view_3
+drop cascades to view _direct_view_3
+drop cascades to view cv_ts
+NOTICE:  view "cv_ts" does not exist, skipping
+DROP EXTENSION time_series CASCADE;

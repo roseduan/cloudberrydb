@@ -1,0 +1,38 @@
+Parsed test spec with 3 sessions
+
+starting permutation: s1_begin s1_insert s2_begin s2_insert s1_commit s2_commit c_chunk_rows c_distinct_chunks c_data_rows
+step s1_begin: BEGIN;
+step s1_insert: INSERT INTO ts_race VALUES ('2025-06-15 12:00:00+00', 1, 1);
+step s2_begin: BEGIN;
+step s2_insert: INSERT INTO ts_race VALUES ('2025-06-15 12:00:00+00', 2, 2);
+step s1_commit: COMMIT;
+step s2_commit: COMMIT;
+step c_chunk_rows: 
+    SELECT count(*) AS chunk_rows
+    FROM gp_dist_random('time_series.ts_chunk')
+    WHERE table_oid = 'ts_race'::regclass;
+
+chunk_rows
+----------
+         2
+(1 row)
+
+step c_distinct_chunks: 
+    SELECT count(*) AS distinct_chunks
+    FROM (
+        SELECT DISTINCT gp_segment_id, chunk_number
+        FROM gp_dist_random('time_series.ts_chunk')
+        WHERE table_oid = 'ts_race'::regclass
+    ) t;
+
+distinct_chunks
+---------------
+              1
+(1 row)
+
+step c_data_rows: SELECT count(*) AS data_rows FROM ts_race;
+data_rows
+---------
+        2
+(1 row)
+

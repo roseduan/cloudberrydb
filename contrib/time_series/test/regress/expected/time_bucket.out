@@ -1,0 +1,1650 @@
+-- Regression tests for time_series extension: time_bucket
+-- Adapted from TimescaleDB test/sql/timestamp.sql.in (Apache 2.0)
+CREATE EXTENSION time_series;
+WARNING:  referential integrity (FOREIGN KEY) constraints are not supported in Apache Cloudberry, will not be enforced
+-- Fix session timezone so expected output is stable across environments.
+SET timezone = 'PST8PDT';
+-- 1.1 Date bucketing: non-integer-day intervals should error
+\set ON_ERROR_STOP 0
+SELECT time_series.time_bucket('1 hour', DATE '2012-01-01');
+ERROR:  interval must not have sub-day precision
+SELECT time_series.time_bucket('25 hour', DATE '2012-01-01');
+ERROR:  interval must be a multiple of a day
+\set ON_ERROR_STOP 1
+-- 1.2 Basic timestamp bucketing (1 day)
+SELECT time_series.time_bucket(INTERVAL '1 day', TIMESTAMP '2011-01-02 01:01:01');
+       time_bucket        
+--------------------------
+ Sun Jan 02 00:00:00 2011
+(1 row)
+
+-- 1.3 Timestamp bucketing (2 day interval)
+SELECT time, time_series.time_bucket(INTERVAL '2 day', time)
+FROM unnest(ARRAY[
+    TIMESTAMP '2011-01-01 01:01:01',
+    TIMESTAMP '2011-01-02 01:01:01',
+    TIMESTAMP '2011-01-03 01:01:01',
+    TIMESTAMP '2011-01-04 01:01:01'
+    ]) AS time;
+           time           |       time_bucket        
+--------------------------+--------------------------
+ Sat Jan 01 01:01:01 2011 | Sat Jan 01 00:00:00 2011
+ Sun Jan 02 01:01:01 2011 | Sat Jan 01 00:00:00 2011
+ Mon Jan 03 01:01:01 2011 | Mon Jan 03 00:00:00 2011
+ Tue Jan 04 01:01:01 2011 | Mon Jan 03 00:00:00 2011
+(4 rows)
+
+-- 1.4 Multiple interval sizes
+SELECT int_def, time_series.time_bucket(int_def, TIMESTAMP '2011-01-02 01:01:01.111')
+FROM unnest(ARRAY[
+    INTERVAL '1 millisecond',
+    INTERVAL '1 second',
+    INTERVAL '1 minute',
+    INTERVAL '1 hour',
+    INTERVAL '1 day',
+    INTERVAL '2 millisecond',
+    INTERVAL '2 second',
+    INTERVAL '2 minute',
+    INTERVAL '2 hour',
+    INTERVAL '2 day'
+    ]) AS int_def;
+   int_def    |         time_bucket          
+--------------+------------------------------
+ @ 0.001 secs | Sun Jan 02 01:01:01.111 2011
+ @ 1 sec      | Sun Jan 02 01:01:01 2011
+ @ 1 min      | Sun Jan 02 01:01:00 2011
+ @ 1 hour     | Sun Jan 02 01:00:00 2011
+ @ 1 day      | Sun Jan 02 00:00:00 2011
+ @ 0.002 secs | Sun Jan 02 01:01:01.11 2011
+ @ 2 secs     | Sun Jan 02 01:01:00 2011
+ @ 2 mins     | Sun Jan 02 01:00:00 2011
+ @ 2 hours    | Sun Jan 02 00:00:00 2011
+ @ 2 days     | Sat Jan 01 00:00:00 2011
+(10 rows)
+
+-- 1.5 Mixed month+day intervals should error
+\set ON_ERROR_STOP 0
+SELECT time_series.time_bucket(INTERVAL '1 year 1d', TIMESTAMP '2011-01-02 01:01:01.111');
+ERROR:  month intervals cannot have day or time component
+SELECT time_series.time_bucket(INTERVAL '1 month 1 minute', TIMESTAMP '2011-01-02 01:01:01.111');
+ERROR:  month intervals cannot have day or time component
+\set ON_ERROR_STOP 1
+-- 1.6 5-minute bucketing (epoch alignment)
+SELECT time, time_series.time_bucket(INTERVAL '5 minute', time)
+FROM unnest(ARRAY[
+    TIMESTAMP '1970-01-01 00:59:59.999999',
+    TIMESTAMP '1970-01-01 01:01:00',
+    TIMESTAMP '1970-01-01 01:04:59.999999',
+    TIMESTAMP '1970-01-01 01:05:00'
+    ]) AS time;
+              time               |       time_bucket        
+---------------------------------+--------------------------
+ Thu Jan 01 00:59:59.999999 1970 | Thu Jan 01 00:55:00 1970
+ Thu Jan 01 01:01:00 1970        | Thu Jan 01 01:00:00 1970
+ Thu Jan 01 01:04:59.999999 1970 | Thu Jan 01 01:00:00 1970
+ Thu Jan 01 01:05:00 1970        | Thu Jan 01 01:05:00 1970
+(4 rows)
+
+SELECT time, time_series.time_bucket(INTERVAL '5 minute', time)
+FROM unnest(ARRAY[
+    TIMESTAMP '2011-01-02 01:04:59.999999',
+    TIMESTAMP '2011-01-02 01:05:00',
+    TIMESTAMP '2011-01-02 01:09:59.999999',
+    TIMESTAMP '2011-01-02 01:10:00'
+    ]) AS time;
+              time               |       time_bucket        
+---------------------------------+--------------------------
+ Sun Jan 02 01:04:59.999999 2011 | Sun Jan 02 01:00:00 2011
+ Sun Jan 02 01:05:00 2011        | Sun Jan 02 01:05:00 2011
+ Sun Jan 02 01:09:59.999999 2011 | Sun Jan 02 01:05:00 2011
+ Sun Jan 02 01:10:00 2011        | Sun Jan 02 01:10:00 2011
+(4 rows)
+
+-- 1.7 Positive offset
+SELECT time, time_series.time_bucket(INTERVAL '5 minute', time, INTERVAL '2 minutes')
+FROM unnest(ARRAY[
+    TIMESTAMP '2011-01-02 01:01:59.999999',
+    TIMESTAMP '2011-01-02 01:02:00',
+    TIMESTAMP '2011-01-02 01:06:59.999999',
+    TIMESTAMP '2011-01-02 01:07:00'
+    ]) AS time;
+              time               |       time_bucket        
+---------------------------------+--------------------------
+ Sun Jan 02 01:01:59.999999 2011 | Sun Jan 02 00:57:00 2011
+ Sun Jan 02 01:02:00 2011        | Sun Jan 02 01:02:00 2011
+ Sun Jan 02 01:06:59.999999 2011 | Sun Jan 02 01:02:00 2011
+ Sun Jan 02 01:07:00 2011        | Sun Jan 02 01:07:00 2011
+(4 rows)
+
+-- 1.8 Negative offset
+SELECT time, time_series.time_bucket(INTERVAL '5 minute', time, - INTERVAL '2 minutes')
+FROM unnest(ARRAY[
+    TIMESTAMP '2011-01-02 01:02:59.999999',
+    TIMESTAMP '2011-01-02 01:03:00',
+    TIMESTAMP '2011-01-02 01:07:59.999999',
+    TIMESTAMP '2011-01-02 01:08:00'
+    ]) AS time;
+              time               |       time_bucket        
+---------------------------------+--------------------------
+ Sun Jan 02 01:02:59.999999 2011 | Sun Jan 02 00:58:00 2011
+ Sun Jan 02 01:03:00 2011        | Sun Jan 02 01:03:00 2011
+ Sun Jan 02 01:07:59.999999 2011 | Sun Jan 02 01:03:00 2011
+ Sun Jan 02 01:08:00 2011        | Sun Jan 02 01:08:00 2011
+(4 rows)
+
+-- 1.9 Infinity handling — timestamp
+SELECT time, time_series.time_bucket(INTERVAL '1 week', time, INTERVAL '1 day')
+FROM unnest(ARRAY[
+    timestamp '-Infinity',
+    timestamp 'Infinity'
+    ]) AS time;
+   time    | time_bucket 
+-----------+-------------
+ -infinity | -infinity
+ infinity  | infinity
+(2 rows)
+
+-- 1.10 Infinity handling — timestamptz
+SELECT time, time_series.time_bucket(INTERVAL '1 week', time, INTERVAL '1 day')
+FROM unnest(ARRAY[
+    timestamp with time zone '-Infinity',
+    timestamp with time zone 'Infinity'
+    ]) AS time;
+   time    | time_bucket 
+-----------+-------------
+ -infinity | -infinity
+ infinity  | infinity
+(2 rows)
+
+-- 1.11 Infinity handling — date
+SELECT date, time_series.time_bucket(INTERVAL '1 week', date, INTERVAL '1 day')
+FROM unnest(ARRAY[
+    date '-Infinity',
+    date 'Infinity'
+    ]) AS date;
+   date    | time_bucket 
+-----------+-------------
+ -infinity | -infinity
+ infinity  | infinity
+(2 rows)
+
+-- 1.12 Timestamptz with UTC
+SET timezone TO 'UTC';
+SELECT time, time_series.time_bucket(INTERVAL '1 hour', time)
+FROM unnest(ARRAY[
+    TIMESTAMP WITH TIME ZONE '2011-01-02 01:01:01',
+    TIMESTAMP WITH TIME ZONE '2011-01-02 01:01:01+01',
+    TIMESTAMP WITH TIME ZONE '2011-01-02 01:01:01+02'
+    ]) AS time;
+             time             |         time_bucket          
+------------------------------+------------------------------
+ Sun Jan 02 01:01:01 2011 UTC | Sun Jan 02 01:00:00 2011 UTC
+ Sun Jan 02 00:01:01 2011 UTC | Sun Jan 02 00:00:00 2011 UTC
+ Sat Jan 01 23:01:01 2011 UTC | Sat Jan 01 23:00:00 2011 UTC
+(3 rows)
+
+SELECT time, time_series.time_bucket(INTERVAL '1 day', time)
+FROM unnest(ARRAY[
+    TIMESTAMP WITH TIME ZONE '2011-01-02 01:01:01',
+    TIMESTAMP WITH TIME ZONE '2011-01-02 01:01:01+01',
+    TIMESTAMP WITH TIME ZONE '2011-01-02 01:01:01+02'
+    ]) AS time;
+             time             |         time_bucket          
+------------------------------+------------------------------
+ Sun Jan 02 01:01:01 2011 UTC | Sun Jan 02 00:00:00 2011 UTC
+ Sun Jan 02 00:01:01 2011 UTC | Sun Jan 02 00:00:00 2011 UTC
+ Sat Jan 01 23:01:01 2011 UTC | Sat Jan 01 00:00:00 2011 UTC
+(3 rows)
+
+-- 1.13 Timestamptz with America/New_York
+SET timezone TO 'America/New_York';
+SELECT time, time_series.time_bucket(INTERVAL '1 hour', time)
+FROM unnest(ARRAY[
+    TIMESTAMP WITH TIME ZONE '2011-01-02 01:01:01',
+    TIMESTAMP WITH TIME ZONE '2011-01-02 01:01:01+01',
+    TIMESTAMP WITH TIME ZONE '2011-01-02 01:01:01+02'
+    ]) AS time;
+             time             |         time_bucket          
+------------------------------+------------------------------
+ Sun Jan 02 01:01:01 2011 EST | Sun Jan 02 01:00:00 2011 EST
+ Sat Jan 01 19:01:01 2011 EST | Sat Jan 01 19:00:00 2011 EST
+ Sat Jan 01 18:01:01 2011 EST | Sat Jan 01 18:00:00 2011 EST
+(3 rows)
+
+-- 1.14 Timestamptz day bucketing (UTC-aligned, not local)
+SELECT time, time_series.time_bucket(INTERVAL '1 day', time)
+FROM unnest(ARRAY[
+    TIMESTAMP WITH TIME ZONE '2011-01-02 01:01:01',
+    TIMESTAMP WITH TIME ZONE '2011-01-03 01:01:01+01',
+    TIMESTAMP WITH TIME ZONE '2011-01-04 01:01:01+02'
+    ]) AS time;
+             time             |         time_bucket          
+------------------------------+------------------------------
+ Sun Jan 02 01:01:01 2011 EST | Sat Jan 01 19:00:00 2011 EST
+ Sun Jan 02 19:01:01 2011 EST | Sun Jan 02 19:00:00 2011 EST
+ Mon Jan 03 18:01:01 2011 EST | Sun Jan 02 19:00:00 2011 EST
+(3 rows)
+
+-- 1.15 DST boundary handling
+SELECT time, time_series.time_bucket(INTERVAL '1 hour', time)
+FROM unnest(ARRAY[
+    TIMESTAMP WITH TIME ZONE '2017-11-05 12:05:00+07',
+    TIMESTAMP WITH TIME ZONE '2017-11-05 13:05:00+07'
+    ]) AS time;
+             time             |         time_bucket          
+------------------------------+------------------------------
+ Sun Nov 05 01:05:00 2017 EDT | Sun Nov 05 01:00:00 2017 EDT
+ Sun Nov 05 01:05:00 2017 EST | Sun Nov 05 01:00:00 2017 EST
+(2 rows)
+
+SELECT time, time_series.time_bucket(INTERVAL '2 hour', time)
+FROM unnest(ARRAY[
+    TIMESTAMP WITH TIME ZONE '2017-11-05 10:05:00+07',
+    TIMESTAMP WITH TIME ZONE '2017-11-05 12:05:00+07',
+    TIMESTAMP WITH TIME ZONE '2017-11-05 13:05:00+07',
+    TIMESTAMP WITH TIME ZONE '2017-11-05 15:05:00+07'
+    ]) AS time;
+             time             |         time_bucket          
+------------------------------+------------------------------
+ Sat Nov 04 23:05:00 2017 EDT | Sat Nov 04 22:00:00 2017 EDT
+ Sun Nov 05 01:05:00 2017 EDT | Sun Nov 05 00:00:00 2017 EDT
+ Sun Nov 05 01:05:00 2017 EST | Sun Nov 05 01:00:00 2017 EST
+ Sun Nov 05 03:05:00 2017 EST | Sun Nov 05 03:00:00 2017 EST
+(4 rows)
+
+RESET timezone;
+-- 1.16 Smallint bucketing
+SELECT time,
+    time_series.time_bucket(10::smallint, time) AS tb
+FROM unnest(ARRAY[
+     '-11', '-10', '-9', '-1', '0', '1', '99', '100', '109', '110'
+    ]::smallint[]) AS time;
+ time | tb  
+------+-----
+  -11 | -20
+  -10 | -10
+   -9 | -10
+   -1 | -10
+    0 |   0
+    1 |   0
+   99 |  90
+  100 | 100
+  109 | 100
+  110 | 110
+(10 rows)
+
+-- 1.17 Smallint with positive offset
+SELECT time,
+    time_series.time_bucket(10::smallint, time, 2::smallint) AS tb
+FROM unnest(ARRAY[
+      '-9', '-8', '-7', '1', '2', '3', '101', '102', '111', '112'
+    ]::smallint[]) AS time;
+ time | tb  
+------+-----
+   -9 | -18
+   -8 |  -8
+   -7 |  -8
+    1 |  -8
+    2 |   2
+    3 |   2
+  101 |  92
+  102 | 102
+  111 | 102
+  112 | 112
+(10 rows)
+
+-- 1.18 Smallint with negative offset
+SELECT time,
+    time_series.time_bucket(10::smallint, time, -2::smallint) AS tb
+FROM unnest(ARRAY[
+    '-13', '-12', '-11', '-3', '-2', '-1', '97', '98', '107', '108'
+    ]::smallint[]) AS time;
+ time | tb  
+------+-----
+  -13 | -22
+  -12 | -12
+  -11 | -12
+   -3 | -12
+   -2 |  -2
+   -1 |  -2
+   97 |  88
+   98 |  98
+  107 |  98
+  108 | 108
+(10 rows)
+
+-- 1.19 Smallint overflow errors
+\set ON_ERROR_STOP 0
+SELECT time_series.time_bucket(10::smallint, '-32768'::smallint);
+ERROR:  timestamp out of range
+SELECT time_series.time_bucket(10::smallint, '-32761'::smallint);
+ERROR:  timestamp out of range
+SELECT time_series.time_bucket(10::smallint, '-32768'::smallint, 1000::smallint);
+ERROR:  timestamp out of range
+SELECT time_series.time_bucket(10::smallint, '-32768'::smallint, '32767'::smallint);
+ERROR:  timestamp out of range
+SELECT time_series.time_bucket(10::smallint, '32767'::smallint, '-32768'::smallint);
+ERROR:  timestamp out of range
+\set ON_ERROR_STOP 1
+SELECT time, time_series.time_bucket(10::smallint, time)
+FROM unnest(ARRAY['-32760', '-32759', '32767']::smallint[]) AS time;
+  time  | time_bucket 
+--------+-------------
+ -32760 |      -32760
+ -32759 |      -32760
+  32767 |       32760
+(3 rows)
+
+-- 1.20 Int overflow errors
+\set ON_ERROR_STOP 0
+SELECT time_series.time_bucket(10::int, '-2147483648'::int);
+ERROR:  timestamp out of range
+SELECT time_series.time_bucket(10::int, '-2147483641'::int);
+ERROR:  timestamp out of range
+SELECT time_series.time_bucket(1000::int, '-2147483000'::int, 1::int);
+ERROR:  timestamp out of range
+SELECT time_series.time_bucket(1000::int, '-2147483648'::int, '2147483647'::int);
+ERROR:  timestamp out of range
+SELECT time_series.time_bucket(1000::int, '2147483647'::int, '-2147483648'::int);
+ERROR:  timestamp out of range
+\set ON_ERROR_STOP 1
+SELECT time, time_series.time_bucket(10::int, time)
+FROM unnest(ARRAY['-2147483640', '-2147483639', '2147483647']::int[]) AS time;
+    time     | time_bucket 
+-------------+-------------
+ -2147483640 | -2147483640
+ -2147483639 | -2147483640
+  2147483647 |  2147483640
+(3 rows)
+
+-- 1.21 Bigint overflow errors
+\set ON_ERROR_STOP 0
+SELECT time_series.time_bucket(10::bigint, '-9223372036854775808'::bigint);
+ERROR:  timestamp out of range
+SELECT time_series.time_bucket(10::bigint, '-9223372036854775801'::bigint);
+ERROR:  timestamp out of range
+SELECT time_series.time_bucket(1000::bigint, '-9223372036854775000'::bigint, 1::bigint);
+ERROR:  timestamp out of range
+SELECT time_series.time_bucket(1000::bigint, '-9223372036854775808'::bigint, '9223372036854775807'::bigint);
+ERROR:  timestamp out of range
+SELECT time_series.time_bucket(1000::bigint, '9223372036854775807'::bigint, '-9223372036854775808'::bigint);
+ERROR:  timestamp out of range
+\set ON_ERROR_STOP 1
+SELECT time, time_series.time_bucket(10::bigint, time)
+FROM unnest(ARRAY['-9223372036854775800', '-9223372036854775799', '9223372036854775807']::bigint[]) AS time;
+         time         |     time_bucket      
+----------------------+----------------------
+ -9223372036854775800 | -9223372036854775800
+ -9223372036854775799 | -9223372036854775800
+  9223372036854775807 |  9223372036854775800
+(3 rows)
+
+-- 1.22 Date bucketing (1 day, 4 day)
+SELECT time, time_series.time_bucket(INTERVAL '1 day', time::date)
+FROM unnest(ARRAY[
+    date '2017-11-05',
+    date '2017-11-06'
+    ]) AS time;
+    time    | time_bucket 
+------------+-------------
+ 11-05-2017 | 11-05-2017
+ 11-06-2017 | 11-06-2017
+(2 rows)
+
+SELECT time, time_series.time_bucket(INTERVAL '4 day', time::date)
+FROM unnest(ARRAY[
+    date '2017-11-04',
+    date '2017-11-05',
+    date '2017-11-08',
+    date '2017-11-09'
+    ]) AS time;
+    time    | time_bucket 
+------------+-------------
+ 11-04-2017 | 11-01-2017
+ 11-05-2017 | 11-05-2017
+ 11-08-2017 | 11-05-2017
+ 11-09-2017 | 11-09-2017
+(4 rows)
+
+-- 1.23 Date bucketing with offset
+SELECT time, time_series.time_bucket(INTERVAL '4 day', time::date, INTERVAL '2 day')
+FROM unnest(ARRAY[
+    date '2017-11-06',
+    date '2017-11-07',
+    date '2017-11-10',
+    date '2017-11-11'
+    ]) AS time;
+    time    | time_bucket 
+------------+-------------
+ 11-06-2017 | 11-03-2017
+ 11-07-2017 | 11-07-2017
+ 11-10-2017 | 11-07-2017
+ 11-11-2017 | 11-11-2017
+(4 rows)
+
+-- 1.24 Week bucketing (date)
+SELECT time, time_series.time_bucket(INTERVAL '1 week', time::date)
+FROM unnest(ARRAY[
+    date '2018-09-16',
+    date '2018-09-17',
+    date '2018-09-23',
+    date '2018-09-24'
+    ]) AS time;
+    time    | time_bucket 
+------------+-------------
+ 09-16-2018 | 09-10-2018
+ 09-17-2018 | 09-17-2018
+ 09-23-2018 | 09-17-2018
+ 09-24-2018 | 09-24-2018
+(4 rows)
+
+-- 1.25 Week bucketing (timestamp)
+SELECT time, time_series.time_bucket(INTERVAL '1 week', time)
+FROM unnest(ARRAY[
+    timestamp without time zone '2018-09-16',
+    timestamp without time zone '2018-09-17',
+    timestamp without time zone '2018-09-23',
+    timestamp without time zone '2018-09-24'
+    ]) AS time;
+           time           |       time_bucket        
+--------------------------+--------------------------
+ Sun Sep 16 00:00:00 2018 | Mon Sep 10 00:00:00 2018
+ Mon Sep 17 00:00:00 2018 | Mon Sep 17 00:00:00 2018
+ Sun Sep 23 00:00:00 2018 | Mon Sep 17 00:00:00 2018
+ Mon Sep 24 00:00:00 2018 | Mon Sep 24 00:00:00 2018
+(4 rows)
+
+-- 1.26 Week bucketing (timestamptz)
+SELECT time, time_series.time_bucket(INTERVAL '1 week', time)
+FROM unnest(ARRAY[
+    timestamp with time zone '2018-09-16',
+    timestamp with time zone '2018-09-17',
+    timestamp with time zone '2018-09-23',
+    timestamp with time zone '2018-09-24'
+    ]) AS time;
+             time             |         time_bucket          
+------------------------------+------------------------------
+ Sun Sep 16 00:00:00 2018 PDT | Sun Sep 09 17:00:00 2018 PDT
+ Mon Sep 17 00:00:00 2018 PDT | Sun Sep 16 17:00:00 2018 PDT
+ Sun Sep 23 00:00:00 2018 PDT | Sun Sep 16 17:00:00 2018 PDT
+ Mon Sep 24 00:00:00 2018 PDT | Sun Sep 23 17:00:00 2018 PDT
+(4 rows)
+
+-- 1.27 Week bucketing with infinity
+SELECT time, time_series.time_bucket(INTERVAL '1 week', time)
+FROM unnest(ARRAY[
+    timestamp with time zone '-Infinity',
+    timestamp with time zone 'Infinity'
+    ]) AS time;
+   time    | time_bucket 
+-----------+-------------
+ -infinity | -infinity
+ infinity  | infinity
+(2 rows)
+
+SELECT time, time_series.time_bucket(INTERVAL '1 week', time)
+FROM unnest(ARRAY[
+    timestamp without time zone '-Infinity',
+    timestamp without time zone 'Infinity'
+    ]) AS time;
+   time    | time_bucket 
+-----------+-------------
+ -infinity | -infinity
+ infinity  | infinity
+(2 rows)
+
+-- 1.28 Week alignment with date_trunc (far dates)
+SELECT time, time_series.time_bucket(INTERVAL '1 week', time),
+       date_trunc('week', time) = time_series.time_bucket(INTERVAL '1 week', time)
+FROM unnest(ARRAY[
+    timestamp without time zone '4714-11-24 01:01:01.0 BC',
+    timestamp without time zone '294276-12-31 23:59:59.9999'
+    ]) AS time;
+              time               |         time_bucket         | ?column? 
+---------------------------------+-----------------------------+----------
+ Mon Nov 24 01:01:01 4714 BC     | Mon Nov 24 00:00:00 4714 BC | t
+ Sun Dec 31 23:59:59.9999 294276 | Mon Dec 25 00:00:00 294276  | t
+(2 rows)
+
+-- 1.29 Weeks align 1000 years later
+SELECT time, time_series.time_bucket(INTERVAL '1 week', time),
+       date_trunc('week', time) = time_series.time_bucket(INTERVAL '1 week', time)
+FROM unnest(ARRAY[
+    timestamp without time zone '3018-09-14',
+    timestamp without time zone '3018-09-20',
+    timestamp without time zone '3018-09-21',
+    timestamp without time zone '3018-09-22'
+    ]) AS time;
+           time           |       time_bucket        | ?column? 
+--------------------------+--------------------------+----------
+ Mon Sep 14 00:00:00 3018 | Mon Sep 14 00:00:00 3018 | t
+ Sun Sep 20 00:00:00 3018 | Mon Sep 14 00:00:00 3018 | t
+ Mon Sep 21 00:00:00 3018 | Mon Sep 21 00:00:00 3018 | t
+ Tue Sep 22 00:00:00 3018 | Mon Sep 21 00:00:00 3018 | t
+(4 rows)
+
+-- 1.30 Origin parameter (timestamptz)
+\x
+SELECT time, time_series.time_bucket(INTERVAL '1 week', time) no_epoch,
+             time_series.time_bucket(INTERVAL '1 week', time) = time_series.time_bucket(INTERVAL '1 week', time, timestamptz '2000-01-03 00:00:00+0') always_true,
+             time_series.time_bucket(INTERVAL '1 week', time, timestamptz '2000-01-01 00:00:00+0') pg_epoch,
+             time_series.time_bucket(INTERVAL '1 week', time, timestamptz 'epoch') unix_epoch
+FROM unnest(ARRAY[
+    timestamp with time zone '2000-01-01 00:00:00+0' - interval '1 second',
+    timestamp with time zone '2000-01-01 00:00:00+0',
+    timestamp with time zone '2000-01-03 00:00:00+0' - interval '1 second',
+    timestamp with time zone '2000-01-03 00:00:00+0',
+    timestamp with time zone '2000-01-01',
+    timestamp with time zone '2000-01-02',
+    timestamp with time zone '2000-01-03'
+    ]) AS time;
+-[ RECORD 1 ]-----------------------------
+time        | Fri Dec 31 15:59:59 1999 PST
+no_epoch    | Sun Dec 26 16:00:00 1999 PST
+always_true | t
+pg_epoch    | Fri Dec 24 16:00:00 1999 PST
+unix_epoch  | Wed Dec 29 16:00:00 1999 PST
+-[ RECORD 2 ]-----------------------------
+time        | Fri Dec 31 16:00:00 1999 PST
+no_epoch    | Sun Dec 26 16:00:00 1999 PST
+always_true | t
+pg_epoch    | Fri Dec 31 16:00:00 1999 PST
+unix_epoch  | Wed Dec 29 16:00:00 1999 PST
+-[ RECORD 3 ]-----------------------------
+time        | Sun Jan 02 15:59:59 2000 PST
+no_epoch    | Sun Dec 26 16:00:00 1999 PST
+always_true | t
+pg_epoch    | Fri Dec 31 16:00:00 1999 PST
+unix_epoch  | Wed Dec 29 16:00:00 1999 PST
+-[ RECORD 4 ]-----------------------------
+time        | Sun Jan 02 16:00:00 2000 PST
+no_epoch    | Sun Jan 02 16:00:00 2000 PST
+always_true | t
+pg_epoch    | Fri Dec 31 16:00:00 1999 PST
+unix_epoch  | Wed Dec 29 16:00:00 1999 PST
+-[ RECORD 5 ]-----------------------------
+time        | Sat Jan 01 00:00:00 2000 PST
+no_epoch    | Sun Dec 26 16:00:00 1999 PST
+always_true | t
+pg_epoch    | Fri Dec 31 16:00:00 1999 PST
+unix_epoch  | Wed Dec 29 16:00:00 1999 PST
+-[ RECORD 6 ]-----------------------------
+time        | Sun Jan 02 00:00:00 2000 PST
+no_epoch    | Sun Dec 26 16:00:00 1999 PST
+always_true | t
+pg_epoch    | Fri Dec 31 16:00:00 1999 PST
+unix_epoch  | Wed Dec 29 16:00:00 1999 PST
+-[ RECORD 7 ]-----------------------------
+time        | Mon Jan 03 00:00:00 2000 PST
+no_epoch    | Sun Jan 02 16:00:00 2000 PST
+always_true | t
+pg_epoch    | Fri Dec 31 16:00:00 1999 PST
+unix_epoch  | Wed Dec 29 16:00:00 1999 PST
+
+-- 1.31 Origin parameter (timestamp)
+SELECT time, time_series.time_bucket(INTERVAL '1 week', time) no_epoch,
+             time_series.time_bucket(INTERVAL '1 week', time) = time_series.time_bucket(INTERVAL '1 week', time, timestamp '2000-01-03 00:00:00') always_true,
+             time_series.time_bucket(INTERVAL '1 week', time, timestamp '2000-01-01 00:00:00') pg_epoch,
+             time_series.time_bucket(INTERVAL '1 week', time, timestamp 'epoch') unix_epoch
+FROM unnest(ARRAY[
+    timestamp without time zone '2000-01-01 00:00:00' - interval '1 second',
+    timestamp without time zone '2000-01-01 00:00:00',
+    timestamp without time zone '2000-01-03 00:00:00' - interval '1 second',
+    timestamp without time zone '2000-01-03 00:00:00',
+    timestamp without time zone '2000-01-01',
+    timestamp without time zone '2000-01-02',
+    timestamp without time zone '2000-01-03'
+    ]) AS time;
+-[ RECORD 1 ]-------------------------
+time        | Fri Dec 31 23:59:59 1999
+no_epoch    | Mon Dec 27 00:00:00 1999
+always_true | t
+pg_epoch    | Sat Dec 25 00:00:00 1999
+unix_epoch  | Thu Dec 30 00:00:00 1999
+-[ RECORD 2 ]-------------------------
+time        | Sat Jan 01 00:00:00 2000
+no_epoch    | Mon Dec 27 00:00:00 1999
+always_true | t
+pg_epoch    | Sat Jan 01 00:00:00 2000
+unix_epoch  | Thu Dec 30 00:00:00 1999
+-[ RECORD 3 ]-------------------------
+time        | Sun Jan 02 23:59:59 2000
+no_epoch    | Mon Dec 27 00:00:00 1999
+always_true | t
+pg_epoch    | Sat Jan 01 00:00:00 2000
+unix_epoch  | Thu Dec 30 00:00:00 1999
+-[ RECORD 4 ]-------------------------
+time        | Mon Jan 03 00:00:00 2000
+no_epoch    | Mon Jan 03 00:00:00 2000
+always_true | t
+pg_epoch    | Sat Jan 01 00:00:00 2000
+unix_epoch  | Thu Dec 30 00:00:00 1999
+-[ RECORD 5 ]-------------------------
+time        | Sat Jan 01 00:00:00 2000
+no_epoch    | Mon Dec 27 00:00:00 1999
+always_true | t
+pg_epoch    | Sat Jan 01 00:00:00 2000
+unix_epoch  | Thu Dec 30 00:00:00 1999
+-[ RECORD 6 ]-------------------------
+time        | Sun Jan 02 00:00:00 2000
+no_epoch    | Mon Dec 27 00:00:00 1999
+always_true | t
+pg_epoch    | Sat Jan 01 00:00:00 2000
+unix_epoch  | Thu Dec 30 00:00:00 1999
+-[ RECORD 7 ]-------------------------
+time        | Mon Jan 03 00:00:00 2000
+no_epoch    | Mon Jan 03 00:00:00 2000
+always_true | t
+pg_epoch    | Sat Jan 01 00:00:00 2000
+unix_epoch  | Thu Dec 30 00:00:00 1999
+
+-- 1.32 Origin parameter (date)
+SELECT time, time_series.time_bucket(INTERVAL '1 week', time) no_epoch,
+             time_series.time_bucket(INTERVAL '1 week', time) = time_series.time_bucket(INTERVAL '1 week', time, date '2000-01-03') always_true,
+             time_series.time_bucket(INTERVAL '1 week', time, date '2000-01-01') pg_epoch,
+             time_series.time_bucket(INTERVAL '1 week', time, (timestamp 'epoch')::date) unix_epoch
+FROM unnest(ARRAY[
+    date '1999-12-31',
+    date '2000-01-01',
+    date '2000-01-02',
+    date '2000-01-03'
+    ]) AS time;
+-[ RECORD 1 ]-----------
+time        | 12-31-1999
+no_epoch    | 12-27-1999
+always_true | t
+pg_epoch    | 12-25-1999
+unix_epoch  | 12-30-1999
+-[ RECORD 2 ]-----------
+time        | 01-01-2000
+no_epoch    | 12-27-1999
+always_true | t
+pg_epoch    | 01-01-2000
+unix_epoch  | 12-30-1999
+-[ RECORD 3 ]-----------
+time        | 01-02-2000
+no_epoch    | 12-27-1999
+always_true | t
+pg_epoch    | 01-01-2000
+unix_epoch  | 12-30-1999
+-[ RECORD 4 ]-----------
+time        | 01-03-2000
+no_epoch    | 01-03-2000
+always_true | t
+pg_epoch    | 01-01-2000
+unix_epoch  | 12-30-1999
+
+\x
+-- 1.33 Origin overflow errors
+\set ON_ERROR_STOP 0
+SELECT time, time_series.time_bucket(INTERVAL '100000 day', time, timestamp without time zone '4710-11-24 01:01:01.0 BC')
+FROM unnest(ARRAY[
+    timestamp without time zone '294270-12-31 23:59:59.9999'
+    ]) AS time;
+ERROR:  timestamp out of range
+SELECT time, time_series.time_bucket(INTERVAL '100000 day', time, timestamp with time zone '4710-11-25 01:01:01.0 BC')
+FROM unnest(ARRAY[
+    timestamp with time zone '294270-12-30 23:59:59.9999'
+    ]) AS time;
+ERROR:  timestamp out of range
+SELECT time, time_series.time_bucket(INTERVAL '10000000 day', time, timestamp without time zone '294270-12-31 23:59:59.9999')
+FROM unnest(ARRAY[
+    timestamp without time zone '4710-11-24 01:01:01.0 BC'
+    ]) AS time;
+ERROR:  timestamp out of range
+SELECT time, time_series.time_bucket(INTERVAL '10000000 day', time, timestamp with time zone '294270-12-31 23:59:59.9999')
+FROM unnest(ARRAY[
+    timestamp with time zone '4710-11-24 01:01:01.0 BC'
+    ]) AS time;
+ERROR:  timestamp out of range
+\set ON_ERROR_STOP 1
+-- 1.34 Month/year bucketing
+SET datestyle TO ISO;
+SELECT
+  time::date,
+  time_series.time_bucket('1 month', time::date) AS "1m",
+  time_series.time_bucket('2 month', time::date) AS "2m",
+  time_series.time_bucket('3 month', time::date) AS "3m",
+  time_series.time_bucket('1 month', time::date, '2000-02-01'::date) AS "1m origin",
+  time_series.time_bucket('2 month', time::date, '2000-02-01'::date) AS "2m origin",
+  time_series.time_bucket('3 month', time::date, '2000-02-01'::date) AS "3m origin"
+FROM generate_series('1990-01-03'::date, '1990-06-03'::date, '1month'::interval) time;
+    time    |     1m     |     2m     |     3m     | 1m origin  | 2m origin  | 3m origin  
+------------+------------+------------+------------+------------+------------+------------
+ 1990-01-03 | 1990-01-01 | 1990-01-01 | 1990-01-01 | 1990-01-01 | 1989-12-01 | 1989-11-01
+ 1990-02-03 | 1990-02-01 | 1990-01-01 | 1990-01-01 | 1990-02-01 | 1990-02-01 | 1990-02-01
+ 1990-03-03 | 1990-03-01 | 1990-03-01 | 1990-01-01 | 1990-03-01 | 1990-02-01 | 1990-02-01
+ 1990-04-03 | 1990-04-01 | 1990-03-01 | 1990-04-01 | 1990-04-01 | 1990-04-01 | 1990-02-01
+ 1990-05-03 | 1990-05-01 | 1990-05-01 | 1990-04-01 | 1990-05-01 | 1990-04-01 | 1990-05-01
+ 1990-06-03 | 1990-06-01 | 1990-05-01 | 1990-04-01 | 1990-06-01 | 1990-06-01 | 1990-05-01
+(6 rows)
+
+SELECT
+  time,
+  time_series.time_bucket('1 month', time) AS "1m",
+  time_series.time_bucket('2 month', time) AS "2m",
+  time_series.time_bucket('3 month', time) AS "3m",
+  time_series.time_bucket('1 month', time, '2000-02-01'::timestamp) AS "1m origin",
+  time_series.time_bucket('2 month', time, '2000-02-01'::timestamp) AS "2m origin",
+  time_series.time_bucket('3 month', time, '2000-02-01'::timestamp) AS "3m origin"
+FROM generate_series('1990-01-03'::timestamp, '1990-06-03'::timestamp, '1month'::interval) time;
+        time         |         1m          |         2m          |         3m          |      1m origin      |      2m origin      |      3m origin      
+---------------------+---------------------+---------------------+---------------------+---------------------+---------------------+---------------------
+ 1990-01-03 00:00:00 | 1990-01-01 00:00:00 | 1990-01-01 00:00:00 | 1990-01-01 00:00:00 | 1990-01-01 00:00:00 | 1989-12-01 00:00:00 | 1989-11-01 00:00:00
+ 1990-02-03 00:00:00 | 1990-02-01 00:00:00 | 1990-01-01 00:00:00 | 1990-01-01 00:00:00 | 1990-02-01 00:00:00 | 1990-02-01 00:00:00 | 1990-02-01 00:00:00
+ 1990-03-03 00:00:00 | 1990-03-01 00:00:00 | 1990-03-01 00:00:00 | 1990-01-01 00:00:00 | 1990-03-01 00:00:00 | 1990-02-01 00:00:00 | 1990-02-01 00:00:00
+ 1990-04-03 00:00:00 | 1990-04-01 00:00:00 | 1990-03-01 00:00:00 | 1990-04-01 00:00:00 | 1990-04-01 00:00:00 | 1990-04-01 00:00:00 | 1990-02-01 00:00:00
+ 1990-05-03 00:00:00 | 1990-05-01 00:00:00 | 1990-05-01 00:00:00 | 1990-04-01 00:00:00 | 1990-05-01 00:00:00 | 1990-04-01 00:00:00 | 1990-05-01 00:00:00
+ 1990-06-03 00:00:00 | 1990-06-01 00:00:00 | 1990-05-01 00:00:00 | 1990-04-01 00:00:00 | 1990-06-01 00:00:00 | 1990-06-01 00:00:00 | 1990-05-01 00:00:00
+(6 rows)
+
+SELECT
+  time,
+  time_series.time_bucket('1 month', time) AS "1m",
+  time_series.time_bucket('2 month', time) AS "2m",
+  time_series.time_bucket('3 month', time) AS "3m",
+  time_series.time_bucket('1 month', time, '2000-02-01'::timestamptz) AS "1m origin",
+  time_series.time_bucket('2 month', time, '2000-02-01'::timestamptz) AS "2m origin",
+  time_series.time_bucket('3 month', time, '2000-02-01'::timestamptz) AS "3m origin"
+FROM generate_series('1990-01-03'::timestamptz, '1990-06-03'::timestamptz, '1month'::interval) time;
+          time          |           1m           |           2m           |           3m           |       1m origin        |       2m origin        |       3m origin        
+------------------------+------------------------+------------------------+------------------------+------------------------+------------------------+------------------------
+ 1990-01-03 00:00:00-08 | 1989-12-31 16:00:00-08 | 1989-12-31 16:00:00-08 | 1989-12-31 16:00:00-08 | 1989-12-31 16:00:00-08 | 1989-11-30 16:00:00-08 | 1989-10-31 16:00:00-08
+ 1990-02-03 00:00:00-08 | 1990-01-31 16:00:00-08 | 1989-12-31 16:00:00-08 | 1989-12-31 16:00:00-08 | 1990-01-31 16:00:00-08 | 1990-01-31 16:00:00-08 | 1990-01-31 16:00:00-08
+ 1990-03-03 00:00:00-08 | 1990-02-28 16:00:00-08 | 1990-02-28 16:00:00-08 | 1989-12-31 16:00:00-08 | 1990-02-28 16:00:00-08 | 1990-01-31 16:00:00-08 | 1990-01-31 16:00:00-08
+ 1990-04-03 00:00:00-07 | 1990-03-31 16:00:00-08 | 1990-02-28 16:00:00-08 | 1990-03-31 16:00:00-08 | 1990-03-31 16:00:00-08 | 1990-03-31 16:00:00-08 | 1990-01-31 16:00:00-08
+ 1990-05-03 00:00:00-07 | 1990-04-30 17:00:00-07 | 1990-04-30 17:00:00-07 | 1990-03-31 16:00:00-08 | 1990-04-30 17:00:00-07 | 1990-03-31 16:00:00-08 | 1990-04-30 17:00:00-07
+ 1990-06-03 00:00:00-07 | 1990-05-31 17:00:00-07 | 1990-04-30 17:00:00-07 | 1990-03-31 16:00:00-08 | 1990-05-31 17:00:00-07 | 1990-05-31 17:00:00-07 | 1990-04-30 17:00:00-07
+(6 rows)
+
+RESET datestyle;
+-- ============================================================
+-- Section 2: NULL parameter handling
+-- ============================================================
+-- All STRICT overloads return NULL for any NULL input
+-- 2a. NULL interval (timestamp variants)
+SELECT time_series.time_bucket(NULL::interval, TIMESTAMP '2024-01-01');
+ time_bucket 
+-------------
+ 
+(1 row)
+
+SELECT time_series.time_bucket(NULL::interval, TIMESTAMPTZ '2024-01-01');
+ time_bucket 
+-------------
+ 
+(1 row)
+
+SELECT time_series.time_bucket(NULL::interval, DATE '2024-01-01');
+ time_bucket 
+-------------
+ 
+(1 row)
+
+-- 2b. NULL timestamp
+SELECT time_series.time_bucket(INTERVAL '1 hour', NULL::timestamp);
+ time_bucket 
+-------------
+ 
+(1 row)
+
+SELECT time_series.time_bucket(INTERVAL '1 hour', NULL::timestamptz);
+ time_bucket 
+-------------
+ 
+(1 row)
+
+SELECT time_series.time_bucket(INTERVAL '1 day', NULL::date);
+ time_bucket 
+-------------
+ 
+(1 row)
+
+-- 2c. NULL integer types
+SELECT time_series.time_bucket(NULL::int, 42);
+ time_bucket 
+-------------
+            
+(1 row)
+
+SELECT time_series.time_bucket(10, NULL::int);
+ time_bucket 
+-------------
+            
+(1 row)
+
+SELECT time_series.time_bucket(NULL::bigint, 42::bigint);
+ time_bucket 
+-------------
+            
+(1 row)
+
+SELECT time_series.time_bucket(10::bigint, NULL::bigint);
+ time_bucket 
+-------------
+            
+(1 row)
+
+SELECT time_series.time_bucket(NULL::smallint, 42::smallint);
+ time_bucket 
+-------------
+            
+(1 row)
+
+SELECT time_series.time_bucket(10::smallint, NULL::smallint);
+ time_bucket 
+-------------
+            
+(1 row)
+
+-- 2d. NULL origin (STRICT variants return NULL)
+SELECT time_series.time_bucket(INTERVAL '1 hour', TIMESTAMP '2024-01-01', NULL::timestamp);
+ time_bucket 
+-------------
+ 
+(1 row)
+
+SELECT time_series.time_bucket(INTERVAL '1 hour', TIMESTAMPTZ '2024-01-01', NULL::timestamptz);
+ time_bucket 
+-------------
+ 
+(1 row)
+
+SELECT time_series.time_bucket(INTERVAL '1 day', DATE '2024-01-01', NULL::date);
+ time_bucket 
+-------------
+ 
+(1 row)
+
+-- 2e. NULL offset (STRICT variants return NULL)
+SELECT time_series.time_bucket(INTERVAL '1 hour', TIMESTAMP '2024-01-01', NULL::interval);
+ time_bucket 
+-------------
+ 
+(1 row)
+
+SELECT time_series.time_bucket(INTERVAL '1 hour', TIMESTAMPTZ '2024-01-01', NULL::interval);
+ time_bucket 
+-------------
+ 
+(1 row)
+
+-- 2f. NULL integer offset
+SELECT time_series.time_bucket(10, 42, NULL::int);
+ time_bucket 
+-------------
+            
+(1 row)
+
+SELECT time_series.time_bucket(10::bigint, 42::bigint, NULL::bigint);
+ time_bucket 
+-------------
+            
+(1 row)
+
+SELECT time_series.time_bucket(10::smallint, 42::smallint, NULL::smallint);
+ time_bucket 
+-------------
+            
+(1 row)
+
+-- ============================================================
+-- Section 3: Timezone bucket with month intervals
+-- ============================================================
+SET datestyle TO ISO;
+-- Timezone-aware bucketing with 1 month interval
+SELECT
+    time,
+    time_series.time_bucket('1 month'::interval, time, 'America/New_York') AS bucket
+FROM generate_series(
+    '2024-01-15'::timestamptz,
+    '2024-06-15'::timestamptz,
+    '1 month'::interval
+) time;
+          time          |         bucket         
+------------------------+------------------------
+ 2024-01-15 00:00:00-08 | 2023-12-31 21:00:00-08
+ 2024-02-15 00:00:00-08 | 2024-01-31 21:00:00-08
+ 2024-03-15 00:00:00-07 | 2024-02-29 21:00:00-08
+ 2024-04-15 00:00:00-07 | 2024-03-31 21:00:00-07
+ 2024-05-15 00:00:00-07 | 2024-04-30 21:00:00-07
+ 2024-06-15 00:00:00-07 | 2024-05-31 21:00:00-07
+(6 rows)
+
+-- Timezone-aware bucketing with 3 month (quarterly) interval
+SELECT
+    time,
+    time_series.time_bucket('3 month'::interval, time, 'UTC') AS bucket
+FROM generate_series(
+    '2024-01-15'::timestamptz,
+    '2024-12-15'::timestamptz,
+    '2 month'::interval
+) time;
+          time          |         bucket         
+------------------------+------------------------
+ 2024-01-15 00:00:00-08 | 2023-12-31 16:00:00-08
+ 2024-03-15 00:00:00-07 | 2023-12-31 16:00:00-08
+ 2024-05-15 00:00:00-07 | 2024-03-31 17:00:00-07
+ 2024-07-15 00:00:00-07 | 2024-06-30 17:00:00-07
+ 2024-09-15 00:00:00-07 | 2024-06-30 17:00:00-07
+ 2024-11-15 00:00:00-08 | 2024-09-30 17:00:00-07
+(6 rows)
+
+RESET datestyle;
+-- ============================================================
+-- Section 4: Zero and negative period errors
+-- ============================================================
+\set ON_ERROR_STOP 0
+-- Zero interval for timestamp
+SELECT time_series.time_bucket(INTERVAL '0', TIMESTAMP '2024-01-01');
+ERROR:  period must be greater than 0
+-- Zero interval for timestamptz
+SELECT time_series.time_bucket(INTERVAL '0', TIMESTAMPTZ '2024-01-01');
+ERROR:  period must be greater than 0
+-- Zero interval for date
+SELECT time_series.time_bucket(INTERVAL '0 day', DATE '2024-01-01');
+ERROR:  period must be greater than 0
+-- Negative interval for timestamp
+SELECT time_series.time_bucket(INTERVAL '-1 hour', TIMESTAMP '2024-01-01');
+ERROR:  period must be greater than 0
+-- Negative interval for timestamptz
+SELECT time_series.time_bucket(INTERVAL '-1 hour', TIMESTAMPTZ '2024-01-01');
+ERROR:  period must be greater than 0
+-- Negative interval for date
+SELECT time_series.time_bucket(INTERVAL '-1 day', DATE '2024-01-01');
+ERROR:  period must be greater than 0
+-- Zero integer period
+SELECT time_series.time_bucket(0, 42);
+ERROR:  period must be greater than 0
+SELECT time_series.time_bucket(0::bigint, 42::bigint);
+ERROR:  period must be greater than 0
+SELECT time_series.time_bucket(0::smallint, 42::smallint);
+ERROR:  period must be greater than 0
+-- Negative integer period
+SELECT time_series.time_bucket(-10, 42);
+ERROR:  period must be greater than 0
+SELECT time_series.time_bucket(-10::bigint, 42::bigint);
+ERROR:  period must be greater than 0
+SELECT time_series.time_bucket(-10::smallint, 42::smallint);
+ERROR:  period must be greater than 0
+\set ON_ERROR_STOP 1
+-- ============================================================
+-- Section 5: Sub-second bucketing
+-- ============================================================
+-- 500ms bucketing
+SELECT time, time_series.time_bucket(INTERVAL '500 milliseconds', time)
+FROM unnest(ARRAY[
+    TIMESTAMP '2024-01-01 00:00:00.000',
+    TIMESTAMP '2024-01-01 00:00:00.499',
+    TIMESTAMP '2024-01-01 00:00:00.500',
+    TIMESTAMP '2024-01-01 00:00:00.999',
+    TIMESTAMP '2024-01-01 00:00:01.000',
+    TIMESTAMP '2024-01-01 00:00:01.250'
+    ]) AS time;
+             time             |        time_bucket         
+------------------------------+----------------------------
+ Mon Jan 01 00:00:00 2024     | Mon Jan 01 00:00:00 2024
+ Mon Jan 01 00:00:00.499 2024 | Mon Jan 01 00:00:00 2024
+ Mon Jan 01 00:00:00.5 2024   | Mon Jan 01 00:00:00.5 2024
+ Mon Jan 01 00:00:00.999 2024 | Mon Jan 01 00:00:00.5 2024
+ Mon Jan 01 00:00:01 2024     | Mon Jan 01 00:00:01 2024
+ Mon Jan 01 00:00:01.25 2024  | Mon Jan 01 00:00:01 2024
+(6 rows)
+
+-- 100ms bucketing
+SELECT time, time_series.time_bucket(INTERVAL '100 milliseconds', time)
+FROM unnest(ARRAY[
+    TIMESTAMP '2024-01-01 00:00:00.000',
+    TIMESTAMP '2024-01-01 00:00:00.099',
+    TIMESTAMP '2024-01-01 00:00:00.100',
+    TIMESTAMP '2024-01-01 00:00:00.199',
+    TIMESTAMP '2024-01-01 00:00:00.999'
+    ]) AS time;
+             time             |        time_bucket         
+------------------------------+----------------------------
+ Mon Jan 01 00:00:00 2024     | Mon Jan 01 00:00:00 2024
+ Mon Jan 01 00:00:00.099 2024 | Mon Jan 01 00:00:00 2024
+ Mon Jan 01 00:00:00.1 2024   | Mon Jan 01 00:00:00.1 2024
+ Mon Jan 01 00:00:00.199 2024 | Mon Jan 01 00:00:00.1 2024
+ Mon Jan 01 00:00:00.999 2024 | Mon Jan 01 00:00:00.9 2024
+(5 rows)
+
+-- 1ms bucketing
+SELECT time, time_series.time_bucket(INTERVAL '1 millisecond', time)
+FROM unnest(ARRAY[
+    TIMESTAMP '2024-01-01 00:00:00.000',
+    TIMESTAMP '2024-01-01 00:00:00.0001',
+    TIMESTAMP '2024-01-01 00:00:00.001',
+    TIMESTAMP '2024-01-01 00:00:00.0019'
+    ]) AS time;
+             time              |         time_bucket          
+-------------------------------+------------------------------
+ Mon Jan 01 00:00:00 2024      | Mon Jan 01 00:00:00 2024
+ Mon Jan 01 00:00:00.0001 2024 | Mon Jan 01 00:00:00 2024
+ Mon Jan 01 00:00:00.001 2024  | Mon Jan 01 00:00:00.001 2024
+ Mon Jan 01 00:00:00.0019 2024 | Mon Jan 01 00:00:00.001 2024
+(4 rows)
+
+-- Sub-second with timestamptz
+SELECT time, time_series.time_bucket(INTERVAL '500 milliseconds', time)
+FROM unnest(ARRAY[
+    TIMESTAMPTZ '2024-01-01 00:00:00.000+00',
+    TIMESTAMPTZ '2024-01-01 00:00:00.499+00',
+    TIMESTAMPTZ '2024-01-01 00:00:00.500+00',
+    TIMESTAMPTZ '2024-01-01 00:00:00.999+00'
+    ]) AS time;
+               time               |          time_bucket           
+----------------------------------+--------------------------------
+ Sun Dec 31 16:00:00 2023 PST     | Sun Dec 31 16:00:00 2023 PST
+ Sun Dec 31 16:00:00.499 2023 PST | Sun Dec 31 16:00:00 2023 PST
+ Sun Dec 31 16:00:00.5 2023 PST   | Sun Dec 31 16:00:00.5 2023 PST
+ Sun Dec 31 16:00:00.999 2023 PST | Sun Dec 31 16:00:00.5 2023 PST
+(4 rows)
+
+-- ============================================================
+-- Section 6: date_trunc alignment verification
+-- ============================================================
+-- time_bucket('1 day') should align with date_trunc('day')
+SELECT time,
+    time_series.time_bucket(INTERVAL '1 day', time) AS tb,
+    date_trunc('day', time) AS dt,
+    time_series.time_bucket(INTERVAL '1 day', time) = date_trunc('day', time) AS aligned
+FROM unnest(ARRAY[
+    TIMESTAMP '2024-01-15 12:30:00',
+    TIMESTAMP '2024-06-15 00:00:00',
+    TIMESTAMP '2024-12-31 23:59:59'
+    ]) AS time;
+           time           |            tb            |            dt            | aligned 
+--------------------------+--------------------------+--------------------------+---------
+ Mon Jan 15 12:30:00 2024 | Mon Jan 15 00:00:00 2024 | Mon Jan 15 00:00:00 2024 | t
+ Sat Jun 15 00:00:00 2024 | Sat Jun 15 00:00:00 2024 | Sat Jun 15 00:00:00 2024 | t
+ Tue Dec 31 23:59:59 2024 | Tue Dec 31 00:00:00 2024 | Tue Dec 31 00:00:00 2024 | t
+(3 rows)
+
+-- time_bucket('1 hour') should align with date_trunc('hour')
+SELECT time,
+    time_series.time_bucket(INTERVAL '1 hour', time) AS tb,
+    date_trunc('hour', time) AS dt,
+    time_series.time_bucket(INTERVAL '1 hour', time) = date_trunc('hour', time) AS aligned
+FROM unnest(ARRAY[
+    TIMESTAMP '2024-01-15 12:30:00',
+    TIMESTAMP '2024-01-15 12:00:00',
+    TIMESTAMP '2024-01-15 12:59:59.999'
+    ]) AS time;
+             time             |            tb            |            dt            | aligned 
+------------------------------+--------------------------+--------------------------+---------
+ Mon Jan 15 12:30:00 2024     | Mon Jan 15 12:00:00 2024 | Mon Jan 15 12:00:00 2024 | t
+ Mon Jan 15 12:00:00 2024     | Mon Jan 15 12:00:00 2024 | Mon Jan 15 12:00:00 2024 | t
+ Mon Jan 15 12:59:59.999 2024 | Mon Jan 15 12:00:00 2024 | Mon Jan 15 12:00:00 2024 | t
+(3 rows)
+
+-- time_bucket('1 minute') should align with date_trunc('minute')
+SELECT time,
+    time_series.time_bucket(INTERVAL '1 minute', time) AS tb,
+    date_trunc('minute', time) AS dt,
+    time_series.time_bucket(INTERVAL '1 minute', time) = date_trunc('minute', time) AS aligned
+FROM unnest(ARRAY[
+    TIMESTAMP '2024-01-15 12:30:45',
+    TIMESTAMP '2024-01-15 12:30:00',
+    TIMESTAMP '2024-01-15 12:30:59.999'
+    ]) AS time;
+             time             |            tb            |            dt            | aligned 
+------------------------------+--------------------------+--------------------------+---------
+ Mon Jan 15 12:30:45 2024     | Mon Jan 15 12:30:00 2024 | Mon Jan 15 12:30:00 2024 | t
+ Mon Jan 15 12:30:00 2024     | Mon Jan 15 12:30:00 2024 | Mon Jan 15 12:30:00 2024 | t
+ Mon Jan 15 12:30:59.999 2024 | Mon Jan 15 12:30:00 2024 | Mon Jan 15 12:30:00 2024 | t
+(3 rows)
+
+-- ============================================================
+-- Section 7: Non-month interval error for date bucketing
+-- ============================================================
+\set ON_ERROR_STOP 0
+-- Sub-day intervals should error for date bucketing
+SELECT time_series.time_bucket(INTERVAL '1 hour', DATE '2024-01-01');
+ERROR:  interval must not have sub-day precision
+SELECT time_series.time_bucket(INTERVAL '25 hours', DATE '2024-01-01');
+ERROR:  interval must be a multiple of a day
+-- Non-multiple-of-day interval
+SELECT time_series.time_bucket(INTERVAL '1 day 1 hour', DATE '2024-01-01');
+ERROR:  interval must be a multiple of a day
+\set ON_ERROR_STOP 1
+-- ============================================================
+-- Section 8: Timestamptz vs timestamp casting behavior
+-- ============================================================
+SET timezone TO 'America/New_York';
+-- timestamptz bucketing respects UTC epoch, not local time
+SELECT
+    time,
+    time_series.time_bucket(INTERVAL '1 day', time) AS bucket_tz,
+    time_series.time_bucket(INTERVAL '1 day', time::timestamp) AS bucket_local
+FROM unnest(ARRAY[
+    TIMESTAMPTZ '2024-01-15 02:00:00+00',
+    TIMESTAMPTZ '2024-06-15 02:00:00+00'
+    ]) AS time;
+             time             |          bucket_tz           |       bucket_local       
+------------------------------+------------------------------+--------------------------
+ Sun Jan 14 21:00:00 2024 EST | Sun Jan 14 19:00:00 2024 EST | Sun Jan 14 00:00:00 2024
+ Fri Jun 14 22:00:00 2024 EDT | Fri Jun 14 20:00:00 2024 EDT | Fri Jun 14 00:00:00 2024
+(2 rows)
+
+RESET timezone;
+-- ============================================================
+-- Section 9: DST boundary with local timezone casting
+-- ============================================================
+SET timezone TO 'America/New_York';
+-- Spring forward: 2024-03-10 02:00 AM doesn't exist in America/New_York
+SELECT time, time_series.time_bucket(INTERVAL '1 hour', time)
+FROM unnest(ARRAY[
+    TIMESTAMPTZ '2024-03-10 06:00:00+00',  -- 01:00 EST
+    TIMESTAMPTZ '2024-03-10 07:00:00+00',  -- 03:00 EDT (skipped 02:00)
+    TIMESTAMPTZ '2024-03-10 08:00:00+00'   -- 04:00 EDT
+    ]) AS time;
+             time             |         time_bucket          
+------------------------------+------------------------------
+ Sun Mar 10 01:00:00 2024 EST | Sun Mar 10 01:00:00 2024 EST
+ Sun Mar 10 03:00:00 2024 EDT | Sun Mar 10 03:00:00 2024 EDT
+ Sun Mar 10 04:00:00 2024 EDT | Sun Mar 10 04:00:00 2024 EDT
+(3 rows)
+
+-- Fall back: 2024-11-03 01:00 AM exists twice in America/New_York
+SELECT time, time_series.time_bucket(INTERVAL '1 hour', time)
+FROM unnest(ARRAY[
+    TIMESTAMPTZ '2024-11-03 04:00:00+00',  -- 00:00 EDT
+    TIMESTAMPTZ '2024-11-03 05:00:00+00',  -- 01:00 EDT
+    TIMESTAMPTZ '2024-11-03 06:00:00+00',  -- 01:00 EST (same local time)
+    TIMESTAMPTZ '2024-11-03 07:00:00+00'   -- 02:00 EST
+    ]) AS time;
+             time             |         time_bucket          
+------------------------------+------------------------------
+ Sun Nov 03 00:00:00 2024 EDT | Sun Nov 03 00:00:00 2024 EDT
+ Sun Nov 03 01:00:00 2024 EDT | Sun Nov 03 01:00:00 2024 EDT
+ Sun Nov 03 01:00:00 2024 EST | Sun Nov 03 01:00:00 2024 EST
+ Sun Nov 03 02:00:00 2024 EST | Sun Nov 03 02:00:00 2024 EST
+(4 rows)
+
+-- Day-level bucketing across DST boundary
+SELECT time, time_series.time_bucket(INTERVAL '1 day', time)
+FROM unnest(ARRAY[
+    TIMESTAMPTZ '2024-03-09 12:00:00-05',
+    TIMESTAMPTZ '2024-03-10 12:00:00-04',
+    TIMESTAMPTZ '2024-03-11 12:00:00-04'
+    ]) AS time;
+             time             |         time_bucket          
+------------------------------+------------------------------
+ Sat Mar 09 12:00:00 2024 EST | Fri Mar 08 19:00:00 2024 EST
+ Sun Mar 10 12:00:00 2024 EDT | Sat Mar 09 19:00:00 2024 EST
+ Mon Mar 11 12:00:00 2024 EDT | Sun Mar 10 20:00:00 2024 EDT
+(3 rows)
+
+RESET timezone;
+-- ============================================================
+-- Section 10: Month interval cannot mix with day/time components
+-- ============================================================
+\set ON_ERROR_STOP 0
+-- These should error: month intervals with day or time components
+SELECT time_series.time_bucket(INTERVAL '1 month 1 day', TIMESTAMP '2024-01-01');
+ERROR:  month intervals cannot have day or time component
+SELECT time_series.time_bucket(INTERVAL '1 year 1 hour', TIMESTAMP '2024-01-01');
+ERROR:  month intervals cannot have day or time component
+SELECT time_series.time_bucket(INTERVAL '1 month 1 second', TIMESTAMPTZ '2024-01-01');
+ERROR:  month intervals cannot have day or time component
+\set ON_ERROR_STOP 1
+-- ============================================================
+-- Section 11: Rounding version (offset to simulate rounding)
+-- (from TimescaleDB timestamp-15.sql line 254-262)
+-- ============================================================
+-- Using negative half-bucket offset + adding half back simulates rounding
+SELECT time, time_series.time_bucket(INTERVAL '5 minute', time, - INTERVAL '2.5 minutes') + INTERVAL '2 minutes 30 seconds'
+FROM unnest(ARRAY[
+    TIMESTAMP '2011-01-02 01:05:01',
+    TIMESTAMP '2011-01-02 01:07:29',
+    TIMESTAMP '2011-01-02 01:02:30',
+    TIMESTAMP '2011-01-02 01:07:30',
+    TIMESTAMP '2011-01-02 01:02:29'
+    ]) AS time;
+           time           |         ?column?         
+--------------------------+--------------------------
+ Sun Jan 02 01:05:01 2011 | Sun Jan 02 01:05:00 2011
+ Sun Jan 02 01:07:29 2011 | Sun Jan 02 01:05:00 2011
+ Sun Jan 02 01:02:30 2011 | Sun Jan 02 01:05:00 2011
+ Sun Jan 02 01:07:30 2011 | Sun Jan 02 01:10:00 2011
+ Sun Jan 02 01:02:29 2011 | Sun Jan 02 01:00:00 2011
+(5 rows)
+
+-- ============================================================
+-- Section 12: Force local alignment with timestamp cast
+-- (from TimescaleDB timestamp-15.sql line 298-336)
+-- ============================================================
+SET timezone TO 'America/New_York';
+-- Can force local bucketing with simple cast (timestamptz → timestamp strips timezone)
+SELECT time,
+    time_series.time_bucket(INTERVAL '1 day', time::timestamp) AS local_bucket,
+    date_trunc('day', time) AS date_trunc_local
+FROM unnest(ARRAY[
+    TIMESTAMP WITH TIME ZONE '2011-01-02 01:01:01',
+    TIMESTAMP WITH TIME ZONE '2011-01-03 01:01:01+01',
+    TIMESTAMP WITH TIME ZONE '2011-01-04 01:01:01+02'
+    ]) AS time;
+             time             |       local_bucket       |       date_trunc_local       
+------------------------------+--------------------------+------------------------------
+ Sun Jan 02 01:01:01 2011 EST | Sun Jan 02 00:00:00 2011 | Sun Jan 02 00:00:00 2011 EST
+ Sun Jan 02 19:01:01 2011 EST | Sun Jan 02 00:00:00 2011 | Sun Jan 02 00:00:00 2011 EST
+ Mon Jan 03 18:01:01 2011 EST | Mon Jan 03 00:00:00 2011 | Mon Jan 03 00:00:00 2011 EST
+(3 rows)
+
+-- Can also use interval offset to correct for timezone (-19h for EST = UTC-5)
+SELECT time,
+    time_series.time_bucket(INTERVAL '1 day', time, -INTERVAL '19 hours') AS offset_bucket,
+    date_trunc('day', time) AS date_trunc_local
+FROM unnest(ARRAY[
+    TIMESTAMP WITH TIME ZONE '2011-01-02 01:01:01',
+    TIMESTAMP WITH TIME ZONE '2011-01-03 01:01:01+01',
+    TIMESTAMP WITH TIME ZONE '2011-01-04 01:01:01+02'
+    ]) AS time;
+             time             |        offset_bucket         |       date_trunc_local       
+------------------------------+------------------------------+------------------------------
+ Sun Jan 02 01:01:01 2011 EST | Sun Jan 02 00:00:00 2011 EST | Sun Jan 02 00:00:00 2011 EST
+ Sun Jan 02 19:01:01 2011 EST | Sun Jan 02 00:00:00 2011 EST | Sun Jan 02 00:00:00 2011 EST
+ Mon Jan 03 18:01:01 2011 EST | Mon Jan 03 00:00:00 2011 EST | Mon Jan 03 00:00:00 2011 EST
+(3 rows)
+
+-- Local alignment preserved when bucketing by local time across DST boundary
+SELECT time, time_series.time_bucket(INTERVAL '2 hour', time::timestamp)
+FROM unnest(ARRAY[
+    TIMESTAMP WITH TIME ZONE '2017-11-05 10:05:00+07',
+    TIMESTAMP WITH TIME ZONE '2017-11-05 12:05:00+07',
+    TIMESTAMP WITH TIME ZONE '2017-11-05 13:05:00+07',
+    TIMESTAMP WITH TIME ZONE '2017-11-05 15:05:00+07'
+    ]) AS time;
+             time             |       time_bucket        
+------------------------------+--------------------------
+ Sat Nov 04 23:05:00 2017 EDT | Sat Nov 04 22:00:00 2017
+ Sun Nov 05 01:05:00 2017 EDT | Sun Nov 05 00:00:00 2017
+ Sun Nov 05 01:05:00 2017 EST | Sun Nov 05 00:00:00 2017
+ Sun Nov 05 03:05:00 2017 EST | Sun Nov 05 02:00:00 2017
+(4 rows)
+
+RESET timezone;
+-- ============================================================
+-- Section 13: Week alignment with local cast (timestamptz)
+-- (from TimescaleDB timestamp-15.sql line 512-519)
+-- ============================================================
+SET timezone TO 'America/New_York';
+-- Weeks align for timestamptz if cast to local time, but not if done at UTC
+SELECT time,
+    date_trunc('week', time) = time_series.time_bucket(INTERVAL '1 week', time) AS "utc_aligned",
+    date_trunc('week', time) = time_series.time_bucket(INTERVAL '1 week', time::timestamp) AS "local_aligned"
+FROM unnest(ARRAY[
+    timestamp with time zone '3018-09-14',
+    timestamp with time zone '3018-09-20',
+    timestamp with time zone '3018-09-21',
+    timestamp with time zone '3018-09-22'
+    ]) AS time;
+             time             | utc_aligned | local_aligned 
+------------------------------+-------------+---------------
+ Mon Sep 14 00:00:00 3018 EDT | f           | t
+ Sun Sep 20 00:00:00 3018 EDT | f           | t
+ Mon Sep 21 00:00:00 3018 EDT | f           | t
+ Tue Sep 22 00:00:00 3018 EDT | f           | t
+(4 rows)
+
+RESET timezone;
+SET timezone = 'PST8PDT';
+-- ============================================================
+-- Section 14: BC dates as origin (working, not error)
+-- (from TimescaleDB timestamp-15.sql line 583-599)
+-- ============================================================
+-- Really old origin works if date around that time
+SELECT time, time_series.time_bucket(INTERVAL '1 week', time, timestamp without time zone '4710-11-24 01:01:01.0 BC')
+FROM unnest(ARRAY[
+    timestamp without time zone '4710-11-24 01:01:01.0 BC',
+    timestamp without time zone '4710-11-25 01:01:01.0 BC',
+    timestamp without time zone '2001-01-01',
+    timestamp without time zone '3001-01-01'
+    ]) AS time;
+            time             |         time_bucket         
+-----------------------------+-----------------------------
+ Sat Nov 24 01:01:01 4710 BC | Sat Nov 24 01:01:01 4710 BC
+ Sun Nov 25 01:01:01 4710 BC | Sat Nov 24 01:01:01 4710 BC
+ Mon Jan 01 00:00:00 2001    | Sat Dec 30 01:01:01 2000
+ Thu Jan 01 00:00:00 3001    | Sat Dec 27 01:01:01 3000
+(4 rows)
+
+-- Really new origin
+SELECT time, time_series.time_bucket(INTERVAL '1 week', time, timestamp without time zone '294270-12-30 23:59:59.9999')
+FROM unnest(ARRAY[
+    timestamp without time zone '294270-12-29 23:59:59.9999',
+    timestamp without time zone '294270-12-30 23:59:59.9999',
+    timestamp without time zone '294270-12-31 23:59:59.9999',
+    timestamp without time zone '2001-01-01',
+    timestamp without time zone '3001-01-01'
+    ]) AS time;
+              time               |           time_bucket           
+---------------------------------+---------------------------------
+ Thu Dec 29 23:59:59.9999 294270 | Fri Dec 23 23:59:59.9999 294270
+ Fri Dec 30 23:59:59.9999 294270 | Fri Dec 30 23:59:59.9999 294270
+ Sat Dec 31 23:59:59.9999 294270 | Fri Dec 30 23:59:59.9999 294270
+ Mon Jan 01 00:00:00 2001        | Fri Dec 29 23:59:59.9999 2000
+ Thu Jan 01 00:00:00 3001        | Fri Dec 26 23:59:59.9999 3000
+(5 rows)
+
+-- ============================================================
+-- Section 15: Timezone NULL args
+-- (from TimescaleDB timestamp-15.sql line 663-672)
+-- ============================================================
+SELECT time_series.time_bucket(NULL::interval, now(), 'Europe/Berlin');
+ time_bucket 
+-------------
+ 
+(1 row)
+
+SELECT time_series.time_bucket('1day', NULL::timestamptz, 'Europe/Berlin');
+ time_bucket 
+-------------
+ 
+(1 row)
+
+SELECT time_series.time_bucket('1day', now(), NULL::text);
+ time_bucket 
+-------------
+ 
+(1 row)
+
+-- ============================================================
+-- Section 16: Multi-timezone parallel bucketing
+-- (from TimescaleDB timestamp-15.sql line 674-695)
+-- ============================================================
+SET datestyle TO ISO;
+SELECT
+  time_series.time_bucket('1day', ts) AS "UTC",
+  time_series.time_bucket('1day', ts, 'Europe/Berlin') AS "Berlin",
+  time_series.time_bucket('1day', ts, 'Europe/London') AS "London",
+  time_series.time_bucket('1day', ts, 'America/New_York') AS "New_York",
+  time_series.time_bucket('1day', ts, 'PST') AS "PST",
+  time_series.time_bucket('1day', ts, current_setting('timezone')) AS "current"
+FROM generate_series('1999-12-31 17:00'::timestamptz,'2000-01-02 3:00'::timestamptz, '1hour'::interval) ts;
+          UTC           |         Berlin         |         London         |        New_York        |          PST           |        current         
+------------------------+------------------------+------------------------+------------------------+------------------------+------------------------
+ 1999-12-31 16:00:00-08 | 1999-12-31 15:00:00-08 | 1999-12-31 16:00:00-08 | 1999-12-30 21:00:00-08 | 1999-12-31 00:00:00-08 | 1999-12-31 00:00:00-08
+ 1999-12-31 16:00:00-08 | 1999-12-31 15:00:00-08 | 1999-12-31 16:00:00-08 | 1999-12-30 21:00:00-08 | 1999-12-31 00:00:00-08 | 1999-12-31 00:00:00-08
+ 1999-12-31 16:00:00-08 | 1999-12-31 15:00:00-08 | 1999-12-31 16:00:00-08 | 1999-12-30 21:00:00-08 | 1999-12-31 00:00:00-08 | 1999-12-31 00:00:00-08
+ 1999-12-31 16:00:00-08 | 1999-12-31 15:00:00-08 | 1999-12-31 16:00:00-08 | 1999-12-30 21:00:00-08 | 1999-12-31 00:00:00-08 | 1999-12-31 00:00:00-08
+ 1999-12-31 16:00:00-08 | 1999-12-31 15:00:00-08 | 1999-12-31 16:00:00-08 | 1999-12-31 21:00:00-08 | 1999-12-31 00:00:00-08 | 1999-12-31 00:00:00-08
+ 1999-12-31 16:00:00-08 | 1999-12-31 15:00:00-08 | 1999-12-31 16:00:00-08 | 1999-12-31 21:00:00-08 | 1999-12-31 00:00:00-08 | 1999-12-31 00:00:00-08
+ 1999-12-31 16:00:00-08 | 1999-12-31 15:00:00-08 | 1999-12-31 16:00:00-08 | 1999-12-31 21:00:00-08 | 1999-12-31 00:00:00-08 | 1999-12-31 00:00:00-08
+ 1999-12-31 16:00:00-08 | 1999-12-31 15:00:00-08 | 1999-12-31 16:00:00-08 | 1999-12-31 21:00:00-08 | 2000-01-01 00:00:00-08 | 2000-01-01 00:00:00-08
+ 1999-12-31 16:00:00-08 | 1999-12-31 15:00:00-08 | 1999-12-31 16:00:00-08 | 1999-12-31 21:00:00-08 | 2000-01-01 00:00:00-08 | 2000-01-01 00:00:00-08
+ 1999-12-31 16:00:00-08 | 1999-12-31 15:00:00-08 | 1999-12-31 16:00:00-08 | 1999-12-31 21:00:00-08 | 2000-01-01 00:00:00-08 | 2000-01-01 00:00:00-08
+ 1999-12-31 16:00:00-08 | 1999-12-31 15:00:00-08 | 1999-12-31 16:00:00-08 | 1999-12-31 21:00:00-08 | 2000-01-01 00:00:00-08 | 2000-01-01 00:00:00-08
+ 1999-12-31 16:00:00-08 | 1999-12-31 15:00:00-08 | 1999-12-31 16:00:00-08 | 1999-12-31 21:00:00-08 | 2000-01-01 00:00:00-08 | 2000-01-01 00:00:00-08
+ 1999-12-31 16:00:00-08 | 1999-12-31 15:00:00-08 | 1999-12-31 16:00:00-08 | 1999-12-31 21:00:00-08 | 2000-01-01 00:00:00-08 | 2000-01-01 00:00:00-08
+ 1999-12-31 16:00:00-08 | 1999-12-31 15:00:00-08 | 1999-12-31 16:00:00-08 | 1999-12-31 21:00:00-08 | 2000-01-01 00:00:00-08 | 2000-01-01 00:00:00-08
+ 1999-12-31 16:00:00-08 | 1999-12-31 15:00:00-08 | 1999-12-31 16:00:00-08 | 1999-12-31 21:00:00-08 | 2000-01-01 00:00:00-08 | 2000-01-01 00:00:00-08
+ 1999-12-31 16:00:00-08 | 1999-12-31 15:00:00-08 | 1999-12-31 16:00:00-08 | 1999-12-31 21:00:00-08 | 2000-01-01 00:00:00-08 | 2000-01-01 00:00:00-08
+ 1999-12-31 16:00:00-08 | 1999-12-31 15:00:00-08 | 1999-12-31 16:00:00-08 | 1999-12-31 21:00:00-08 | 2000-01-01 00:00:00-08 | 2000-01-01 00:00:00-08
+ 1999-12-31 16:00:00-08 | 1999-12-31 15:00:00-08 | 1999-12-31 16:00:00-08 | 1999-12-31 21:00:00-08 | 2000-01-01 00:00:00-08 | 2000-01-01 00:00:00-08
+ 1999-12-31 16:00:00-08 | 1999-12-31 15:00:00-08 | 1999-12-31 16:00:00-08 | 1999-12-31 21:00:00-08 | 2000-01-01 00:00:00-08 | 2000-01-01 00:00:00-08
+ 1999-12-31 16:00:00-08 | 1999-12-31 15:00:00-08 | 1999-12-31 16:00:00-08 | 1999-12-31 21:00:00-08 | 2000-01-01 00:00:00-08 | 2000-01-01 00:00:00-08
+ 1999-12-31 16:00:00-08 | 1999-12-31 15:00:00-08 | 1999-12-31 16:00:00-08 | 1999-12-31 21:00:00-08 | 2000-01-01 00:00:00-08 | 2000-01-01 00:00:00-08
+ 1999-12-31 16:00:00-08 | 1999-12-31 15:00:00-08 | 1999-12-31 16:00:00-08 | 1999-12-31 21:00:00-08 | 2000-01-01 00:00:00-08 | 2000-01-01 00:00:00-08
+ 1999-12-31 16:00:00-08 | 2000-01-01 15:00:00-08 | 1999-12-31 16:00:00-08 | 1999-12-31 21:00:00-08 | 2000-01-01 00:00:00-08 | 2000-01-01 00:00:00-08
+ 2000-01-01 16:00:00-08 | 2000-01-01 15:00:00-08 | 2000-01-01 16:00:00-08 | 1999-12-31 21:00:00-08 | 2000-01-01 00:00:00-08 | 2000-01-01 00:00:00-08
+ 2000-01-01 16:00:00-08 | 2000-01-01 15:00:00-08 | 2000-01-01 16:00:00-08 | 1999-12-31 21:00:00-08 | 2000-01-01 00:00:00-08 | 2000-01-01 00:00:00-08
+ 2000-01-01 16:00:00-08 | 2000-01-01 15:00:00-08 | 2000-01-01 16:00:00-08 | 1999-12-31 21:00:00-08 | 2000-01-01 00:00:00-08 | 2000-01-01 00:00:00-08
+ 2000-01-01 16:00:00-08 | 2000-01-01 15:00:00-08 | 2000-01-01 16:00:00-08 | 1999-12-31 21:00:00-08 | 2000-01-01 00:00:00-08 | 2000-01-01 00:00:00-08
+ 2000-01-01 16:00:00-08 | 2000-01-01 15:00:00-08 | 2000-01-01 16:00:00-08 | 1999-12-31 21:00:00-08 | 2000-01-01 00:00:00-08 | 2000-01-01 00:00:00-08
+ 2000-01-01 16:00:00-08 | 2000-01-01 15:00:00-08 | 2000-01-01 16:00:00-08 | 2000-01-01 21:00:00-08 | 2000-01-01 00:00:00-08 | 2000-01-01 00:00:00-08
+ 2000-01-01 16:00:00-08 | 2000-01-01 15:00:00-08 | 2000-01-01 16:00:00-08 | 2000-01-01 21:00:00-08 | 2000-01-01 00:00:00-08 | 2000-01-01 00:00:00-08
+ 2000-01-01 16:00:00-08 | 2000-01-01 15:00:00-08 | 2000-01-01 16:00:00-08 | 2000-01-01 21:00:00-08 | 2000-01-01 00:00:00-08 | 2000-01-01 00:00:00-08
+ 2000-01-01 16:00:00-08 | 2000-01-01 15:00:00-08 | 2000-01-01 16:00:00-08 | 2000-01-01 21:00:00-08 | 2000-01-02 00:00:00-08 | 2000-01-02 00:00:00-08
+ 2000-01-01 16:00:00-08 | 2000-01-01 15:00:00-08 | 2000-01-01 16:00:00-08 | 2000-01-01 21:00:00-08 | 2000-01-02 00:00:00-08 | 2000-01-02 00:00:00-08
+ 2000-01-01 16:00:00-08 | 2000-01-01 15:00:00-08 | 2000-01-01 16:00:00-08 | 2000-01-01 21:00:00-08 | 2000-01-02 00:00:00-08 | 2000-01-02 00:00:00-08
+ 2000-01-01 16:00:00-08 | 2000-01-01 15:00:00-08 | 2000-01-01 16:00:00-08 | 2000-01-01 21:00:00-08 | 2000-01-02 00:00:00-08 | 2000-01-02 00:00:00-08
+(35 rows)
+
+SELECT
+  time_series.time_bucket('1month', ts) AS "UTC",
+  time_series.time_bucket('1month', ts, 'Europe/Berlin') AS "Berlin",
+  time_series.time_bucket('1month', ts, 'America/New_York') AS "New_York",
+  time_series.time_bucket('1month', ts, current_setting('timezone')) AS "current",
+  time_series.time_bucket('2month', ts, current_setting('timezone')) AS "2m"
+FROM generate_series('1999-12-01'::timestamptz,'2000-09-01'::timestamptz, '9 day'::interval) ts;
+          UTC           |         Berlin         |        New_York        |        current         |           2m           
+------------------------+------------------------+------------------------+------------------------+------------------------
+ 1999-11-30 16:00:00-08 | 1999-11-30 15:00:00-08 | 1999-11-30 21:00:00-08 | 1999-12-01 00:00:00-08 | 1999-11-01 00:00:00-08
+ 1999-11-30 16:00:00-08 | 1999-11-30 15:00:00-08 | 1999-11-30 21:00:00-08 | 1999-12-01 00:00:00-08 | 1999-11-01 00:00:00-08
+ 1999-11-30 16:00:00-08 | 1999-11-30 15:00:00-08 | 1999-11-30 21:00:00-08 | 1999-12-01 00:00:00-08 | 1999-11-01 00:00:00-08
+ 1999-11-30 16:00:00-08 | 1999-11-30 15:00:00-08 | 1999-11-30 21:00:00-08 | 1999-12-01 00:00:00-08 | 1999-11-01 00:00:00-08
+ 1999-12-31 16:00:00-08 | 1999-12-31 15:00:00-08 | 1999-12-31 21:00:00-08 | 2000-01-01 00:00:00-08 | 2000-01-01 00:00:00-08
+ 1999-12-31 16:00:00-08 | 1999-12-31 15:00:00-08 | 1999-12-31 21:00:00-08 | 2000-01-01 00:00:00-08 | 2000-01-01 00:00:00-08
+ 1999-12-31 16:00:00-08 | 1999-12-31 15:00:00-08 | 1999-12-31 21:00:00-08 | 2000-01-01 00:00:00-08 | 2000-01-01 00:00:00-08
+ 2000-01-31 16:00:00-08 | 2000-01-31 15:00:00-08 | 2000-01-31 21:00:00-08 | 2000-02-01 00:00:00-08 | 2000-01-01 00:00:00-08
+ 2000-01-31 16:00:00-08 | 2000-01-31 15:00:00-08 | 2000-01-31 21:00:00-08 | 2000-02-01 00:00:00-08 | 2000-01-01 00:00:00-08
+ 2000-01-31 16:00:00-08 | 2000-01-31 15:00:00-08 | 2000-01-31 21:00:00-08 | 2000-02-01 00:00:00-08 | 2000-01-01 00:00:00-08
+ 2000-01-31 16:00:00-08 | 2000-01-31 15:00:00-08 | 2000-01-31 21:00:00-08 | 2000-02-01 00:00:00-08 | 2000-01-01 00:00:00-08
+ 2000-02-29 16:00:00-08 | 2000-02-29 15:00:00-08 | 2000-02-29 21:00:00-08 | 2000-03-01 00:00:00-08 | 2000-03-01 00:00:00-08
+ 2000-02-29 16:00:00-08 | 2000-02-29 15:00:00-08 | 2000-02-29 21:00:00-08 | 2000-03-01 00:00:00-08 | 2000-03-01 00:00:00-08
+ 2000-02-29 16:00:00-08 | 2000-02-29 15:00:00-08 | 2000-02-29 21:00:00-08 | 2000-03-01 00:00:00-08 | 2000-03-01 00:00:00-08
+ 2000-03-31 16:00:00-08 | 2000-03-31 14:00:00-08 | 2000-03-31 21:00:00-08 | 2000-04-01 00:00:00-08 | 2000-03-01 00:00:00-08
+ 2000-03-31 16:00:00-08 | 2000-03-31 14:00:00-08 | 2000-03-31 21:00:00-08 | 2000-04-01 00:00:00-08 | 2000-03-01 00:00:00-08
+ 2000-03-31 16:00:00-08 | 2000-03-31 14:00:00-08 | 2000-03-31 21:00:00-08 | 2000-04-01 00:00:00-08 | 2000-03-01 00:00:00-08
+ 2000-04-30 17:00:00-07 | 2000-04-30 15:00:00-07 | 2000-04-30 21:00:00-07 | 2000-05-01 00:00:00-07 | 2000-05-01 00:00:00-07
+ 2000-04-30 17:00:00-07 | 2000-04-30 15:00:00-07 | 2000-04-30 21:00:00-07 | 2000-05-01 00:00:00-07 | 2000-05-01 00:00:00-07
+ 2000-04-30 17:00:00-07 | 2000-04-30 15:00:00-07 | 2000-04-30 21:00:00-07 | 2000-05-01 00:00:00-07 | 2000-05-01 00:00:00-07
+ 2000-04-30 17:00:00-07 | 2000-04-30 15:00:00-07 | 2000-04-30 21:00:00-07 | 2000-05-01 00:00:00-07 | 2000-05-01 00:00:00-07
+ 2000-05-31 17:00:00-07 | 2000-05-31 15:00:00-07 | 2000-05-31 21:00:00-07 | 2000-06-01 00:00:00-07 | 2000-05-01 00:00:00-07
+ 2000-05-31 17:00:00-07 | 2000-05-31 15:00:00-07 | 2000-05-31 21:00:00-07 | 2000-06-01 00:00:00-07 | 2000-05-01 00:00:00-07
+ 2000-05-31 17:00:00-07 | 2000-05-31 15:00:00-07 | 2000-05-31 21:00:00-07 | 2000-06-01 00:00:00-07 | 2000-05-01 00:00:00-07
+ 2000-06-30 17:00:00-07 | 2000-06-30 15:00:00-07 | 2000-06-30 21:00:00-07 | 2000-07-01 00:00:00-07 | 2000-07-01 00:00:00-07
+ 2000-06-30 17:00:00-07 | 2000-06-30 15:00:00-07 | 2000-06-30 21:00:00-07 | 2000-07-01 00:00:00-07 | 2000-07-01 00:00:00-07
+ 2000-06-30 17:00:00-07 | 2000-06-30 15:00:00-07 | 2000-06-30 21:00:00-07 | 2000-07-01 00:00:00-07 | 2000-07-01 00:00:00-07
+ 2000-06-30 17:00:00-07 | 2000-06-30 15:00:00-07 | 2000-06-30 21:00:00-07 | 2000-07-01 00:00:00-07 | 2000-07-01 00:00:00-07
+ 2000-07-31 17:00:00-07 | 2000-07-31 15:00:00-07 | 2000-07-31 21:00:00-07 | 2000-08-01 00:00:00-07 | 2000-07-01 00:00:00-07
+ 2000-07-31 17:00:00-07 | 2000-07-31 15:00:00-07 | 2000-07-31 21:00:00-07 | 2000-08-01 00:00:00-07 | 2000-07-01 00:00:00-07
+ 2000-07-31 17:00:00-07 | 2000-07-31 15:00:00-07 | 2000-07-31 21:00:00-07 | 2000-08-01 00:00:00-07 | 2000-07-01 00:00:00-07
+(31 rows)
+
+RESET datestyle;
+-- ============================================================
+-- Section 17: Origin with custom values (extended from Section 1.30)
+-- (from TimescaleDB timestamp-15.sql line 521-580)
+-- ============================================================
+\x
+-- timestamptz origin with custom origins
+SELECT time, time_series.time_bucket(INTERVAL '1 week', time) no_epoch,
+             time_series.time_bucket(INTERVAL '1 week', time) = time_series.time_bucket(INTERVAL '1 week', time, timestamptz '2000-01-03 00:00:00+0') always_true,
+             time_series.time_bucket(INTERVAL '1 week', time, timestamptz '2000-01-01 00:00:00+0') pg_epoch,
+             time_series.time_bucket(INTERVAL '1 week', time, timestamptz 'epoch') unix_epoch
+FROM unnest(ARRAY[
+    timestamp with time zone '3018-09-12',
+    timestamp with time zone '3018-09-13',
+    timestamp with time zone '3018-09-14',
+    timestamp with time zone '3018-09-15'
+    ]) AS time;
+-[ RECORD 1 ]-----------------------------
+time        | Sat Sep 12 00:00:00 3018 PDT
+no_epoch    | Sun Sep 06 17:00:00 3018 PDT
+always_true | t
+pg_epoch    | Fri Sep 11 17:00:00 3018 PDT
+unix_epoch  | Wed Sep 09 17:00:00 3018 PDT
+-[ RECORD 2 ]-----------------------------
+time        | Sun Sep 13 00:00:00 3018 PDT
+no_epoch    | Sun Sep 06 17:00:00 3018 PDT
+always_true | t
+pg_epoch    | Fri Sep 11 17:00:00 3018 PDT
+unix_epoch  | Wed Sep 09 17:00:00 3018 PDT
+-[ RECORD 3 ]-----------------------------
+time        | Mon Sep 14 00:00:00 3018 PDT
+no_epoch    | Sun Sep 13 17:00:00 3018 PDT
+always_true | t
+pg_epoch    | Fri Sep 11 17:00:00 3018 PDT
+unix_epoch  | Wed Sep 09 17:00:00 3018 PDT
+-[ RECORD 4 ]-----------------------------
+time        | Tue Sep 15 00:00:00 3018 PDT
+no_epoch    | Sun Sep 13 17:00:00 3018 PDT
+always_true | t
+pg_epoch    | Fri Sep 11 17:00:00 3018 PDT
+unix_epoch  | Wed Sep 09 17:00:00 3018 PDT
+
+-- timestamp origin with custom origins
+SELECT time, time_series.time_bucket(INTERVAL '1 week', time) no_epoch,
+             time_series.time_bucket(INTERVAL '1 week', time) = time_series.time_bucket(INTERVAL '1 week', time, timestamp '2000-01-03 00:00:00') always_true,
+             time_series.time_bucket(INTERVAL '1 week', time, timestamp '2000-01-01 00:00:00+0') pg_epoch,
+             time_series.time_bucket(INTERVAL '1 week', time, timestamp 'epoch') unix_epoch
+FROM unnest(ARRAY[
+    timestamp without time zone '3018-09-12',
+    timestamp without time zone '3018-09-13',
+    timestamp without time zone '3018-09-14',
+    timestamp without time zone '3018-09-15'
+    ]) AS time;
+-[ RECORD 1 ]-------------------------
+time        | Sat Sep 12 00:00:00 3018
+no_epoch    | Mon Sep 07 00:00:00 3018
+always_true | t
+pg_epoch    | Sat Sep 12 00:00:00 3018
+unix_epoch  | Thu Sep 10 00:00:00 3018
+-[ RECORD 2 ]-------------------------
+time        | Sun Sep 13 00:00:00 3018
+no_epoch    | Mon Sep 07 00:00:00 3018
+always_true | t
+pg_epoch    | Sat Sep 12 00:00:00 3018
+unix_epoch  | Thu Sep 10 00:00:00 3018
+-[ RECORD 3 ]-------------------------
+time        | Mon Sep 14 00:00:00 3018
+no_epoch    | Mon Sep 14 00:00:00 3018
+always_true | t
+pg_epoch    | Sat Sep 12 00:00:00 3018
+unix_epoch  | Thu Sep 10 00:00:00 3018
+-[ RECORD 4 ]-------------------------
+time        | Tue Sep 15 00:00:00 3018
+no_epoch    | Mon Sep 14 00:00:00 3018
+always_true | t
+pg_epoch    | Sat Sep 12 00:00:00 3018
+unix_epoch  | Thu Sep 10 00:00:00 3018
+
+-- date origin with custom origins
+SELECT time, time_series.time_bucket(INTERVAL '1 week', time) no_epoch,
+             time_series.time_bucket(INTERVAL '1 week', time) = time_series.time_bucket(INTERVAL '1 week', time, date '2000-01-03') always_true,
+             time_series.time_bucket(INTERVAL '1 week', time, date '2000-01-01') pg_epoch,
+             time_series.time_bucket(INTERVAL '1 week', time, (timestamp 'epoch')::date) unix_epoch
+FROM unnest(ARRAY[
+    date '3018-09-12',
+    date '3018-09-13',
+    date '3018-09-14',
+    date '3018-09-15'
+    ]) AS time;
+-[ RECORD 1 ]-----------
+time        | 09-12-3018
+no_epoch    | 09-07-3018
+always_true | t
+pg_epoch    | 09-12-3018
+unix_epoch  | 09-10-3018
+-[ RECORD 2 ]-----------
+time        | 09-13-3018
+no_epoch    | 09-07-3018
+always_true | t
+pg_epoch    | 09-12-3018
+unix_epoch  | 09-10-3018
+-[ RECORD 3 ]-----------
+time        | 09-14-3018
+no_epoch    | 09-14-3018
+always_true | t
+pg_epoch    | 09-12-3018
+unix_epoch  | 09-10-3018
+-[ RECORD 4 ]-----------
+time        | 09-15-3018
+no_epoch    | 09-14-3018
+always_true | t
+pg_epoch    | 09-12-3018
+unix_epoch  | 09-10-3018
+
+\x
+-- ============================================================
+-- Section 18: Origin alignment example
+-- (from TimescaleDB timestamp-15.sql line 244-251)
+-- ============================================================
+-- Example to align with an origin using offset arithmetic
+SELECT time, time_series.time_bucket(INTERVAL '5 minute', time - (TIMESTAMP '2011-01-02 00:02:00' - TIMESTAMP 'epoch')) + (TIMESTAMP '2011-01-02 00:02:00' - TIMESTAMP 'epoch')
+FROM unnest(ARRAY[
+    TIMESTAMP '2011-01-02 01:01:59.999999',
+    TIMESTAMP '2011-01-02 01:02:00',
+    TIMESTAMP '2011-01-02 01:06:59.999999',
+    TIMESTAMP '2011-01-02 01:07:00'
+    ]) AS time;
+              time               |         ?column?         
+---------------------------------+--------------------------
+ Sun Jan 02 01:01:59.999999 2011 | Sun Jan 02 00:57:00 2011
+ Sun Jan 02 01:02:00 2011        | Sun Jan 02 01:02:00 2011
+ Sun Jan 02 01:06:59.999999 2011 | Sun Jan 02 01:02:00 2011
+ Sun Jan 02 01:07:00 2011        | Sun Jan 02 01:07:00 2011
+(4 rows)
+
+-- ============================================================
+-- Section 19: Int/Bigint bucketing (combined test)
+-- (from TimescaleDB timestamp-15.sql line 339-354)
+-- ============================================================
+-- All three integer types in one test
+SELECT time,
+    time_series.time_bucket(10::smallint, time) AS time_bucket_smallint,
+    time_series.time_bucket(10::int, time::int) AS time_bucket_int,
+    time_series.time_bucket(10::bigint, time::bigint) AS time_bucket_bigint
+FROM unnest(ARRAY[
+     '-11', '-10', '-9', '-1', '0', '1', '99', '100', '109', '110'
+    ]::smallint[]) AS time;
+ time | time_bucket_smallint | time_bucket_int | time_bucket_bigint 
+------+----------------------+-----------------+--------------------
+  -11 |                  -20 |             -20 |                -20
+  -10 |                  -10 |             -10 |                -10
+   -9 |                  -10 |             -10 |                -10
+   -1 |                  -10 |             -10 |                -10
+    0 |                    0 |               0 |                  0
+    1 |                    0 |               0 |                  0
+   99 |                   90 |              90 |                 90
+  100 |                  100 |             100 |                100
+  109 |                  100 |             100 |                100
+  110 |                  110 |             110 |                110
+(10 rows)
+
+SELECT time,
+    time_series.time_bucket(10::smallint, time, 2::smallint) AS time_bucket_smallint,
+    time_series.time_bucket(10::int, time::int, 2::int) AS time_bucket_int,
+    time_series.time_bucket(10::bigint, time::bigint, 2::bigint) AS time_bucket_bigint
+FROM unnest(ARRAY[
+      '-9', '-8', '-7', '1', '2', '3', '101', '102', '111', '112'
+    ]::smallint[]) AS time;
+ time | time_bucket_smallint | time_bucket_int | time_bucket_bigint 
+------+----------------------+-----------------+--------------------
+   -9 |                  -18 |             -18 |                -18
+   -8 |                   -8 |              -8 |                 -8
+   -7 |                   -8 |              -8 |                 -8
+    1 |                   -8 |              -8 |                 -8
+    2 |                    2 |               2 |                  2
+    3 |                    2 |               2 |                  2
+  101 |                   92 |              92 |                 92
+  102 |                  102 |             102 |                102
+  111 |                  102 |             102 |                102
+  112 |                  112 |             112 |                112
+(10 rows)
+
+SELECT time,
+    time_series.time_bucket(10::smallint, time, -2::smallint) AS time_bucket_smallint,
+    time_series.time_bucket(10::int, time::int, -2::int) AS time_bucket_int,
+    time_series.time_bucket(10::bigint, time::bigint, -2::bigint) AS time_bucket_bigint
+FROM unnest(ARRAY[
+    '-13', '-12', '-11', '-3', '-2', '-1', '97', '98', '107', '108'
+    ]::smallint[]) AS time;
+ time | time_bucket_smallint | time_bucket_int | time_bucket_bigint 
+------+----------------------+-----------------+--------------------
+  -13 |                  -22 |             -22 |                -22
+  -12 |                  -12 |             -12 |                -12
+  -11 |                  -12 |             -12 |                -12
+   -3 |                  -12 |             -12 |                -12
+   -2 |                   -2 |              -2 |                 -2
+   -1 |                   -2 |              -2 |                 -2
+   97 |                   88 |              88 |                 88
+   98 |                   98 |              98 |                 98
+  107 |                   98 |              98 |                 98
+  108 |                  108 |             108 |                108
+(10 rows)
+
+DROP EXTENSION time_series CASCADE;

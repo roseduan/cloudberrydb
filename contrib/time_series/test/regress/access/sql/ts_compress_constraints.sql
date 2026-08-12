@@ -1,0 +1,318 @@
+-- ts_compress_constraints.sql
+--
+-- Constraint and index interactions with compress / reclaim flow.
+-- Covers what time_series + ts_btree currently supports plus the
+-- intentionally-rejected cases.
+--
+-- Mirrors what upstream compression_constraints.sql,
+-- compression_indexcreate.sql and compression_indexscan.sql cover.
+--
+-- Intentional feature gaps verified here:
+--   * Standard btree index (and therefore PRIMARY KEY / UNIQUE) is
+--     rejected at DDL time — only USING ts_btree is allowed.
+--   * Multi-column ts_btree index is rejected.
+--   * FOREIGN KEY is accepted but not enforced (Cloudberry-wide).
+
+\i sql/include/setup.sql
+
+-- ======================================================================
+-- Section 1: NOT NULL — enforced through full ACTIVE → COMPRESSED →
+-- PARTIAL cycle
+-- ======================================================================
+
+CREATE TABLE ts_c_notnull (
+    ts   timestamptz NOT NULL,
+    val  integer     NOT NULL
+) USING time_series WITH (
+    ts_partition_column='ts', ts_chunk_interval='1 day',
+    ts_chunk_origin='2025-01-01 00:00:00+00'
+) DISTRIBUTED REPLICATED;
+
+\set ON_ERROR_STOP 0
+-- 1a: NOT NULL on ts (partition col)
+INSERT INTO ts_c_notnull VALUES (NULL, 1);
+-- 1b: NOT NULL on val
+INSERT INTO ts_c_notnull VALUES ('2025-01-01 01:00+00', NULL);
+\set ON_ERROR_STOP 1
+
+INSERT INTO ts_c_notnull VALUES ('2025-01-01 01:00+00', 1);
+SELECT time_series.compress_chunks('ts_c_notnull'::regclass);
+
+-- 1c: NOT NULL still enforced after compress (auto-truncate path
+-- triggers but constraint check fires first)
+\set ON_ERROR_STOP 0
+INSERT INTO ts_c_notnull VALUES ('2025-01-01 02:00+00', NULL);
+\set ON_ERROR_STOP 1
+
+SELECT count(*) AS rows FROM ts_c_notnull;
+DROP TABLE ts_c_notnull;
+
+
+-- ======================================================================
+-- Section 2: CHECK constraint — enforced across the cycle
+-- ======================================================================
+
+CREATE TABLE ts_c_check (
+    ts   timestamptz NOT NULL,
+    val  integer CHECK (val > 0 AND val < 1000)
+) USING time_series WITH (
+    ts_partition_column='ts', ts_chunk_interval='1 day',
+    ts_chunk_origin='2025-01-01 00:00:00+00'
+) DISTRIBUTED REPLICATED;
+
+\set ON_ERROR_STOP 0
+-- 2a: CHECK violated on ACTIVE chunk
+INSERT INTO ts_c_check VALUES ('2025-01-01 01:00+00', 0);
+INSERT INTO ts_c_check VALUES ('2025-01-01 01:00+00', 1500);
+\set ON_ERROR_STOP 1
+
+INSERT INTO ts_c_check VALUES ('2025-01-01 01:00+00', 50);
+SELECT time_series.compress_chunks('ts_c_check'::regclass);
+SELECT time_series.reclaim_chunk_heaps('ts_c_check'::regclass);
+
+\set ON_ERROR_STOP 0
+-- 2b: CHECK violated when INSERTing into COMPRESSED chunk (auto-truncate
+-- path fires AFTER constraint check, so the heap stays untouched on rejection)
+INSERT INTO ts_c_check VALUES ('2025-01-01 02:00+00', -5);
+\set ON_ERROR_STOP 1
+
+-- Status should still be COMPRESSED — the failed INSERT must not flip to PARTIAL
+SELECT DISTINCT status FROM time_series.ts_chunk
+ WHERE table_oid = 'ts_c_check'::regclass;
+
+-- 2c: valid INSERT after COMPRESSED — status flips to PARTIAL
+INSERT INTO ts_c_check VALUES ('2025-01-01 02:00+00', 99);
+SELECT DISTINCT status FROM time_series.ts_chunk
+ WHERE table_oid = 'ts_c_check'::regclass;
+SELECT count(*) AS rows FROM ts_c_check;
+
+DELETE FROM time_series.ts_compressed_chunk WHERE table_oid='ts_c_check'::regclass;
+DELETE FROM time_series.ts_compress_config  WHERE table_oid='ts_c_check'::regclass;
+DROP TABLE ts_c_check;
+
+
+-- ======================================================================
+-- Section 3: PRIMARY KEY / UNIQUE rejected at DDL — feature gap
+--
+-- These require a standard btree index, but time_series tableam only
+-- accepts USING ts_btree.  The DDL must error cleanly with an
+-- actionable HINT pointing the user at ts_btree.
+-- ======================================================================
+
+\set ON_ERROR_STOP 0
+CREATE TABLE ts_c_pk (ts timestamptz NOT NULL PRIMARY KEY, v int)
+USING time_series WITH (
+    ts_partition_column='ts', ts_chunk_interval='1 day',
+    ts_chunk_origin='2025-01-01 00:00:00+00'
+) DISTRIBUTED REPLICATED;
+
+CREATE TABLE ts_c_unique (ts timestamptz NOT NULL UNIQUE, v int)
+USING time_series WITH (
+    ts_partition_column='ts', ts_chunk_interval='1 day',
+    ts_chunk_origin='2025-01-01 00:00:00+00'
+) DISTRIBUTED REPLICATED;
+\set ON_ERROR_STOP 1
+
+
+-- ======================================================================
+-- Section 4: FOREIGN KEY — Cloudberry-wide doesn't enforce; verify
+-- the DDL is accepted with the standard warning, both directions
+-- ======================================================================
+
+CREATE TABLE ts_c_fk_parent (id int PRIMARY KEY, name text)
+DISTRIBUTED REPLICATED;
+
+INSERT INTO ts_c_fk_parent VALUES (1, 'one'), (2, 'two');
+
+-- 4a: time_series table referencing a regular table (FK warning expected)
+CREATE TABLE ts_c_fk_child (
+    ts        timestamptz NOT NULL,
+    parent_id integer REFERENCES ts_c_fk_parent(id)
+) USING time_series WITH (
+    ts_partition_column='ts', ts_chunk_interval='1 day',
+    ts_chunk_origin='2025-01-01 00:00:00+00'
+) DISTRIBUTED REPLICATED;
+
+INSERT INTO ts_c_fk_child VALUES
+    ('2025-01-01 01:00+00', 1),
+    ('2025-01-01 02:00+00', 2),
+    -- Reference to non-existent parent: under MPP FK isn't enforced
+    -- so this is silently accepted (Cloudberry behaviour, not ours)
+    ('2025-01-01 03:00+00', 999);
+
+SELECT count(*) AS pre_compress FROM ts_c_fk_child;
+SELECT time_series.compress_chunks('ts_c_fk_child'::regclass);
+
+-- After compress all rows still readable; FK metadata preserved
+SELECT count(*) AS post_compress FROM ts_c_fk_child;
+SELECT count(*) AS fk_count FROM information_schema.table_constraints
+ WHERE table_name = 'ts_c_fk_child' AND constraint_type = 'FOREIGN KEY';
+
+DELETE FROM time_series.ts_compressed_chunk WHERE table_oid='ts_c_fk_child'::regclass;
+DELETE FROM time_series.ts_compress_config  WHERE table_oid='ts_c_fk_child'::regclass;
+DROP TABLE ts_c_fk_child;
+DROP TABLE ts_c_fk_parent;
+
+
+-- ======================================================================
+-- Sections 5-8 below are disabled along with the ts_btree index AM.
+-- Re-enable as a block when the AM comes back online by stripping the
+-- leading "-- " from each line.
+-- ======================================================================
+
+-- -- ======================================================================
+-- -- Section 5: ts_btree index across compress / reclaim / recompress
+-- --
+-- -- ts_btree TIDs point at heap-fork pages.  Two safety mechanisms keep
+-- -- the user from hitting "could not read block 0" after reclaim:
+-- --   (a) the pathlist hook drops IndexScan paths when any chunk is
+-- --       COMPRESSED or PARTIAL — the planner picks ChunkScan instead;
+-- --   (b) ts_btree_build_chunk_list filters out COMPRESSED chunks as
+-- --       a second layer of defense.
+-- -- This section runs the full ACTIVE → COMPRESSED → reclaim cycle and
+-- -- confirms equality / range queries return correct rows in every state.
+-- -- ======================================================================
+--
+-- CREATE TABLE ts_c_idx (
+--     ts   timestamptz NOT NULL,
+--     val  integer
+-- ) USING time_series WITH (
+--     ts_partition_column='ts', ts_chunk_interval='1 day',
+--     ts_chunk_origin='2025-01-01 00:00:00+00'
+-- ) DISTRIBUTED REPLICATED;
+--
+-- CREATE INDEX ts_c_idx_ts ON ts_c_idx USING ts_btree (ts);
+--
+-- INSERT INTO ts_c_idx
+-- SELECT '2025-01-01 00:00+00'::timestamptz + (i * interval '1 hour'), i
+-- FROM generate_series(1, 24) i;
+--
+-- SELECT time_series.compress_chunks('ts_c_idx'::regclass);
+-- SELECT time_series.reclaim_chunk_heaps('ts_c_idx'::regclass);
+--
+-- -- Equality + range after reclaim (planner falls back to ChunkScan)
+-- SELECT * FROM ts_c_idx WHERE ts = '2025-01-01 12:00+00';
+-- SELECT count(*) AS slice FROM ts_c_idx
+--  WHERE ts >= '2025-01-01 06:00+00' AND ts < '2025-01-01 18:00+00';
+--
+-- -- INSERT after reclaim (PARTIAL), recompress, lookup still works
+-- INSERT INTO ts_c_idx VALUES ('2025-01-01 11:30+00', 999);
+-- SELECT * FROM ts_c_idx WHERE ts = '2025-01-01 11:30+00';
+-- SELECT time_series.compress_chunks('ts_c_idx'::regclass);
+-- SELECT * FROM ts_c_idx WHERE ts = '2025-01-01 11:30+00';
+--
+-- DROP INDEX ts_c_idx_ts;
+-- DELETE FROM time_series.ts_compressed_chunk WHERE table_oid='ts_c_idx'::regclass;
+-- DELETE FROM time_series.ts_compress_config  WHERE table_oid='ts_c_idx'::regclass;
+-- DROP TABLE ts_c_idx;
+--
+--
+-- -- ======================================================================
+-- -- Section 6: partial index (WHERE predicate)
+-- --
+-- -- The pathlist hook drops IndexOnlyScan paths unconditionally so the
+-- -- planner can't pick IOS against ts_btree (which would raise
+-- -- "no data returned for index-only scan").  Partial index still
+-- -- works correctly for ChunkScan-based queries.
+-- -- ======================================================================
+--
+-- CREATE TABLE ts_c_pidx (
+--     ts   timestamptz NOT NULL,
+--     val  integer
+-- ) USING time_series WITH (
+--     ts_partition_column='ts', ts_chunk_interval='1 day',
+--     ts_chunk_origin='2025-01-01 00:00:00+00'
+-- ) DISTRIBUTED REPLICATED;
+--
+-- -- Partial index: only entries where val > 0
+-- CREATE INDEX ts_c_pidx_pos ON ts_c_pidx USING ts_btree (ts) WHERE val > 0;
+--
+-- INSERT INTO ts_c_pidx VALUES
+--     ('2025-01-01 01:00+00',  10),
+--     ('2025-01-01 02:00+00',  -5),    -- excluded from index
+--     ('2025-01-01 03:00+00',  20),
+--     ('2025-01-01 04:00+00',  -10),   -- excluded
+--     ('2025-01-01 05:00+00',  30);
+--
+-- SELECT time_series.compress_chunks('ts_c_pidx'::regclass);
+--
+-- -- Row counts post-compress: total 5 = 3 positive + 2 negative
+-- SELECT count(*) AS positive_rows FROM ts_c_pidx WHERE val > 0;
+-- SELECT count(*) AS negative_rows FROM ts_c_pidx WHERE val < 0;
+-- SELECT count(*) AS total FROM ts_c_pidx;
+--
+-- DROP INDEX ts_c_pidx_pos;
+-- DELETE FROM time_series.ts_compressed_chunk WHERE table_oid='ts_c_pidx'::regclass;
+-- DELETE FROM time_series.ts_compress_config  WHERE table_oid='ts_c_pidx'::regclass;
+-- DROP TABLE ts_c_pidx;
+--
+--
+-- -- ======================================================================
+-- -- Section 7: ts_btree multi-column rejected — feature gap
+-- -- ======================================================================
+--
+-- CREATE TABLE ts_c_multi (
+--     ts     timestamptz NOT NULL,
+--     region text,
+--     val    integer
+-- ) USING time_series WITH (
+--     ts_partition_column='ts', ts_chunk_interval='1 day',
+--     ts_chunk_origin='2025-01-01 00:00:00+00'
+-- ) DISTRIBUTED REPLICATED;
+--
+-- \set ON_ERROR_STOP 0
+-- CREATE INDEX ON ts_c_multi USING ts_btree (ts, val);
+-- \set ON_ERROR_STOP 1
+--
+-- DROP TABLE ts_c_multi;
+--
+--
+-- -- ======================================================================
+-- -- Section 8: REINDEX of a ts_btree index on a compressed table
+-- --
+-- -- ts_btree pages live in the same extension fork as the chunk data,
+-- -- so REINDEX has to walk the table-AM-specific scan to rebuild.
+-- -- Verify it doesn't error and the index still finds rows after.
+-- -- ======================================================================
+--
+-- CREATE TABLE ts_c_reindex (
+--     ts   timestamptz NOT NULL,
+--     val  integer
+-- ) USING time_series WITH (
+--     ts_partition_column='ts', ts_chunk_interval='1 day',
+--     ts_chunk_origin='2025-01-01 00:00:00+00'
+-- ) DISTRIBUTED REPLICATED;
+--
+-- CREATE INDEX ts_c_reindex_idx ON ts_c_reindex USING ts_btree (ts);
+--
+-- INSERT INTO ts_c_reindex
+-- SELECT '2025-01-01 00:00+00'::timestamptz + (i * interval '1 hour'), i
+-- FROM generate_series(1, 12) i;
+--
+-- SELECT time_series.compress_chunks('ts_c_reindex'::regclass);
+--
+-- -- Lookup before REINDEX
+-- SELECT * FROM ts_c_reindex WHERE ts = '2025-01-01 06:00+00';
+--
+-- \set ON_ERROR_STOP 0
+-- REINDEX INDEX ts_c_reindex_idx;
+-- \set ON_ERROR_STOP 1
+--
+-- -- Lookup after REINDEX
+-- SELECT * FROM ts_c_reindex WHERE ts = '2025-01-01 06:00+00';
+-- SELECT count(*) AS total FROM ts_c_reindex;
+--
+-- DROP INDEX ts_c_reindex_idx;
+-- DELETE FROM time_series.ts_compressed_chunk WHERE table_oid='ts_c_reindex'::regclass;
+-- DELETE FROM time_series.ts_compress_config  WHERE table_oid='ts_c_reindex'::regclass;
+-- DROP TABLE ts_c_reindex;
+--
+--
+-- ======================================================================
+-- Cleanup
+-- ======================================================================
+
+RESET timezone;
+RESET optimizer;
+RESET datestyle;
+RESET extra_float_digits;

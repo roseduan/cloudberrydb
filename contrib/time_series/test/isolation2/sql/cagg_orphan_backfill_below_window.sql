@@ -1,0 +1,215 @@
+-- ============================================================
+-- cagg_orphan_backfill_below_window.sql (isolation2)
+--
+-- Regression for the cold-start watermark pin: a CAGG whose
+-- watermark never left -infinity is permanently unable to advance
+-- when a backfill lands BELOW every future policy window.
+--
+-- Real incident (12h soak SOAK-20260721_161133, cv_1hour): the CAGG
+-- was created cold (empty source, wm = -infinity).  A late-arrival
+-- bulk backfill then wrote rows into a bucket older than anything
+-- the sliding policy window [now-start_offset, now-end_offset)
+-- would ever cover again (inscribed bucket alignment excluded the
+-- straddled bucket at the one tick whose window touched it).  The
+-- invalidation was parked in L2 with no consumer:
+--
+--   * policy expand-back -- the only mechanism that pulls
+--     window_start below the sliding window -- is guarded by
+--     !TIMESTAMP_IS_NOBEGIN(watermark) and never fires while the
+--     watermark is still -infinity;
+--   * the catch-up gap probe [-infinity, boundary) then finds the
+--     orphan source bucket missing from mat forever, so neither the
+--     per-window advance nor catch-up ever moves the watermark.
+--
+-- Result: wm pinned at -infinity for the whole 12h run, the union
+-- view served every query from the live branch (mat had 6424 rows
+-- nobody read), and each refresh re-materialized an ever-growing
+-- window (duration 523ms -> 306s).  No chaos required: refresh
+-- succeeded 21/21; this is pure scheduling starvation.
+--
+-- Fix under test (L2-driven expand-back): the policy must anchor
+-- expand-back on the oldest PENDING obligation recorded in the
+-- invalidation logs -- "there is unpaid work below the window" is
+-- itself the reason to pull the window down, independent of the
+-- watermark value.  A brand-new CAGG has no L2 entries, so the
+-- original footgun (full-history refresh on a fresh CAGG) stays
+-- fixed.
+--
+-- Expected output encodes the FIXED behavior: this test is RED on
+-- current code (orphan_wm_is_finite = f, parked L2 entry survives)
+-- and turns green once the L2-driven expand-back lands.
+--
+-- Two CAGGs mirror the incident's shape: cv_ob_helper stands in for
+-- cv_1min/cv_5min -- it advances the SHARED per-source invalidation
+-- threshold so the later backfill is threshold-watched and lands in
+-- L1 -- while cv_ob_slow (the CAGG under test) still has
+-- wm = -infinity when the orphan arrives, exactly like cv_1hour.
+--
+-- Invariant checked in every phase: the union view NEVER loses rows
+-- (wm staying put keeps queries on the live branch: slow but
+-- correct).  The bug is availability/performance, not consistency.
+-- ============================================================
+
+1: SET optimizer = off;
+1: SET timezone = 'UTC';
+1: DROP EXTENSION IF EXISTS time_series CASCADE;
+1: DROP TABLE IF EXISTS ob_src CASCADE;
+1: DROP TABLE IF EXISTS ob_anchor CASCADE;
+1: CREATE EXTENSION time_series;
+1: SET search_path TO public, time_series;
+
+-- Keep run_job fully deterministic: no scheduler ticks racing us.
+1: SELECT time_series.stop_background_workers();
+
+-- One anchor captured once; every timestamp below derives from it.
+-- All margins are >= 1 hour so crossing an hour boundary mid-test
+-- cannot flip any bucket-vs-window relationship.
+1: CREATE TABLE ob_anchor AS SELECT date_trunc('hour', now()) AS a DISTRIBUTED REPLICATED;
+
+1: CREATE TABLE ob_src (
+    time TIMESTAMPTZ NOT NULL,
+    device INT NOT NULL,
+    val FLOAT8
+) USING time_series WITH (
+    ts_partition_column = 'time',
+    ts_chunk_interval   = '4 hour',
+    ts_chunk_origin     = '2020-01-01'
+)
+DISTRIBUTED BY (device);
+
+-- CAGG under test: created on an EMPTY source -> wm = -infinity.
+1: CREATE MATERIALIZED VIEW cv_ob_slow WITH (time_series.continuous) AS
+     SELECT time_bucket('1 hour'::interval, time) AS bucket, count(*) AS cnt
+     FROM ob_src GROUP BY bucket;
+
+-- Helper CAGG on the same source: its refresh advances the SHARED
+-- invalidation threshold (threshold = MAX over sibling watermarks),
+-- reproducing the soak where cv_1min kept the threshold hot while
+-- cv_1hour's own watermark stayed at -infinity.
+1: CREATE MATERIALIZED VIEW cv_ob_helper WITH (time_series.continuous) AS
+     SELECT time_bucket('1 hour'::interval, time) AS bucket, count(*) AS cnt
+     FROM ob_src GROUP BY bucket;
+
+-- Baseline: cold start pins the watermark at -infinity.
+1: SELECT bool_and(watermark = '-infinity'::timestamptz) AS cold_start_wm_is_neg_inf
+   FROM time_series.cagg_watermark w
+   JOIN time_series.continuous_agg c ON w.cagg_id = c.cagg_id
+  WHERE c.user_view_name = 'cv_ob_slow';
+
+-- ------------------------------------------------------------
+-- Recent data INSIDE the future policy window.
+-- Policy will use start_offset '6 hours' / end_offset '1 hour',
+-- so its inscribed window is ~[a-5h, a-1h).  Buckets a-3h and
+-- a-2h sit comfortably inside with >= 1h margin on both sides.
+-- ------------------------------------------------------------
+1: INSERT INTO ob_src
+   SELECT a - (hr || ' hour')::interval + (m * 6 || ' minute')::interval,
+          ((hr + m) % 3) + 1, hr + m * 0.1
+   FROM ob_anchor, generate_series(2, 3) hr, generate_series(1, 9) m;
+
+-- Helper refresh: materializes the recent buckets for cv_ob_helper
+-- and -- the part that matters -- advances the shared invalidation
+-- threshold, so the upcoming backfill is watched and logged to L1.
+-- cv_ob_slow is untouched: its watermark stays -infinity.
+1: CALL time_series.refresh_continuous_aggregate('cv_ob_helper', NULL, NULL);
+
+1: SELECT bool_and(watermark > '-infinity'::timestamptz) AS helper_wm_is_finite
+   FROM time_series.cagg_watermark w
+   JOIN time_series.continuous_agg c ON w.cagg_id = c.cagg_id
+  WHERE c.user_view_name = 'cv_ob_helper';
+
+-- ------------------------------------------------------------
+-- The orphan backfill: one bucket at a-8h, three hours BELOW the
+-- policy window's inscribed start (~a-5h).  No future sliding
+-- window will ever reach it; only expand-back can.
+-- ------------------------------------------------------------
+1: INSERT INTO ob_src
+   SELECT a - interval '8 hours' + (m * 6 || ' minute')::interval,
+          (m % 3) + 1, 100 + m
+   FROM ob_anchor, generate_series(1, 9) m;
+
+-- ------------------------------------------------------------
+-- Policy on the CAGG under test.  schedule_interval is irrelevant
+-- (scheduler stopped); the window offsets are what matter.
+--
+-- The job id is deterministic: the extension was created fresh in
+-- this test, the only built-in job is the retention job at the
+-- reserved id 1, and the user-job sequence is setval'd to 1000 at
+-- install -- so the first add_continuous_aggregate_policy always
+-- returns 1001.  Printing it here pins that assumption in the
+-- expected output (isolation2 cannot parse multi-line $$ bodies,
+-- so a plpgsql lookup wrapper is not an option).
+-- ------------------------------------------------------------
+1: SELECT add_continuous_aggregate_policy('cv_ob_slow',
+       '6 hours'::interval, '1 hour'::interval, '4 hours'::interval) AS jid;
+
+-- Policy run #1: window ~[a-5h, a-1h).  Materializes the recent
+-- buckets into cv_ob_slow's mat; the orphan invalidation is cut
+-- from L1 and parked in L2 below the window.  The per-window
+-- advance is refused (gap [-inf, window_start) contains the orphan
+-- source bucket, absent from mat), and catch-up is refused for the
+-- same reason.
+1: CALL time_series.run_job(1001);
+
+-- Policy run #2: the heal point.
+--   FIXED code:  expand-back consults the pending logs, finds the
+--                parked orphan obligation, pulls window_start down
+--                to its bucket, materializes it, consumes the L2
+--                residue -- and the advance path finally clears
+--                the gap probe, lifting wm off -infinity.
+--   BUGGY code:  expand-back is skipped (wm still -infinity), the
+--                window repeats ~[a-5h, a-1h), the orphan stays
+--                unmaterialized, wm stays pinned.
+1: CALL time_series.run_job(1001);
+
+-- ============================================================
+-- Assertions.  Expected output = FIXED behavior.
+-- ============================================================
+
+-- THE red/green line: after the heal run the watermark must have
+-- left -infinity.  (Today: f -- pinned forever.)
+1: SELECT bool_and(watermark > '-infinity'::timestamptz) AS orphan_wm_is_finite
+   FROM time_series.cagg_watermark w
+   JOIN time_series.continuous_agg c ON w.cagg_id = c.cagg_id
+  WHERE c.user_view_name = 'cv_ob_slow';
+
+-- And meaningfully so: at least past the recent buckets it
+-- materialized (>= a-3h).  (Today: f.)
+1: SELECT bool_and(w.watermark >= x.a - interval '3 hours') AS orphan_wm_past_recent
+   FROM time_series.cagg_watermark w
+   JOIN time_series.continuous_agg c ON w.cagg_id = c.cagg_id
+   CROSS JOIN ob_anchor x
+  WHERE c.user_view_name = 'cv_ob_slow';
+
+-- The parked L2 obligation below the sliding window must have been
+-- consumed by the heal run.  (Today: the residue rows survive.)
+1: SELECT count(*) AS l2_parked_below_window
+   FROM time_series.cagg_materialization_log l
+   JOIN time_series.continuous_agg c ON l.cagg_id = c.cagg_id
+   CROSS JOIN ob_anchor x
+  WHERE c.user_view_name = 'cv_ob_slow'
+    AND l.lowest_modified < x.a - interval '5 hours';
+
+-- Correctness invariant, phase-independent: the union view never
+-- loses rows.  Pre-fix it is served entirely by the live branch
+-- (slow but right); post-fix mostly by mat.  Both must show all 3
+-- source buckets and a bit-exact aggregation.
+1: SELECT count(DISTINCT bucket) AS view_bucket_count FROM cv_ob_slow;
+
+1: SELECT count(*) AS view_vs_source_diff FROM (
+     (SELECT bucket, cnt FROM cv_ob_slow)
+     EXCEPT
+     (SELECT time_bucket('1 hour'::interval, time), count(*)
+        FROM ob_src GROUP BY 1)
+     UNION ALL
+     (SELECT time_bucket('1 hour'::interval, time), count(*)
+        FROM ob_src GROUP BY 1)
+     EXCEPT
+     (SELECT bucket, cnt FROM cv_ob_slow)
+   ) x;
+
+-- ============================================================
+-- Cleanup
+-- ============================================================
+1: DROP TABLE ob_src CASCADE;
+1: DROP TABLE ob_anchor;

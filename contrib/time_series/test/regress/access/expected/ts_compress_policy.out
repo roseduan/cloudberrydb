@@ -1,0 +1,302 @@
+-- Test: auto-compression policy
+-- Verifies add_compression_policy / remove_compression_policy /
+-- policy_compression / compression_policy_stats end-to-end.
+-- start_matchsubs
+-- m/oid=\d+/
+-- s/oid=\d+/oid=OID/
+-- m/job_id=\d+/
+-- s/job_id=\d+/job_id=N/
+-- m/^\s*\d+\s*$/
+-- s/^\s*\d+\s*$/N/
+-- end_matchsubs
+\i sql/include/setup.sql
+-- Shared setup for time_series regression tests.
+-- Include this at the top of every test file via:
+--   \ir include/setup.sql
+CREATE EXTENSION IF NOT EXISTS time_series;
+NOTICE:  extension "time_series" already exists, skipping
+SET optimizer = off;
+SET timezone = 'UTC';
+SET datestyle = 'ISO';
+SET extra_float_digits = 0;
+CREATE SCHEMA IF NOT EXISTS test;
+NOTICE:  schema "test" already exists, skipping
+-- start_ignore
+-- ============================================================
+-- Shared file-counting helpers (used by ts_drop_truncate_files.sql
+-- and ts_drop_pax_files.sql).  Wrapped in start_ignore..end_ignore
+-- so every OTHER test that \i's this setup file is unaffected by
+-- the CREATE FUNCTION output added here.  gpdiff.pl recognises
+-- these markers and skips the enclosed lines during diff.
+-- ============================================================
+CREATE OR REPLACE FUNCTION test.ts_chunk_files_per_seg(rfile oid)
+RETURNS TABLE(seg int, cnt int)
+LANGUAGE sql EXECUTE ON ALL SEGMENTS AS $$
+    SELECT gp_execution_segment(),
+           count(*)::int
+    FROM pg_ls_dir('base/' || (SELECT oid::text FROM pg_database
+                                WHERE datname = current_database()))
+    WHERE pg_ls_dir LIKE rfile::text || '_ts_%';
+$$;
+CREATE OR REPLACE FUNCTION test.ts_chunk_files_total(rfile oid)
+RETURNS bigint
+LANGUAGE sql AS $$
+    SELECT COALESCE(sum(cnt)::bigint, 0)
+      FROM test.ts_chunk_files_per_seg(rfile);
+$$;
+CREATE OR REPLACE FUNCTION test.ts_pax_files_per_seg(relid oid)
+RETURNS TABLE(seg int, cnt int)
+LANGUAGE sql EXECUTE ON ALL SEGMENTS AS $$
+    SELECT gp_execution_segment(),
+           (SELECT count(*)::int
+              FROM pg_ls_dir(
+                'base/' || (SELECT oid::text FROM pg_database
+                            WHERE datname = current_database())
+                || '/ts_compressed/' || relid::text,
+                TRUE, FALSE));
+$$;
+CREATE OR REPLACE FUNCTION test.ts_pax_files_total(relid oid)
+RETURNS bigint
+LANGUAGE sql AS $$
+    SELECT COALESCE(sum(cnt)::bigint, 0)
+      FROM test.ts_pax_files_per_seg(relid);
+$$;
+-- end_ignore
+-- ======================================================================
+-- Section 1: setup test table + compress config
+-- ======================================================================
+DROP TABLE IF EXISTS test.policy_metrics;
+NOTICE:  table "policy_metrics" does not exist, skipping
+CREATE TABLE test.policy_metrics (
+    "time"     timestamptz NOT NULL,
+    sensor_id  integer,
+    val        double precision
+)
+USING time_series
+WITH (ts_partition_column='time', ts_chunk_interval='1 hour',
+      ts_chunk_origin='2025-01-01')
+DISTRIBUTED BY (sensor_id);
+INSERT INTO test.policy_metrics
+SELECT '2025-01-01 00:00:00+00'::timestamptz + (i * interval '1 minute'),
+       (i % 10), random()*100
+FROM generate_series(1, 500) i;
+SELECT time_series.set_compress_config('test.policy_metrics'::regclass,
+                                       'sensor_id', '"time"');
+ set_compress_config 
+---------------------
+ 
+(1 row)
+
+-- ======================================================================
+-- Section 2: add_compression_policy + view
+-- ======================================================================
+SELECT time_series.add_compression_policy(
+    table_name        => 'test.policy_metrics'::regclass,
+    compress_after    => INTERVAL '1 second',
+    schedule_interval => INTERVAL '12 hours'
+) IS NOT NULL AS registered;
+ registered 
+------------
+ t
+(1 row)
+
+-- View should expose the policy
+SELECT table_name, schedule_interval, compress_after, active
+FROM time_series.compression_policy_stats
+WHERE table_name = 'test.policy_metrics'::regclass;
+     table_name      | schedule_interval | compress_after | active 
+---------------------+-------------------+----------------+--------
+ test.policy_metrics | @ 12 hours        | @ 1 sec        | t
+(1 row)
+
+-- ======================================================================
+-- Section 3: validation errors
+-- ======================================================================
+-- 3a. compress_after = 0 → reject (avoid compressing in-flight chunks)
+DO $$ BEGIN
+    PERFORM time_series.add_compression_policy(
+        'test.policy_metrics'::regclass, INTERVAL '0 second');
+    RAISE EXCEPTION 'should have thrown';
+EXCEPTION WHEN invalid_parameter_value THEN
+    RAISE NOTICE 'compress_after=0 → rejected (expected)';
+END $$;
+NOTICE:  compress_after=0 → rejected (expected)
+-- 3b. compress_after = negative → reject
+DO $$ BEGIN
+    PERFORM time_series.add_compression_policy(
+        'test.policy_metrics'::regclass, INTERVAL '-1 day');
+    RAISE EXCEPTION 'should have thrown';
+EXCEPTION WHEN invalid_parameter_value THEN
+    RAISE NOTICE 'compress_after<0 → rejected (expected)';
+END $$;
+NOTICE:  compress_after<0 → rejected (expected)
+-- 3c. schedule_interval = 0 → reject (would busy-loop the scheduler)
+DO $$ BEGIN
+    PERFORM time_series.add_compression_policy(
+        'test.policy_metrics'::regclass,
+        compress_after    => INTERVAL '1 hour',
+        schedule_interval => INTERVAL '0 second');
+    RAISE EXCEPTION 'should have thrown';
+EXCEPTION WHEN invalid_parameter_value THEN
+    RAISE NOTICE 'schedule_interval=0 → rejected (expected)';
+END $$;
+NOTICE:  schedule_interval=0 → rejected (expected)
+-- ======================================================================
+-- Section 4: duplicate policy detection
+-- ======================================================================
+-- 4a. Plain duplicate → error
+DO $$ BEGIN
+    PERFORM time_series.add_compression_policy(
+        'test.policy_metrics'::regclass, INTERVAL '7 days');
+    RAISE EXCEPTION 'should have thrown';
+EXCEPTION WHEN duplicate_object OR sqlstate 'P0001' THEN
+    RAISE NOTICE 'duplicate add → rejected (expected)';
+END $$;
+NOTICE:  duplicate add → rejected (expected)
+-- 4b. if_not_exists → returns existing job_id, no error
+SELECT time_series.add_compression_policy(
+    'test.policy_metrics'::regclass,
+    compress_after  => INTERVAL '1 second',
+    if_not_exists   => true
+) IS NOT NULL AS reused_existing;
+NOTICE:  compression policy already exists for "test.policy_metrics", skipping
+ reused_existing 
+-----------------
+ t
+(1 row)
+
+-- After both attempts there should still be exactly one row
+SELECT count(*) AS n_policies
+FROM time_series.compression_policy_stats
+WHERE table_name = 'test.policy_metrics'::regclass;
+ n_policies 
+------------
+          1
+(1 row)
+
+-- ======================================================================
+-- Section 5: synchronous fire via run_job → chunks compressed
+-- ======================================================================
+-- Capture job_id for run_job (CALL can't take a subquery).
+SELECT job_id FROM time_series.compression_policy_stats
+WHERE table_name = 'test.policy_metrics'::regclass \gset
+CALL time_series.run_job(:job_id);
+NOTICE:  compress_and_reclaim: compressed 9 chunk(s)
+NOTICE:  compress_and_reclaim: reclaimed 9 chunk heap(s)
+-- All chunks for this table should now be COMPRESSED (status = 1).
+SELECT count(DISTINCT chunk_number) AS chunks,
+       bool_and(status = 1) AS all_compressed
+FROM time_series.ts_chunk
+WHERE table_oid = 'test.policy_metrics'::regclass;
+ chunks | all_compressed 
+--------+----------------
+      9 | t
+(1 row)
+
+-- Stats reflect the successful run.
+SELECT total_runs >= 1 AS ran,
+       total_successes >= 1 AS succeeded,
+       total_failures = 0   AS no_failures,
+       last_run_success
+FROM time_series.compression_policy_stats
+WHERE table_name = 'test.policy_metrics'::regclass;
+ ran | succeeded | no_failures | last_run_success 
+-----+-----------+-------------+------------------
+ t   | t         | t           | t
+(1 row)
+
+-- ======================================================================
+-- Section 6: remove_compression_policy
+-- ======================================================================
+SELECT time_series.remove_compression_policy('test.policy_metrics'::regclass);
+ remove_compression_policy 
+---------------------------
+ 
+(1 row)
+
+-- View empty for this table
+SELECT count(*) AS remaining
+FROM time_series.compression_policy_stats
+WHERE table_name = 'test.policy_metrics'::regclass;
+ remaining 
+-----------
+         0
+(1 row)
+
+-- Remove on missing → error
+DO $$ BEGIN
+    PERFORM time_series.remove_compression_policy('test.policy_metrics'::regclass);
+    RAISE EXCEPTION 'should have thrown';
+EXCEPTION WHEN sqlstate 'P0001' THEN
+    RAISE NOTICE 'remove on missing → rejected (expected)';
+END $$;
+NOTICE:  remove on missing → rejected (expected)
+-- Remove with if_exists → silent no-op
+SELECT time_series.remove_compression_policy(
+    'test.policy_metrics'::regclass, if_exists => true);
+ remove_compression_policy 
+---------------------------
+ 
+(1 row)
+
+-- ======================================================================
+-- Section 7: auto-disable when target table is dropped
+-- ======================================================================
+CREATE TABLE test.policy_orphan (t timestamptz NOT NULL, v int)
+USING time_series
+WITH (ts_partition_column='t', ts_chunk_interval='1 day')
+DISTRIBUTED REPLICATED;
+INSERT INTO test.policy_orphan
+SELECT '2025-01-01'::timestamptz + (i * interval '1 sec'), i
+FROM generate_series(1, 50) i;
+SELECT time_series.set_compress_config(
+    'test.policy_orphan'::regclass, NULL, '"t"');
+ set_compress_config 
+---------------------
+ 
+(1 row)
+
+SELECT time_series.add_compression_policy(
+    'test.policy_orphan'::regclass, INTERVAL '1 second') AS orphan_job \gset
+DROP TABLE test.policy_orphan;
+-- After DROP TABLE the policy row still exists but firing it should
+-- auto-disable instead of crashing.
+CALL time_series.run_job(:orphan_job);
+NOTICE:  compression policy disabled: target table (oid=91395) no longer exists; run remove_compression_policy() to clean up
+-- active = false after auto-disable
+SELECT active AS still_active
+FROM time_series.compression_policy_stats
+WHERE job_id = :orphan_job;
+ still_active 
+--------------
+ f
+(1 row)
+
+-- remove_compression_policy can still clean up the disabled row by oid.
+SELECT time_series.remove_compression_policy(
+    (SELECT table_name FROM time_series.compression_policy_stats
+     WHERE job_id = :orphan_job),
+    if_exists => true);
+ remove_compression_policy 
+---------------------------
+ 
+(1 row)
+
+SELECT count(*) AS remaining_disabled
+FROM time_series.compression_policy_stats
+WHERE job_id = :orphan_job;
+ remaining_disabled 
+--------------------
+                  0
+(1 row)
+
+-- ======================================================================
+-- Cleanup
+-- ======================================================================
+DROP TABLE IF EXISTS test.policy_metrics;
+DROP SCHEMA IF EXISTS test CASCADE;
+NOTICE:  drop cascades to 4 other objects
+DETAIL:  drop cascades to function test.ts_chunk_files_per_seg(oid[])
+drop cascades to function test.ts_chunk_files_total(oid[])
+drop cascades to function test.ts_pax_files_per_seg(oid)
+drop cascades to function test.ts_pax_files_total(oid)

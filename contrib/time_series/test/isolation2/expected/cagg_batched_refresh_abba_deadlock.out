@@ -1,0 +1,243 @@
+-- ============================================================
+-- cagg_batched_refresh_abba_deadlock.sql (isolation2)
+--
+-- Regression test for the SOAK-20260723_170208 wedge
+-- (doc/bugs/cagg-batched-refresh-cross-cagg-abba-deadlock.md).
+--
+-- THE BUG (fixed 2026-07-24 in refresh.c):  a batched policy
+-- refresh returned from each batch with the batch's TX2
+-- UNCOMMITTED -- it chain-committed only inside the NEXT batch's
+-- cagg_refresh -- so at every batch boundary the session still
+-- held all of TX2's write locks, upgraded to ExclusiveLock under
+-- GDD-off (CdbTryOpenTable).  The next batch's TX1 then acquired
+-- the source-level advisory while holding those locks
+-- (hold-and-wait).  A concurrent refresh of ANOTHER CAGG on the
+-- same source could take the advisory inside that window (the
+-- previous TX1's advisory was released by its chain commit) and
+-- block on L2 (cagg_materialization_log) on every segment:
+--
+--   A (batched policy) held L2-Ex (batch-N TX2, still open)
+--                      wanted source-advisory     (batch-N+1 TX1)
+--   B (plain refresh)  held source-advisory       (its TX1)
+--                      wanted L2-RowEx on segments (its migrate)
+--
+-- The wait edges spanned coordinator + segments, invisible to the
+-- per-node deadlock detector, and with
+-- gp_enable_global_deadlock_detector=off nothing ever broke the
+-- cycle: the soak froze for 13h+.
+--
+-- THE FIX (both halves in cagg_refresh):
+--   1. TX2 is chain-committed at the END of every cagg_refresh
+--      call, so batch boundaries hold zero locks and the next
+--      batch's TX1 starts lock-clean (hold-and-wait eliminated).
+--   2. TX2 re-acquires the source advisory before touching L2,
+--      giving every L2-writing transaction the same global lock
+--      order (source advisory -> L2 -> threshold), so the ABBA is
+--      structurally impossible even for future code paths.
+--
+-- WHAT THIS TEST PINS:  refresh A is frozen at the batch boundary
+-- (cagg_policy_batch_boundary 'suspend'); the boundary must hold
+-- NO L2 lock; refresh B on the same source must run to completion
+-- WHILE A is frozen (on the buggy build B wedges on L2 forever --
+-- this test then times out / the synchronous CALL below hangs).
+--
+-- Lock queries compare `relation` against ::regclass (oid), NEVER
+-- against regclass::text -- with time_series in search_path the
+-- text form drops the schema prefix and silently matches nothing
+-- (the false negative that misled the first investigation).
+-- ============================================================
+
+1: SET optimizer = off;
+SET
+1: SET timezone = 'UTC';
+SET
+1: DROP EXTENSION IF EXISTS time_series CASCADE;
+DROP
+1: DROP TABLE IF EXISTS dl_src CASCADE;
+DROP
+1: DROP TABLE IF EXISTS dl_anchor CASCADE;
+DROP
+1: CREATE EXTENSION time_series;
+CREATE
+1: CREATE EXTENSION IF NOT EXISTS gp_inject_fault;
+CREATE
+1: SET search_path TO public, time_series;
+SET
+
+-- Precondition: the historical deadlock needed the GDD-off
+-- UPDATE/DELETE lock upgrade (RowExclusive -> Exclusive).  Pin it
+-- so a config drift shows up as a diff here instead of silently
+-- weakening the scenario.
+1: SHOW gp_enable_global_deadlock_detector;
+ gp_enable_global_deadlock_detector 
+------------------------------------
+ off                                
+(1 row)
+
+-- No scheduler ticks racing the in-session run_job.
+1: SELECT time_series.stop_background_workers();
+ stop_background_workers 
+-------------------------
+ t                       
+(1 row)
+
+-- One anchor captured once; margins >= 1 hour everywhere so an
+-- hour-boundary crossing mid-test cannot flip any relationship.
+1: CREATE TABLE dl_anchor AS SELECT date_trunc('hour', now()) AS a DISTRIBUTED REPLICATED;
+CREATE 1
+
+1: CREATE TABLE dl_src ( time TIMESTAMPTZ NOT NULL, device INT NOT NULL, val FLOAT8 ) USING time_series WITH ( ts_partition_column = 'time', ts_chunk_interval   = '4 hour', ts_chunk_origin     = '2020-01-01' ) DISTRIBUTED BY (device);
+CREATE
+
+-- Refresh A's CAGG (batched policy under test).
+1: CREATE MATERIALIZED VIEW cv_dl WITH (time_series.continuous) AS SELECT time_bucket('1 hour'::interval, time) AS bucket, count(*) AS cnt FROM dl_src GROUP BY bucket;
+CREATE
+
+-- Helper CAGG: its manual refresh advances the SHARED invalidation
+-- threshold so the later bulk insert is watched and logged to L1 --
+-- without pending invalidations the batch splitter declines and the
+-- policy runs as a single batch (no boundary, no scenario).  Same
+-- pattern as cagg_hole_batch_boundary.
+1: CREATE MATERIALIZED VIEW cv_dl_helper WITH (time_series.continuous) AS SELECT time_bucket('1 hour'::interval, time) AS bucket, count(*) AS cnt FROM dl_src GROUP BY bucket;
+CREATE
+
+-- Refresh B's CAGG (the concurrent same-source victim-no-more).
+1: CREATE MATERIALIZED VIEW cv_dl_victim WITH (time_series.continuous) AS SELECT time_bucket('1 hour'::interval, time) AS bucket, sum(val) AS total FROM dl_src GROUP BY bucket;
+CREATE
+
+-- Seed the NEWEST bucket only (a-2h), then refresh the helper: the
+-- shared threshold advances to ~a-2h while cv_dl stays untouched.
+1: INSERT INTO dl_src SELECT a - interval '2 hours' + (m * 6 || ' minute')::interval, (m % 3) + 1, m * 1.0 FROM dl_anchor, generate_series(1, 9) m;
+INSERT 9
+
+1: CALL time_series.refresh_continuous_aggregate('cv_dl_helper', NULL, NULL);
+CALL
+
+-- Bulk data for the three older buckets (a-5h .. a-3h), all below
+-- the threshold now -> logged to L1 -> the splitter has pending
+-- invalidations to anchor its batch candidates on.
+1: INSERT INTO dl_src SELECT a - (hr || ' hour')::interval + (m * 6 || ' minute')::interval, ((hr + m) % 3) + 1, hr + m * 0.1 FROM dl_anchor, generate_series(3, 5) hr, generate_series(1, 9) m;
+INSERT 27
+
+-- Policy on cv_dl: window ~[a-6h, a-1h), 2 buckets per batch =>
+-- exactly 2 batches => exactly one boundary for the fault to pin.
+-- Only policy in a fresh extension -> job id 1001.
+1: SELECT add_continuous_aggregate_policy('cv_dl', start_offset              => INTERVAL '6 hours', end_offset                => INTERVAL '1 hour', schedule_interval         => INTERVAL '4 hours', buckets_per_batch         => 2, max_batches_per_execution => 10, refresh_newest_first      => true) AS jid;
+ jid  
+------
+ 1001 
+(1 row)
+
+2: SET optimizer = off;
+SET
+2: SET search_path TO public, time_series;
+SET
+3: SET optimizer = off;
+SET
+3: SET search_path TO public, time_series;
+SET
+
+-- ============================================================
+-- Step 1: pin refresh A at the batch boundary.  Batch 1 has run
+-- TX1 + TX2 and -- with the fix -- TX2 chain-committed at the end
+-- of the batch, so the boundary holds NO locks.
+-- ============================================================
+
+1: SELECT gp_inject_fault('cagg_policy_batch_boundary', 'suspend', dbid) FROM gp_segment_configuration WHERE role = 'p' AND content = -1;
+ gp_inject_fault 
+-----------------
+ Success:        
+(1 row)
+
+1&: CALL time_series.run_job(1001);  <waiting ...>
+
+2: SELECT gp_wait_until_triggered_fault('cagg_policy_batch_boundary', 1, dbid) FROM gp_segment_configuration WHERE role = 'p' AND content = -1;
+ gp_wait_until_triggered_fault 
+-------------------------------
+ Success:                      
+(1 row)
+
+-- FIX PROOF #1: the boundary is lock-clean.  On the buggy build the
+-- pinned session still held batch 1 TX2's ExclusiveLock here (this
+-- assertion read 't' with `> 0`); a regression flips it back.
+2: SELECT count(*) = 0 AS boundary_lock_clean FROM pg_locks l JOIN pg_stat_activity a ON a.pid = l.pid WHERE l.relation IN ('time_series.cagg_materialization_log'::regclass, 'time_series.cagg_watermark'::regclass) AND l.granted AND a.query LIKE '%run_job%' AND a.pid <> pg_backend_pid();
+ boundary_lock_clean 
+---------------------
+ t                   
+(1 row)
+
+-- ============================================================
+-- Step 2: refresh B runs to COMPLETION while A is frozen at the
+-- boundary.  This synchronous CALL is the core regression check:
+-- on the buggy build B's L1->L2 migration wedged on L2 forever
+-- (cross-node, invisible to the deadlock detector) and this
+-- statement would hang the test.
+-- ============================================================
+
+2: CALL time_series.refresh_continuous_aggregate('cv_dl_victim', NULL, NULL);
+CALL
+
+-- And nothing is queued behind L2 anywhere.
+3: SELECT count(*) = 0 AS no_l2_waiters_while_pinned FROM gp_dist_random('pg_locks') WHERE relation = 'time_series.cagg_materialization_log'::regclass AND NOT granted;
+ no_l2_waiters_while_pinned 
+----------------------------
+ t                          
+(1 row)
+
+-- ============================================================
+-- Step 3: resume A.  Batch 2's TX1 takes the (free) source
+-- advisory and the job completes -- no ABBA, no wait.
+-- ============================================================
+
+3: SELECT gp_inject_fault('cagg_policy_batch_boundary', 'resume', dbid) FROM gp_segment_configuration WHERE role = 'p' AND content = -1;
+ gp_inject_fault 
+-----------------
+ Success:        
+(1 row)
+
+1<:  <... completed>
+CALL
+
+3: SELECT gp_inject_fault('cagg_policy_batch_boundary', 'reset', dbid) FROM gp_segment_configuration WHERE role = 'p' AND content = -1;
+ gp_inject_fault 
+-----------------
+ Success:        
+(1 row)
+
+-- ============================================================
+-- Step 4: aftermath -- both refreshes finished, nothing leaked.
+-- ============================================================
+
+1: SELECT last_run_success = true AS refresh_a_succeeded FROM time_series.bgw_job_stat WHERE job_id = 1001;
+ refresh_a_succeeded 
+---------------------
+ t                   
+(1 row)
+
+1: SELECT count(*) = 0 AS no_l2_waiters_left FROM gp_dist_random('pg_locks') WHERE relation = 'time_series.cagg_materialization_log'::regclass AND NOT granted;
+ no_l2_waiters_left 
+--------------------
+ t                  
+(1 row)
+
+-- cv_dl is bit-exact vs source.
+1: SELECT count(*) AS diff_a FROM ( (SELECT bucket, cnt FROM cv_dl) EXCEPT (SELECT time_bucket('1 hour'::interval, time), count(*) FROM dl_src GROUP BY 1) UNION ALL (SELECT time_bucket('1 hour'::interval, time), count(*) FROM dl_src GROUP BY 1) EXCEPT (SELECT bucket, cnt FROM cv_dl) ) x;
+ diff_a 
+--------
+ 0      
+(1 row)
+
+-- Refresh B's CAGG is bit-exact too.
+2: SELECT count(*) AS diff_b FROM ( (SELECT bucket, round(total::numeric, 6) FROM cv_dl_victim) EXCEPT (SELECT time_bucket('1 hour'::interval, time), round(sum(val)::numeric, 6) FROM dl_src GROUP BY 1) UNION ALL (SELECT time_bucket('1 hour'::interval, time), round(sum(val)::numeric, 6) FROM dl_src GROUP BY 1) EXCEPT (SELECT bucket, round(total::numeric, 6) FROM cv_dl_victim) ) x;
+ diff_b 
+--------
+ 0      
+(1 row)
+
+-- ============================================================
+-- Cleanup
+-- ============================================================
+1: DROP TABLE dl_src CASCADE;
+DROP
+1: DROP TABLE dl_anchor;
+DROP

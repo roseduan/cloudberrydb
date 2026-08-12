@@ -1,0 +1,3 @@
+# Verdict rules go here, one per file.  Each defines a function named
+# verdict.<name> taking (results_dir, state_dir), sourced by judged.sh.
+# Empty until the judge layer is implemented (see README.zh.md §3.6).

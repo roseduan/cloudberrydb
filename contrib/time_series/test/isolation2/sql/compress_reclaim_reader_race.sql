@@ -1,0 +1,159 @@
+-- ============================================================
+-- compress_reclaim_reader_race.sql (isolation2)
+--
+-- Regression spec for the reader-vs-reclaim race fix.  Before the
+-- fix, ts_reclaim_chunk_heaps_segment's smgrtruncate ran with only
+-- the existing per-chunk advisory ExclusiveLock (which the reader
+-- did NOT take), so a SELECT with a snapshot older than compress
+-- could see its heap fork vanish mid-scan:
+--   - mdread past EOF → ERROR "could not read block N", OR
+--   - cur_chunk_nblocks lazily recomputed to 0 → silent 0 rows
+--     (data loss).
+--
+-- Fix: ts_chunk_scan_begin acquires the per-chunk advisory
+-- ShareLock on every ACTIVE / PARTIAL chunk the scan will touch,
+-- held until xact end.  reclaim's matching ExclusiveLock now
+-- blocks for the reader's lifetime, so smgrtruncate cannot race.
+--
+-- This spec deterministically interleaves the participants via
+-- the ts_chunk_scan_after_status_load fault injection point in
+-- ts_chunk_scan_begin (compiled in under FAULT_INJECTOR).  The
+-- assertions cover:
+--   (1) reader holds advisory ShareLocks while wedged at the
+--       fault point.
+--   (2) concurrent compress blocks on those ShareLocks (granted=f
+--       in pg_locks).
+--   (3) after reader resume, reader observes the full 400 rows
+--       its snapshot expects.
+--   (4) compress / reclaim then complete cleanly.
+-- ============================================================
+
+1: SET optimizer = off;
+-- Pin to serial ChunkScan: this spec counts advisory ShareLocks taken
+-- by the reader's per-chunk lock acquisition (4 chunks * 1 backend = 4).
+-- Parallel ChunkScan would spawn N worker backends, each taking its own
+-- ShareLock (4 * (N+1) entries), perturbing the count assertions.  The
+-- locking semantics are correct under parallel (multiple ShareLocks
+-- still block reclaim's ExclusiveLock), just not what this regression
+-- spec is shaped to assert.
+1: SET max_parallel_workers_per_gather = 0;
+1: DROP EXTENSION IF EXISTS time_series CASCADE;
+1: CREATE EXTENSION time_series;
+1: CREATE EXTENSION IF NOT EXISTS gp_inject_fault;
+1: SET search_path TO public, time_series;
+
+-- Two 1 h chunks with 200 rows each → 400 rows total.  Origin
+-- well before the insert range so bare-date tz interpretation
+-- can never push origin past the data.
+1: CREATE TABLE race_tbl (ts TIMESTAMPTZ NOT NULL, device INT NOT NULL, val FLOAT8)
+   USING time_series WITH (
+     ts_partition_column = 'ts',
+     ts_chunk_interval   = '1 hour',
+     ts_chunk_origin     = '2020-01-01'
+   )
+   DISTRIBUTED BY (device);
+
+1: INSERT INTO race_tbl
+   SELECT '2024-01-01'::timestamptz + (i * interval '15 sec'),
+          (i % 4) + 1, i * 0.5
+   FROM generate_series(1, 200) i;
+1: INSERT INTO race_tbl
+   SELECT '2024-01-01'::timestamptz + interval '1 hour' + (i * interval '15 sec'),
+          (i % 4) + 1, i * 0.5
+   FROM generate_series(1, 200) i;
+
+-- Both chunks ACTIVE, 400 rows total.
+1: SELECT chunk_number, status FROM time_series.ts_chunk
+   WHERE table_oid = 'race_tbl'::regclass
+   GROUP BY chunk_number, status ORDER BY chunk_number;
+1: SELECT count(*) AS total_before_race FROM race_tbl;
+
+-- ============================================================
+-- Arm fault on every primary QE — the scan executor runs on
+-- segments, so the wedge must fire there.
+-- ============================================================
+1: SELECT gp_inject_fault('ts_chunk_scan_after_status_load', 'suspend', dbid)
+   FROM gp_segment_configuration WHERE role = 'p' AND content >= 0;
+
+-- ============================================================
+-- Session 2: take an RR snapshot, scan race_tbl.  Each segment
+-- enters ts_chunk_scan_begin, takes per-chunk advisory ShareLock
+-- on every ACTIVE chunk, then suspends at the fault.
+-- ============================================================
+2: SET optimizer = off;
+2: SET max_parallel_workers_per_gather = 0;
+2: BEGIN ISOLATION LEVEL REPEATABLE READ;
+2>: SELECT count(*) AS rows_seen FROM race_tbl;
+
+-- Wait for the scan to wedge on every primary QE.
+1: SELECT gp_wait_until_triggered_fault('ts_chunk_scan_after_status_load', 1, dbid)
+   FROM gp_segment_configuration WHERE role = 'p' AND content >= 0;
+
+-- ASSERTION (1): reader holds advisory ShareLocks (one per
+-- ACTIVE chunk per QE that has any data for race_tbl —
+-- DISTRIBUTED BY (device) with 4 device values across 3
+-- segments may leave the 3rd segment with no rows, so the
+-- exact count is "however many QEs touch heap × nchunks"; the
+-- only invariant the test pins is "there ARE granted Share
+-- advisory locks before compress runs".
+1: SELECT mode, granted, count(*) AS n
+   FROM pg_locks
+   WHERE locktype = 'advisory' AND mode IN ('ShareLock', 'ExclusiveLock')
+   GROUP BY mode, granted ORDER BY mode, granted;
+
+-- ============================================================
+-- Session 3: compress_chunks — should block on reader's
+-- ShareLocks (single-namespace fix: compress takes Exclusive on
+-- the same advisory lock the reader holds Share on).
+-- ============================================================
+3: SET optimizer = off;
+3&: SELECT time_series.compress_chunks('race_tbl');
+
+-- Give compress a moment to actually attempt the lock acquire
+-- on every QE.
+1: SELECT pg_sleep(2);
+
+-- ASSERTION (2): compress is waiting on Lock (not granted on
+-- the segments).  pg_locks aggregated by granted; we should now
+-- see both granted=t (reader's Shares) and granted=f (compress's
+-- pending Exclusives).
+1: SELECT mode, granted, count(*) AS n
+   FROM pg_locks
+   WHERE locktype = 'advisory' AND mode IN ('ShareLock', 'ExclusiveLock')
+   GROUP BY mode, granted ORDER BY mode, granted;
+
+-- ============================================================
+-- Resume the reader.  The chain unblocks: reader finishes its
+-- scan with all 400 rows visible, releases Shares, compress
+-- acquires Exclusive and completes.
+-- ============================================================
+1: SELECT gp_inject_fault('ts_chunk_scan_after_status_load', 'resume', dbid)
+   FROM gp_segment_configuration WHERE role = 'p' AND content >= 0;
+
+-- ASSERTION (3): reader's xact saw all 400 rows.  Before the
+-- fix this was 0 (silent loss) or ERROR (mdread EOF).
+2<:
+2: ROLLBACK;
+
+-- ASSERTION (4): compress completed.  ts_chunk now reports both
+-- chunks COMPRESSED (status = 1).
+3<:
+1: SELECT chunk_number, status FROM time_series.ts_chunk
+   WHERE table_oid = 'race_tbl'::regclass
+   GROUP BY chunk_number, status ORDER BY chunk_number;
+
+-- Reclaim is now safe — no live readers reference the heap.
+1: SELECT time_series.reclaim_chunk_heaps('race_tbl');
+
+-- Post-race: a fresh reader (sees status=COMPRESSED) serves all
+-- 400 rows from PAX.  Confirms the fix did not regress PAX read.
+1: SELECT count(*) AS total_after_race FROM race_tbl;
+
+-- Cleanup
+1: SELECT gp_inject_fault('ts_chunk_scan_after_status_load', 'reset', dbid)
+   FROM gp_segment_configuration WHERE role = 'p' AND content >= 0;
+1: DROP TABLE race_tbl;
+1: DROP EXTENSION time_series CASCADE;
+1q:
+2q:
+3q:

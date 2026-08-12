@@ -170,3 +170,11 @@ endif
 
 $(recurse)
 $(recurse_always)
+
+# time_series links against pax_storage's libpaxformat.so; order the
+# recursion under `make -j` so it's built first (same pattern as
+# src/interfaces/Makefile's ecpg/libpq dependency).
+ifeq ($(enable_pax)+$(enable_time_series),yes+yes)
+all-time_series-recurse: all-pax_storage-recurse
+install-time_series-recurse: install-pax_storage-recurse
+endif

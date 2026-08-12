@@ -1,0 +1,40 @@
+Parsed test spec with 2 sessions
+
+starting permutation: r_count_all w_begin w_insert r_count_all r_count_chunk2 w_commit r_count_all r_count_chunk2
+step r_count_all: SELECT count(*) FROM ts_is;
+count
+-----
+   50
+(1 row)
+
+step w_begin: BEGIN;
+step w_insert: 
+    INSERT INTO ts_is
+    SELECT '2025-01-02'::timestamptz + (i * interval '1 minute'), 1000 + i
+    FROM generate_series(1, 50) i;
+
+step r_count_all: SELECT count(*) FROM ts_is;
+count
+-----
+   50
+(1 row)
+
+step r_count_chunk2: SELECT count(*) FROM ts_is WHERE ts >= '2025-01-02';
+count
+-----
+    0
+(1 row)
+
+step w_commit: COMMIT;
+step r_count_all: SELECT count(*) FROM ts_is;
+count
+-----
+  100
+(1 row)
+
+step r_count_chunk2: SELECT count(*) FROM ts_is WHERE ts >= '2025-01-02';
+count
+-----
+   50
+(1 row)
+

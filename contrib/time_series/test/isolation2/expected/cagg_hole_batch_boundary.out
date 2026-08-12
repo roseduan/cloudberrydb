@@ -1,0 +1,242 @@
+-- ============================================================
+-- cagg_hole_batch_boundary.sql (isolation2)
+--
+-- Hole taxonomy classes 1+2 (refresh-side; see
+-- doc/bugs/cagg-refresh-stuck-across-gap.md §9.10): what does a
+-- batched newest-first policy leave behind when aborted at a batch
+-- boundary, and does the next run self-heal?
+--
+-- The abort is deterministic via the cagg_policy_batch_boundary
+-- fault injector, which fires BETWEEN batches.
+--
+-- BOUNDARY SEMANTICS (updated 2026-07-24 with the ABBA-deadlock
+-- fix, see doc/bugs/cagg-batched-refresh-cross-cagg-abba-deadlock.md):
+-- each batch's materialization transaction (TX2) now chain-commits
+-- at the END of its own cagg_refresh call -- historically it rode
+-- along uncommitted until the NEXT batch's SPI_commit_and_chain,
+-- which both (a) meant a boundary abort rolled the just-finished
+-- batch back too, and (b) left every TX2 write lock held across the
+-- boundary, enabling a cross-CAGG cross-node ABBA deadlock under
+-- GDD-off.  With the fix, a finished batch is durable at the
+-- boundary (matching upstream's per-batch transaction semantics);
+-- an abort AT the boundary loses only the batches that never ran.
+-- Batches remain atomic -- a batch either fully commits or not at
+-- all, so there is still zero PARTIAL leakage.  This file pins the
+-- boundary-abort semantics: the finished batch durable, the failed
+-- run recorded in bgw_job_stat, the watermark held below the hole,
+-- the union view never wrong, and a full self-heal on the next run.
+--
+-- Batch-split precondition (learned the hard way): the splitter only
+-- emits batch candidates that overlap a PENDING INVALIDATION, so the
+-- window data must be threshold-watched when written.  As in
+-- cagg_orphan_backfill_below_window, a helper CAGG on the same
+-- source is refreshed first to advance the shared invalidation
+-- threshold; the bulk insert after that lands below the threshold
+-- and is logged to L1, which both (a) makes the splitter produce the
+-- two batches this test needs and (b) mirrors how batching engages
+-- in the soak (late-arrival writes are always threshold-watched).
+--
+-- Companion of cagg_orphan_backfill_below_window (class 3,
+-- arrival-side).  Together the two files cover every hole-producing
+-- mechanism the refresh scheduler itself can create or heal.
+--
+-- Invariant in every phase: the union view never loses rows -- the
+-- watermark of the CAGG under test stays at -infinity until the
+-- window is whole, so both phases serve from the live branch (slow
+-- but correct).
+-- ============================================================
+
+1: SET optimizer = off;
+SET
+1: SET timezone = 'UTC';
+SET
+1: DROP EXTENSION IF EXISTS time_series CASCADE;
+DROP
+1: DROP TABLE IF EXISTS hb_src CASCADE;
+DROP
+1: DROP TABLE IF EXISTS hb_anchor CASCADE;
+DROP
+1: CREATE EXTENSION time_series;
+CREATE
+1: CREATE EXTENSION IF NOT EXISTS gp_inject_fault;
+CREATE
+1: SET search_path TO public, time_series;
+SET
+
+-- Keep run_job fully deterministic: no scheduler ticks racing us.
+1: SELECT time_series.stop_background_workers();
+ stop_background_workers 
+-------------------------
+ t                       
+(1 row)
+
+-- One anchor captured once; margins are >= 1 hour everywhere so an
+-- hour-boundary crossing mid-test cannot flip any relationship.
+1: CREATE TABLE hb_anchor AS SELECT date_trunc('hour', now()) AS a DISTRIBUTED REPLICATED;
+CREATE 1
+
+1: CREATE TABLE hb_src ( time TIMESTAMPTZ NOT NULL, device INT NOT NULL, val FLOAT8 ) USING time_series WITH ( ts_partition_column = 'time', ts_chunk_interval   = '4 hour', ts_chunk_origin     = '2020-01-01' ) DISTRIBUTED BY (device);
+CREATE
+
+-- CAGG under test FIRST: in a fresh extension its cagg_id is 1, so
+-- the internal mat table is time_series._mat_cv_hb_1 -- queried
+-- directly below to observe the island/hole (the union view cannot
+-- show it: with wm = -infinity it serves everything from live).
+1: CREATE MATERIALIZED VIEW cv_hb WITH (time_series.continuous) AS SELECT time_bucket('1 hour'::interval, time) AS bucket, count(*) AS cnt FROM hb_src GROUP BY bucket;
+CREATE
+
+-- Helper CAGG: its manual refresh advances the SHARED invalidation
+-- threshold so the later bulk insert is watched and logged to L1.
+1: CREATE MATERIALIZED VIEW cv_hb_helper WITH (time_series.continuous) AS SELECT time_bucket('1 hour'::interval, time) AS bucket, count(*) AS cnt FROM hb_src GROUP BY bucket;
+CREATE
+
+-- Seed the NEWEST bucket only (a-2h), then refresh the helper: the
+-- shared threshold advances to ~a-2h while cv_hb stays untouched at
+-- watermark = -infinity.
+1: INSERT INTO hb_src SELECT a - interval '2 hours' + (m * 6 || ' minute')::interval, (m % 3) + 1, m * 1.0 FROM hb_anchor, generate_series(1, 9) m;
+INSERT 9
+
+1: CALL time_series.refresh_continuous_aggregate('cv_hb_helper', NULL, NULL);
+CALL
+
+1: SELECT bool_and(watermark = '-infinity'::timestamptz) AS cold_start_wm_is_neg_inf FROM time_series.cagg_watermark w JOIN time_series.continuous_agg c ON w.cagg_id = c.cagg_id WHERE c.user_view_name = 'cv_hb';
+ cold_start_wm_is_neg_inf 
+--------------------------
+ t                        
+(1 row)
+
+-- Bulk data for the three older buckets (a-5h, a-4h, a-3h), all
+-- below the threshold now -> logged to L1 -> the batch splitter has
+-- pending invalidations to anchor its candidates on.
+1: INSERT INTO hb_src SELECT a - (hr || ' hour')::interval + (m * 6 || ' minute')::interval, ((hr + m) % 3) + 1, hr + m * 0.1 FROM hb_anchor, generate_series(3, 5) hr, generate_series(1, 9) m;
+INSERT 27
+
+-- Policy on cv_hb: window ~[a-5h, a-1h) = 4 buckets, 2 buckets per
+-- batch => exactly 2 batches; newest-first deliberately (the
+-- island-maker combination under test).  Only policy in a fresh
+-- extension -> job id 1001, printed to pin the assumption.
+1: SELECT add_continuous_aggregate_policy('cv_hb', start_offset              => INTERVAL '6 hours', end_offset                => INTERVAL '1 hour', schedule_interval         => INTERVAL '4 hours', buckets_per_batch         => 2, max_batches_per_execution => 10, refresh_newest_first      => true) AS jid;
+ jid  
+------
+ 1001 
+(1 row)
+
+-- ------------------------------------------------------------
+-- Arm the boundary fault on the coordinator (run_job executes the
+-- policy in this backend) and run the policy.  Batch 1 (newest two
+-- buckets) commits; the fault then aborts the execution before
+-- batch 2 starts; run_job records the failure and returns.
+-- ------------------------------------------------------------
+1: SELECT gp_inject_fault('cagg_policy_batch_boundary', 'error', dbid) FROM gp_segment_configuration WHERE role = 'p' AND content = -1;
+ gp_inject_fault 
+-----------------
+ Success:        
+(1 row)
+
+1: CALL time_series.run_job(1001);
+CALL
+
+-- ============================================================
+-- PHASE A: the interrupted state.  Batch 1 (the newest two
+-- buckets) chain-committed at its own batch end, so it survives
+-- the boundary abort; batch 2 never ran.  Watermark held below
+-- the hole, failed run recorded, view still correct.
+-- ============================================================
+
+-- The aborted execution was recorded as a failed run.
+1: SELECT last_run_success = false AS phase_a_job_failed FROM time_series.bgw_job_stat WHERE job_id = 1001;
+ phase_a_job_failed 
+--------------------
+ t                  
+(1 row)
+
+-- Batch durability: the finished batch is in mat -- TX2 commits at
+-- batch end since the 2026-07-24 ABBA fix.  Batch 1 nominally
+-- covers the newest two buckets (a-3h, a-2h), but a-2h is the hot
+-- bucket (holds max(time)) and refresh excludes it by design
+-- (actual_boundary clamp), so exactly ONE bucket lands.  Batches
+-- stay atomic -- any other count means partial leakage.
+1: SELECT count(DISTINCT bucket) = 1 AS phase_a_batch1_durable FROM time_series._mat_cv_hb_1;
+ phase_a_batch1_durable 
+------------------------
+ t                      
+(1 row)
+
+-- Watermark must NOT have advanced past the hole.
+1: SELECT bool_and(watermark = '-infinity'::timestamptz) AS phase_a_wm_held FROM time_series.cagg_watermark w JOIN time_series.continuous_agg c ON w.cagg_id = c.cagg_id WHERE c.user_view_name = 'cv_hb';
+ phase_a_wm_held 
+-----------------
+ t               
+(1 row)
+
+-- View correctness invariant: all 4 buckets visible, bit-exact.
+1: SELECT count(DISTINCT bucket) AS phase_a_view_buckets FROM cv_hb;
+ phase_a_view_buckets 
+----------------------
+ 4                    
+(1 row)
+1: SELECT count(*) AS phase_a_diff FROM ( (SELECT bucket, cnt FROM cv_hb) EXCEPT (SELECT time_bucket('1 hour'::interval, time), count(*) FROM hb_src GROUP BY 1) UNION ALL (SELECT time_bucket('1 hour'::interval, time), count(*) FROM hb_src GROUP BY 1) EXCEPT (SELECT bucket, cnt FROM cv_hb) ) x;
+ phase_a_diff 
+--------------
+ 0            
+(1 row)
+
+-- ============================================================
+-- PHASE B: self-heal.  Clear the fault and run the policy again:
+-- the window still covers everything, the surviving ledger entries
+-- anchor the batches, the stable buckets materialize, and the
+-- watermark lifts off -infinity.
+-- ============================================================
+
+1: SELECT gp_inject_fault('cagg_policy_batch_boundary', 'reset', dbid) FROM gp_segment_configuration WHERE role = 'p' AND content = -1;
+ gp_inject_fault 
+-----------------
+ Success:        
+(1 row)
+
+1: CALL time_series.run_job(1001);
+CALL
+
+1: SELECT last_run_success = true AS phase_b_job_succeeded FROM time_series.bgw_job_stat WHERE job_id = 1001;
+ phase_b_job_succeeded 
+-----------------------
+ t                     
+(1 row)
+
+-- Window materialized: the three stable buckets are in mat.  The
+-- newest data bucket (a-2h) is the hot bucket -- actual_boundary is
+-- its start, so refresh excludes it by design and the view serves it
+-- from the live branch.
+1: SELECT count(DISTINCT bucket) AS phase_b_mat_buckets FROM time_series._mat_cv_hb_1;
+ phase_b_mat_buckets 
+---------------------
+ 3                   
+(1 row)
+
+-- Watermark lifted off -infinity and past the stable buckets.
+1: SELECT bool_and(watermark > '-infinity'::timestamptz) AS phase_b_wm_is_finite FROM time_series.cagg_watermark w JOIN time_series.continuous_agg c ON w.cagg_id = c.cagg_id WHERE c.user_view_name = 'cv_hb';
+ phase_b_wm_is_finite 
+----------------------
+ t                    
+(1 row)
+
+1: SELECT bool_and(w.watermark >= x.a - interval '3 hours') AS phase_b_wm_past_hole FROM time_series.cagg_watermark w JOIN time_series.continuous_agg c ON w.cagg_id = c.cagg_id CROSS JOIN hb_anchor x WHERE c.user_view_name = 'cv_hb';
+ phase_b_wm_past_hole 
+----------------------
+ t                    
+(1 row)
+
+-- View correctness invariant still holds.
+1: SELECT count(*) AS phase_b_diff FROM ( (SELECT bucket, cnt FROM cv_hb) EXCEPT (SELECT time_bucket('1 hour'::interval, time), count(*) FROM hb_src GROUP BY 1) UNION ALL (SELECT time_bucket('1 hour'::interval, time), count(*) FROM hb_src GROUP BY 1) EXCEPT (SELECT bucket, cnt FROM cv_hb) ) x;
+ phase_b_diff 
+--------------
+ 0            
+(1 row)
+
+-- ============================================================
+-- Cleanup
+-- ============================================================
+1: DROP TABLE hb_src CASCADE;
+DROP
+1: DROP TABLE hb_anchor;
+DROP

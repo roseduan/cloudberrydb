@@ -1,0 +1,130 @@
+-- ============================================================
+-- compress_insert_no_deadlock.sql (isolation2)
+--
+-- Regression for the compress-vs-INSERT cross-segment deadlock that
+-- froze the write path under the Global Deadlock Detector OFF (the
+-- cluster default).
+--
+-- Root cause: compress flipped chunk status with a SQL
+-- "UPDATE time_series.ts_chunk SET status = COMPRESSED".  With GDD
+-- off, Greenplum/CBDB escalates UPDATE/DELETE to a table-level
+-- ExclusiveLock.  That conflicts with the RowExclusiveLock a
+-- concurrent INSERT holds on ts_chunk while creating a (different)
+-- chunk.  Because the two MPP operations acquire the ts_chunk lock
+-- independently on each segment, they could invert order across
+-- segments (compress wins one segment, INSERT another) and deadlock —
+-- invisible to the per-segment local deadlock detectors, and with GDD
+-- off no global detector breaks it, so the write path hung forever.
+--
+-- Fix: compress sets the status via ts_chunk_catalog_update_status (a
+-- heap CatalogTupleUpdate that takes RowExclusiveLock — the same mode
+-- INSERT uses, and self-compatible), so compress and a concurrent
+-- chunk-creating INSERT never conflict on ts_chunk regardless of GDD.
+--
+-- This spec drives the exact conflicting pair deterministically:
+--   * Session 1 creates+populates chunk A (committed, ACTIVE,
+--     compressible).
+--   * Session 2 opens a transaction and INSERTs into a DIFFERENT time
+--     range (chunk B).  Creating chunk B takes RowExclusiveLock on
+--     ts_chunk; the open transaction holds it.  Chunk B stays
+--     uncommitted, so compress's eligibility scan cannot see it and
+--     targets chunk A only (no per-chunk advisory serialization with
+--     session 2 — the only possible interaction is the ts_chunk
+--     relation lock, which is exactly what the bug was about).
+--   * Session 3 compresses chunk A.  Pre-fix its status UPDATE took
+--     ExclusiveLock and blocked on session 2's RowExclusiveLock
+--     (deadlock-prone / hang); post-fix it takes RowExclusiveLock and
+--     completes immediately.
+--
+-- Assertions:
+--   (1) compress completes (returns 1) while session 2 still holds its
+--       ts_chunk RowExclusiveLock in an open transaction.
+--   (2) chunk A ends COMPRESSED, chunk B still present after commit.
+-- ============================================================
+
+1: SET optimizer = off;
+SET
+1: DROP EXTENSION IF EXISTS time_series CASCADE;
+DROP
+1: CREATE EXTENSION time_series;
+CREATE
+1: SET search_path TO public, time_series;
+SET
+
+1: CREATE TABLE nd_tbl (ts TIMESTAMPTZ NOT NULL, device INT NOT NULL, val FLOAT8) USING time_series WITH ( ts_partition_column = 'ts', ts_chunk_interval   = '1 hour', ts_chunk_origin     = '2020-01-01' ) DISTRIBUTED BY (device);
+CREATE
+
+-- Chunk A: committed, ACTIVE, far in the past so it is compress-eligible.
+1: INSERT INTO nd_tbl SELECT '2024-01-01 00:00+00'::timestamptz + (i * interval '15 sec'), (i % 4) + 1, i * 0.5 FROM generate_series(1, 200) i;
+INSERT 200
+1: SELECT chunk_number, status FROM time_series.ts_chunk WHERE table_oid = 'nd_tbl'::regclass GROUP BY chunk_number, status ORDER BY chunk_number;
+ chunk_number | status 
+--------------+--------
+ 35060        | 0      
+(1 row)
+
+-- ============================================================
+-- Session 2: open a transaction that creates a DIFFERENT chunk (B) and
+-- leaves it uncommitted, holding RowExclusiveLock on ts_chunk.
+-- ============================================================
+2: SET optimizer = off;
+SET
+2: SET search_path TO public, time_series;
+SET
+2: BEGIN;
+BEGIN
+2: INSERT INTO nd_tbl SELECT '2024-06-01 00:00+00'::timestamptz + (i * interval '15 sec'), (i % 4) + 1, i * 0.5 FROM generate_series(1, 200) i;
+INSERT 200
+
+-- ============================================================
+-- Session 3: compress chunk A while session 2 holds its lock.  Chunk B
+-- is uncommitted, so compress's scan sees only chunk A.  Run this
+-- SYNCHRONOUSLY: with the fix the status update takes RowExclusiveLock
+-- (self-compatible with session 2's lock) so it returns immediately;
+-- pre-fix it took ExclusiveLock and blocked on session 2 forever, so a
+-- regression makes this step hang and the spec times out rather than
+-- passing.  compress_chunks must run as a top-level statement (it calls
+-- PreventInTransactionBlock), so no surrounding BEGIN.
+-- ============================================================
+3: SET optimizer = off;
+SET
+3: SET search_path TO public, time_series;
+SET
+3: SELECT time_series.compress_chunks('nd_tbl', INTERVAL '1 day') AS compressed;
+ compressed 
+------------
+ 1          
+(1 row)
+
+-- Session 2's lock is still held; releasing now.
+2: COMMIT;
+COMMIT
+
+-- ASSERTION (2): chunk A COMPRESSED, both chunks present, all 400 rows.
+1: SELECT chunk_number, status FROM time_series.ts_chunk WHERE table_oid = 'nd_tbl'::regclass GROUP BY chunk_number, status ORDER BY chunk_number;
+ chunk_number | status 
+--------------+--------
+ 35060        | 1      
+ 38708        | 0      
+(2 rows)
+1: SELECT count(*) AS total_rows FROM nd_tbl;
+ total_rows 
+------------
+ 400        
+(1 row)
+
+-- Stop the BGW scheduler before DROP EXTENSION to avoid a catalog-lock
+-- ABBA against check_for_stopped_and_timed_out_jobs()'s BGWH_STOPPED
+-- path (unbounded lock wait; observed as "deadlock detected" on
+-- aarch64 CI runners in MR pipelines #146318 and #146347).  Consistent
+-- with every other iso2 test that ends in DROP EXTENSION.
+1: SELECT time_series.stop_background_workers();
+ stop_background_workers 
+-------------------------
+ t                       
+(1 row)
+
+1: DROP TABLE nd_tbl;
+DROP
+1: DROP EXTENSION time_series CASCADE;
+DROP

@@ -1,0 +1,5 @@
+fault_name,level,target,mechanism,signal,active_s,recovery_budget_s,weight,description
+refresh_worker_kill,1,refresh_worker,pkill,KILL,20,120,3,"kill -9 the BGW backend currently running a CAGG refresh — tests mid-refresh crash recovery (Phase-2 territory: no double-read / no lost row / watermark consistent)"
+compress_worker_kill,1,compress_worker,pkill,KILL,20,120,3,"kill -9 the BGW backend currently running a compress — tests mid-compress crash recovery (Phase-1 territory: no lost row, PAX/heap consistent)"
+scheduler_kill,1,scheduler,pg_terminate,,20,60,2,"terminate the time_series BGW scheduler — tests launcher respawns a new scheduler, no job lost"
+cluster_crash,1,cluster,pkill_all,KILL,10,180,1,"kill -9 ALL postgres, then gpstart recovery — the power-cord test for crash-consistency of chunks / mat / watermark / L1-L2.  Needs CHAOS_ACTIVE_FLAG suppression + gpstart recovery orchestration."

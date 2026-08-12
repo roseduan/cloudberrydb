@@ -1,0 +1,4 @@
+-- start_matchsubs
+-- m/\(seg\d+ .*\)/
+-- s/\(seg\d+ .*\)/(seg0 slice1 127.0.0.1:1234 pid=12345)/
+-- end_matchsubs

@@ -1,0 +1,167 @@
+-- ============================================================
+-- recompress_reader_double_count.sql (isolation2)
+--
+-- Regression spec for the recompress-vs-reader DOUBLE-COUNT race
+-- that leaves the CAGG mat permanently ahead of the source.
+--
+-- ── The race ────────────────────────────────────────────────
+-- 1. Chunk is COMPRESSED (PAX has N rows, heap fork empty).
+-- 2. A late INSERT R commits → chunk flips to PARTIAL and its
+--    heap fork holds R.
+-- 3. Reader (refresh's partial-view SELECT) enters
+--    ts_chunk_scan_begin.  ts_chunk_scan_load_chunks reads
+--    ts_chunk statuses via SnapshotSelf and caches them in
+--    state->chunk_status[] — this snapshot sees PARTIAL.
+-- 4. Between the status read and the per-chunk ShareLock loop,
+--    a concurrent recompress:
+--      a. takes the per-chunk ExclusiveLock (Share not held
+--         yet, so no conflict),
+--      b. merges old PAX + heap fork → writes new PAX to
+--         seg_path.new,
+--      c. rename(2) seg_path.new → seg_path (filesystem-level,
+--         non-transactional, IMMEDIATELY visible to any subsequent
+--         file open),
+--      d. commits the ts_chunk status flip PARTIAL → COMPRESSED,
+--      e. releases the ExclusiveLock at commit.
+-- 5. Reader resumes.  Share is granted instantly.  Because the
+--    scan uses the stale PARTIAL from state->chunk_status[], it
+--    walks the PAX-then-heap path (ts_chunk_scan_use_pax).
+--    Opening PAX now returns the POST-rename file, which already
+--    contains R (recompress merged it in from heap).  Reading the
+--    heap fork ALSO returns R — reclaim needs the same Exclusive
+--    lock we now hold in Share, so smgrtruncate hasn't run yet.
+--    → R is counted TWICE.
+-- 6. Refresh aggregates the double-count into mat.  Because
+--    compress emits no invalidation, no subsequent refresh
+--    re-covers the range, and mat stays +1 forever.
+--
+-- ── The fix ─────────────────────────────────────────────────
+-- ts_chunk_scan_begin now re-reads ts_chunk statuses AFTER the
+-- Share loop (still via SnapshotSelf) and overwrites
+-- state->chunk_status[] with the fresh values.  A chunk that
+-- flipped to COMPRESSED during the Share wait is now observed as
+-- COMPRESSED — the scan takes the PAX-only path further down,
+-- and the double-count is impossible.
+--
+-- ── Deterministic interleave via FAULT_INJECTOR ────────────
+-- The race window in production is timing-dependent; the
+-- ts_chunk_scan_before_share fault injector pins the reader at
+-- exactly the vulnerable point (post load_chunks, pre Share
+-- loop) so the racing recompress can commit unimpeded.
+--
+--   S1: setup + first compress + reclaim (chunk COMPRESSED)
+--   S2: INSERT R (chunk PARTIAL, heap has R)
+--   S1: install 'suspend' on ts_chunk_scan_before_share
+--   S3&: SELECT count(*)/sum FROM t — blocks in fault injector
+--        with snapshot showing status=PARTIAL
+--   S4: compress_chunks('t') — takes Ex (S3 has no Share yet),
+--        writes new PAX (N+1 rows), commits, releases Ex.
+--        Heap fork STILL has R — no reclaim called yet.
+--   S1: 'resume' the fault injector
+--   S3<: unblocked; takes Share, re-reads statuses (fix path),
+--        sees COMPRESSED, PAX-only scan.
+--
+-- ASSERTION: reader returns count = N+1, sum = base_sum + R.val.
+-- Before fix: count = N+2 (R counted twice).
+-- ============================================================
+
+1: SET optimizer = off;
+1: SET max_parallel_workers_per_gather = 0;
+1: DROP EXTENSION IF EXISTS time_series CASCADE;
+1: CREATE EXTENSION time_series;
+1: CREATE EXTENSION IF NOT EXISTS gp_inject_fault;
+1: SET search_path TO public, time_series;
+
+-- One 1 h chunk, single device pins all rows to one QE.
+1: CREATE TABLE race_tbl (ts TIMESTAMPTZ NOT NULL, device INT NOT NULL, val FLOAT8)
+   USING time_series WITH (
+     ts_partition_column = 'ts',
+     ts_chunk_interval   = '1 hour',
+     ts_chunk_origin     = '2020-01-01'
+   )
+   DISTRIBUTED BY (device);
+1: SELECT set_compress_config('race_tbl', 'device', 'ts');
+
+-- Seed 100 rows into an ACTIVE chunk, then compress + reclaim so
+-- the chunk is COMPRESSED with PAX only.  base_sum = 1+2+...+100 = 5050.
+1: INSERT INTO race_tbl
+   SELECT '2024-01-01 00:00:00'::timestamptz + (i * interval '1 sec'), 1, i * 1.0
+   FROM generate_series(1, 100) i;
+1: SELECT time_series.compress_chunks('race_tbl');
+1: SELECT time_series.reclaim_chunk_heaps('race_tbl');
+1: SELECT chunk_number, status FROM time_series.ts_chunk
+   WHERE table_oid = 'race_tbl'::regclass GROUP BY chunk_number, status;
+1: SELECT count(*) AS after_first_compress, sum(val)::float8 AS sum_after
+   FROM race_tbl;
+
+-- ============================================================
+-- S2: late arrival R.  Insert path flips COMPRESSED → PARTIAL
+-- and lands R in the chunk's heap fork.  val=999.0 is distinct
+-- from workload so we can tell whether it was counted 1x or 2x.
+-- ============================================================
+2: SET optimizer = off;
+2: SET search_path TO public, time_series;
+2: INSERT INTO race_tbl VALUES ('2024-01-01 00:00:50.5'::timestamptz, 1, 999.0);
+
+1: SELECT chunk_number, status FROM time_series.ts_chunk
+   WHERE table_oid = 'race_tbl'::regclass GROUP BY chunk_number, status;
+-- Ground truth: 101 rows, sum = 5050 + 999 = 6049.
+1: SELECT count(*) AS after_late, sum(val)::float8 AS sum_after_late
+   FROM race_tbl;
+
+-- ============================================================
+-- Suspend readers at the vulnerable point on every primary.
+-- ============================================================
+1: SELECT gp_inject_fault('ts_chunk_scan_before_share', 'suspend', dbid)
+   FROM gp_segment_configuration WHERE role = 'p' AND content >= 0;
+
+-- ============================================================
+-- S3: reader.  ts_chunk_scan_load_chunks captures status =
+-- PARTIAL under SnapshotSelf, then the fault injector suspends
+-- BEFORE the Share loop is reached.  S3 holds no per-chunk lock.
+-- ============================================================
+3: SET optimizer = off;
+3: SET search_path TO public, time_series;
+3&: SELECT count(*) AS race_cnt, sum(val)::float8 AS race_sum FROM race_tbl;
+
+-- ============================================================
+-- S4: recompress.  No Share is held on the chunk (S3 is wedged
+-- upstream of the lock loop), so S4's Exclusive is granted
+-- immediately.  Recompress reads prior_reader + heap fork,
+-- writes new PAX (101 rows via .new + rename), commits catalog
+-- status → COMPRESSED, releases Ex.  Reclaim is NOT called.
+-- ============================================================
+4: SET optimizer = off;
+4: SET search_path TO public, time_series;
+4: SELECT time_series.compress_chunks('race_tbl');
+
+1: SELECT chunk_number, status FROM time_series.ts_chunk
+   WHERE table_oid = 'race_tbl'::regclass GROUP BY chunk_number, status;
+
+-- ============================================================
+-- Resume S3.  Its scan proceeds: takes Share (Ex was released),
+-- re-reads statuses (fix path) — now sees COMPRESSED, uses the
+-- PAX-only branch, counts R exactly once from the new PAX.
+-- Without the fix: uses the stale PARTIAL cache, reads PAX (has
+-- R) + heap fork (still has R) → race_cnt = 102, race_sum = 7048.
+-- ============================================================
+1: SELECT gp_inject_fault('ts_chunk_scan_before_share', 'resume', dbid)
+   FROM gp_segment_configuration WHERE role = 'p' AND content >= 0;
+
+-- ASSERTION: reader observed R exactly once.
+3<:
+
+-- After S3 commits, reclaim can proceed and heap fork gets truncated.
+1: SELECT gp_inject_fault('ts_chunk_scan_before_share', 'reset', dbid)
+   FROM gp_segment_configuration WHERE role = 'p' AND content >= 0;
+1: SELECT time_series.reclaim_chunk_heaps('race_tbl');
+1: SELECT count(*) AS final_cnt, sum(val)::float8 AS final_sum
+   FROM race_tbl;
+
+-- Cleanup
+1: DROP TABLE race_tbl;
+1: DROP EXTENSION time_series CASCADE;
+1q:
+2q:
+3q:
+4q:

@@ -1,0 +1,214 @@
+Parsed test spec with 5 sessions
+
+starting permutation: s2_begin s2_compress_in_xact s2_rollback
+step s2_begin: BEGIN;
+step s2_compress_in_xact: 
+    SELECT time_series.compress_chunks('ts_conc_comp'::regclass);
+
+ERROR:  compress_chunks cannot run inside a transaction block
+step s2_rollback: ROLLBACK;
+
+starting permutation: s2_begin s2_reclaim_in_xact s2_rollback
+step s2_begin: BEGIN;
+step s2_reclaim_in_xact: 
+    SELECT time_series.reclaim_chunk_heaps('ts_conc_comp'::regclass);
+
+ERROR:  reclaim_chunk_heaps cannot run inside a transaction block
+step s2_rollback: ROLLBACK;
+
+starting permutation: s1_begin s1_insert_chunk1 s2_compress s1_commit s2_count
+step s1_begin: BEGIN;
+step s1_insert_chunk1: 
+    INSERT INTO ts_conc_comp VALUES
+        ('2025-01-01 23:30:00+00', 99, 9999);
+
+step s2_compress: SELECT time_series.compress_chunks('ts_conc_comp'::regclass) AS s2_compressed; <waiting ...>
+step s1_commit: COMMIT;
+step s2_compress: <... completed>
+s2_compressed
+-------------
+            2
+(1 row)
+
+step s2_count: SELECT count(*) AS s2_count FROM ts_conc_comp;
+s2_count
+--------
+     401
+(1 row)
+
+
+starting permutation: s1_begin s1_insert_chunk2 s2_compress s1_commit s2_count
+step s1_begin: BEGIN;
+step s1_insert_chunk2: 
+    INSERT INTO ts_conc_comp VALUES
+        ('2025-01-02 23:30:00+00', 99, 9999);
+
+step s2_compress: SELECT time_series.compress_chunks('ts_conc_comp'::regclass) AS s2_compressed; <waiting ...>
+step s1_commit: COMMIT;
+step s2_compress: <... completed>
+s2_compressed
+-------------
+            2
+(1 row)
+
+step s2_count: SELECT count(*) AS s2_count FROM ts_conc_comp;
+s2_count
+--------
+     401
+(1 row)
+
+
+starting permutation: s1_begin s1_insert_chunk1 s2_compress s1_rollback s2_count
+step s1_begin: BEGIN;
+step s1_insert_chunk1: 
+    INSERT INTO ts_conc_comp VALUES
+        ('2025-01-01 23:30:00+00', 99, 9999);
+
+step s2_compress: SELECT time_series.compress_chunks('ts_conc_comp'::regclass) AS s2_compressed; <waiting ...>
+step s1_rollback: ROLLBACK;
+step s2_compress: <... completed>
+s2_compressed
+-------------
+            2
+(1 row)
+
+step s2_count: SELECT count(*) AS s2_count FROM ts_conc_comp;
+s2_count
+--------
+     400
+(1 row)
+
+
+starting permutation: s2_compress r_select s2_count
+step s2_compress: SELECT time_series.compress_chunks('ts_conc_comp'::regclass) AS s2_compressed;
+s2_compressed
+-------------
+            2
+(1 row)
+
+step r_select: SELECT count(*) AS reader_count FROM ts_conc_comp;
+reader_count
+------------
+         400
+(1 row)
+
+step s2_count: SELECT count(*) AS s2_count FROM ts_conc_comp;
+s2_count
+--------
+     400
+(1 row)
+
+
+starting permutation: lk_begin lk_take_suel s2_compress lk_commit s2_count
+step lk_begin: BEGIN;
+step lk_take_suel: LOCK TABLE ts_conc_comp IN SHARE UPDATE EXCLUSIVE MODE;
+step s2_compress: SELECT time_series.compress_chunks('ts_conc_comp'::regclass) AS s2_compressed;
+s2_compressed
+-------------
+            2
+(1 row)
+
+step lk_commit: COMMIT;
+step s2_count: SELECT count(*) AS s2_count FROM ts_conc_comp;
+s2_count
+--------
+     400
+(1 row)
+
+
+starting permutation: ddl_begin ddl_lock s2_compress ddl_commit s2_count
+step ddl_begin: BEGIN;
+step ddl_lock: LOCK TABLE ts_conc_comp IN ACCESS EXCLUSIVE MODE;
+step s2_compress: SELECT time_series.compress_chunks('ts_conc_comp'::regclass) AS s2_compressed; <waiting ...>
+step ddl_commit: COMMIT;
+step s2_compress: <... completed>
+s2_compressed
+-------------
+            2
+(1 row)
+
+step s2_count: SELECT count(*) AS s2_count FROM ts_conc_comp;
+s2_count
+--------
+     400
+(1 row)
+
+
+starting permutation: s2_set_rr s2_compress s2_reset_iso
+step s2_set_rr: SET default_transaction_isolation = 'repeatable read';
+step s2_compress: SELECT time_series.compress_chunks('ts_conc_comp'::regclass) AS s2_compressed;
+s2_compressed
+-------------
+            2
+(1 row)
+
+step s2_reset_iso: RESET default_transaction_isolation;
+
+starting permutation: s2_set_ser s2_compress s2_reclaim s2_reset_iso
+step s2_set_ser: SET default_transaction_isolation = 'serializable';
+step s2_compress: SELECT time_series.compress_chunks('ts_conc_comp'::regclass) AS s2_compressed;
+s2_compressed
+-------------
+            2
+(1 row)
+
+step s2_reclaim: SELECT time_series.reclaim_chunk_heaps('ts_conc_comp'::regclass) AS s2_reclaimed;
+s2_reclaimed
+------------
+           2
+(1 row)
+
+step s2_reset_iso: RESET default_transaction_isolation;
+
+starting permutation: ddl_begin ddl_alter_add s2_compress ddl_commit s2_count
+step ddl_begin: BEGIN;
+step ddl_alter_add: ALTER TABLE ts_conc_comp ADD COLUMN extra integer;
+step s2_compress: SELECT time_series.compress_chunks('ts_conc_comp'::regclass) AS s2_compressed; <waiting ...>
+step ddl_commit: COMMIT;
+step s2_compress: <... completed>
+s2_compressed
+-------------
+            2
+(1 row)
+
+step s2_count: SELECT count(*) AS s2_count FROM ts_conc_comp;
+s2_count
+--------
+     400
+(1 row)
+
+
+starting permutation: s1_begin s1_insert_chunk1 s2_compress_c5 s1_commit
+step s1_begin: BEGIN;
+step s1_insert_chunk1: 
+    INSERT INTO ts_conc_comp VALUES
+        ('2025-01-01 23:30:00+00', 99, 9999);
+
+step s2_compress_c5: SELECT time_series.compress_chunk('ts_conc_comp'::regclass, 5) AS s2_c5;
+s2_c5
+-----
+    1
+(1 row)
+
+step s1_commit: COMMIT;
+
+starting permutation: s1_begin s1_insert_chunk1 s2_compress_c5 s2_compress_c4 s1_commit
+step s1_begin: BEGIN;
+step s1_insert_chunk1: 
+    INSERT INTO ts_conc_comp VALUES
+        ('2025-01-01 23:30:00+00', 99, 9999);
+
+step s2_compress_c5: SELECT time_series.compress_chunk('ts_conc_comp'::regclass, 5) AS s2_c5;
+s2_c5
+-----
+    1
+(1 row)
+
+step s2_compress_c4: SELECT time_series.compress_chunk('ts_conc_comp'::regclass, 4) AS s2_c4; <waiting ...>
+step s1_commit: COMMIT;
+step s2_compress_c4: <... completed>
+s2_c4
+-----
+    1
+(1 row)
+

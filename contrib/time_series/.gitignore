@@ -1,0 +1,17 @@
+# pg_regress output
+results/
+output_iso/
+test/results/
+test/output_iso/
+test/isolation/results/
+test/isolation/output_iso/
+
+# TAP test scratch (temporary cluster + logs, see Makefile tapcheck)
+test/tmp_check/
+
+# build artifacts
+*.o
+*.so
+
+# design specs (not committed)
+docs/superpowers/

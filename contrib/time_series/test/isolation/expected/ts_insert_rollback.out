@@ -1,0 +1,157 @@
+Parsed test spec with 2 sessions
+
+starting permutation: w_begin w_insert_chunk1 r_count w_rollback r_count
+step w_begin: BEGIN;
+step w_insert_chunk1: 
+    INSERT INTO ts_rb
+    SELECT '2025-01-01 12:00:00+00'::timestamptz + (i * interval '1 minute'), 1000 + i
+    FROM generate_series(1, 50) i;
+
+step r_count: SELECT count(*) FROM ts_rb;
+count
+-----
+   50
+(1 row)
+
+step w_rollback: ROLLBACK;
+step r_count: SELECT count(*) FROM ts_rb;
+count
+-----
+   50
+(1 row)
+
+
+starting permutation: w_begin w_insert_chunk2 r_count r_count_chunk2 w_rollback r_count r_count_chunk2
+step w_begin: BEGIN;
+step w_insert_chunk2: 
+    INSERT INTO ts_rb
+    SELECT '2025-01-02'::timestamptz + (i * interval '1 minute'), 2000 + i
+    FROM generate_series(1, 50) i;
+
+step r_count: SELECT count(*) FROM ts_rb;
+count
+-----
+   50
+(1 row)
+
+step r_count_chunk2: SELECT count(*) FROM ts_rb WHERE ts >= '2025-01-02';
+count
+-----
+    0
+(1 row)
+
+step w_rollback: ROLLBACK;
+step r_count: SELECT count(*) FROM ts_rb;
+count
+-----
+   50
+(1 row)
+
+step r_count_chunk2: SELECT count(*) FROM ts_rb WHERE ts >= '2025-01-02';
+count
+-----
+    0
+(1 row)
+
+
+starting permutation: w_begin w_insert_chunk1 w_insert_chunk2 r_count w_rollback r_count
+step w_begin: BEGIN;
+step w_insert_chunk1: 
+    INSERT INTO ts_rb
+    SELECT '2025-01-01 12:00:00+00'::timestamptz + (i * interval '1 minute'), 1000 + i
+    FROM generate_series(1, 50) i;
+
+step w_insert_chunk2: 
+    INSERT INTO ts_rb
+    SELECT '2025-01-02'::timestamptz + (i * interval '1 minute'), 2000 + i
+    FROM generate_series(1, 50) i;
+
+step r_count: SELECT count(*) FROM ts_rb;
+count
+-----
+   50
+(1 row)
+
+step w_rollback: ROLLBACK;
+step r_count: SELECT count(*) FROM ts_rb;
+count
+-----
+   50
+(1 row)
+
+
+starting permutation: w_begin w_insert_chunk1 w_commit r_count w_begin w_insert_chunk2 r_count w_rollback r_count r_count_chunk2
+step w_begin: BEGIN;
+step w_insert_chunk1: 
+    INSERT INTO ts_rb
+    SELECT '2025-01-01 12:00:00+00'::timestamptz + (i * interval '1 minute'), 1000 + i
+    FROM generate_series(1, 50) i;
+
+step w_commit: COMMIT;
+step r_count: SELECT count(*) FROM ts_rb;
+count
+-----
+  100
+(1 row)
+
+step w_begin: BEGIN;
+step w_insert_chunk2: 
+    INSERT INTO ts_rb
+    SELECT '2025-01-02'::timestamptz + (i * interval '1 minute'), 2000 + i
+    FROM generate_series(1, 50) i;
+
+step r_count: SELECT count(*) FROM ts_rb;
+count
+-----
+  100
+(1 row)
+
+step w_rollback: ROLLBACK;
+step r_count: SELECT count(*) FROM ts_rb;
+count
+-----
+  100
+(1 row)
+
+step r_count_chunk2: SELECT count(*) FROM ts_rb WHERE ts >= '2025-01-02';
+count
+-----
+    0
+(1 row)
+
+
+starting permutation: w_begin w_insert_chunk1 w_insert_chunk2 w_rollback w_begin w_insert_chunk1 w_rollback w_insert_chunk1b w_insert_chunk2b w_insert_chunk3 r_count
+step w_begin: BEGIN;
+step w_insert_chunk1: 
+    INSERT INTO ts_rb
+    SELECT '2025-01-01 12:00:00+00'::timestamptz + (i * interval '1 minute'), 1000 + i
+    FROM generate_series(1, 50) i;
+
+step w_insert_chunk2: 
+    INSERT INTO ts_rb
+    SELECT '2025-01-02'::timestamptz + (i * interval '1 minute'), 2000 + i
+    FROM generate_series(1, 50) i;
+
+step w_rollback: ROLLBACK;
+step w_begin: BEGIN;
+step w_insert_chunk1: 
+    INSERT INTO ts_rb
+    SELECT '2025-01-01 12:00:00+00'::timestamptz + (i * interval '1 minute'), 1000 + i
+    FROM generate_series(1, 50) i;
+
+step w_rollback: ROLLBACK;
+step w_insert_chunk1b: 
+    INSERT INTO ts_rb VALUES ('2025-01-01 06:00:00+00', 100);
+
+step w_insert_chunk2b: 
+    INSERT INTO ts_rb VALUES ('2025-01-02 06:00:00+00', 200);
+
+step w_insert_chunk3: 
+    INSERT INTO ts_rb VALUES ('2025-01-03 06:00:00+00', 300);
+
+step r_count: SELECT count(*) FROM ts_rb;
+count
+-----
+   53
+(1 row)
+

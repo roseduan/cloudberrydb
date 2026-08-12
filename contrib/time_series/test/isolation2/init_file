@@ -1,0 +1,29 @@
+-- Global patterns for time_series isolation2 tests
+
+-- start_matchignore
+m/^NOTICE:/
+m/^DETAIL:/
+m/^psql:/
+-- end_matchignore
+
+-- start_matchsubs
+-- Match segment PIDs which vary between runs
+m/\(seg\d+ [\d\.]+:\d+ pid=\d+\)/
+s/\(seg\d+ [\d\.]+:\d+ pid=\d+\)/(seg0 IP:PORT pid=PID)/
+
+-- Same, but for errors raised inside a dispatched slice: those carry an
+-- extra "sliceN" field, so the pattern above does not match them.  The
+-- segment number is masked too -- which segment a hash lands on is not
+-- part of any assertion.
+m/\(seg\d+ slice\d+ [\d\.]+:\d+ pid=\d+\)/
+s/\(seg\d+ slice\d+ [\d\.]+:\d+ pid=\d+\)/(segN sliceN IP:PORT pid=PID)/
+
+-- Match timestamps in watermark values
+m/\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\.\d+\+\d{2}/
+s/\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\.\d+\+\d{2}/YYYY-MM-DD HH:MM:SS.ffffff+TZ/
+
+-- Mask the cagg_id suffix in materialization table names (sequence-
+-- assigned, varies with how many caggs earlier tests created)
+m/_mat_[a-z0-9_]+_\d+/
+s/(_mat_[a-z0-9_]+)_\d+/${1}_N/
+-- end_matchsubs

@@ -1,0 +1,864 @@
+-- ============================================================
+-- cagg_concurrent_refresh.sql (isolation2)
+-- based on the reference isolation test.spec (9 perms)
+--
+-- Tests REFRESH serialization using:
+-- - LOCK TABLE on mat table (simulates ongoing REFRESH holding lock)
+-- - Advisory locks (our native REFRESH locking mechanism)
+-- - gp_inject_fault for mid-REFRESH pause
+--
+-- Fault injection points used:
+-- - cagg_refresh_before_watermark_advance (pause before watermark update)
+-- ============================================================
+
+-- ============================================================
+-- Setup
+-- ============================================================
+1: SET optimizer = off;
+1: DROP EXTENSION IF EXISTS time_series CASCADE;
+1: CREATE EXTENSION time_series;
+1: SET search_path TO public, time_series;
+
+1: CREATE TABLE cond (time TIMESTAMPTZ NOT NULL, device INT NOT NULL, temp FLOAT8) USING time_series WITH (
+    ts_partition_column = 'time',
+    ts_chunk_interval   = '4 hour',
+    ts_chunk_origin     = '2020-01-01'
+)
+   DISTRIBUTED BY (device);
+1: INSERT INTO cond SELECT '2024-01-01'::timestamptz + (i * interval '6 min'),
+   (i % 5) + 1, i * 0.5 FROM generate_series(1, 500) i;
+
+-- Two CAGGs on same source (different bucket widths)
+1: CREATE MATERIALIZED VIEW cv_1h WITH (time_series.continuous) AS
+   SELECT time_bucket('1 hour'::interval, time) AS bucket,
+          device, count(*) AS cnt
+   FROM cond GROUP BY bucket, device;
+
+1: CREATE MATERIALIZED VIEW cv_2h WITH (time_series.continuous) AS
+   SELECT time_bucket('2 hour'::interval, time) AS bucket,
+          count(*) AS cnt
+   FROM cond GROUP BY bucket;
+
+-- Second source table + CAGG (for cross-source independence test)
+1: CREATE TABLE cond2 (time TIMESTAMPTZ NOT NULL, device INT NOT NULL, temp FLOAT8) USING time_series WITH (
+    ts_partition_column = 'time',
+    ts_chunk_interval   = '4 hour',
+    ts_chunk_origin     = '2020-01-01'
+)
+   DISTRIBUTED BY (device);
+1: INSERT INTO cond2 SELECT '2024-01-01'::timestamptz + (i * interval '6 min'),
+   (i % 3) + 1, i FROM generate_series(1, 200) i;
+1: CREATE MATERIALIZED VIEW cv_cond2 WITH (time_series.continuous) AS
+   SELECT time_bucket('1 hour'::interval, time) AS bucket,
+          count(*) AS cnt
+   FROM cond2 GROUP BY bucket;
+
+-- Initial REFRESH to establish watermarks
+1: CALL time_series.refresh_continuous_aggregate('cv_1h', NULL, NULL);
+1: CALL time_series.refresh_continuous_aggregate('cv_2h', NULL, NULL);
+1: CALL time_series.refresh_continuous_aggregate('cv_cond2', NULL, NULL);
+
+-- Insert backfill data to create dirty intervals
+1: INSERT INTO cond SELECT '2024-01-01 01:30+00'::timestamptz + (i * interval '1 min'),
+   1, i FROM generate_series(1, 10) i;
+1: INSERT INTO cond SELECT '2024-01-01 03:30+00'::timestamptz + (i * interval '1 min'),
+   2, i FROM generate_series(1, 10) i;
+
+2: SET optimizer = off;
+2: SET search_path TO public, time_series;
+3: SET optimizer = off;
+3: SET search_path TO public, time_series;
+
+-- ============================================================
+-- SANITY-CHUNKS: Verify the source hypertables are actually
+-- multi-chunk before exercising concurrent REFRESH races.
+--
+-- cond:  500 rows × 6 min = 3000 min ≈ 50 hours of data, with
+--        ts_chunk_interval = 4 h and origin '2020-01-01' that
+--        spans at least 12 chunks.
+-- cond2: 200 rows × 6 min = 1200 min = 20 hours → at least
+--        5 chunks.
+-- Without this assertion, a future refactor that accidentally
+-- shrinks the data range would silently degrade every perm
+-- below into a single-chunk test.
+-- ============================================================
+1: SELECT count(DISTINCT chunk_number) >= 12 AS cond_spans_at_least_12_chunks
+   FROM time_series.ts_chunk WHERE table_oid = 'cond'::regclass;
+1: SELECT count(DISTINCT chunk_number) >= 5 AS cond2_spans_at_least_5_chunks
+   FROM time_series.ts_chunk WHERE table_oid = 'cond2'::regclass;
+
+-- ============================================================
+-- Perm 1: Baseline — single REFRESH + SELECT, no concurrency
+--         (upstream concurrent_refresh perm 1)
+-- ============================================================
+1: CALL time_series.refresh_continuous_aggregate('cv_1h', NULL, NULL);
+1: SELECT count(*) AS cv1h_rows FROM cv_1h;
+
+-- ============================================================
+-- Perm 5: LOCK mat table → REFRESH blocked → release → verify
+--         (upstream concurrent_refresh perm 5)
+--         Core test: advisory lock serializes REFRESH
+-- ============================================================
+
+-- Re-dirty
+1: INSERT INTO cond VALUES ('2024-01-01 02:30+00', 3, 100.0);
+
+-- Session 1 locks mat table (simulates ongoing REFRESH)
+1: BEGIN;
+1: DO $$ BEGIN PERFORM 1 FROM time_series.continuous_agg WHERE user_view_name = 'cv_1h'; EXECUTE format('LOCK TABLE time_series.%I IN EXCLUSIVE MODE', (SELECT mat_table_name FROM time_series.continuous_agg WHERE user_view_name = 'cv_1h')); END $$;
+
+-- Session 2 REFRESH → blocks on advisory lock (which acquires mat table lock internally)
+2&: CALL time_series.refresh_continuous_aggregate('cv_1h', NULL, NULL);
+
+-- Verify session 2 is waiting.  Poll up to 30s before sampling, so
+-- under heavy host CPU contention the "2&:" REFRESH has time to reach
+-- lock acquisition (it can take >1s just to parse/dispatch).  The
+-- pinned SELECT below still asserts the value deterministically.
+1: DO $$ DECLARE n int; deadline timestamptz := clock_timestamp() + interval '30 seconds'; BEGIN LOOP SELECT count(*) INTO n FROM pg_stat_activity WHERE query LIKE '%refresh_continuous_aggregate%' AND wait_event_type = 'Lock' AND pid != pg_backend_pid(); EXIT WHEN n >= 1 OR clock_timestamp() > deadline; PERFORM pg_sleep(0.2); END LOOP; END$$;
+1: SELECT count(*) > 0 AS s2_waiting
+   FROM pg_stat_activity
+   WHERE query LIKE '%refresh_continuous_aggregate%'
+     AND wait_event_type = 'Lock'
+     AND pid != pg_backend_pid();
+
+-- Release
+1: COMMIT;
+2<:
+
+-- No duplicate rows
+1: SELECT count(*) AS dup_rows FROM (
+     SELECT bucket, device, count(*) FROM time_series._mat_cv_1h_1
+     GROUP BY bucket, device HAVING count(*) > 1
+   ) x;
+
+-- ============================================================
+-- Perm 6: TWO queued REFRESHes serialize, no duplicate rows [P0]
+--         (upstream concurrent_refresh perm 6)
+-- ============================================================
+
+-- Re-dirty
+1: INSERT INTO cond VALUES ('2024-01-01 04:30+00', 4, 200.0);
+
+-- Lock mat table
+1: BEGIN;
+1: DO $$ BEGIN EXECUTE format('LOCK TABLE time_series.%I IN EXCLUSIVE MODE', (SELECT mat_table_name FROM time_series.continuous_agg WHERE user_view_name = 'cv_1h')); END $$;
+
+-- TWO sessions try REFRESH simultaneously
+2&: CALL time_series.refresh_continuous_aggregate('cv_1h', NULL, NULL);
+3&: CALL time_series.refresh_continuous_aggregate('cv_1h', NULL, NULL);
+
+-- Both should be waiting.  Poll up to 30s for both sessions to reach
+-- lock acquisition (see comment at the s2_waiting site above).
+1: DO $$ DECLARE n int; deadline timestamptz := clock_timestamp() + interval '30 seconds'; BEGIN LOOP SELECT count(*) INTO n FROM pg_stat_activity WHERE query LIKE '%refresh_continuous_aggregate%' AND wait_event_type = 'Lock' AND pid != pg_backend_pid(); EXIT WHEN n >= 2 OR clock_timestamp() > deadline; PERFORM pg_sleep(0.2); END LOOP; END$$;
+1: SELECT count(*) AS waiters
+   FROM pg_stat_activity
+   WHERE query LIKE '%refresh_continuous_aggregate%'
+     AND wait_event_type = 'Lock'
+     AND pid != pg_backend_pid();
+
+-- Release — both proceed sequentially
+1: COMMIT;
+2<:
+3<:
+
+-- CRITICAL: no duplicate rows after two concurrent REFRESHes
+1: SELECT count(*) AS dup_after_double FROM (
+     SELECT bucket, device, count(*) FROM time_series._mat_cv_1h_1
+     GROUP BY bucket, device HAVING count(*) > 1
+   ) x;
+
+-- Data still correct.  Symmetric EXCEPT (both directions) so we
+-- catch BOTH "mat has extra rows" (duplicate-write) AND "source has
+-- rows mat missed" (lost-update) — the latter is the classic
+-- concurrent-refresh race where one of the racers clears the
+-- invalidation log before the other consumes it.
+1: SELECT count(*) AS diff_double FROM (
+   (SELECT bucket, device, cnt FROM cv_1h EXCEPT
+    SELECT time_bucket('1 hour'::interval, time), device, count(*)
+    FROM cond GROUP BY 1, 2)
+   UNION ALL
+   (SELECT time_bucket('1 hour'::interval, time), device, count(*)
+    FROM cond GROUP BY 1, 2
+    EXCEPT
+    SELECT bucket, device, cnt FROM cv_1h)
+   ) x;
+
+-- ============================================================
+-- Perm 8: Different CAGGs on same source → don't block each other
+--         (upstream concurrent_refresh perm 8)
+-- ============================================================
+
+-- Dirty both CAGGs
+1: INSERT INTO cond VALUES ('2024-01-01 05:30+00', 5, 300.0);
+
+-- Lock cv_1h's mat table only
+1: BEGIN;
+1: DO $$ BEGIN EXECUTE format('LOCK TABLE time_series.%I IN EXCLUSIVE MODE', (SELECT mat_table_name FROM time_series.continuous_agg WHERE user_view_name = 'cv_1h')); END $$;
+
+-- cv_1h REFRESH blocks
+2&: CALL time_series.refresh_continuous_aggregate('cv_1h', NULL, NULL);
+
+-- cv_2h REFRESH should NOT block (different mat table)
+3: CALL time_series.refresh_continuous_aggregate('cv_2h', NULL, NULL);
+
+-- cv_2h completed while cv_1h is still blocked (symmetric).
+3: SELECT count(*) AS cv2h_ok FROM (
+   (SELECT bucket, cnt FROM cv_2h EXCEPT
+    SELECT time_bucket('2 hour'::interval, time), count(*)
+    FROM cond GROUP BY 1)
+   UNION ALL
+   (SELECT time_bucket('2 hour'::interval, time), count(*)
+    FROM cond GROUP BY 1
+    EXCEPT
+    SELECT bucket, cnt FROM cv_2h)
+   ) x;
+
+-- Release cv_1h
+1: COMMIT;
+2<:
+
+-- Both correct (symmetric EXCEPT).
+1: SELECT count(*) AS diff_1h FROM (
+   (SELECT bucket, device, cnt FROM cv_1h EXCEPT
+    SELECT time_bucket('1 hour'::interval, time), device, count(*)
+    FROM cond GROUP BY 1, 2)
+   UNION ALL
+   (SELECT time_bucket('1 hour'::interval, time), device, count(*)
+    FROM cond GROUP BY 1, 2
+    EXCEPT
+    SELECT bucket, device, cnt FROM cv_1h)
+   ) x;
+
+-- ============================================================
+-- Perm 9: Different source tables → don't block each other
+--         (upstream concurrent_refresh perm 9)
+-- ============================================================
+
+-- Dirty both sources
+1: INSERT INTO cond VALUES ('2024-01-01 06:30+00', 1, 400.0);
+1: INSERT INTO cond2 VALUES ('2024-01-01 06:30+00', 1, 400.0);
+
+-- Refresh both CAGGs (independent sources → independent advisory
+-- locks).  They do NOT block each other, so the iso2 '&' blocking
+-- form does not apply (it would report "not blocking"); we issue
+-- them from the two sessions back-to-back and assert each ends up
+-- correct.  The serialization that DOES exist (same source) is
+-- covered by Perms 6-8 above.
+2: CALL time_series.refresh_continuous_aggregate('cv_1h', NULL, NULL);
+3: CALL time_series.refresh_continuous_aggregate('cv_cond2', NULL, NULL);
+
+-- Both correct (symmetric EXCEPT on each independent CAGG).
+1: SELECT count(*) AS diff_cross_1 FROM (
+   (SELECT bucket, device, cnt FROM cv_1h EXCEPT
+    SELECT time_bucket('1 hour'::interval, time), device, count(*)
+    FROM cond GROUP BY 1, 2)
+   UNION ALL
+   (SELECT time_bucket('1 hour'::interval, time), device, count(*)
+    FROM cond GROUP BY 1, 2
+    EXCEPT
+    SELECT bucket, device, cnt FROM cv_1h)
+   ) x;
+1: SELECT count(*) AS diff_cross_2 FROM (
+   (SELECT bucket, cnt FROM cv_cond2 EXCEPT
+    SELECT time_bucket('1 hour'::interval, time), count(*)
+    FROM cond2 GROUP BY 1)
+   UNION ALL
+   (SELECT time_bucket('1 hour'::interval, time), count(*)
+    FROM cond2 GROUP BY 1
+    EXCEPT
+    SELECT bucket, cnt FROM cv_cond2)
+   ) x;
+
+-- ============================================================
+-- Perm FAULT: Pause REFRESH before watermark advance
+--             (upstream watermark perm 1 equivalent, using fault injection)
+-- ============================================================
+
+1: INSERT INTO cond VALUES ('2024-01-01 07:30+00', 1, 500.0);
+
+-- Enable fault: pause REFRESH before watermark advance
+1: SELECT gp_inject_fault('cagg_refresh_before_watermark_advance', 'suspend', dbid)
+   FROM gp_segment_configuration WHERE role = 'p' AND content = -1;
+
+-- Session 2 REFRESH — will pause before watermark update
+2>: CALL time_series.refresh_continuous_aggregate('cv_1h', NULL, NULL);
+
+-- Wait for session 2 to hit the fault point
+1: SELECT gp_wait_until_triggered_fault('cagg_refresh_before_watermark_advance', 1, dbid)
+   FROM gp_segment_configuration WHERE role = 'p' AND content = -1;
+
+-- At this point: mat table updated but watermark NOT yet advanced
+-- Session 3 can query and should see old watermark
+3: SELECT count(*) AS mid_refresh_query FROM cv_1h;
+
+-- Resume REFRESH
+1: SELECT gp_inject_fault('cagg_refresh_before_watermark_advance', 'resume', dbid)
+   FROM gp_segment_configuration WHERE role = 'p' AND content = -1;
+2<:
+
+-- Reset fault
+1: SELECT gp_inject_fault('cagg_refresh_before_watermark_advance', 'reset', dbid)
+   FROM gp_segment_configuration WHERE role = 'p' AND content = -1;
+
+-- Final correctness (symmetric EXCEPT — fault-injected pause at
+-- watermark advance must not leave the mat table missing rows).
+1: SELECT count(*) AS diff_final FROM (
+   (SELECT bucket, device, cnt FROM cv_1h EXCEPT
+    SELECT time_bucket('1 hour'::interval, time), device, count(*)
+    FROM cond GROUP BY 1, 2)
+   UNION ALL
+   (SELECT time_bucket('1 hour'::interval, time), device, count(*)
+    FROM cond GROUP BY 1, 2
+    EXCEPT
+    SELECT bucket, device, cnt FROM cv_1h)
+   ) x;
+
+-- ============================================================
+-- Perm 2-4: LOCK watermark table (ACCESS EXCLUSIVE) → REFRESH blocked
+--           (upstream concurrent_refresh perm 2-4: threshold reader blocks refresh)
+--           Our equivalent: an ACCESS EXCLUSIVE lock on cagg_watermark
+--           blocks REFRESH's cagg_get_min_watermark() SELECT (which
+--           takes AccessShare).  ACCESS EXCLUSIVE is the mode that
+--           conflicts with AccessShare; a plain ACCESS SHARE lock here
+--           would NOT block the reader (two AccessShare holders are
+--           compatible), so the lock must be ACCESS EXCLUSIVE.
+-- ============================================================
+
+1: INSERT INTO cond VALUES ('2024-01-01 08:30+00', 1, 600.0);
+
+-- Session 1: ACCESS EXCLUSIVE lock on watermark
+1: BEGIN;
+1: LOCK TABLE time_series.cagg_watermark IN ACCESS EXCLUSIVE MODE;
+
+-- Session 2: REFRESH's cagg_get_min_watermark() read → blocks
+2&: CALL time_series.refresh_continuous_aggregate('cv_1h', NULL, NULL);
+
+-- Verify blocked.  Poll up to 30s for session 2 to reach lock acq.
+1: DO $$ DECLARE n int; deadline timestamptz := clock_timestamp() + interval '30 seconds'; BEGIN LOOP SELECT count(*) INTO n FROM pg_stat_activity WHERE query LIKE '%refresh_continuous_aggregate%' AND wait_event_type = 'Lock' AND pid != pg_backend_pid(); EXIT WHEN n >= 1 OR clock_timestamp() > deadline; PERFORM pg_sleep(0.2); END LOOP; END$$;
+1: SELECT count(*) > 0 AS refresh_blocked_by_excl
+   FROM pg_stat_activity
+   WHERE query LIKE '%refresh_continuous_aggregate%'
+     AND wait_event_type = 'Lock'
+     AND pid != pg_backend_pid();
+
+1: COMMIT;
+2<:
+
+-- Data correct after unblock (symmetric).
+1: SELECT count(*) AS diff_share FROM (
+   (SELECT bucket, device, cnt FROM cv_1h EXCEPT
+    SELECT time_bucket('1 hour'::interval, time), device, count(*)
+    FROM cond GROUP BY 1, 2)
+   UNION ALL
+   (SELECT time_bucket('1 hour'::interval, time), device, count(*)
+    FROM cond GROUP BY 1, 2
+    EXCEPT
+    SELECT bucket, device, cnt FROM cv_1h)
+   ) x;
+
+-- ============================================================
+-- Perm 7: Non-overlapping refresh windows still serialize
+--         (upstream concurrent_refresh perm 7)
+--         Two REFRESHes with different windows on same CAGG
+--         should still serialize (conservative locking).
+-- ============================================================
+
+1: INSERT INTO cond VALUES ('2024-01-01 01:15+00', 1, 700.0);
+1: INSERT INTO cond VALUES ('2024-01-01 09:15+00', 2, 800.0);
+
+-- Lock mat table
+1: BEGIN;
+1: DO $$ BEGIN EXECUTE format('LOCK TABLE time_series.%I IN EXCLUSIVE MODE', (SELECT mat_table_name FROM time_series.continuous_agg WHERE user_view_name = 'cv_1h')); END $$;
+
+-- Two non-overlapping windows
+2&: CALL time_series.refresh_continuous_aggregate('cv_1h', '2024-01-01 01:00+00', '2024-01-01 02:00+00');
+3&: CALL time_series.refresh_continuous_aggregate('cv_1h', '2024-01-01 09:00+00', '2024-01-01 10:00+00');
+
+-- Poll up to 30s for both sessions to reach lock acquisition.
+1: DO $$ DECLARE n int; deadline timestamptz := clock_timestamp() + interval '30 seconds'; BEGIN LOOP SELECT count(*) INTO n FROM pg_stat_activity WHERE query LIKE '%refresh_continuous_aggregate%' AND wait_event_type = 'Lock' AND pid != pg_backend_pid(); EXIT WHEN n >= 2 OR clock_timestamp() > deadline; PERFORM pg_sleep(0.2); END LOOP; END$$;
+1: SELECT count(*) AS non_overlap_waiters
+   FROM pg_stat_activity
+   WHERE query LIKE '%refresh_continuous_aggregate%'
+     AND wait_event_type = 'Lock'
+     AND pid != pg_backend_pid();
+
+1: COMMIT;
+2<:
+3<:
+
+-- Both windows refreshed correctly (symmetric — non-overlapping
+-- windows in two sessions must not silently drop the row in either
+-- window).
+1: SELECT count(*) AS diff_nonoverlap FROM (
+   (SELECT bucket, device, cnt FROM cv_1h EXCEPT
+    SELECT time_bucket('1 hour'::interval, time), device, count(*)
+    FROM cond GROUP BY 1, 2)
+   UNION ALL
+   (SELECT time_bucket('1 hour'::interval, time), device, count(*)
+    FROM cond GROUP BY 1, 2
+    EXCEPT
+    SELECT bucket, device, cnt FROM cv_1h)
+   ) x;
+
+-- ============================================================
+-- Perm DROP-MID-REFRESH (P0): DROP MATERIALIZED VIEW while another
+--   session is mid-refresh.  Without correct locking, REFRESH's
+--   TX2 writes to a now-dropped mat table → SIGSEGV / catalog
+--   corruption.  The fix is that DROP must take a lock that
+--   conflicts with REFRESH's mat-table write lock; both calls
+--   serialize and finish cleanly.
+-- ============================================================
+
+-- Build a dedicated CAGG so a DROP in this test does not destroy
+-- cv_1h / cv_2h / cv_cond2 used by earlier perms.
+1: CREATE TABLE drop_src (time TIMESTAMPTZ NOT NULL, device INT NOT NULL, val FLOAT8) USING time_series WITH (
+    ts_partition_column = 'time',
+    ts_chunk_interval   = '4 hour',
+    ts_chunk_origin     = '2020-01-01'
+)
+   DISTRIBUTED BY (device);
+1: INSERT INTO drop_src
+   SELECT '2024-01-01'::timestamptz + (i * interval '6 min'),
+          (i % 5) + 1, i FROM generate_series(1, 100) i;
+
+1: CREATE MATERIALIZED VIEW cv_drop_test WITH (time_series.continuous) AS
+   SELECT time_bucket('1 hour'::interval, time) AS bucket,
+          device, count(*) AS cnt
+   FROM drop_src GROUP BY bucket, device;
+1: CALL time_series.refresh_continuous_aggregate('cv_drop_test', NULL, NULL);
+
+-- Dirty the CAGG so refresh has work to do
+1: INSERT INTO drop_src VALUES ('2024-01-01 02:30+00', 1, 999);
+
+-- Suspend refresh before watermark advance so we have a window where
+-- TX1 has committed (mat rows written) but TX2 has not started yet.
+-- This is exactly the dangerous interval for an interleaving DROP.
+1: SELECT gp_inject_fault('cagg_refresh_before_watermark_advance', 'suspend', dbid)
+   FROM gp_segment_configuration WHERE role = 'p' AND content = -1;
+
+-- Session 2: kick off refresh; it will block at the fault point
+2>: CALL time_series.refresh_continuous_aggregate('cv_drop_test', NULL, NULL);
+
+1: SELECT gp_wait_until_triggered_fault('cagg_refresh_before_watermark_advance', 1, dbid)
+   FROM gp_segment_configuration WHERE role = 'p' AND content = -1;
+
+-- Session 3: DROP the CAGG while refresh is paused mid-flight.
+-- (Note: a CAGG's user-facing object is a regular VIEW, not a
+-- catalog MATERIALIZED VIEW — the actual mat *table* lives under
+-- time_series schema with a synthetic name.  Hence DROP VIEW, not
+-- DROP MATERIALIZED VIEW.  Our sql_drop event trigger picks this
+-- up and tears down the mat table + bgw_job rows.)
+--
+-- Correct behavior: DROP must NOT crash the cluster, NOT corrupt
+-- the catalog, NOT leave orphan bgw_job rows.  The acceptable
+-- outcomes are (a) DROP blocks until refresh finishes, then
+-- succeeds; or (b) DROP fails cleanly with an informative error.
+-- Either way the load-bearing invariant is "no SIGSEGV, no orphan
+-- catalog rows, no corrupted mat table" — checked below.
+3&: DROP VIEW cv_drop_test CASCADE;
+
+-- Give session 3 a moment to enter its lock wait (if it blocks).
+1: SELECT pg_sleep(1);
+
+-- Resume refresh; both sessions should drain to completion.
+1: SELECT gp_inject_fault('cagg_refresh_before_watermark_advance', 'resume', dbid)
+   FROM gp_segment_configuration WHERE role = 'p' AND content = -1;
+2<:
+3<:
+
+1: SELECT gp_inject_fault('cagg_refresh_before_watermark_advance', 'reset', dbid)
+   FROM gp_segment_configuration WHERE role = 'p' AND content = -1;
+
+-- Final state: cv_drop_test must be gone, catalog clean, cluster alive.
+1: SELECT count(*) AS cv_drop_test_still_exists
+   FROM time_series.continuous_agg WHERE user_view_name = 'cv_drop_test';
+1: SELECT count(*) AS orphan_bgw_job_rows
+   FROM time_series.bgw_job WHERE application_name LIKE '%cv_drop_test%';
+1: SELECT 1 AS cluster_alive;
+
+1: DROP TABLE drop_src CASCADE;
+
+-- ============================================================
+-- Perm DROP-VS-REFRESH-INSERT (P0): concurrent DROP + refresh mid-INSERT
+--   ABBA deadlock regression (repro'd on cbdb-soak 2026-07-13, GDD-off).
+--
+--   Complements Perm DROP-MID-REFRESH above, which suspends between
+--   REFRESH's TX1 and TX2 (post-watermark-advance).  This perm targets
+--   the DIFFERENT window INSIDE refresh's per-range materialization:
+--   between `DELETE FROM _mat` (holds mat.RowExclusiveLock) and
+--   `INSERT INTO _mat SELECT _partial_view` (needs partial_view.
+--   AccessShareLock).  A concurrent `DROP VIEW cv_* CASCADE` invokes
+--   cagg_handle_source_drop which — pre-fix — dropped partial_view
+--   BEFORE mat, giving mat←→partial_view an ABBA cycle:
+--       refresh: mat.RowEx  → wants partial_view.Share
+--       drop:    partial_view.Ex → wants mat.Ex
+--   Postgres's per-segment deadlock detector caught it, killed one
+--   side.  Fix (time_series--1.0.sql cagg_handle_source_drop view
+--   branch): drop the mat table FIRST so both sides run mat →
+--   partial_view.  This spec exercises the exact window manually
+--   (no fault point exists between refresh's DELETE and INSERT);
+--   post-fix both sessions must complete without 40P01.
+-- ============================================================
+
+-- Scratch CAGG for this perm; independent of every other perm's CAGG
+-- so DROP here won't disturb cv_1h / cv_2h / cv_cond2.
+1: CREATE MATERIALIZED VIEW cv_dropvictim WITH (time_series.continuous) AS
+   SELECT time_bucket('1 hour'::interval, time) AS bucket,
+          device, count(*) AS cnt
+   FROM cond GROUP BY bucket, device;
+1: CALL time_series.refresh_continuous_aggregate('cv_dropvictim', NULL, NULL);
+
+-- Session 1 stages the refresh half-transaction: DELETE FROM _mat
+-- takes mat.RowExclusiveLock; held to COMMIT.  Range overlaps existing
+-- rows so DELETE has non-zero effect (an empty DELETE would still take
+-- the same lock, but a work-shaped statement stays closer to the real
+-- refresh path).  DO block MUST stay one line: pg_isolation2_regress
+-- splits SQL on newlines.
+1: BEGIN;
+1: DO $$ BEGIN EXECUTE format('DELETE FROM time_series.%I WHERE bucket >= ''2024-01-01 04:00+00''::timestamptz AND bucket < ''2024-01-01 08:00+00''::timestamptz', (SELECT mat_table_name FROM time_series.continuous_agg WHERE user_view_name = 'cv_dropvictim')); END $$;
+
+-- Session 2 (async): DROP VIEW cv_dropvictim CASCADE fires
+-- cagg_handle_source_drop's view branch.
+--   Post-fix ordering (mat -> partial_view -> direct_view): DROP TABLE
+--   _mat is the FIRST lock request; it waits on session 1's mat.RowEx.
+--   Pre-fix ordering (partial_view -> direct_view -> mat): DROP VIEW
+--   _partial_view runs first, acquires partial_view.Ex, THEN blocks on
+--   mat.Ex -- priming the ABBA against session 1's next INSERT below.
+2&: DROP VIEW cv_dropvictim CASCADE;
+
+-- Wait up to 30s for session 2 to reach lock acquisition; same polling
+-- pattern as perm 5 above.  Single line, as required by iso2 driver.
+1: DO $$ DECLARE n int; deadline timestamptz := clock_timestamp() + interval '30 seconds'; BEGIN LOOP SELECT count(*) INTO n FROM pg_stat_activity WHERE query ILIKE '%DROP VIEW cv_dropvictim%' AND wait_event_type = 'Lock' AND pid != pg_backend_pid(); EXIT WHEN n >= 1 OR clock_timestamp() > deadline; PERFORM pg_sleep(0.2); END LOOP; END$$;
+1: SELECT count(*) > 0 AS drop_waiting_on_lock FROM pg_stat_activity WHERE query ILIKE '%DROP VIEW cv_dropvictim%' AND wait_event_type = 'Lock' AND pid != pg_backend_pid();
+
+-- Session 1's refresh second half: INSERT INTO _mat SELECT * FROM _partial_view.
+--   Post-fix: partial_view still lock-free (session 2 hasn't reached it) ->
+--     INSERT gets partial_view.Share cleanly -> succeeds.  No deadlock.
+--   Pre-fix:  partial_view already held Ex by session 2 -> session 1 blocks ->
+--     both sides waiting on opposing locks -> postgres detects the cycle ->
+--     ERROR "deadlock detected" on one side.
+1: DO $$ BEGIN EXECUTE format('INSERT INTO time_series.%I SELECT * FROM time_series.%I WHERE bucket >= ''2024-01-01 04:00+00''::timestamptz AND bucket < ''2024-01-01 08:00+00''::timestamptz', (SELECT mat_table_name FROM time_series.continuous_agg WHERE user_view_name = 'cv_dropvictim'), (SELECT partial_view_name FROM time_series.continuous_agg WHERE user_view_name = 'cv_dropvictim')); END $$;
+1: COMMIT;
+
+-- Session 2 (DROP) can now finish -- mat.RowEx released.
+2<:
+
+-- Post-check: DROP fully applied, no lingering CAGG catalog row.
+1: SELECT count(*) AS cv_dropvictim_after_drop
+     FROM time_series.continuous_agg WHERE user_view_name = 'cv_dropvictim';
+
+-- ============================================================
+-- Perm DROP-SOURCE-MID-REFRESH (P0): DROP TABLE source CASCADE
+--   while another session is mid-refresh.  More dangerous than
+--   DROP-MID-REFRESH on the CAGG above: refresh reads FROM the
+--   source table while running its materialization SQL.  If the
+--   source disappears mid-query, refresh worker can either:
+--     (a) hit AccessShare lock conflict → DROP blocks
+--     (b) read past the lock release → SIGSEGV / undefined data
+--   The first is correct; the second is a P0 data-integrity bug.
+-- ============================================================
+
+1: CREATE TABLE drop_src2 (time TIMESTAMPTZ NOT NULL, device INT NOT NULL, val FLOAT8) USING time_series WITH (
+    ts_partition_column = 'time',
+    ts_chunk_interval   = '4 hour',
+    ts_chunk_origin     = '2020-01-01'
+)
+   DISTRIBUTED BY (device);
+1: INSERT INTO drop_src2
+   SELECT '2024-01-01'::timestamptz + (i * interval '6 min'),
+          (i % 5) + 1, i FROM generate_series(1, 100) i;
+
+1: CREATE MATERIALIZED VIEW cv_drop_src_test WITH (time_series.continuous) AS
+   SELECT time_bucket('1 hour'::interval, time) AS bucket,
+          device, count(*) AS cnt
+   FROM drop_src2 GROUP BY bucket, device;
+1: CALL time_series.refresh_continuous_aggregate('cv_drop_src_test', NULL, NULL);
+
+-- Dirty so refresh has work to do
+1: INSERT INTO drop_src2 VALUES ('2024-01-01 02:30+00', 1, 999);
+
+-- Suspend refresh after L1→L2 commit but before TX2 (the actual
+-- materialization SQL).  In this window refresh has released the
+-- L1 row lock but still needs to read source data in TX2.
+1: SELECT gp_inject_fault('cagg_refresh_before_watermark_advance', 'suspend', dbid)
+   FROM gp_segment_configuration WHERE role = 'p' AND content = -1;
+
+-- Session 2: trigger refresh, suspend at fault
+2>: CALL time_series.refresh_continuous_aggregate('cv_drop_src_test', NULL, NULL);
+
+1: SELECT gp_wait_until_triggered_fault('cagg_refresh_before_watermark_advance', 1, dbid)
+   FROM gp_segment_configuration WHERE role = 'p' AND content = -1;
+
+-- Session 3: DROP source CASCADE while refresh suspended.
+-- CASCADE is required because cv_drop_src_test depends on drop_src2.
+-- Correct behavior: must NOT crash the cluster; either DROP blocks
+-- until refresh finishes, or DROP cleanly fails with a dependency /
+-- lock error.  P0 failure mode = SIGSEGV from refresh worker
+-- writing to torn-down catalog rows.
+3&: DROP TABLE drop_src2 CASCADE;
+
+-- Give session 3 a moment to enter its lock wait (if blocking).
+1: SELECT pg_sleep(1);
+
+-- Resume refresh.  Both sessions drain.
+1: SELECT gp_inject_fault('cagg_refresh_before_watermark_advance', 'resume', dbid)
+   FROM gp_segment_configuration WHERE role = 'p' AND content = -1;
+2<:
+3<:
+
+1: SELECT gp_inject_fault('cagg_refresh_before_watermark_advance', 'reset', dbid)
+   FROM gp_segment_configuration WHERE role = 'p' AND content = -1;
+
+-- Final state: source + CAGG both gone, catalog clean, cluster alive.
+1: SELECT count(*) AS drop_src2_still_exists
+   FROM pg_class WHERE relname = 'drop_src2';
+1: SELECT count(*) AS cv_drop_src_test_still_exists
+   FROM time_series.continuous_agg WHERE user_view_name = 'cv_drop_src_test';
+1: SELECT count(*) AS orphan_invalidation_rows
+   FROM time_series.cagg_invalidation_log
+   WHERE source_table_oid NOT IN (SELECT oid FROM pg_class);
+1: SELECT 1 AS cluster_alive;
+
+-- ============================================================
+-- Perm MULTI-CHUNK-CONCURRENT [P0]: dirty rows scattered across
+--   6 distinct chunks, then TWO sessions REFRESH the same CAGG
+--   concurrently.  Builds on Perm 6 (which used a single-chunk
+--   dirty) to stress the L1 row-lock race across multiple chunks.
+--
+-- The fear: with multi-chunk dirty, each L1 row corresponds to a
+--   different chunk's invalidation range.  A racy L1→L2 migration
+--   could lock-skip one chunk's row and leave that chunk's
+--   invalidation un-materialized — i.e., lost-update.  The
+--   symmetric EXCEPT below catches this.
+--
+-- We also assert per-chunk row presence in the mat table so a
+--   silent "dropped one chunk's worth of buckets" regression
+--   shows up as an obvious 0 count.
+-- ============================================================
+
+-- Insert one dirty row into each of 6 distinct chunks within the
+-- existing 50 h data span.  Chunks at 4 h interval, origin 2020-01-01,
+-- so each timestamp here lands in a distinct ts_chunk:
+--   02:30 → chunk N, 06:30 → N+1, 14:30 → N+3, 22:30 → N+5,
+--   day 2 10:30 → N+8, day 2 22:30 → N+11.
+1: INSERT INTO cond VALUES ('2024-01-01 02:30+00', 1, 9001.0);
+1: INSERT INTO cond VALUES ('2024-01-01 06:30+00', 2, 9002.0);
+1: INSERT INTO cond VALUES ('2024-01-01 14:30+00', 3, 9003.0);
+1: INSERT INTO cond VALUES ('2024-01-01 22:30+00', 4, 9004.0);
+1: INSERT INTO cond VALUES ('2024-01-02 10:30+00', 5, 9005.0);
+1: INSERT INTO cond VALUES ('2024-01-02 22:30+00', 1, 9006.0);
+
+-- Lock mat table — both REFRESHes queue behind it
+1: BEGIN;
+1: DO $$ BEGIN EXECUTE format('LOCK TABLE time_series.%I IN EXCLUSIVE MODE', (SELECT mat_table_name FROM time_series.continuous_agg WHERE user_view_name = 'cv_1h')); END $$;
+
+2&: CALL time_series.refresh_continuous_aggregate('cv_1h', NULL, NULL);
+3&: CALL time_series.refresh_continuous_aggregate('cv_1h', NULL, NULL);
+
+-- Both should be waiting on the lock.  Poll up to 30s for both
+-- sessions to reach lock acquisition (see s2_waiting site for why).
+1: DO $$ DECLARE n int; deadline timestamptz := clock_timestamp() + interval '30 seconds'; BEGIN LOOP SELECT count(*) INTO n FROM pg_stat_activity WHERE query LIKE '%refresh_continuous_aggregate%' AND wait_event_type = 'Lock' AND pid != pg_backend_pid(); EXIT WHEN n >= 2 OR clock_timestamp() > deadline; PERFORM pg_sleep(0.2); END LOOP; END$$;
+1: SELECT count(*) AS mc_waiters
+   FROM pg_stat_activity
+   WHERE query LIKE '%refresh_continuous_aggregate%'
+     AND wait_event_type = 'Lock'
+     AND pid != pg_backend_pid();
+
+-- Release — both REFRESHes serialize through the queue
+1: COMMIT;
+2<:
+3<:
+
+-- 1) No duplicate (bucket, device) rows
+1: SELECT count(*) AS mc_dup_rows FROM (
+     SELECT bucket, device, count(*)
+     FROM time_series._mat_cv_1h_1
+     GROUP BY bucket, device HAVING count(*) > 1
+   ) x;
+
+-- 2) Symmetric EXCEPT bit-equivalence across full source
+1: SELECT count(*) AS mc_diff_full FROM (
+   (SELECT bucket, device, cnt FROM cv_1h EXCEPT
+    SELECT time_bucket('1 hour'::interval, time), device, count(*)
+    FROM cond GROUP BY 1, 2)
+   UNION ALL
+   (SELECT time_bucket('1 hour'::interval, time), device, count(*)
+    FROM cond GROUP BY 1, 2
+    EXCEPT
+    SELECT bucket, device, cnt FROM cv_1h)
+   ) x;
+
+-- 3) Per-chunk reflection: each of the 6 dirty chunks must contain
+--    the corresponding (device, bucket) row in the mat table.  If
+--    the race lost any chunk's L1 entry, one of these counts drops
+--    to zero.  Pin each independently so a regression isolates to
+--    a specific chunk.
+1: SELECT
+     count(*) FILTER (WHERE bucket = '2024-01-01 02:00+00' AND device = 1) AS mc_chunk_a,
+     count(*) FILTER (WHERE bucket = '2024-01-01 06:00+00' AND device = 2) AS mc_chunk_b,
+     count(*) FILTER (WHERE bucket = '2024-01-01 14:00+00' AND device = 3) AS mc_chunk_c,
+     count(*) FILTER (WHERE bucket = '2024-01-01 22:00+00' AND device = 4) AS mc_chunk_d,
+     count(*) FILTER (WHERE bucket = '2024-01-02 10:00+00' AND device = 5) AS mc_chunk_e,
+     count(*) FILTER (WHERE bucket = '2024-01-02 22:00+00' AND device = 1) AS mc_chunk_f
+   FROM cv_1h;
+
+-- 4) Confirm dirty rows live in 6 distinct ts_chunk entries.  This
+--    guards against an environment in which chunk boundaries shift
+--    and our 6 timestamps collapse into fewer chunks — without it
+--    the test would still pass but no longer be a multi-chunk race.
+1: WITH dirty_times(ts) AS (VALUES
+       ('2024-01-01 02:30+00'::timestamptz),
+       ('2024-01-01 06:30+00'::timestamptz),
+       ('2024-01-01 14:30+00'::timestamptz),
+       ('2024-01-01 22:30+00'::timestamptz),
+       ('2024-01-02 10:30+00'::timestamptz),
+       ('2024-01-02 22:30+00'::timestamptz))
+   SELECT count(DISTINCT floor(extract(epoch from (ts - '2020-01-01'::timestamptz))/14400)::int)
+            AS dirty_chunks_touched
+   FROM dirty_times;
+
+-- ============================================================
+-- run_job / bgw_job_stat lock (silent CAGG-watermark-freeze regression)
+--
+-- run_job() does bgw_job_stat_mark_start() (an UPDATE on bgw_job_stat)
+-- then runs the refresh body.  CBDB escalates UPDATE to a table-level
+-- ExclusiveLock whenever gp_enable_global_deadlock_detector is OFF (the
+-- default); if mark_start shares the body's transaction that whole-table
+-- lock is held across cagg_refresh's TX1 (the cross-segment L1->L2
+-- migration) and blocks every other job's mark_start cluster-wide -> the
+-- per-source invalidation threshold stalls and every CAGG watermark on
+-- that source silently freezes.  The fix commits mark_start in its own
+-- transaction first (job.c bgw_run_job, matching the BGW scheduler).
+--
+-- Park one run_job inside TX1 (fault, fired once) and check that a second
+-- transaction's bgw_job_stat UPDATE is NOT blocked:
+--   pre-fix : blocks until lock_timeout fires -> ERROR
+--   post-fix: UPDATE 1
+-- The first CAGG refresh policy on a fresh extension gets job id 1001.
+-- ============================================================
+1: SELECT gp_inject_fault('all', 'reset', dbid)
+   FROM gp_segment_configuration WHERE role = 'p';
+-- Give cv_1h a refresh policy (-> job 1001) for run_job to drive; park
+-- next_start at infinity so the BGW scheduler never races our run_job.
+1: SELECT time_series.add_continuous_aggregate_policy('cv_1h',
+        start_offset => INTERVAL '30 days', end_offset => INTERVAL '1 hour',
+        schedule_interval => INTERVAL '1 hour') AS rj_job;
+1: UPDATE time_series.bgw_job_stat SET next_start = 'infinity'
+   WHERE job_id IN (SELECT id FROM time_series.bgw_job
+                    WHERE proc_name = 'policy_refresh_cagg');
+-- Suspend the refresh inside TX1 (after mark_start, before
+-- commit_and_chain); fire once so session 2 does not also suspend.
+1: SELECT gp_inject_fault('cagg_refresh_before_commit_and_chain',
+        'suspend', '', '', '', 1, 1, 0, dbid)
+   FROM gp_segment_configuration WHERE role = 'p' AND content = -1;
+1>: CALL time_series.run_job(1001);
+3: SELECT gp_wait_until_triggered_fault(
+        'cagg_refresh_before_commit_and_chain', 1, dbid)
+   FROM gp_segment_configuration WHERE role = 'p' AND content = -1;
+-- Probe the bgw_job_stat lock directly (the table mark_start writes).
+2: SET lock_timeout = '5s';
+2: UPDATE time_series.bgw_job_stat SET last_finish = last_finish WHERE job_id = 1001;
+3: SELECT gp_inject_fault('cagg_refresh_before_commit_and_chain', 'reset', dbid)
+   FROM gp_segment_configuration WHERE role = 'p' AND content = -1;
+1<:
+1: SELECT gp_inject_fault('all', 'reset', dbid)
+   FROM gp_segment_configuration WHERE role = 'p';
+
+-- ============================================================
+-- bgw_job_stat row missing race (silent scheduler-crash regression)
+--
+-- THE BUG (24h soak: 12 self-triggered events, repro'd deterministically
+-- at ddl_churn=60s in 44 seconds): scheduler.c:on_failure_to_start_job
+-- took a share lock on bgw_job, then called bgw_job_stat_set_next_start
+-- which UPDATE'd bgw_job_stat.  Under Read Committed a concurrent
+-- remove_continuous_aggregate_policy / DROP MATVIEW CASCADE commits
+-- between the two operations -- the cascade DELETE on bgw_job_stat is
+-- not blocked by the share lock on bgw_job, and the UPDATE re-read sees
+-- 0 rows.  set_next_start raised ERROR; on_failure_to_start_job ran
+-- OUTSIDE any PG_TRY in the scheduler main loop, so the ERROR exited
+-- the scheduler with code 1, which made postmaster reap every in-flight
+-- refresh worker the scheduler owned (FATAL "due to administrator
+-- command") and stalled CAGG refresh for ~20 minutes per crash event.
+--
+-- Fix #2 (set_next_start ERROR -> WARNING) is the leaf-level contract
+-- change; fix #1 (PG_TRY around on_failure_to_start_job) is defense in
+-- depth.  This test exercises fix #2 directly via a test-only C shim
+-- (ts_test_bgw_job_stat_set_next_start, registered below) -- the
+-- production set_next_start has no SQL hook because it only runs in
+-- forked BGW worker / scheduler code, but the shim drives the same
+-- function with whatever (job_id, next_start) we hand it.  The integration
+-- regression that exercises fix #1 against a real scheduler lives in
+-- soak/tools/regression_scheduler_crash.sh.
+--
+--   pre-fix: bgw_job_stat row deleted -> set_next_start raises ERROR
+--            "unable to find job statistics for job N"
+--   post-fix: bgw_job_stat row deleted -> WARNING
+--            "bgw_job_stat row for job N is missing ...", function
+--            returns normally; calling backend stays alive.
+-- ============================================================
+1: SELECT gp_inject_fault('all', 'reset', dbid)
+   FROM gp_segment_configuration WHERE role = 'p';
+-- pg_isolation2_regress drops WARNING from the captured output by
+-- default; pin client_min_messages so the post-fix WARNING is asserted
+-- by the diff instead of just inferred from "no ERROR happened".
+1: SET client_min_messages = WARNING;
+-- Register the test-only shim; defined in src/bgw/job_stat.c and
+-- intentionally absent from time_series--1.0.sql so it never ships in
+-- a user-installed catalog.  Mirrors the pattern used elsewhere for
+-- bgw_job_set_scheduler_test_hook / bgw_job_set_job_entrypoint_function_name.
+1: CREATE OR REPLACE FUNCTION _ts_test_set_next_start(int4, timestamptz)
+     RETURNS void LANGUAGE C AS 'time_series', 'ts_test_bgw_job_stat_set_next_start';
+-- Use an existing CAGG refresh policy (cv_1h gained a policy earlier in
+-- this spec).  Park its next_start at infinity first so the BGW
+-- scheduler does not race our test by calling set_next_start itself.
+1: UPDATE time_series.bgw_job_stat SET next_start = 'infinity'
+   WHERE job_id IN (SELECT id FROM time_series.bgw_job
+                    WHERE proc_name = 'policy_refresh_cagg');
+1: SELECT id AS rj_job_id FROM time_series.bgw_job
+    WHERE proc_name = 'policy_refresh_cagg'
+    ORDER BY id LIMIT 1;
+-- Sanity: stat row present, shim succeeds without WARNING.
+1: SELECT count(*) AS stat_rows_before
+     FROM time_series.bgw_job_stat
+    WHERE job_id = (SELECT min(id) FROM time_series.bgw_job
+                    WHERE proc_name = 'policy_refresh_cagg');
+1: SELECT _ts_test_set_next_start(
+       (SELECT min(id) FROM time_series.bgw_job
+        WHERE proc_name = 'policy_refresh_cagg'),
+       now() + INTERVAL '1 hour');
+-- Stage the race: drop the bgw_job_stat row.  In production this is
+-- what remove_*_policy's CASCADE does -- here we DELETE directly so
+-- the race timing is deterministic.  We DELETE only the stat row
+-- (NOT the bgw_job row), reproducing the exact moment the scheduler
+-- saw a valid bgw_job + a missing bgw_job_stat.
+1: DELETE FROM time_series.bgw_job_stat
+   WHERE job_id = (SELECT min(id) FROM time_series.bgw_job
+                   WHERE proc_name = 'policy_refresh_cagg');
+1: SELECT count(*) AS stat_rows_after_delete
+     FROM time_series.bgw_job_stat
+    WHERE job_id = (SELECT min(id) FROM time_series.bgw_job
+                    WHERE proc_name = 'policy_refresh_cagg');
+-- The probe.  Pre-fix this raised ERROR "unable to find job statistics
+-- for job N" and the scheduler that called it (the BGW process) would
+-- die with exit code 1.  Post-fix it emits the WARNING and returns;
+-- the calling backend stays alive (we issue another query after).
+1: SELECT _ts_test_set_next_start(
+       (SELECT min(id) FROM time_series.bgw_job
+        WHERE proc_name = 'policy_refresh_cagg'),
+       now() + INTERVAL '1 hour');
+-- Backend alive check: a fresh query in the same session must succeed.
+1: SELECT 'backend-alive' AS post_probe;
+-- Clean up the shim.  Cleanup of the inserted refresh policy is handled
+-- by the spec's outer DROP EXTENSION CASCADE.
+1: DROP FUNCTION _ts_test_set_next_start(int4, timestamptz);
+
+
+-- ============================================================
+-- Cleanup
+-- ============================================================
+1: DROP TABLE cond CASCADE;
+1: DROP TABLE cond2 CASCADE;
+1: DROP EXTENSION time_series CASCADE;
+1q:
+2q:
+3q:

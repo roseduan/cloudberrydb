@@ -1,0 +1,1036 @@
+-- ============================================================
+-- cagg_bgw_policy_run.sql
+--
+-- Synchronous refresh execution via the policy entry points.
+-- All cases CALL run_job (or refresh_continuous_aggregate)
+-- directly from the test session - no BGW scheduler tick
+-- involved.  Verifies:
+--
+--   * RUN-01..06: run_job invokes policy_refresh_cagg, stat
+--     counters advance, alter_job + run_job sequence honors
+--     the modified config.
+--   * POL-INV-02: many UPDATEs across multiple buckets are
+--     merged into a single refresh.
+--   * RUN-MAT-DATE / RUN-MAT-TS: cagg materialization of
+--     date- and timestamp-typed time columns is correct.
+--   * RUN-GUC-01: caller's optimizer GUC is preserved across
+--     run_job (PG_FINALLY save/restore invariant).
+--
+-- BGW dispatch (real or mock-time-driven) is covered separately:
+--   * cagg_bgw_policy_scheduler_run.sql - scheduler-driven runs
+--                                          (mock-time framework)
+--   * cagg_bgw_policy_e2e.sql           - real BGW worker
+-- ============================================================
+
+SET optimizer = off;
+SET timezone = 'UTC';
+
+DROP EXTENSION IF EXISTS time_series CASCADE;
+-- Defensive: prior test runs may leave behind source tables and auto-named
+-- materialization tables (which are NOT cleaned by DROP EXTENSION CASCADE
+-- for views that were dropped via DROP MATERIALIZED VIEW).
+DROP TABLE IF EXISTS metrics_tstz CASCADE;
+DROP TABLE IF EXISTS metrics_ts   CASCADE;
+DROP TABLE IF EXISTS metrics_date CASCADE;
+
+CREATE EXTENSION time_series;
+SET search_path TO public, time_series;
+-- ============================================================
+-- Setup: source tables with data placed relative to now()
+-- so that policy default windows (now()-Xd, now()] actually cover them.
+-- ============================================================
+CREATE TABLE metrics_tstz (
+    time        TIMESTAMPTZ       NOT NULL,
+    tags_id     INT               NOT NULL,
+    temperature DOUBLE PRECISION
+) USING time_series WITH (
+    ts_partition_column = 'time',
+    ts_chunk_interval   = '4 hour',
+    ts_chunk_origin     = '2020-01-01'
+) DISTRIBUTED BY (tags_id);
+
+-- 48 hours of data ending ~2 hours before now(), so refresh windows that
+-- exclude the most-recent few minutes still cover the last bucket.
+INSERT INTO metrics_tstz
+SELECT date_trunc('hour', now()) - ((48 - h) * interval '1 hour')
+       + (m * interval '5 minutes'),
+       (h % 5) + 1,
+       20.0 + h * 0.1 + m * 0.01
+FROM generate_series(1, 48) h,
+     generate_series(0, 5)  m;
+
+CREATE TABLE metrics_ts (
+    time        TIMESTAMP         NOT NULL,
+    tags_id     INT               NOT NULL,
+    temperature DOUBLE PRECISION
+) USING time_series WITH (
+    ts_partition_column = 'time',
+    ts_chunk_interval   = '4 hour',
+    ts_chunk_origin     = '2020-01-01'
+) DISTRIBUTED BY (tags_id);
+INSERT INTO metrics_ts
+SELECT (date_trunc('hour', now()) - ((48 - h) * interval '1 hour'))::timestamp,
+       (h % 5) + 1, 20.0 + h * 0.1
+FROM generate_series(1, 48) h;
+
+CREATE TABLE metrics_date (
+    time        DATE              NOT NULL,
+    tags_id     INT               NOT NULL,
+    cnt         INT
+) USING time_series WITH (
+    ts_partition_column = 'time',
+    ts_chunk_interval   = '4 hour',
+    ts_chunk_origin     = '2020-01-01'
+) DISTRIBUTED BY (tags_id);
+INSERT INTO metrics_date
+SELECT (now()::date - d), (d % 5) + 1, d * 10
+FROM generate_series(1, 10) d;
+
+-- ============================================================
+-- CAGG views
+-- ============================================================
+CREATE MATERIALIZED VIEW cv_tstz
+WITH (time_series.continuous) AS
+  SELECT time_bucket('1 hour'::interval, time) AS bucket, tags_id,
+         count(*) AS cnt, avg(temperature) AS avg_temp
+  FROM metrics_tstz GROUP BY bucket, tags_id;
+
+CREATE MATERIALIZED VIEW cv_ts
+WITH (time_series.continuous) AS
+  SELECT time_bucket('1 hour'::interval, time) AS bucket, tags_id,
+         count(*) AS cnt
+  FROM metrics_ts GROUP BY bucket, tags_id;
+
+CREATE MATERIALIZED VIEW cv_date
+WITH (time_series.continuous) AS
+  SELECT time_bucket('1 day'::interval, time) AS bucket, tags_id,
+         sum(cnt) AS s
+  FROM metrics_date GROUP BY bucket, tags_id;
+-- ============================================================
+-- Section 1: run_job - synchronous refresh trigger
+-- ============================================================
+
+
+\echo '=== RUN-01: run_job triggers refresh, stat updates ==='
+SELECT add_continuous_aggregate_policy('cv_tstz',
+       '7 days'::interval, '0'::interval, '10 seconds'::interval) AS jid_r1 \gset
+
+SELECT total_runs AS runs_before FROM time_series.bgw_job_stat WHERE job_id = :jid_r1 \gset
+CALL time_series.run_job(:jid_r1);
+SELECT total_runs    = :runs_before + 1 AS runs_incremented,
+       total_successes > 0                AS success_recorded,
+       total_crashes = 0                AS no_crashes,
+       last_run_success                 AS last_run_success
+  FROM time_series.bgw_job_stat WHERE job_id = :jid_r1;
+
+\echo '=== RUN-02: 5 sequential runs accumulate (dangling-pointer regression) ==='
+-- This is the regression for cagg_bgw_debug_journey.md Bug #2: bgw_job_stat_find
+-- used to return a dangling pointer, causing total_duration_failures to overflow
+-- after multiple runs.  We assert sane totals across 5 runs.
+CALL time_series.run_job(:jid_r1);
+CALL time_series.run_job(:jid_r1);
+CALL time_series.run_job(:jid_r1);
+CALL time_series.run_job(:jid_r1);
+
+SELECT
+    total_runs >= :runs_before + 5                            AS runs_at_least_5_more,
+    total_crashes = 0                                         AS no_crashes,
+    total_duration         BETWEEN '0'::interval
+                                AND '10 minutes'::interval    AS dur_sane,
+    total_duration_failures BETWEEN '0'::interval
+                                AND '1 minute'::interval      AS dur_fail_sane,
+    extract(epoch from total_duration_failures) > -86400      AS dur_fail_no_overflow
+  FROM time_series.bgw_job_stat WHERE job_id = :jid_r1;
+
+\echo '=== RUN-03: run_job populates the cagg materialization correctly ==='
+-- Direct aggregation must equal cagg materialization (EXCEPT = 0)
+WITH expected AS (
+    SELECT time_bucket('1 hour'::interval, time) AS bucket,
+           tags_id, count(*) AS cnt,
+           round(avg(temperature)::numeric, 6) AS avg_temp
+      FROM metrics_tstz
+     GROUP BY 1, 2
+), actual AS (
+    SELECT bucket, tags_id, cnt, round(avg_temp::numeric, 6) AS avg_temp FROM cv_tstz
+)
+SELECT count(*) AS diff_count
+  FROM (
+    (SELECT * FROM expected EXCEPT SELECT * FROM actual)
+    UNION ALL
+    (SELECT * FROM actual EXCEPT SELECT * FROM expected)
+  ) d;
+
+-- (RUN-04 / RUN-05 — generic run_job error paths — moved to bgw_job.sql
+--  as RUN-01 / RUN-02; they don't depend on the job being a cagg policy.)
+
+\echo '=== RUN-06: alter_job + run_job sequence — modified config takes effect ==='
+-- Alter: tighten the refresh window to a 1-day band ending 6 hours ago.
+-- run_job uses the new config.
+SELECT (alter_job(:jid_r1,
+        config => jsonb_build_object(
+            'cagg_name', 'cv_tstz',
+            'start_offset', '1 day',
+            'end_offset', '6 hours'))).id IS NOT NULL AS altered;
+CALL time_series.run_job(:jid_r1);
+
+-- last_run_success must still be true (refresh ran with new window)
+SELECT last_run_success FROM time_series.bgw_job_stat WHERE job_id = :jid_r1;
+
+SELECT remove_continuous_aggregate_policy('cv_tstz');
+
+\echo '=== RUN-06b: policy expands window to cover watermark gap ==='
+CALL time_series.refresh_continuous_aggregate('cv_tstz', NULL, NULL);
+
+UPDATE time_series.cagg_watermark w
+   SET watermark = date_trunc('hour', now()) - interval '36 hours'
+  FROM time_series.continuous_agg c
+ WHERE w.cagg_id = c.cagg_id
+   AND c.user_view_name = 'cv_tstz';
+
+INSERT INTO metrics_tstz (time, tags_id, temperature)
+VALUES (date_trunc('hour', now()) - interval '30 hours' + interval '15 minutes',
+        99, 777.0);
+
+SELECT add_continuous_aggregate_policy('cv_tstz',
+       '1 day'::interval, '6 hours'::interval, '10 seconds'::interval) AS jid_gap \gset
+CALL time_series.run_job(:jid_gap);
+SELECT last_run_success AS gap_policy_success
+  FROM time_series.bgw_job_stat WHERE job_id = :jid_gap;
+
+WITH target AS (
+    SELECT date_trunc('hour', now()) - interval '30 hours' AS bucket
+), expected AS (
+    SELECT time_bucket('1 hour'::interval, m.time) AS bucket,
+           m.tags_id, count(*)::bigint AS cnt
+      FROM metrics_tstz m, target t
+     WHERE m.time >= t.bucket
+       AND m.time <  t.bucket + interval '1 hour'
+       AND m.tags_id = 99
+     GROUP BY 1, 2
+), actual AS (
+    SELECT c.bucket, c.tags_id, c.cnt
+      FROM cv_tstz c, target t
+     WHERE c.bucket = t.bucket
+       AND c.tags_id = 99
+)
+SELECT count(*) = 0 AS gap_bucket_matches
+  FROM (
+    (SELECT * FROM expected EXCEPT SELECT * FROM actual)
+    UNION ALL
+    (SELECT * FROM actual EXCEPT SELECT * FROM expected)
+  ) d;
+
+SELECT remove_continuous_aggregate_policy('cv_tstz');
+
+\echo '=== POL-INV-02: many invalidations across multiple buckets → merged refresh ==='
+CALL time_series.refresh_continuous_aggregate('cv_tstz', NULL, NULL);
+
+-- Invalidate 5 different hour-buckets at once.  time_series tables are
+-- append-only, so the way to dirty a materialised bucket is to INSERT a
+-- new row into it (the invalidation trigger then logs L1 for that
+-- bucket); an UPDATE is rejected ("cannot update a time_series table").
+-- Each high-temperature row pulls its bucket's average well above 100.
+INSERT INTO metrics_tstz (time, tags_id, temperature)
+SELECT t, 1, 999.0
+  FROM (VALUES
+    (date_trunc('hour', now()) - interval '40 hours'),
+    (date_trunc('hour', now()) - interval '35 hours'),
+    (date_trunc('hour', now()) - interval '30 hours'),
+    (date_trunc('hour', now()) - interval '25 hours'),
+    (date_trunc('hour', now()) - interval '20 hours')
+  ) v(t);
+
+-- A SINGLE refresh must pick up all 5 dirtied buckets (merged refresh).
+CALL time_series.refresh_continuous_aggregate('cv_tstz', NULL, NULL);
+
+SELECT count(*) AS buckets_with_999_avg FROM cv_tstz
+ WHERE bucket IN (
+   date_trunc('hour', now()) - interval '40 hours',
+   date_trunc('hour', now()) - interval '35 hours',
+   date_trunc('hour', now()) - interval '30 hours',
+   date_trunc('hour', now()) - interval '25 hours',
+   date_trunc('hour', now()) - interval '20 hours'
+ ) AND tags_id = 1
+   AND avg_temp > 100;
+
+-- ============================================================
+-- RUN-MAT-DATE: run_job materialises cagg over a date time column
+--
+-- ============================================================
+\echo '=== RUN-MAT-DATE: run_job populates date-bucketed cagg ==='
+CREATE TABLE continuous_agg_max_mat_date(
+    time DATE,
+    tags_id INT NOT NULL DEFAULT 1
+) USING time_series WITH (
+    ts_partition_column = 'time',
+    ts_chunk_interval   = '4 hour',
+    ts_chunk_origin     = '2020-01-01'
+) DISTRIBUTED BY (tags_id);
+
+CREATE MATERIALIZED VIEW max_mat_view_date
+    WITH (time_series.continuous, time_series.materialized_only=true)
+    AS SELECT time_bucket('1 days'::interval, time) AS bucket, count(*) AS c
+        FROM continuous_agg_max_mat_date
+        GROUP BY bucket WITH NO DATA;
+
+SELECT add_continuous_aggregate_policy('max_mat_view_date',
+       '3 days'::interval, '1 day'::interval, '1 day'::interval)
+   AS job_id \gset
+
+SELECT (config->>'cagg_name')   AS cagg_name,
+       (config->>'start_offset') AS start_offset,
+       (config->>'end_offset')   AS end_offset
+  FROM time_series.bgw_job WHERE id = :job_id;
+
+INSERT INTO continuous_agg_max_mat_date(time)
+SELECT (now() - i * interval '1 day')::date
+FROM generate_series(1, 10) i;
+
+SET client_min_messages TO warning;
+CALL time_series.run_job(:job_id);
+RESET client_min_messages;
+
+-- Materialization should have populated the buckets that fall in the
+-- [now()-3 days, now()-1 day] refresh window.  Two-layer assertion:
+--   1. at least one bucket materialized (catches "0 of 10 made it"
+--      total-failure that count(*) > 0 would still flag, but kept
+--      here for completeness);
+--   2. every materialized (bucket, c) tuple matches what aggregating
+--      the source directly would produce — the new bit.  Catches the
+--      "wrong c values" / "wrong bucket boundary" classes of bug that
+--      the old count(*) > 0 was silently passing.
+WITH src AS (
+    SELECT time_bucket('1 days'::interval, time) AS bucket,
+           count(*)::bigint AS c
+      FROM continuous_agg_max_mat_date GROUP BY 1
+), mat AS (
+    SELECT bucket, c FROM max_mat_view_date
+)
+SELECT (SELECT count(*) FROM mat) >= 1                       AS at_least_one_bucket,
+       (SELECT count(*) FROM (
+          SELECT bucket, c FROM mat
+          EXCEPT
+          SELECT bucket, c FROM src
+        ) d) = 0                                              AS mat_matches_source;
+
+SELECT remove_continuous_aggregate_policy('max_mat_view_date');
+DROP VIEW max_mat_view_date;
+DROP TABLE continuous_agg_max_mat_date CASCADE;
+-- ============================================================
+-- RUN-MAT-TS: run_job materialises cagg over a timestamp time column
+--
+-- ============================================================
+\echo '=== RUN-MAT-TS: run_job populates timestamp-bucketed cagg ==='
+CREATE TABLE continuous_agg_timestamp(
+    time TIMESTAMP,
+    tags_id INT NOT NULL DEFAULT 1
+) USING time_series WITH (
+    ts_partition_column = 'time',
+    ts_chunk_interval   = '4 hour',
+    ts_chunk_origin     = '2020-01-01'
+) DISTRIBUTED BY (tags_id);
+
+CREATE MATERIALIZED VIEW max_mat_view_timestamp
+    WITH (time_series.continuous, time_series.materialized_only=true)
+    AS SELECT time_bucket('7 days'::interval, time) AS bucket, count(*) AS c
+        FROM continuous_agg_timestamp
+        GROUP BY bucket WITH NO DATA;
+
+SELECT add_continuous_aggregate_policy('max_mat_view_timestamp',
+       '30 days'::interval, '1 hour'::interval, '1 hour'::interval)
+   AS job_id \gset
+
+INSERT INTO continuous_agg_timestamp(time)
+SELECT (now() - i * interval '1 day')::timestamp
+FROM generate_series(1, 20) i;
+
+SET client_min_messages TO warning;
+CALL time_series.run_job(:job_id);
+RESET client_min_messages;
+
+-- Two-layer assertion (mirror of RUN-MAT-DATE upgrade): multi-bucket
+-- + per-bucket source-equivalence.
+WITH src AS (
+    SELECT time_bucket('7 days'::interval, time) AS bucket,
+           count(*)::bigint AS c
+      FROM continuous_agg_timestamp GROUP BY 1
+), mat AS (
+    SELECT bucket, c FROM max_mat_view_timestamp
+)
+SELECT (SELECT count(*) FROM mat) >= 2                       AS at_least_two_buckets,
+       (SELECT count(*) FROM (
+          SELECT bucket, c FROM mat
+          EXCEPT
+          SELECT bucket, c FROM src
+        ) d) = 0                                              AS mat_matches_source;
+
+SELECT remove_continuous_aggregate_policy('max_mat_view_timestamp');
+DROP VIEW max_mat_view_timestamp;
+DROP TABLE continuous_agg_timestamp CASCADE;
+-- ============================================================
+-- RUN-GUC-01: run_job must not silently flip caller's optimizer GUC
+--
+-- The same PG_FINALLY save/restore that cagg_refresh.sql REFRESH-GUC
+-- pins for direct CALL refresh must hold via the run_job entry too.
+-- run_job goes through policy_refresh_cagg, which does its own
+-- SPI / ExecuteCallStmt around the inner refresh — easy to lose
+-- the GUC restoration without noticing.
+-- ============================================================
+CREATE TABLE m_orca(
+    time TIMESTAMPTZ NOT NULL,
+    v INT NOT NULL DEFAULT 1
+) USING time_series WITH (
+    ts_partition_column = 'time',
+    ts_chunk_interval   = '4 hour',
+    ts_chunk_origin     = '2020-01-01'
+) DISTRIBUTED BY (v);
+
+CREATE MATERIALIZED VIEW cv_orca
+    WITH (time_series.continuous, time_series.materialized_only=true)
+    AS SELECT time_bucket('1 hour'::interval, time) AS bucket,
+              count(*) AS c
+       FROM m_orca GROUP BY bucket WITH NO DATA;
+
+INSERT INTO m_orca(time)
+SELECT now() - i * interval '1 hour' FROM generate_series(1, 3) i;
+
+\echo '=== RUN-GUC-01: optimizer=on preserved across run_job ==='
+SELECT add_continuous_aggregate_policy('cv_orca',
+       '1 day'::interval, '0'::interval, '1 hour'::interval)
+   AS orca_jid \gset
+SET optimizer = on;
+SELECT current_setting('optimizer') AS optimizer_before;
+SET client_min_messages TO warning;
+CALL time_series.run_job(:orca_jid);
+RESET client_min_messages;
+SELECT current_setting('optimizer') AS optimizer_after_run_job;
+
+RESET optimizer;
+SELECT remove_continuous_aggregate_policy('cv_orca');
+DROP VIEW cv_orca;
+DROP TABLE m_orca CASCADE;
+
+-- ============================================================
+-- Section RUN-CHUNK: chunk-aware refresh window semantics
+--
+-- The earlier RUN-* / POL-INV-02 / RUN-MAT-* sections test policy
+-- mechanics but never assert anything that distinguishes "refresh
+-- correctly handles chunk boundaries" from "refresh ignored chunks
+-- entirely and rescanned everything".  This suite uses a fresh
+-- hypertable with KNOWN chunk boundaries (origin 2024-01-01, 4h
+-- interval) and a materialized_only=true CAGG so cv_chunk returns
+-- ONLY mat rows (no real-time UNION) — every assertion below is a
+-- direct probe of mat-table state.
+--
+-- Chunk layout (each chunk = 4h holds 4 hourly buckets):
+--   chunk 0 : 00:00-04:00  (buckets 00 01 02 03)
+--   chunk 1 : 04:00-08:00  (buckets 04 05 06 07)
+--   chunk 2 : 08:00-12:00  (buckets 08 09 10 11)
+--   chunk 3 : 12:00-16:00  (buckets 12 13 14 15)
+--   chunk 4 : 16:00-20:00  (buckets 16 17 18 19)
+--   chunk 5 : 20:00-24:00  (buckets 20 21 22 23)
+--
+-- Each bucket holds 60 rows (1 row per minute × 60 minutes).
+-- sum(v) is included in the CAGG aggregate so we can detect UPDATEs
+-- (count(*) alone is invariant under UPDATE).
+-- ============================================================
+
+SET optimizer = off;  -- RUN-GUC-01 RESET-ed it; deterministic plans below.
+
+CREATE TABLE m_chunk (
+    time TIMESTAMPTZ NOT NULL,
+    tags_id INT NOT NULL,
+    v INT NOT NULL
+) USING time_series WITH (
+    ts_partition_column = 'time',
+    ts_chunk_interval   = '4 hour',
+    ts_chunk_origin     = '2024-01-01'
+) DISTRIBUTED BY (tags_id);
+
+INSERT INTO m_chunk
+SELECT '2024-01-01 00:00+00'::timestamptz + (i * interval '1 minute'),
+       1, i
+FROM generate_series(0, 24 * 60 - 1) i;
+
+CREATE MATERIALIZED VIEW cv_chunk
+    WITH (time_series.continuous, time_series.materialized_only=true)
+    AS SELECT time_bucket('1 hour'::interval, time) AS bucket,
+              tags_id, count(*) AS c, sum(v) AS sv
+       FROM m_chunk GROUP BY 1, 2 WITH NO DATA;
+
+\echo '=== RUN-CHUNK-00: 6 chunks created at INSERT time ==='
+SELECT count(*) = 6 AS six_chunks_created
+  FROM time_series.ts_chunk WHERE table_oid = 'm_chunk'::regclass;
+
+\echo '=== RUN-CHUNK-01: refresh window aligned to single chunk ==='
+-- Refresh exactly chunk 2 (08:00 - 12:00).  Expect 4 mat rows
+-- (buckets 08, 09, 10, 11), each with c=60 and sv = sum of v values
+-- in that minute range (deterministic — we wrote v=i where i is
+-- the minute offset from 2024-01-01 00:00).
+CALL time_series.refresh_continuous_aggregate('cv_chunk',
+    '2024-01-01 08:00+00'::timestamptz,
+    '2024-01-01 12:00+00'::timestamptz);
+
+-- Shape assertions: exactly 4 buckets, exactly the right boundaries,
+-- every bucket has exactly 60 rows.  No chunk-pruning bug can pass.
+SELECT count(*) = 4                                              AS exactly_4_buckets,
+       min(bucket) = '2024-01-01 08:00+00'::timestamptz          AS first_bucket_08,
+       max(bucket) = '2024-01-01 11:00+00'::timestamptz          AS last_bucket_11,
+       bool_and(c = 60)                                          AS every_bucket_has_60_rows
+  FROM cv_chunk;
+
+-- Bit-equivalence against the same source window: same (bucket, c, sv)
+-- triples → diff = 0.
+WITH expected AS (
+    SELECT time_bucket('1 hour'::interval, time) AS bucket,
+           tags_id, count(*)::bigint AS c, sum(v)::bigint AS sv
+      FROM m_chunk
+     WHERE time >= '2024-01-01 08:00+00'::timestamptz
+       AND time <  '2024-01-01 12:00+00'::timestamptz
+     GROUP BY 1, 2
+), actual AS (
+    SELECT bucket, tags_id, c, sv FROM cv_chunk
+)
+SELECT count(*) AS diff_chunk_01
+  FROM (
+    (SELECT * FROM expected EXCEPT SELECT * FROM actual)
+    UNION ALL
+    (SELECT * FROM actual EXCEPT SELECT * FROM expected)
+  ) d;
+
+\echo '=== RUN-CHUNK-02: refresh window straddles chunk boundary ==='
+-- After RUN-CHUNK-01 mat has buckets 08-11.  Now refresh 06:00 - 10:00,
+-- which spans end of chunk 1 (buckets 06, 07) + start of chunk 2
+-- (buckets 08, 09).  Should add buckets 06, 07 (and re-confirm 08, 09).
+-- Final state: buckets 06, 07, 08, 09, 10, 11 (6 rows).  06, 07 come
+-- from chunk 1 — the test FAILS if refresh's WHERE clause silently
+-- truncates to whole-chunk granularity (a real possible bug).
+CALL time_series.refresh_continuous_aggregate('cv_chunk',
+    '2024-01-01 06:00+00'::timestamptz,
+    '2024-01-01 10:00+00'::timestamptz);
+
+SELECT count(*) = 6                                              AS exactly_6_buckets,
+       min(bucket) = '2024-01-01 06:00+00'::timestamptz          AS first_bucket_06,
+       max(bucket) = '2024-01-01 11:00+00'::timestamptz          AS last_bucket_11,
+       bool_and(c = 60)                                          AS every_bucket_has_60_rows
+  FROM cv_chunk;
+
+WITH expected AS (
+    SELECT time_bucket('1 hour'::interval, time) AS bucket,
+           tags_id, count(*)::bigint AS c, sum(v)::bigint AS sv
+      FROM m_chunk
+     WHERE time >= '2024-01-01 06:00+00'::timestamptz
+       AND time <  '2024-01-01 12:00+00'::timestamptz
+     GROUP BY 1, 2
+), actual AS (
+    SELECT bucket, tags_id, c, sv FROM cv_chunk
+)
+SELECT count(*) AS diff_chunk_02
+  FROM (
+    (SELECT * FROM expected EXCEPT SELECT * FROM actual)
+    UNION ALL
+    (SELECT * FROM actual EXCEPT SELECT * FROM expected)
+  ) d;
+
+\echo '=== RUN-CHUNK-03: cross-chunk INSERT + single re-refresh ==='
+-- Real bug surface: a refresh whose invalidation handling is per-chunk
+-- but doesn't merge invalidation log entries from distant chunks would
+-- only partially repair the mat table.
+--
+-- time_series hypertables are append-only (no row-level UPDATE).  The
+-- equivalent stimulus is inserting fresh rows into already-refreshed
+-- buckets located in distant chunks.  Each INSERT writes an
+-- invalidation_log entry; both must be merged into a single re-refresh
+-- pass that re-aggregates both touched buckets.
+--
+-- Strategy:
+--   1. Full-refresh so all 24 buckets are materialized.
+--   2. INSERT extra rows into chunk 0 (bucket 02:00) and chunk 5
+--      (bucket 22:00) — two physically-distant chunks, two disjoint
+--      invalidation regions.  c grows from 60 to 70 in each.
+--   3. Single re-refresh of the full range.
+--   4. Both touched buckets reflect new c; every other bucket
+--      identical to source aggregation.
+
+-- Step 1: full refresh
+CALL time_series.refresh_continuous_aggregate('cv_chunk', NULL, NULL);
+-- Source has 24 hours of data; after refresh the hot bucket (the
+-- one containing max(t) = 2024-01-01 23:59) is excluded from mat by
+-- design, so exactly 23 stable buckets are materialized.  cv_chunk
+-- is created WITH materialized_only=true so this query probes mat
+-- directly.  Pre-fix the assertion was `count(*) = 24` against the
+-- old behaviour where the hot bucket was wastefully re-materialised
+-- on every refresh.
+SELECT count(*) = 23 AS all_stable_buckets_materialized FROM cv_chunk;
+
+-- Step 2: capture pre-INSERT c values for the two target buckets
+SELECT c AS c_02_before
+  FROM cv_chunk WHERE bucket = '2024-01-01 02:00+00'::timestamptz \gset
+SELECT c AS c_22_before
+  FROM cv_chunk WHERE bucket = '2024-01-01 22:00+00'::timestamptz \gset
+
+-- Step 3: INSERT 10 rows into each target bucket (sub-minute spacing
+-- so all 10 fall in the same hourly bucket).  v values are tagged so
+-- a future regression that mis-attributes them to wrong buckets fails
+-- the EXCEPT diff below.
+INSERT INTO m_chunk
+SELECT '2024-01-01 02:30:00+00'::timestamptz + (i * interval '1 second'),
+       1, 100000 + i
+FROM generate_series(0, 9) i;
+
+INSERT INTO m_chunk
+SELECT '2024-01-01 22:30:00+00'::timestamptz + (i * interval '1 second'),
+       1, 200000 + i
+FROM generate_series(0, 9) i;
+
+-- Step 4: single re-refresh, full range
+CALL time_series.refresh_continuous_aggregate('cv_chunk', NULL, NULL);
+
+-- Both buckets' c must have grown by exactly 10
+SELECT (SELECT c FROM cv_chunk WHERE bucket = '2024-01-01 02:00+00'::timestamptz)
+            = :c_02_before + 10                                AS bucket_02_picked_up,
+       (SELECT c FROM cv_chunk WHERE bucket = '2024-01-01 22:00+00'::timestamptz)
+            = :c_22_before + 10                                AS bucket_22_picked_up;
+
+-- Whole-table bit-equivalence: no other buckets were corrupted; both
+-- touched buckets exactly match source aggregation (catches "merge
+-- handled bucket 02 but accidentally lost some rows in bucket 22" or
+-- vice versa).  We restrict the source-side aggregation to the
+-- stable bucket range (< hot bucket start) because cv_chunk is
+-- materialized_only=true: the hot bucket lives in the live branch
+-- only, by design, so mat is expected to mirror source MINUS the
+-- hot bucket.  The hot bucket here is the one containing
+-- max(time) = 2024-01-01 23:59 i.e. '2024-01-01 23:00'.
+WITH expected AS (
+    SELECT time_bucket('1 hour'::interval, time) AS bucket,
+           tags_id, count(*)::bigint AS c, sum(v)::bigint AS sv
+      FROM m_chunk
+     WHERE time < '2024-01-01 23:00+00'::timestamptz
+     GROUP BY 1, 2
+), actual AS (
+    SELECT bucket, tags_id, c, sv FROM cv_chunk
+)
+SELECT count(*) AS diff_chunk_03
+  FROM (
+    (SELECT * FROM expected EXCEPT SELECT * FROM actual)
+    UNION ALL
+    (SELECT * FROM actual EXCEPT SELECT * FROM expected)
+  ) d;
+
+\echo '=== RUN-CHUNK-04: refresh path EXPLAIN uses ChunkScan ==='
+-- Lock the plan shape used by the refresh INSERT...SELECT.  If a
+-- regression silently routes refresh through a plain Seq Scan on
+-- m_chunk (no chunk pruning), refresh correctness above would still
+-- pass (it'd just be slower over time as chunk count grows), but
+-- this EXPLAIN diff would catch the regression.
+EXPLAIN (COSTS OFF)
+SELECT time_bucket('1 hour'::interval, time) AS bucket,
+       tags_id, count(*) AS c, sum(v) AS sv
+  FROM m_chunk
+ WHERE time >= '2024-01-01 08:00+00'::timestamptz
+   AND time <  '2024-01-01 12:00+00'::timestamptz
+ GROUP BY 1, 2;
+
+-- Cleanup RUN-CHUNK suite
+DROP VIEW cv_chunk;
+DROP TABLE m_chunk CASCADE;
+
+-- ============================================================
+-- Section 4: RUN-BATCH — window-split batching via policy
+--
+-- add_continuous_aggregate_policy gained two batching params (faithful
+-- port of TSDB upstream commit 627c36f97 "Incremental CAgg Refresh
+-- Policy"):
+--   buckets_per_batch          int (default 10; 0 = single batch)
+--   max_batches_per_execution  int (default 0 = unlimited)
+--
+-- The policy slices its per-tick refresh window into bucket-aligned
+-- sub-windows of (buckets_per_batch * bucket_width), processes them
+-- NEWEST-FIRST as independent transactions (recent data visible
+-- first), skips sub-windows with no dirty data, and stops after
+-- max_batches_per_execution batches so one tick can't monopolize the
+-- worker (the remainder resumes next tick).
+--
+-- This suite mirrors the scenarios in TSDB's
+-- cagg_refresh_policy_incremental.sql, adapted to our catalog and
+-- driven synchronously via run_job (no scheduler / mock-time, so no
+-- launcher race).  A dedicated source table with ABSOLUTE 2024
+-- timestamps + NULL/NULL policy windows keeps every assertion
+-- deterministic regardless of now():
+--
+--   RUN-BATCH-01/02  invalid config rejected (negative values)
+--   RUN-BATCH-03     defaults round-trip (buckets=10, max_batches=0)
+--   RUN-BATCH-04     explicit values round-trip
+--   RUN-BATCH-05     multi-batch run == manually-refreshed twin (parity)
+--   RUN-BATCH-06     max_batches cap -> partial (diff > 0)
+--   RUN-BATCH-07     remainder resumes across ticks -> converges (diff 0)
+--   RUN-BATCH-08     backfill into the past -> all batches, parity
+--   RUN-BATCH-09     no dirty data -> single-batch fallback, parity holds
+--   RUN-BATCH-10     window <= one batch -> single-batch fallback, parity
+--   RUN-BATCH-11     refresh_newest_first=false (oldest-first) -> parity
+--   RUN-BATCH-12     cold-start batched policy advances the watermark
+--                    off -infinity (n_intervals==0 catch-up advance)
+--   RUN-BATCH-13     newest-first batches converge the watermark to the
+--                    actual data boundary in one tick (per-batch advance
+--                    alone stalls at the oldest batch's window end)
+-- ============================================================
+
+-- Dedicated, deterministic fixtures for the batching suite.
+CREATE TABLE rb_src (
+    time TIMESTAMPTZ NOT NULL,
+    dev  INT         NOT NULL,
+    v    FLOAT8
+) USING time_series WITH (
+    ts_partition_column = 'time',
+    ts_chunk_interval   = '4 hour',
+    ts_chunk_origin     = '2020-01-01'
+) DISTRIBUTED BY (dev);
+-- 48 h of hourly data (2 calendar days), single device.
+INSERT INTO rb_src
+SELECT '2024-01-01 00:00+00'::timestamptz + (h * interval '1 hour'), 1, h
+FROM generate_series(0, 47) h;
+
+-- Batched CAGG under test.
+CREATE MATERIALIZED VIEW rb_cagg WITH (time_series.continuous) AS
+  SELECT time_bucket('1 hour'::interval, time) AS bucket, dev, count(*) AS cnt
+  FROM rb_src GROUP BY bucket, dev;
+-- Reference twin: same definition, only ever refreshed in one shot via
+-- plain refresh_continuous_aggregate(NULL,NULL).  The batched CAGG must
+-- always end up bit-identical to this twin.
+CREATE MATERIALIZED VIEW rb_twin WITH (time_series.continuous) AS
+  SELECT time_bucket('1 hour'::interval, time) AS bucket, dev, count(*) AS cnt
+  FROM rb_src GROUP BY bucket, dev;
+
+\echo '=== RUN-BATCH-01: buckets_per_batch < 0 rejected ==='
+DO $$ BEGIN
+    PERFORM add_continuous_aggregate_policy('rb_cagg',
+        start_offset => NULL, end_offset => NULL,
+        schedule_interval => INTERVAL '1 hour',
+        buckets_per_batch => -1);
+    RAISE EXCEPTION 'expected ERROR for negative buckets_per_batch';
+EXCEPTION WHEN invalid_parameter_value THEN
+    RAISE NOTICE 'correctly rejected: %', SQLERRM;
+END$$;
+
+\echo '=== RUN-BATCH-02: max_batches_per_execution < 0 rejected ==='
+DO $$ BEGIN
+    PERFORM add_continuous_aggregate_policy('rb_cagg',
+        start_offset => NULL, end_offset => NULL,
+        schedule_interval => INTERVAL '1 hour',
+        max_batches_per_execution => -1);
+    RAISE EXCEPTION 'expected ERROR for negative max_batches_per_execution';
+EXCEPTION WHEN invalid_parameter_value THEN
+    RAISE NOTICE 'correctly rejected: %', SQLERRM;
+END$$;
+
+\echo '=== RUN-BATCH-03: defaults round-trip (buckets=10, max_batches=0, newest_first=t) ==='
+SELECT add_continuous_aggregate_policy('rb_cagg',
+    start_offset => NULL, end_offset => NULL,
+    schedule_interval => INTERVAL '1 hour') AS jid_def \gset
+SELECT (config->>'buckets_per_batch')::int          AS bpb,
+       (config->>'max_batches_per_execution')::int  AS mbpe,
+       (config->>'refresh_newest_first')::bool      AS newest_first
+  FROM time_series.bgw_job WHERE id = :jid_def;
+SELECT remove_continuous_aggregate_policy('rb_cagg');
+
+\echo '=== RUN-BATCH-04: explicit values round-trip ==='
+SELECT add_continuous_aggregate_policy('rb_cagg',
+    start_offset => NULL, end_offset => NULL,
+    schedule_interval => INTERVAL '1 hour',
+    buckets_per_batch => 6, max_batches_per_execution => 2,
+    refresh_newest_first => false) AS jid_exp \gset
+SELECT (config->>'buckets_per_batch')::int          AS bpb,
+       (config->>'max_batches_per_execution')::int  AS mbpe,
+       (config->>'refresh_newest_first')::bool      AS newest_first
+  FROM time_series.bgw_job WHERE id = :jid_exp;
+SELECT remove_continuous_aggregate_policy('rb_cagg');
+
+\echo '=== RUN-BATCH-05: multi-batch run == manually-refreshed twin ==='
+-- Refresh the reference twin in one shot.
+CALL time_series.refresh_continuous_aggregate('rb_twin', NULL, NULL);
+-- Batched policy: 6-bucket batches, unlimited per execution.  NULL/NULL
+-- window so the split caps to the source's chunk min/max and the batch
+-- grid aligns to the data's bucket boundaries.
+SELECT add_continuous_aggregate_policy('rb_cagg',
+    start_offset => NULL, end_offset => NULL,
+    schedule_interval => INTERVAL '1 hour',
+    buckets_per_batch => 6, max_batches_per_execution => 0) AS jid_multi \gset
+UPDATE time_series.bgw_job_stat SET next_start = 'infinity' WHERE job_id = :jid_multi;
+CALL time_series.run_job(:jid_multi);
+-- Batched CAGG must equal the twin (symmetric EXCEPT, both directions).
+SELECT count(*) AS multi_vs_twin_diff FROM (
+    (SELECT * FROM rb_cagg EXCEPT SELECT * FROM rb_twin)
+    UNION ALL
+    (SELECT * FROM rb_twin EXCEPT SELECT * FROM rb_cagg)
+) d;
+SELECT remove_continuous_aggregate_policy('rb_cagg');
+
+\echo '=== RUN-BATCH-06/07: cap -> partial -> resume -> converge ==='
+-- Re-dirty every hourly bucket across the whole 48 h window with a new
+-- device group so the split has 8 non-empty 6-bucket batches to chew.
+INSERT INTO rb_src
+SELECT '2024-01-01 00:00+00'::timestamptz + (h * interval '1 hour'), 99, 1
+FROM generate_series(0, 47) h;
+-- Refresh the twin in one shot so it is the up-to-date reference again.
+CALL time_series.refresh_continuous_aggregate('rb_twin', NULL, NULL);
+-- Capped policy: 6-bucket batches, at most 2 batches per execution.
+SELECT add_continuous_aggregate_policy('rb_cagg',
+    start_offset => NULL, end_offset => NULL,
+    schedule_interval => INTERVAL '1 hour',
+    buckets_per_batch => 6, max_batches_per_execution => 2) AS jid_cap \gset
+
+-- First execution: cap stops it early, so the batched CAGG must still
+-- DIFFER from the fully-refreshed twin (some buckets pending).
+UPDATE time_series.bgw_job_stat SET next_start = 'infinity' WHERE job_id = :jid_cap;
+CALL time_series.run_job(:jid_cap);
+SELECT count(*) > 0 AS partial_after_first_tick FROM (
+    (SELECT * FROM rb_cagg EXCEPT SELECT * FROM rb_twin)
+    UNION ALL
+    (SELECT * FROM rb_twin EXCEPT SELECT * FROM rb_cagg)
+) d;
+
+-- Subsequent ticks pick up the remainder.  Eight 6-bucket batches at
+-- (effectively) one batch per tick converge within a handful of ticks;
+-- run 8 more ticks to be safe, then assert full parity with the twin.
+-- (run_job must be a top-level CALL -- it cannot run inside a DO block
+-- because the inner refresh runs in a NONATOMIC context -- so each tick
+-- is an explicit park + CALL pair.)
+UPDATE time_series.bgw_job_stat SET next_start='infinity' WHERE job_id=:jid_cap;
+CALL time_series.run_job(:jid_cap);
+UPDATE time_series.bgw_job_stat SET next_start='infinity' WHERE job_id=:jid_cap;
+CALL time_series.run_job(:jid_cap);
+UPDATE time_series.bgw_job_stat SET next_start='infinity' WHERE job_id=:jid_cap;
+CALL time_series.run_job(:jid_cap);
+UPDATE time_series.bgw_job_stat SET next_start='infinity' WHERE job_id=:jid_cap;
+CALL time_series.run_job(:jid_cap);
+UPDATE time_series.bgw_job_stat SET next_start='infinity' WHERE job_id=:jid_cap;
+CALL time_series.run_job(:jid_cap);
+UPDATE time_series.bgw_job_stat SET next_start='infinity' WHERE job_id=:jid_cap;
+CALL time_series.run_job(:jid_cap);
+UPDATE time_series.bgw_job_stat SET next_start='infinity' WHERE job_id=:jid_cap;
+CALL time_series.run_job(:jid_cap);
+UPDATE time_series.bgw_job_stat SET next_start='infinity' WHERE job_id=:jid_cap;
+CALL time_series.run_job(:jid_cap);
+-- After resuming, the batched CAGG must fully match the twin.
+SELECT count(*) AS resume_vs_twin_diff FROM (
+    (SELECT * FROM rb_cagg EXCEPT SELECT * FROM rb_twin)
+    UNION ALL
+    (SELECT * FROM rb_twin EXCEPT SELECT * FROM rb_cagg)
+) d;
+-- The re-dirtied dev=99 groups must all be materialized (48 buckets).
+SELECT count(*) AS dev99_buckets FROM rb_cagg WHERE dev = 99;
+SELECT remove_continuous_aggregate_policy('rb_cagg');
+
+\echo '=== RUN-BATCH-08: backfill into the past -> all batches, parity ==='
+-- Insert an entirely new earlier day; a batched run must materialize it.
+INSERT INTO rb_src
+SELECT '2023-12-30 00:00+00'::timestamptz + (h * interval '1 hour'), 7, h
+FROM generate_series(0, 23) h;
+CALL time_series.refresh_continuous_aggregate('rb_twin', NULL, NULL);
+SELECT add_continuous_aggregate_policy('rb_cagg',
+    start_offset => NULL, end_offset => NULL,
+    schedule_interval => INTERVAL '1 hour',
+    buckets_per_batch => 6, max_batches_per_execution => 0) AS jid_bf \gset
+UPDATE time_series.bgw_job_stat SET next_start='infinity' WHERE job_id=:jid_bf;
+CALL time_series.run_job(:jid_bf);
+SELECT count(*) AS backfill_vs_twin_diff FROM (
+    (SELECT * FROM rb_cagg EXCEPT SELECT * FROM rb_twin)
+    UNION ALL
+    (SELECT * FROM rb_twin EXCEPT SELECT * FROM rb_cagg)
+) d;
+SELECT count(*) > 0 AS backfilled_day_present
+  FROM rb_cagg WHERE bucket < '2024-01-01 00:00+00';
+SELECT remove_continuous_aggregate_policy('rb_cagg');
+
+\echo '=== RUN-BATCH-09: no dirty data -> single-batch fallback, parity ==='
+-- CAGG is already fully materialized (twin and rb_cagg both current).
+-- A batched run with nothing dirty must hole-skip down to a single
+-- (no-op) batch and leave the data untouched.
+SELECT add_continuous_aggregate_policy('rb_cagg',
+    start_offset => NULL, end_offset => NULL,
+    schedule_interval => INTERVAL '1 hour',
+    buckets_per_batch => 6, max_batches_per_execution => 0) AS jid_nd \gset
+UPDATE time_series.bgw_job_stat SET next_start='infinity' WHERE job_id=:jid_nd;
+CALL time_series.run_job(:jid_nd);
+SELECT count(*) AS nodata_vs_twin_diff FROM (
+    (SELECT * FROM rb_cagg EXCEPT SELECT * FROM rb_twin)
+    UNION ALL
+    (SELECT * FROM rb_twin EXCEPT SELECT * FROM rb_cagg)
+) d;
+SELECT remove_continuous_aggregate_policy('rb_cagg');
+
+\echo '=== RUN-BATCH-10: window <= one batch -> single-batch fallback ==='
+-- buckets_per_batch enormous so (batch_size >= whole window): the split
+-- must fall back to a single batch.  Re-dirty one bucket so there is
+-- work, then verify the result still matches the twin.
+INSERT INTO rb_src VALUES ('2024-01-01 03:30+00', 5, 1);
+CALL time_series.refresh_continuous_aggregate('rb_twin', NULL, NULL);
+SELECT add_continuous_aggregate_policy('rb_cagg',
+    start_offset => NULL, end_offset => NULL,
+    schedule_interval => INTERVAL '1 hour',
+    buckets_per_batch => 100000, max_batches_per_execution => 0) AS jid_sw \gset
+UPDATE time_series.bgw_job_stat SET next_start='infinity' WHERE job_id=:jid_sw;
+CALL time_series.run_job(:jid_sw);
+SELECT count(*) AS smallwin_vs_twin_diff FROM (
+    (SELECT * FROM rb_cagg EXCEPT SELECT * FROM rb_twin)
+    UNION ALL
+    (SELECT * FROM rb_twin EXCEPT SELECT * FROM rb_cagg)
+) d;
+SELECT remove_continuous_aggregate_policy('rb_cagg');
+
+\echo '=== RUN-BATCH-11: refresh_newest_first=false (oldest-first) parity ==='
+-- Re-dirty the whole window again, then run an UNCAPPED oldest-first
+-- batched refresh.  Order must not affect the final result: the batched
+-- CAGG must still equal the one-shot twin.  (Order only changes which
+-- batch becomes visible first, not correctness.)
+INSERT INTO rb_src
+SELECT '2024-01-01 00:00+00'::timestamptz + (h * interval '1 hour'), 42, 1
+FROM generate_series(0, 47) h;
+CALL time_series.refresh_continuous_aggregate('rb_twin', NULL, NULL);
+SELECT add_continuous_aggregate_policy('rb_cagg',
+    start_offset => NULL, end_offset => NULL,
+    schedule_interval => INTERVAL '1 hour',
+    buckets_per_batch => 6, max_batches_per_execution => 0,
+    refresh_newest_first => false) AS jid_of \gset
+UPDATE time_series.bgw_job_stat SET next_start='infinity' WHERE job_id=:jid_of;
+CALL time_series.run_job(:jid_of);
+SELECT count(*) AS oldestfirst_vs_twin_diff FROM (
+    (SELECT * FROM rb_cagg EXCEPT SELECT * FROM rb_twin)
+    UNION ALL
+    (SELECT * FROM rb_twin EXCEPT SELECT * FROM rb_cagg)
+) d;
+SELECT count(*) AS dev42_buckets FROM rb_cagg WHERE dev = 42;
+SELECT remove_continuous_aggregate_policy('rb_cagg');
+
+\echo '=== RUN-BATCH-12: cold-start batched policy advances the watermark ==='
+-- Regression for the cold-start + batched-refresh watermark-pinning bug:
+-- a CAGG created on an already-populated source starts at watermark
+-- = -infinity.  Under a newest-first batched policy, the first tick
+-- materializes every stable bucket but each per-batch advance is refused
+-- while an older still-unmaterialized batch remains (the gap check sees
+-- it).  Once all stable buckets are materialized, subsequent ticks find
+-- nothing to do (n_intervals == 0) -- and before the fix the watermark
+-- advance lived only in the n_intervals > 0 path, so the watermark stayed
+-- pinned at -infinity forever.  The cagg_union view then served every
+-- query from the live branch (full source re-aggregation) and the mat
+-- table was never read: silently correct, but a severe perf cliff that a
+-- view-vs-source content check (RUN-BATCH-05/11) cannot catch.
+--
+-- The fix makes the advance convergent: when n_intervals == 0 the
+-- watermark still advances to actual_boundary whenever the gap below it
+-- is fully materialized.  Assert the watermark leaves -infinity and
+-- reaches the last (stable) bucket.  A dedicated fresh CAGG guarantees
+-- the cold-start watermark = -infinity precondition independent of the
+-- mutations the earlier RUN-BATCH cases made to rb_cagg.
+CREATE MATERIALIZED VIEW rb_cold WITH (time_series.continuous) AS
+  SELECT time_bucket('1 hour'::interval, time) AS bucket, dev, count(*) AS cnt
+  FROM rb_src GROUP BY bucket, dev;
+-- Cold-start precondition: never refreshed → watermark is -infinity.
+SELECT min(watermark) = '-infinity'::timestamptz AS cold_start_wm_is_neg_inf
+  FROM time_series.cagg_watermark
+ WHERE cagg_id = (SELECT cagg_id FROM time_series.continuous_agg
+                   WHERE user_view_name = 'rb_cold');
+SELECT add_continuous_aggregate_policy('rb_cold',
+    start_offset => NULL, end_offset => NULL,
+    schedule_interval => INTERVAL '1 hour',
+    buckets_per_batch => 6, max_batches_per_execution => 0) AS jid_cold \gset
+-- Two ticks: the first materializes the stable buckets; depending on how
+-- the newest-first batches interleave with the gap check, the watermark
+-- advance may be deferred to the second tick, where n_intervals == 0 and
+-- the catch-up advance fires.  Pre-fix the advance lived only in the
+-- n_intervals > 0 path, so once materialization finished the watermark
+-- stayed pinned at -infinity across every later tick.  Two ticks is
+-- enough to converge for this all-historical fixture; a third would be a
+-- no-op.  (run_job must be a top-level CALL -- the inner refresh runs in
+-- a NONATOMIC context -- so each tick is an explicit park + CALL pair.)
+UPDATE time_series.bgw_job_stat SET next_start='infinity' WHERE job_id=:jid_cold;
+CALL time_series.run_job(:jid_cold);
+UPDATE time_series.bgw_job_stat SET next_start='infinity' WHERE job_id=:jid_cold;
+CALL time_series.run_job(:jid_cold);
+-- The watermark must have left -infinity (the bug's permanent state) and
+-- reached the last source bucket -- every bucket is stable here (the data
+-- is historical, no hot bucket is being written), so the convergent
+-- advance covers the whole source.
+SELECT min(watermark) > '-infinity'::timestamptz AS wm_advanced
+  FROM time_series.cagg_watermark
+ WHERE cagg_id = (SELECT cagg_id FROM time_series.continuous_agg
+                   WHERE user_view_name = 'rb_cold');
+SELECT (SELECT min(watermark) FROM time_series.cagg_watermark
+         WHERE cagg_id = (SELECT cagg_id FROM time_series.continuous_agg
+                           WHERE user_view_name = 'rb_cold'))
+       = (SELECT max(time_bucket('1 hour'::interval, time)) FROM rb_src)
+       AS wm_at_last_bucket;
+SELECT remove_continuous_aggregate_policy('rb_cold');
+
+\echo '=== RUN-BATCH-13: newest-first batches converge watermark to actual boundary ==='
+-- Regression for the per-batch-only watermark advance.  Each batch
+-- refresh advances the watermark only to its OWN window end, and only
+-- when the gap below its window_start is already materialized.  Under
+-- newest-first order the older buckets below a batch are not yet
+-- materialized when that batch runs (the older batches run later in the
+-- tick), so every batch except the oldest refuses to advance, and the
+-- oldest advances only to its own low window end.  The watermark then
+-- crawls one batch-width per tick and, under a continuous workload with
+-- a sliding policy window, can stay pinned (often at -infinity) -- so
+-- the cagg_union view serves every query from the live branch and the
+-- mat table is never read.  RUN-BATCH-12 does not catch this: its
+-- all-historical data makes a later tick hit n_intervals == 0, where
+-- the (pre-strengthening) catch-up still fired.
+--
+-- Drive the inner batches directly, newest-first, exactly as the policy
+-- would, on a cold-start CAGG.  Each explicit-window refresh has
+-- something to materialize (n_intervals > 0), so it never relies on the
+-- n_intervals == 0 path.  After the oldest batch fills the last hole the
+-- convergent catch-up must lift the watermark all the way to the actual
+-- data boundary (last stable bucket) within this single tick.  On the
+-- pre-fix code the watermark would stall at the oldest batch's window
+-- end (02:00), not the boundary (05:00).
+CREATE TABLE conv_src (ts TIMESTAMPTZ NOT NULL, dev INT NOT NULL, val FLOAT8)
+  USING time_series WITH (
+    ts_partition_column = 'ts',
+    ts_chunk_interval   = '1 hour',
+    ts_chunk_origin     = '2020-01-01'
+  ) DISTRIBUTED BY (dev);
+-- Cold-start: CAGG created before any data so its watermark is -infinity.
+CREATE MATERIALIZED VIEW conv_cv WITH (time_series.continuous) AS
+  SELECT time_bucket('1 hour'::interval, ts) AS bucket, dev, count(*) AS cnt
+  FROM conv_src GROUP BY bucket, dev;
+-- Six hour-buckets 00:00..05:59; bucket 05:00 is the (hot) last one, so
+-- the actual data boundary -- and the watermark target -- is 05:00.
+INSERT INTO conv_src
+SELECT '2024-03-01 00:00+00'::timestamptz + (i * interval '36 sec'),
+       (i % 4) + 1, i
+FROM generate_series(0, 599) i;
+SELECT min(watermark) = '-infinity'::timestamptz AS cold_start_wm_is_neg_inf
+  FROM time_series.cagg_watermark
+ WHERE cagg_id = (SELECT cagg_id FROM time_series.continuous_agg
+                   WHERE user_view_name = 'conv_cv');
+-- Newest-first batch sequence (2-bucket batches), mirroring the policy.
+CALL time_series.refresh_continuous_aggregate('conv_cv'::regclass,
+     '2024-03-01 04:00+00'::timestamptz, '2024-03-01 06:00+00'::timestamptz);
+CALL time_series.refresh_continuous_aggregate('conv_cv'::regclass,
+     '2024-03-01 02:00+00'::timestamptz, '2024-03-01 04:00+00'::timestamptz);
+CALL time_series.refresh_continuous_aggregate('conv_cv'::regclass,
+     '2024-03-01 00:00+00'::timestamptz, '2024-03-01 02:00+00'::timestamptz);
+-- Watermark must have converged to the actual data boundary (05:00),
+-- not stalled at the oldest batch's window end.
+SELECT min(watermark) = '2024-03-01 05:00+00'::timestamptz AS wm_at_actual_boundary
+  FROM time_series.cagg_watermark
+ WHERE cagg_id = (SELECT cagg_id FROM time_series.continuous_agg
+                   WHERE user_view_name = 'conv_cv');
+DROP TABLE conv_src CASCADE;
+
+-- Batching-suite cleanup (dropping the source cascades to both CAGGs
+-- and their materialization tables).
+DROP TABLE rb_src CASCADE;
+
+-- ============================================================
+-- Cleanup
+-- ============================================================
+DROP VIEW IF EXISTS cv_tstz;
+DROP VIEW IF EXISTS cv_ts;
+DROP VIEW IF EXISTS cv_date;
+DROP TABLE IF EXISTS metrics_tstz;
+DROP TABLE IF EXISTS metrics_ts;
+DROP TABLE IF EXISTS metrics_date;
+DROP EXTENSION time_series CASCADE;

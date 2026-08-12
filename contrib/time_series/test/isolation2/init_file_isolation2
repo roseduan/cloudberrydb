@@ -1,0 +1,5 @@
+-- start_matchsubs
+-- Normalize deadlock DETAIL messages (PIDs and OIDs vary between runs)
+m/Process \d+ waits for .* on relation \d+ of database \d+; blocked by process \d+\./
+s/Process \d+ waits for .* on relation \d+ of database \d+; blocked by process \d+\./Process PID waits for lock on relation OID of database OID; blocked by process PID./
+-- end_matchsubs
