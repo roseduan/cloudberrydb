@@ -10,12 +10,22 @@
 --   connection to isolation2test.  pg_isolation2_regress drops the test
 --   database at the START of every run with a plain DROP DATABASE (no
 --   WITH FORCE), which fails with "database is being accessed by other
---   users" whenever the scheduler is still connected.  Disabling the
---   scheduler for this database (so any worker the launcher respawns
---   exits immediately) and terminating the live one leaves isolation2test
---   with no resident backend, so consecutive isolation2 runs succeed.
+--   users" whenever the scheduler is still connected.
+--
+--   stop_background_workers() sends a BGW_MSG_STOP to the launcher,
+--   which terminates the running scheduler and transitions its per-DB
+--   entry to DISABLED so the launcher's automatic state-trans loop does
+--   not respawn it.  (The previous approach here -- ALTER DATABASE ...
+--   SET time_series.bgw_scheduler_disable -- set a GUC that no longer
+--   exists anywhere in scheduler.c and was a silent no-op; the explicit
+--   pg_terminate_backend below was the only thing actually doing
+--   anything, and only for a scheduler already running at THIS instant,
+--   not for one the launcher respawns moments later.)
 -- ============================================================
-1: ALTER DATABASE isolation2test SET time_series.bgw_scheduler_disable = on;
-ALTER
+1: SELECT time_series.stop_background_workers();
+ stop_background_workers 
+-------------------------
+ t                       
+(1 row)
 1: DO $$ BEGIN PERFORM pg_terminate_backend(pid) FROM pg_stat_activity WHERE backend_type = 'time_series scheduler' AND datname = current_database(); END $$;
 DO

@@ -153,6 +153,14 @@
 1: SELECT gp_inject_fault('ts_chunk_scan_after_status_load', 'reset', dbid)
    FROM gp_segment_configuration WHERE role = 'p' AND content >= 0;
 1: DROP TABLE race_tbl;
+
+-- Stop the BGW scheduler before DROP EXTENSION to avoid a catalog-lock
+-- ABBA against check_for_stopped_and_timed_out_jobs()'s BGWH_STOPPED
+-- path (unbounded lock wait; observed as "deadlock detected").
+-- Consistent with every other iso2 test that ends in DROP EXTENSION --
+-- see compress_insert_no_deadlock.sql.
+1: SELECT time_series.stop_background_workers();
+
 1: DROP EXTENSION time_series CASCADE;
 1q:
 2q:

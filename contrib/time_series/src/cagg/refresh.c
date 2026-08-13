@@ -1324,9 +1324,22 @@ cagg_refresh(PG_FUNCTION_ARGS)
 	 *
 	 * Forcing the Postgres planner avoids the entire ORCA-fallback path.
 	 *
-	 * We assign the global directly (instead of set_config_option) because
-	 * SET LOCAL via SPI showed no effect under BGW NONATOMIC SPI: the next
-	 * SPI_execute_with_args still triggered ORCA NOTICE and the same crash.
+	 * Go through set_config_option() with GUC_ACTION_SET -- a plain
+	 * top-level SET, not SET LOCAL / GUC_ACTION_SAVE -- rather than
+	 * assigning the extern global directly.  This matters across the
+	 * SPI_commit_and_chain() calls below: SET LOCAL and a nested/temp
+	 * GUC_ACTION_SAVE assignment are both unwound by AtEOXact_GUC() at
+	 * the very next transaction end, which is exactly why an earlier
+	 * SET LOCAL via SPI attempt showed no effect under BGW NONATOMIC
+	 * SPI (the next SPI_execute_with_args still triggered ORCA NOTICE
+	 * and the same crash) -- a plain SET's effect is session-scoped and
+	 * is NOT torn down at COMMIT.  A raw assignment to the extern global
+	 * also survives the commit boundary, but leaves the GUC subsystem's
+	 * own bookkeeping (source, stack) out of sync with the variable, so
+	 * anything that consults the GUC record rather than the bare global
+	 * (e.g. SHOW optimizer, a later SET issued in the same session) can
+	 * disagree with reality; going through the real API keeps both in
+	 * sync at essentially the same cost as the direct assignment.
 	 *
 	 * Save/restore via PG_TRY/PG_FINALLY: cagg_refresh is reachable from
 	 * three call paths -- BGW worker (process exits, no leak), CALL run_job
@@ -1340,7 +1353,9 @@ cagg_refresh(PG_FUNCTION_ARGS)
 		extern bool optimizer;
 		bool		saved_optimizer = optimizer;
 
-		optimizer = false;
+		set_config_option("optimizer", "off",
+						  PGC_USERSET, PGC_S_SESSION,
+						  GUC_ACTION_SET, true, 0, false);
 		PG_TRY();
 		{
 
@@ -2426,7 +2441,9 @@ cagg_refresh(PG_FUNCTION_ARGS)
 		}
 		PG_FINALLY();
 		{
-			optimizer = saved_optimizer;
+			set_config_option("optimizer", saved_optimizer ? "on" : "off",
+							  PGC_USERSET, PGC_S_SESSION,
+							  GUC_ACTION_SET, true, 0, false);
 		}
 		PG_END_TRY();
 	}

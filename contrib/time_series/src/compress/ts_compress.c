@@ -665,7 +665,7 @@ parse_segmentby_list(Oid relid, Relation userrel, text *segmentby_text,
 {
 	char	   *segmentby_str;
 	char	   *token;
-	char	   *saveptr;
+	char	   *saveptr = NULL;
 	int			n_seg = 0;
 
 	if (segmentby_text == NULL)

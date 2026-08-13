@@ -216,8 +216,8 @@ SET
 -- the transaction never commits, and the segment restarts into
 -- crash recovery -- which replays the flushed ".new" WAL.
 2<:  <... completed>
-ERROR:  fault triggered, fault name:'ts_recompress_before_rename' fault type:'panic'  (seg1 slice1 172.19.0.2:7003 pid=90593)
-CONTEXT:  SQL statement "SELECT time_series._ts_compress_write_chunks(2737523, ARRAY[35068]::integer[])"
+ERROR:  fault triggered, fault name:'ts_recompress_before_rename' fault type:'panic'  (seg1 slice1 172.17.0.2:7003 pid=32276)
+CONTEXT:  SQL statement "SELECT time_series._ts_compress_write_chunks(69010, ARRAY[35068]::integer[])"
 2q: ... <quitting>
 
 -- The coordinator is alive, so its fts_probe skip can be lifted here.
@@ -283,6 +283,18 @@ SET
 DROP
 3: DROP TABLE crash_target;
 DROP
+
+-- Stop the BGW scheduler before DROP EXTENSION to avoid a catalog-lock
+-- ABBA against check_for_stopped_and_timed_out_jobs()'s BGWH_STOPPED
+-- path (unbounded lock wait; observed as "deadlock detected").
+-- Consistent with every other iso2 test that ends in DROP EXTENSION --
+-- see compress_insert_no_deadlock.sql.
+3: SELECT time_series.stop_background_workers();
+ stop_background_workers 
+-------------------------
+ t                       
+(1 row)
+
 3: DROP EXTENSION time_series CASCADE;
 DROP
 3q: ... <quitting>
