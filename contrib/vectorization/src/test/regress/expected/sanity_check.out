@@ -238,10 +238,7 @@ test_tsvector|f
 testjsonb|f
 text_tbl|f
 textrange_test|t
-time_tbl|f
-timestamp_tbl|f
 timestamptz_tbl|f
-timetz_tbl|f
 tmp|f
 trigger_parted|t
 trigger_parted_p1|t

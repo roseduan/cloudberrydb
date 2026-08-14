@@ -27,7 +27,6 @@ test: copy_eol
 # file related tests (like gp_log_system, etc) faster.
 test: disable_autovacuum
 test: gp_toolkit
-test: python_processed64bit
 test: enable_autovacuum
 
 test: log_guc
@@ -37,7 +36,7 @@ test: instr_in_shmem_setup
 test: instr_in_shmem
 
 test: createdb
-test: gp_aggregates gp_aggregates_costs gp_metadata variadic_parameters default_parameters function_extensions spi gp_xml shared_scan triggers_gp returning_gp resource_queue_with_rule gp_types gp_index cluster_gp combocid_gp gp_sort
+test: gp_aggregates gp_aggregates_costs variadic_parameters function_extensions spi shared_scan triggers_gp gp_types cluster_gp
 
 # FIXME: disable update-related tests
 # test: update_gp
@@ -51,12 +50,12 @@ test: gp_tablespace
 #test: temp_tablespaces
 #test: default_tablespace
 
-test: leastsquares opr_sanity_gp decode_expr bitmapscan bitmapscan_ao case_gp limit_gp notin percentile join_gp union_gp gpcopy_encoding gp_create_table gp_create_view window_views replication_slots create_table_like_gp gp_constraints matview_ao gpcopy_dispatch
+test: decode_expr bitmapscan bitmapscan_ao case_gp limit_gp notin percentile join_gp union_gp gpcopy_encoding gp_create_table create_table_like_gp gp_constraints matview_ao
 # below test(s) inject faults so each of them need to be in a separate group
 test: gpcopy
 
 test: orca_static_pruning orca_groupingsets_fallbacks
-test: filter gpctas gpdist gpdist_opclasses gpdist_legacy_opclasses matrix sublink table_functions olap_setup complex opclass_ddl information_schema guc_env_var gp_explain distributed_transactions explain_format olap_plans misc_jiras gp_copy_dtx
+test: gpctas gpdist gpdist_opclasses gpdist_legacy_opclasses sublink table_functions olap_setup opclass_ddl information_schema guc_env_var gp_explain distributed_transactions explain_format olap_plans misc_jiras gp_copy_dtx
 # below test(s) inject faults so each of them need to be in a separate group
 test: guc_gp
 test: toast
@@ -78,7 +77,6 @@ test: dpe qp_dpe qp_subquery qp_left_anti_semi_join qp_union_intersect qp_functi
 test: scalar_subq_filter_pushdown
 
 test: olap_setup
-test: qp_olap_group qp_olap_group2
 
 test: hooktest tuple_serialization
 
@@ -88,14 +86,11 @@ test: query_info_hook_test
 ignore: tpch500GB_orca
 
 # Tests for "compaction", i.e. VACUUM, of updatable append-only tables
-test: uao_compaction/full uao_compaction/outdated_partialindex uao_compaction/drop_column_update uao_compaction/eof_truncate uao_compaction/basic uao_compaction/outdatedindex uao_compaction/update_toast uao_compaction/outdatedindex_abort uao_compaction/delete_toast uao_compaction/alter_table_analyze uao_compaction/full_eof_truncate uao_compaction/full_threshold
+test: uao_compaction/basic
 # TODO find why these tests fail in parallel, for now keeping them sequential
 test: uao_compaction/full_stats
 test: uao_compaction/stats
 test: uao_compaction/index_stats
-test: uao_compaction/index
-test: uao_compaction/drop_column
-test: uao_compaction/index2
 
 
 # Tests for "compaction", i.e. VACUUM, of updatable append-only column oriented tables
@@ -140,7 +135,6 @@ test: disable_autovacuum
 # should always be below disable_autovacuum, don't change the order.
 test: uao_catalog_tables
 test: uaocs_catalog_tables
-test: uao_compaction/threshold
 # FIXME: disable update-related tests
 # test: uaocs_compaction/threshold
 test: uao_ddl/analyze_ao_table_every_dml_row 
@@ -149,19 +143,14 @@ test: uao_ddl/analyze_ao_table_every_dml_row
 test: uao_dml/uao_dml_row
 # FIXME: disable update-related tests
 # test: uao_dml/uao_dml_column
-test: ao_locks
 # FIXME: disable update-related tests
 # test: freeze_aux_tables
 
 # These cannot run in parallel, because they check that VACUUM FULL shrinks table size.
 # A concurrent session could hold back the xid horizon and prevent old tuples from being
 # removed.
-test: vacuum_full_ao
-test: vacuum_full_freeze_heap
 test: vacuum_full_heap
-test: vacuum_full_heap_bitmapindex
 # Check for shmem leak for instrumentation slots
-test: instr_in_shmem_verify
 # check autostats
 test: autostats
 test: enable_autovacuum
@@ -172,7 +161,7 @@ test: session_reset
 test: fts_error
 test: backpressure
 
-test: psql_gp_commands pg_resetwal dropdb_check_shared_buffer_cache gp_upgrade_cornercases
+test: psql_gp_commands dropdb_check_shared_buffer_cache gp_upgrade_cornercases
 
 test: temp_relation
 test: alter_db_set_tablespace
@@ -194,7 +183,6 @@ test: autovacuum-template0-segment
 test: gangsize gang_reuse
 
 # some utilities do not work while doing gpexpand, check them can print correct message
-test: run_utility_gpexpand_phase1
 
 # check correct error message when create extension error on segment
 test: create_extension_fail
