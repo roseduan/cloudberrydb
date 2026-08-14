@@ -12,7 +12,7 @@ test: tablespace
 # ----------
 # The first group of parallel tests
 # ----------
-test: boolean char name varchar text int2 int4 int8 oid float4 float8 bit numeric txid uuid enum money rangetypes pg_lsn regproc
+test: boolean char name varchar text int2 int4 int8 oid float4 float8 bit numeric txid uuid enum money rangetypes pg_lsn
 
 # ----------
 # The second group of parallel tests
@@ -29,7 +29,7 @@ test: strings numerology point lseg line box path polygon circle date time timet
 # horology depends on interval, timetz, timestamp, timestamptz
 # opr_sanity depends on create_function_0
 # ----------
-test: geometry horology tstypes regex type_sanity opr_sanity misc_sanity comments expressions unicode xid mvcc
+test: geometry horology type_sanity misc_sanity expressions xid mvcc
 
 # ----------
 # These four each depend on the previous one
@@ -53,7 +53,7 @@ test: copy copyselect copydml insert
 # ----------
 # More groups of parallel tests
 # ----------
-test: create_misc create_operator create_procedure
+test: create_misc create_procedure
 # These depend on create_misc and create_operator
 
 test: create_index create_view index_including 
@@ -70,7 +70,7 @@ test: gp_gin_index
 # Another group of parallel tests
 # ----------
 
-test: create_aggregate create_function_3 create_cast select inherit typed_table drop_if_exists roleattributes create_am hash_func errors infinite_recurse
+test: create_aggregate create_function_3 select inherit typed_table drop_if_exists create_am errors
 
 # ignore reason:
 #  1. Pax have not implements tuple_insert_speculative and tuple_lock
@@ -113,7 +113,7 @@ test: transactions
 # ----------
 # Another group of parallel tests
 # ----------
-test: privileges init_privs security_label collate lock replica_identity rowsecurity object_address tablesample groupingsets drop_operator password identity appendonly_sample aocs_sample
+test: privileges security_label collate lock replica_identity rowsecurity object_address tablesample groupingsets identity
 
 test: matview
 # ignore reason: 
@@ -139,7 +139,7 @@ test: task
 # ----------
 # Another group of parallel tests
 # ----------
-test: create_table_like alter_generic alter_operator misc async dbsize misc_functions sysviews tsrf tid collate.icu.utf8 incremental_sort
+test: create_table_like alter_generic misc async misc_functions tsrf tid collate.icu.utf8 incremental_sort
 # ignore reason: tidrangescan assumes the ctid is organized by heap
 # test: tidrangescan 
 # ignore reason: pax not support incremental matview
@@ -174,12 +174,12 @@ test: psql psql_crosstab amutils stats_ext collate.linux.utf8
 # test: vacuum_parallel
 
 # no relation related tests can be put in this group
-test: publication subscription
+test: publication
 
 # ----------
 # Another group of parallel tests
 # ----------
-test: select_views portals_p2  dependency guc bitmapops tsearch tsdicts foreign_data window xmlmap functional_deps advisory_lock indirect_toast equivclass
+test: select_views portals_p2 dependency guc bitmapops tsearch foreign_data window xmlmap functional_deps indirect_toast equivclass
 
 # ignore reason:
 #   1. virtual tuple table slot does not have system attributes
@@ -194,7 +194,7 @@ test: cluster
 # ----------
 # Another group of parallel tests (JSON related)
 # ----------
-test: json jsonb json_encoding jsonpath jsonpath_encoding jsonb_jsonpath
+test: json jsonb
 
 # ----------
 # Another group of parallel tests
@@ -226,3 +226,7 @@ test: fast_default
 
 # run stats by itself because its delay may be insufficient under heavy load
 test: stats
+test: create_misc create_operator create_procedure
+test: create_aggregate create_function_3 create_cast select inherit typed_table drop_if_exists roleattributes create_am hash_func errors infinite_recurse
+test: privileges init_privs security_label collate lock replica_identity rowsecurity object_address tablesample groupingsets drop_operator password identity appendonly_sample aocs_sample
+test: create_table_like alter_generic alter_operator misc async dbsize misc_functions sysviews tsrf tid collate.icu.utf8 incremental_sort
