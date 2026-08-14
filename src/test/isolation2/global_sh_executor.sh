@@ -83,8 +83,14 @@ create_match_sub_with_spaces() {
         then
             to_replace=$var
         else
-            # \b is trying to match the whole word to make it more stable.
-            export MATCHSUBS="${MATCHSUBS}${NL}m/\\b${to_replace}\\b/${NL}s/\\b${to_replace} */${var} /${NL}"
+            # \b on both ends matches the whole word to keep the substitution
+            # stable.  The trailing \b (before the optional spaces) is crucial:
+            # without it, a short value that happens to be a prefix of a longer
+            # cell on the same line gets replaced there instead.  For example a
+            # 4-digit segment port "7002" would match the leading digits of a
+            # random auth_token "70020851..." and corrupt it, since the s///
+            # applies to the whole line and replaces the first match only.
+            export MATCHSUBS="${MATCHSUBS}${NL}m/\\b${to_replace}\\b/${NL}s/\\b${to_replace}\\b */${var} /${NL}"
             to_replace=""
         fi
     done
