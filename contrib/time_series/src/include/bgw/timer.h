@@ -20,9 +20,7 @@ typedef struct Timer
 extern bool timer_wait(TimestampTz until);
 extern TimestampTz timer_get_current_timestamp(void);
 
-#ifdef USE_ASSERT_CHECKING
 extern void timer_set(const Timer *timer);
 extern const Timer *get_standard_timer(void);
-#endif
 
 #endif /* BGW_TIMER_H */

@@ -114,16 +114,14 @@ timer_get_current_timestamp()
 	return timer_get()->get_current_timestamp();
 }
 
-#ifdef USE_ASSERT_CHECKING
 void
 timer_set(const Timer * timer)
 {
 	current_timer_implementation = timer;
 }
 
-const		Timer *
+const Timer*
 get_standard_timer()
 {
 	return &standard_timer;
 }
-#endif
