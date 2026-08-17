@@ -1,0 +1,100 @@
+--
+-- foreign_table_distributed.sql
+--
+-- Regression coverage for CREATE FOREIGN TABLE ... DISTRIBUTED ...
+-- semantics with the gp_exttable_server foreign server.
+--
+-- Before commit (Fix CreateForeignTableStmt DISTRIBUTED forwarding):
+--   parse_utilcmd.c had the CreateForeignTableStmt distributedBy
+--   transform branch wrapped in #if 0.  CREATE FOREIGN TABLE ...
+--   DISTRIBUTED RANDOMLY/BY(...) silently dropped the user's clause:
+--   no gp_distribution_policy row was inserted, and INSERTs to writable
+--   external tables degenerated to POLICYTYPE_ENTRY (QD-only plans,
+--   no Motion).
+--
+-- This test locks in the fix by exercising the surviving symptoms.
+
+\set HIDE_TABLEAM off
+
+-- ============================================================
+-- 1. writable ext + DISTRIBUTED RANDOMLY
+--    Must produce a 'p' policy row and an INSERT plan with Motion.
+-- ============================================================
+DROP FOREIGN TABLE IF EXISTS ft_dist_w_r;
+CREATE FOREIGN TABLE ft_dist_w_r (a int, b text)
+    SERVER gp_exttable_server
+    OPTIONS (location_uris 'gpfdist://localhost.invalid:7070/x.csv',
+             format 'csv', format_type 'c', is_writable 'true')
+    DISTRIBUTED RANDOMLY;
+
+SELECT 'writable+RANDOMLY' AS scenario,
+       p.policytype, p.numsegments,
+       pg_get_table_distributedby('ft_dist_w_r'::regclass) AS dby
+FROM pg_class c LEFT JOIN gp_distribution_policy p ON p.localoid = c.oid
+WHERE c.relname = 'ft_dist_w_r';
+
+-- ============================================================
+-- 2. writable ext + DISTRIBUTED BY (key)
+--    Must produce a 'p' policy row with the key attnum.
+-- ============================================================
+DROP FOREIGN TABLE IF EXISTS ft_dist_w_k;
+CREATE FOREIGN TABLE ft_dist_w_k (a int, b text)
+    SERVER gp_exttable_server
+    OPTIONS (location_uris 'gpfdist://localhost.invalid:7070/x.csv',
+             format 'csv', format_type 'c', is_writable 'true')
+    DISTRIBUTED BY (a);
+
+SELECT 'writable+BY(a)' AS scenario,
+       p.policytype, p.numsegments, p.distkey,
+       pg_get_table_distributedby('ft_dist_w_k'::regclass) AS dby
+FROM pg_class c LEFT JOIN gp_distribution_policy p ON p.localoid = c.oid
+WHERE c.relname = 'ft_dist_w_k';
+
+-- ============================================================
+-- 3. readable ext + DISTRIBUTED RANDOMLY
+--    Policy is stored for dump symmetry; runtime ignores it
+--    (GpPolicyFetch synthesizes RANDOMLY for !iswritable ext tables).
+-- ============================================================
+DROP FOREIGN TABLE IF EXISTS ft_dist_r;
+CREATE FOREIGN TABLE ft_dist_r (a int, b text)
+    SERVER gp_exttable_server
+    OPTIONS (location_uris 'gpfdist://localhost.invalid:7070/x.csv',
+             format 'csv', format_type 'c', is_writable 'false')
+    DISTRIBUTED RANDOMLY;
+
+SELECT 'readable+RANDOMLY' AS scenario,
+       p.policytype, p.numsegments,
+       pg_get_table_distributedby('ft_dist_r'::regclass) AS dby
+FROM pg_class c LEFT JOIN gp_distribution_policy p ON p.localoid = c.oid
+WHERE c.relname = 'ft_dist_r';
+
+-- ============================================================
+-- 4. ALTER FOREIGN TABLE ... OPTIONS (SET is_writable 'true')
+--    The pre-created policy must survive the flip so the now-writable
+--    table is immediately usable without an additional REINDEX/ALTER.
+-- ============================================================
+ALTER FOREIGN TABLE ft_dist_r OPTIONS (SET is_writable 'true');
+
+SELECT 'flipped readable->writable' AS scenario,
+       p.policytype, p.numsegments,
+       pg_get_table_distributedby('ft_dist_r'::regclass) AS dby
+FROM pg_class c LEFT JOIN gp_distribution_policy p ON p.localoid = c.oid
+WHERE c.relname = 'ft_dist_r';
+
+-- ============================================================
+-- 5. Foreign servers other than gp_exttable_server must still reject
+--    DISTRIBUTED at parse time (no behaviour change).
+-- ============================================================
+DO $$
+BEGIN
+    EXECUTE 'CREATE FOREIGN TABLE ft_dist_invalid (a int) '
+            'SERVER no_such_server DISTRIBUTED RANDOMLY';
+    RAISE NOTICE 'NOT EXPECTED: grammar should have rejected this';
+EXCEPTION WHEN feature_not_supported THEN
+    RAISE NOTICE 'rejected as expected: %', SQLERRM;
+END $$;
+
+-- Cleanup
+DROP FOREIGN TABLE ft_dist_w_r;
+DROP FOREIGN TABLE ft_dist_w_k;
+DROP FOREIGN TABLE ft_dist_r;

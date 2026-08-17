@@ -404,20 +404,34 @@ transformCreateStmt(CreateStmt *stmt, const char *queryString)
 													 stmt->distributedBy,
 													 likeDistributedBy, bQuiet);
 	}
-
-	/*
-	 * CBDB: for a foreign table, do not inherit source table's distribution policy.
-	 * It should be decided by OPTIONS, ex: mpp_execute all segments.
-	 */
-#if 0
-	if (IsA(stmt, CreateForeignTableStmt))
+	else if (IsA(stmt, CreateForeignTableStmt))
 	{
+		/*
+		 * CBDB-specific: foreign tables that use SERVER gp_exttable_server
+		 * (the new home of the legacy CREATE EXTERNAL TABLE syntax) may
+		 * carry an explicit DISTRIBUTED clause; the grammar already rejects
+		 * the clause for any other foreign server.  Forward it to the base
+		 * CreateStmt so DefineRelation -> heap_create_with_catalog stores a
+		 * gp_distribution_policy row.  For writable external tables, this
+		 * row is what GpPolicyFetch reads to build the redistribute Motion
+		 * at INSERT plan time; without it INSERT degenerates to
+		 * POLICYTYPE_ENTRY (QD-only).  For readable external tables the
+		 * runtime synthesizes a RANDOMLY policy and ignores the stored row,
+		 * but we keep it for dump/restore symmetry and so that
+		 * `ALTER FOREIGN TABLE ... OPTIONS (SET is_writable 'true')` lands
+		 * on a table that already has a usable distribution policy.
+		 *
+		 * Pass NULL for likeDistributedBy: do NOT inherit a source table's
+		 * policy via the LIKE clause — that's the original intent of the
+		 * earlier #if 0'd code (CBDB-specific: foreign-table distribution
+		 * should be decided by OPTIONS / DISTRIBUTED, never inherited).
+		 */
 		DistributedBy *ft_distributedBy = ((CreateForeignTableStmt *)stmt)->distributedBy;
-		if (ft_distributedBy || likeDistributedBy)
-			stmt->distributedBy = transformDistributedBy(pstate, &cxt, ft_distributedBy,
-														 likeDistributedBy, bQuiet);
+		if (ft_distributedBy)
+			stmt->distributedBy = transformDistributedBy(pstate, &cxt,
+														 ft_distributedBy,
+														 NULL, bQuiet);
 	}
-#endif
 
 	/*
 	 * Postprocess check constraints.
