@@ -205,7 +205,7 @@ iceberg_modify_init(Relation rel, IcebergDMLState *state, CmdType operation,
 		table_info->opts ? table_info->opts->namespace : NULL,
 		table_info->catalog_server_name,
 		table_info->catalog_name,
-		rel);
+		RelationGetNamespace(rel));
 	fdwState->iceTable.tableName = pstrdup(RelationGetRelationName(rel));
 
 	/*

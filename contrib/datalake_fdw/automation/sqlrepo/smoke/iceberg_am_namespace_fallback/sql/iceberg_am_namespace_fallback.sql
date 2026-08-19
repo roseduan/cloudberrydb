@@ -1,0 +1,117 @@
+-- Iceberg namespace resolution on a NON-BUILTIN catalog (issue #411).
+--
+-- pg_iceberg_resolve_namespace() has three tiers:
+--   1. table OPTIONS namespace
+--   2. foreign catalog default_namespace
+--   3. the table's PG schema name
+--
+-- Tier 3 was unreachable on the write path.  Under deferred commit (issue
+-- #323) the actual catalog commit happens at transaction PRE_COMMIT, where
+-- the tracker holds only the relid and deliberately does not reopen the
+-- relation -- and tier 3 used to read the schema off a Relation.  So a table
+-- with OPTIONS (table ...) but no OPTIONS (namespace ...), on a catalog with
+-- no default_namespace, could be CREATEd and SELECTed but every INSERT died
+-- at commit with "iceberg namespace cannot be resolved".
+--
+-- Every pre-existing external-shape test writes namespace AND table together,
+-- so tier 1 always won and this combination was never executed.  The builtin
+-- iceberg_namespace test does cover all three tiers, but builtin catalogs
+-- never enter the external commit path at all.
+--
+-- Targets the lakehouse stack MinIO (endpoint http://minio:9000,
+-- admin/admin12345) like iceberg_am_timestamptz; run.sh asserts the iceberg
+-- namespace each table actually landed in on object storage.
+
+\i ../../../lib/sql/common_setup.sql
+
+SET client_min_messages = WARNING;
+
+-- Catalog A: hadoop backend, deliberately WITHOUT default_namespace, so
+-- tier 2 comes up empty and tier 3 is the only thing left.
+DROP SERVER IF EXISTS nsfb_cat_srv CASCADE;
+CREATE SERVER nsfb_cat_srv FOREIGN DATA WRAPPER iceberg_catalog_fdw
+    OPTIONS (type 'hadoop');
+CREATE USER MAPPING FOR current_user SERVER nsfb_cat_srv;
+CREATE FOREIGN CATALOG nsfb_cat SERVER nsfb_cat_srv
+    OPTIONS (warehouse_location_prefix 's3a://warehouse/iceberg_am_namespace_fallback/');
+
+-- Catalog B: same backend, default_namespace set, for the tier 2 case.
+DROP SERVER IF EXISTS nsfb_cat_def_srv CASCADE;
+CREATE SERVER nsfb_cat_def_srv FOREIGN DATA WRAPPER iceberg_catalog_fdw
+    OPTIONS (type 'hadoop');
+CREATE USER MAPPING FOR current_user SERVER nsfb_cat_def_srv;
+CREATE FOREIGN CATALOG nsfb_cat_def SERVER nsfb_cat_def_srv
+    OPTIONS (warehouse_location_prefix 's3a://warehouse/iceberg_am_namespace_fallback/',
+             default_namespace 'nsfb_catdefault');
+
+DROP SERVER IF EXISTS nsfb_vol_srv CASCADE;
+CREATE SERVER nsfb_vol_srv FOREIGN DATA WRAPPER iceberg_volume_fdw
+    OPTIONS (type 's3', endpoint 'http://minio:9000', region 'us-east-1',
+             bucket_name 'warehouse', path_style_access 'true');
+CREATE USER MAPPING FOR current_user SERVER nsfb_vol_srv
+    OPTIONS (access_key_id 'admin', secret_access_key 'admin12345');
+CREATE FOREIGN VOLUME nsfb_vol SERVER nsfb_vol_srv
+    OPTIONS (base_path '/iceberg_am_namespace_fallback/', allow_writes 'true');
+SET iceberg_default_volume = 'nsfb_vol';
+
+SET iceberg_default_catalog = 'nsfb_cat';
+
+-- ============================================================
+-- Tier 1: explicit OPTIONS namespace wins.  -> nsfb_explicit
+-- ============================================================
+CREATE ICEBERG TABLE nsfb_tier1 (id int, val text)
+    OPTIONS (namespace 'nsfb_explicit', table 'nsfb_tier1');
+INSERT INTO nsfb_tier1 VALUES (1, 'a'), (2, 'b');
+SELECT count(*) FROM nsfb_tier1;
+
+-- ============================================================
+-- Tier 2: no OPTIONS namespace, catalog default_namespace wins.
+-- -> nsfb_catdefault
+-- ============================================================
+SET iceberg_default_catalog = 'nsfb_cat_def';
+CREATE ICEBERG TABLE nsfb_tier2 (id int, val text)
+    OPTIONS (table 'nsfb_tier2');
+INSERT INTO nsfb_tier2 VALUES (1, 'a'), (2, 'b');
+SELECT count(*) FROM nsfb_tier2;
+SET iceberg_default_catalog = 'nsfb_cat';
+
+-- ============================================================
+-- Tier 3 -- the combination issue #411 is about: OPTIONS table with
+-- no namespace, on a catalog with no default_namespace.  CREATE and
+-- SELECT always worked here; the INSERT is what used to fail, and it
+-- failed at COMMIT rather than at the statement.  -> public
+-- ============================================================
+CREATE ICEBERG TABLE nsfb_tier3 (id int, val text)
+    OPTIONS (table 'nsfb_tier3');
+INSERT INTO nsfb_tier3 VALUES (1, 'a'), (2, 'b'), (3, 'c');
+SELECT count(*) FROM nsfb_tier3;
+
+-- UPDATE / DELETE reach the same committer through its COMMIT_UPDATE /
+-- COMMIT_DELETE variants, so they need the fallback just as much.
+UPDATE nsfb_tier3 SET val = 'updated' WHERE id = 2;
+DELETE FROM nsfb_tier3 WHERE id = 3;
+SELECT count(*) FROM nsfb_tier3;
+
+-- Multi-statement transaction: both INSERTs are materialized by a single
+-- deferred commit, which is exactly where the namespace was resolved
+-- without a relation at hand.
+BEGIN;
+INSERT INTO nsfb_tier3 VALUES (4, 'd');
+INSERT INTO nsfb_tier3 VALUES (5, 'e');
+COMMIT;
+SELECT count(*) FROM nsfb_tier3;
+
+-- ============================================================
+-- Tier 3 must follow the table's real PG schema, never a hardcoded
+-- "public".  Same iceberg table name in a different PG schema has to
+-- land in a different iceberg namespace, or the two silently share one
+-- iceberg table and corrupt each other.  -> nsfb_schema
+-- ============================================================
+CREATE SCHEMA nsfb_schema;
+CREATE ICEBERG TABLE nsfb_schema.nsfb_tier3 (id int, val text)
+    OPTIONS (table 'nsfb_tier3');
+INSERT INTO nsfb_schema.nsfb_tier3 VALUES (100, 'other schema');
+SELECT count(*) FROM nsfb_schema.nsfb_tier3;
+
+-- ... and the public one is untouched by it.
+SELECT count(*) FROM public.nsfb_tier3;

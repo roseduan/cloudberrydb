@@ -91,8 +91,10 @@ const char *
 pg_iceberg_resolve_namespace(const char *options_namespace,
 							 const char *catalog_server_name,
 							 const char *catalog_name,
-							 Relation rel)
+							 Oid schema_oid)
 {
+	char	   *nspname;
+
 	/* Tier 1: explicit table OPTIONS namespace. */
 	if (options_namespace != NULL && options_namespace[0] != '\0')
 		return pstrdup(options_namespace);
@@ -109,22 +111,28 @@ pg_iceberg_resolve_namespace(const char *options_namespace,
 	}
 
 	/*
-	 * Tier 3: PG schema name of the relation. Some callsites (e.g.
-	 * pg_iceberg_commit_data_with_catalog on the external-table path) pass
-	 * rel == NULL because they always expect tier 1 to win there. Raise an
-	 * ereport in that case rather than asserting / dereferencing NULL, so
-	 * the failure is diagnosable: it means tiers 1 + 2 both came up empty
-	 * AND there's no relation to fall back on -- typically a programming
-	 * error in the caller.
+	 * Tier 3: PG schema name behind schema_oid. A caller that has no schema
+	 * at hand passes InvalidOid because it always expects tier 1 to win.
+	 * Raise an ereport in that case rather than inventing a namespace: a
+	 * hardcoded "public" here would silently route data of a table living in
+	 * some other schema into the wrong iceberg namespace, which is strictly
+	 * worse than a loud failure.
 	 */
-	if (rel == NULL)
+	if (!OidIsValid(schema_oid))
 		ereport(ERROR,
 				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
 				 errmsg("iceberg namespace cannot be resolved: "
 						"no OPTIONS namespace, no catalog default_namespace, "
-						"and no relation for PG schema fallback")));
+						"and no PG schema for fallback")));
 
-	return get_namespace_name(rel->rd_rel->relnamespace);
+	nspname = get_namespace_name(schema_oid);
+	if (nspname == NULL)
+		ereport(ERROR,
+				(errcode(ERRCODE_UNDEFINED_SCHEMA),
+				 errmsg("iceberg namespace cannot be resolved: "
+						"schema with OID %u no longer exists", schema_oid)));
+
+	return nspname;
 }
 
 static FdwRoutine *
@@ -942,7 +950,7 @@ pg_iceberg_commit_rewrite(Relation rel, List *all_private_results)
 		table_info->opts ? table_info->opts->namespace : NULL,
 		table_info->catalog_server_name,
 		table_info->catalog_name,
-		rel);
+		RelationGetNamespace(rel));
 
 	if (table_info->opts == NULL || table_info->opts->table == NULL)
 	{

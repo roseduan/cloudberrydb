@@ -265,7 +265,6 @@ pg_iceberg_get_latest_metadata_location(Oid relid, IcebergTableInfo *table_info)
 {
 	IcebergMetadataInfo *meta_info;
 	IcebergLoadTableResult *load_result;
-	Relation	rel;
 	const char *nameSpace;
 	const char *tableName;
 	const char *catalogName;
@@ -286,15 +285,15 @@ pg_iceberg_get_latest_metadata_location(Oid relid, IcebergTableInfo *table_info)
 	/*
 	 * External path: resolve namespace via the 3-tier precedence so a missing
 	 * OPTIONS namespace can still fall back to catalog default / PG schema.
-	 * Open the relation briefly to get relnamespace for the final fallback;
-	 * AccessShareLock is the standard read lock for catalog-only access.
+	 * A syscache lookup is enough for the schema OID -- this runs from the
+	 * transaction PRE_COMMIT path too, where opening the relation just to
+	 * read relnamespace would take a fresh lock at the very end of the
+	 * transaction.
 	 */
-	rel = relation_open(relid, AccessShareLock);
 	nameSpace = pg_iceberg_resolve_namespace(table_info->opts->namespace,
 											 table_info->catalog_server_name,
 											 table_info->catalog_name,
-											 rel);
-	relation_close(rel, AccessShareLock);
+											 get_rel_namespace(relid));
 
 	tableName = table_info->opts->table;
 	catalogName = table_info->opts->catalog;
@@ -401,7 +400,7 @@ pg_iceberg_create_table_with_catalog(Relation rel, bool *is_internal)
 		table_info->opts ? table_info->opts->namespace : NULL,
 		table_info->catalog_server_name,
 		table_info->catalog_name,
-		rel);
+		RelationGetNamespace(rel));
 
 	if (table_info->opts == NULL || table_info->opts->table == NULL)
 	{
@@ -621,7 +620,7 @@ pg_iceberg_get_fragments_with_catalog(Relation rel,
 		table_info->opts ? table_info->opts->namespace : NULL,
 		table_info->catalog_server_name,
 		table_info->catalog_name,
-		rel);
+		RelationGetNamespace(rel));
 
 	if (table_info->opts == NULL || table_info->opts->table == NULL)
 	{
@@ -661,7 +660,7 @@ pg_iceberg_get_statistics_with_catalog(Relation rel,
 		table_info->opts ? table_info->opts->namespace : NULL,
 		table_info->catalog_server_name,
 		table_info->catalog_name,
-		rel);
+		RelationGetNamespace(rel));
 
 	if (table_info->opts == NULL || table_info->opts->table == NULL)
 	{
@@ -703,7 +702,7 @@ pg_iceberg_get_rewrite_plan_with_catalog(Relation rel,
 		table_info->opts ? table_info->opts->namespace : NULL,
 		table_info->catalog_server_name,
 		table_info->catalog_name,
-		rel);
+		RelationGetNamespace(rel));
 
 	if (table_info->opts == NULL || table_info->opts->table == NULL)
 	{
@@ -765,7 +764,7 @@ pg_iceberg_modify_data_with_catalog(Relation rel,
 		table_info->opts ? table_info->opts->namespace : NULL,
 		table_info->catalog_server_name,
 		table_info->catalog_name,
-		rel);
+		RelationGetNamespace(rel));
 
 	if (table_info->opts == NULL || table_info->opts->table == NULL)
 	{
@@ -814,7 +813,7 @@ pg_iceberg_truncate_with_catalog(Relation rel,
 		table_info->opts ? table_info->opts->namespace : NULL,
 		table_info->catalog_server_name,
 		table_info->catalog_name,
-		rel);
+		RelationGetNamespace(rel));
 
 	if (table_info->opts == NULL || table_info->opts->table == NULL)
 	{
@@ -861,7 +860,7 @@ pg_iceberg_update_schema_with_catalog(Relation rel,
 		table_info->opts ? table_info->opts->namespace : NULL,
 		table_info->catalog_server_name,
 		table_info->catalog_name,
-		rel);
+		RelationGetNamespace(rel));
 
 	if (table_info->opts == NULL || table_info->opts->table == NULL)
 	{
@@ -887,6 +886,7 @@ pg_iceberg_update_schema_with_catalog(Relation rel,
 
 char *
 pg_iceberg_commit_data_with_catalog(Relation rel,
+									Oid schema_oid,
 									IcebergTableInfo *table_info,
 									const char *data_locations,
 									const char *metadata_location,
@@ -920,6 +920,16 @@ pg_iceberg_commit_data_with_catalog(Relation rel,
 	 * pointing at a non-builtin server) leave opts->table NULL and we fall
 	 * back to the relation's own namespace + name, mirroring what
 	 * pg_iceberg_modify_data_with_catalog already does.
+	 *
+	 * The namespace comes from schema_oid, not from rel: this function is
+	 * the transaction PRE_COMMIT committer, and on the explicit-OPTIONS
+	 * path the caller deliberately passes rel == NULL (it does not reopen
+	 * the relation at end of transaction).  Passing the schema OID
+	 * separately is what keeps the PG-schema fallback (tier 3) reachable
+	 * there -- see issue #411, where OPTIONS (table ...) without OPTIONS
+	 * (namespace ...) on a catalog with no default_namespace made every
+	 * INSERT fail at commit while CREATE and SELECT of the very same table
+	 * worked.
 	 */
 	if (table_info->opts == NULL || table_info->opts->table == NULL)
 	{
@@ -931,7 +941,7 @@ pg_iceberg_commit_data_with_catalog(Relation rel,
 			table_info->opts ? table_info->opts->namespace : NULL,
 			table_info->catalog_server_name,
 			table_info->catalog_name,
-			rel);
+			schema_oid);
 		tableName = pstrdup(RelationGetRelationName(rel));
 		catalogName = NULL;
 	}
@@ -941,7 +951,7 @@ pg_iceberg_commit_data_with_catalog(Relation rel,
 			table_info->opts->namespace,
 			table_info->catalog_server_name,
 			table_info->catalog_name,
-			rel);
+			schema_oid);
 		tableName = table_info->opts->table;
 		catalogName = table_info->opts->catalog;
 	}

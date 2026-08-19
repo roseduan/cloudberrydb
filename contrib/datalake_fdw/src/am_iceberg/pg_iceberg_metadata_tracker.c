@@ -522,14 +522,20 @@ tracker_commit_external_table(TableMetadataState *state,
 	 * For internal tables on a non-builtin catalog (Polaris/Hive used as
 	 * iceberg_default_catalog), table_info->opts->table is NULL because the
 	 * table was created without explicit OPTIONS. The commit endpoint then
-	 * needs the relation to derive namespace + table name. External tables
-	 * with explicit OPTIONS keep the existing path and never open the rel.
+	 * needs the relation to derive the table name. External tables with
+	 * explicit OPTIONS keep the existing path and never open the rel.
+	 *
+	 * The namespace never needs the relation: state->namespace_oid was
+	 * recorded at register time and is passed separately, so the resolver's
+	 * PG-schema fallback stays reachable on the external path too (issue
+	 * #411).
 	 */
 	if (table_info->opts == NULL || table_info->opts->table == NULL)
 		rel = table_open(state->relid, AccessShareLock);
 
 	committed_metadata_location = pg_iceberg_commit_data_with_catalog(
 		rel,
+		state->namespace_oid,
 		table_info,
 		data_locations_json,
 		final_metadata_location,

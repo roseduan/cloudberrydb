@@ -67,25 +67,31 @@ typedef struct IcebergLoadTableResult
  * operation.  Precedence (highest first):
  *   1. table OPTIONS namespace   -- per-table override (opts->namespace)
  *   2. catalog default_namespace -- per-catalog default
- *   3. PG schema name of rel     -- final fallback
+ *   3. PG schema name of schema_oid -- final fallback
  *
  * All three sources are user-visible PG state, no external lookup.
  * Returns a palloc'd string in the current memory context; never returns
  * NULL.
  *
+ * Tier (3) takes the schema OID rather than a Relation because the resolver
+ * also runs at transaction PRE_COMMIT (issue #411), where the tracker holds
+ * only relid + namespace_oid and deliberately does not table_open() the
+ * relation -- taking a fresh lock at the end of a transaction is something
+ * we want to avoid.  The OID is all tier (3) ever needed.
+ *
  * Parameter nullability:
  *   catalog_server_name / catalog_name  may be NULL when no foreign
  *      catalog is associated; tier (2) is skipped in that case.
- *   rel                                  may be NULL on callsites that
+ *   schema_oid                           may be InvalidOid on callsites that
  *      always expect tier (1) to win (e.g. external-table commit paths
- *      that never need PG schema fallback). If rel is NULL AND tiers (1)
- *      + (2) both come up empty, ereport(ERROR) is raised so the failure
- *      is diagnosable rather than a NULL dereference.
+ *      that never need PG schema fallback). If it is InvalidOid AND tiers
+ *      (1) + (2) both come up empty, ereport(ERROR) is raised so the
+ *      failure is diagnosable rather than a silent wrong namespace.
  */
 extern const char *pg_iceberg_resolve_namespace(const char *options_namespace,
 												const char *catalog_server_name,
 												const char *catalog_name,
-												Relation rel);
+												Oid schema_oid);
 
 /*
  * Validate an iceberg object name (table or namespace) against a strict

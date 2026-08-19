@@ -84,7 +84,16 @@ extern char *pg_iceberg_update_schema_with_catalog(Relation rel,
 												   const char *metadata_location,
 												   List *schemaOps);
 
+/*
+ * Transaction PRE_COMMIT committer.
+ *
+ * rel is NULL on the explicit-OPTIONS external path (the tracker does not
+ * reopen the relation at end of transaction); schema_oid must always
+ * carry the table's PG schema so the namespace resolver can still fall
+ * back to it (issue #411).
+ */
 extern char *pg_iceberg_commit_data_with_catalog(Relation rel,
+												 Oid schema_oid,
 												 IcebergTableInfo *table_info,
 												 const char *data_locations,
 												 const char *metadata_location,
