@@ -3,6 +3,32 @@
 0:CREATE RESOURCE QUEUE rq_terminate WITH (active_statements = 1);
 0:CREATE ROLE role_terminate RESOURCE QUEUE rq_terminate;
 
+-- Helper: after pg_terminate_backend() only sends SIGTERM, the terminated
+-- backend releases its resource-queue slot asynchronously in proc_exit ->
+-- ProcKill -> AtExitCleanup_ResPortals, which runs *after* the FATAL message
+-- reaches the client. The sanity checks below must therefore poll until the
+-- counter settles instead of reading it once (otherwise they race the cleanup
+-- and flake on a loaded machine). On a genuine leak the poll times out and
+-- returns the stale value, so the diff still catches it.
+0:CREATE FUNCTION rq_wait_status(p_rsqname text, p_expected float4)
+    RETURNS TABLE(rsqcountlimit float4, rsqcountvalue float4) AS $$
+DECLARE /* in func */
+    v_lim float4; /* in func */
+    v_val float4; /* in func */
+BEGIN /* in func */
+    FOR i IN 1..300 LOOP /* in func */
+        SELECT s.rsqcountlimit, s.rsqcountvalue INTO v_lim, v_val
+            FROM pg_resqueue_status s WHERE s.rsqname = p_rsqname; /* in func */
+        EXIT WHEN v_val = p_expected; /* in func */
+        PERFORM pg_sleep(0.1); /* in func */
+    END LOOP; /* in func */
+    rsqcountlimit := v_lim; /* in func */
+    rsqcountvalue := v_val; /* in func */
+    RETURN NEXT; /* in func */
+END; /* in func */
+$$
+LANGUAGE plpgsql;
+
 --
 -- Scenario 1: Terminate a backend with a regular open cursor
 --
@@ -15,7 +41,7 @@
 
 1<:
 -- Sanity check: Ensure that the resource queue is now empty.
-0:SELECT rsqcountlimit, rsqcountvalue FROM pg_resqueue_status WHERE rsqname = 'rq_terminate';
+0:SELECT rsqcountlimit, rsqcountvalue FROM rq_wait_status('rq_terminate', 0);
 
 --
 -- Scenario 2: Terminate a backend with a holdable open cursor that has been
@@ -29,7 +55,7 @@
 
 2<:
 -- Sanity check: Ensure that the resource queue is now empty.
-0:SELECT rsqcountlimit, rsqcountvalue FROM pg_resqueue_status WHERE rsqname = 'rq_terminate';
+0:SELECT rsqcountlimit, rsqcountvalue FROM rq_wait_status('rq_terminate', 0);
 
 --
 -- Scenario 3: Terminate a backend with a waiting statement
@@ -46,7 +72,7 @@
 4<:
 3:END;
 -- Sanity check: Ensure that the resource queue is now empty.
-0:SELECT rsqcountlimit, rsqcountvalue FROM pg_resqueue_status WHERE rsqname = 'rq_terminate';
+0:SELECT rsqcountlimit, rsqcountvalue FROM rq_wait_status('rq_terminate', 0);
 
 --
 -- Scenario 4: Terminate a backend with a waiting holdable cursor
@@ -63,7 +89,7 @@
 6<:
 5:END;
 -- Sanity check: Ensure that the resource queue is now empty.
-0:SELECT rsqcountlimit, rsqcountvalue FROM pg_resqueue_status WHERE rsqname = 'rq_terminate';
+0:SELECT rsqcountlimit, rsqcountvalue FROM rq_wait_status('rq_terminate', 0);
 
 --
 -- Scenario 5: Race during termination of session having a waiting portal with
@@ -94,7 +120,7 @@
 
 -- Sanity check: Ensure that the resource queue now has 1 active statement (from
 -- the external grant).
-0:SELECT rsqcountlimit, rsqcountvalue FROM pg_resqueue_status WHERE rsqname = 'rq_terminate';
+0:SELECT rsqcountlimit, rsqcountvalue FROM rq_wait_status('rq_terminate', 1);
 
 0:SELECT gp_inject_fault('res_lock_wait_cancel_before_partition_lock', 'reset', dbid) FROM
     gp_segment_configuration WHERE content = -1 AND role = 'p';
@@ -103,7 +129,7 @@
 7:END;
 
 -- Sanity check: Ensure that the resource queue is now empty.
-0:SELECT rsqcountlimit, rsqcountvalue FROM pg_resqueue_status WHERE rsqname = 'rq_terminate';
+0:SELECT rsqcountlimit, rsqcountvalue FROM rq_wait_status('rq_terminate', 0);
 
 --
 -- Scenario 6: Same as 5, except the statement being terminated is a holdable cursor.
@@ -128,7 +154,7 @@
 
 -- Sanity check: Ensure that the resource queue now has 1 active statement (from
 -- the external grant).
-0:SELECT rsqcountlimit, rsqcountvalue FROM pg_resqueue_status WHERE rsqname = 'rq_terminate';
+0:SELECT rsqcountlimit, rsqcountvalue FROM rq_wait_status('rq_terminate', 1);
 
 0:SELECT gp_inject_fault('res_lock_wait_cancel_before_partition_lock', 'reset', dbid) FROM
     gp_segment_configuration WHERE content = -1 AND role = 'p';
@@ -137,8 +163,9 @@
 9:END;
 
 -- Sanity check: Ensure that the resource queue is now empty.
-0:SELECT rsqcountlimit, rsqcountvalue FROM pg_resqueue_status WHERE rsqname = 'rq_terminate';
+0:SELECT rsqcountlimit, rsqcountvalue FROM rq_wait_status('rq_terminate', 0);
 
 -- Cleanup
+0:DROP FUNCTION rq_wait_status(text, float4);
 0:DROP ROLE role_terminate;
 0:DROP RESOURCE QUEUE rq_terminate;
