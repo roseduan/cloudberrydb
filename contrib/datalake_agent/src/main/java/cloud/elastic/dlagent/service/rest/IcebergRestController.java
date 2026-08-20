@@ -34,6 +34,7 @@ import org.apache.iceberg.ContentFile;
 import org.apache.iceberg.ManifestContent;
 import org.apache.iceberg.StatisticsFile;
 import org.apache.iceberg.exceptions.NotFoundException;
+import org.apache.iceberg.exceptions.NoSuchTableException;
 import org.apache.iceberg.io.FileIO;
 import org.apache.iceberg.io.InputFile;
 import org.apache.iceberg.io.CloseableIterable;
@@ -42,6 +43,7 @@ import cloud.elastic.dlagent.api.model.CleanupFromMetadataRequest;
 import cloud.elastic.dlagent.api.model.CleanupFromMetadataResponse;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.http.HttpStatus;
+import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
 import cloud.elastic.dlagent.api.model.RequestContext;
@@ -55,6 +57,9 @@ import java.util.ArrayList;
 import cloud.elastic.dlagent.api.utilities.ColumnDescriptor;
 import java.io.StringWriter;
 import java.io.PrintWriter;
+import java.io.ByteArrayOutputStream;
+import java.io.IOException;
+import java.io.InputStream;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import cloud.elastic.dlagent.service.rest.IcebergExceptionHandler;
@@ -266,6 +271,64 @@ public class IcebergRestController {
         return ResponseEntity.ok()
                 .header("ETag", etag)
                 .body(response);
+    }
+
+    /**
+     * Return the table's metadata.json verbatim.
+     *
+     * Separate endpoint rather than a new field on /load on purpose: /load is called on every
+     * scan (pg_iceberg_am.c), and a metadata doc can be multiple MB. Only the REST catalog
+     * gateway needs the full document, and only on loadTable.
+     */
+    @PostMapping({
+        "/{prefix}/tables/{table}/loadMetadataJson",
+        "/tables/{table}/loadMetadataJson"
+    })
+    public ResponseEntity<?> loadMetadataJson(
+            @PathVariable(value = "prefix", required = false) String prefix,
+            @PathVariable("table") String table,
+            @RequestBody Map<String, Object> request) throws Exception {
+
+        String namespace = (String) request.get("namespace");
+        if (namespace == null || namespace.isEmpty()) {
+            Map<String, Object> error = new HashMap<>();
+            error.put("message", "Namespace is required");
+            error.put("type", "BadRequestException");
+            error.put("code", 400);
+            Map<String, Object> errorResponse = new HashMap<>();
+            errorResponse.put("error", error);
+            return ResponseEntity.status(HttpStatus.BAD_REQUEST).body(errorResponse);
+        }
+
+        log.info("Loading metadata document: {}.{}", namespace, table);
+
+        Map<String, String> properties = extractProperties(request);
+        RequestContext context = createRequestContext(namespace, table, properties);
+        Table icebergTable = icebergService.loadTable(namespace, table, properties, context);
+
+        String metadataLocation =
+                ((BaseTable) icebergTable).operations().current().metadataFileLocation();
+        requireMetadataLocationPresent(metadataLocation, namespace, table);
+        byte[] doc = readMetadataBytes(icebergTable.io(), metadataLocation);
+
+        return ResponseEntity.ok()
+                .header("X-Iceberg-Metadata-Location", metadataLocation)
+                .contentType(MediaType.APPLICATION_JSON)
+                .body(doc);
+    }
+
+    /**
+     * Guard for loadMetadataJson: a table whose current metadata pointer is null/blank is,
+     * for this endpoint's purposes, indistinguishable from a table that does not exist — the
+     * caller has nothing to read. Surfaced as NoSuchTableException (not IllegalArgumentException)
+     * so it maps to the same 404 + ErrorModel shape as an actual missing table, per spec.
+     *
+     * Package-private (not private) so a unit test can drive it without going through Spring.
+     */
+    static void requireMetadataLocationPresent(String metadataLocation, String namespace, String table) {
+        if (metadataLocation == null || metadataLocation.trim().isEmpty()) {
+            throw new NoSuchTableException("No metadata location for table: %s.%s", namespace, table);
+        }
     }
 
     /**
@@ -1764,6 +1827,29 @@ public class IcebergRestController {
             log.debug("Extracted properties: {}", properties);
         }
         return properties;
+    }
+
+    /**
+     * Read a metadata.json verbatim. Deliberately NOT TableMetadataParser.read + toJson:
+     * dlagent runs iceberg 1.3.0 while the REST catalog gateway runs 1.6.1, so a round trip
+     * through this JVM's TableMetadata model would silently drop any field 1.3.0 does not
+     * model. Byte passthrough is version-agnostic.
+     *
+     * Package-private (not private) so LoadMetadataJsonTest can drive it without HTTP.
+     */
+    static byte[] readMetadataBytes(FileIO io, String metadataLocation) throws IOException {
+        if (metadataLocation == null || metadataLocation.trim().isEmpty()) {
+            throw new IllegalArgumentException("metadataLocation is required");
+        }
+        try (InputStream in = io.newInputFile(metadataLocation).newStream();
+             ByteArrayOutputStream buf = new ByteArrayOutputStream()) {
+            byte[] chunk = new byte[8192];
+            int n;
+            while ((n = in.read(chunk)) != -1) {
+                buf.write(chunk, 0, n);
+            }
+            return buf.toByteArray();
+        }
     }
 
     /**
