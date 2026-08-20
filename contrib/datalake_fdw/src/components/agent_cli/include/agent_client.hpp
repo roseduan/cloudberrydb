@@ -72,6 +72,13 @@ public:
                          const std::string& request_json,
                          const RequestConfig* request_config = nullptr);
 
+    // REST catalog gateway support (#382/#935): fetch a builtin table's
+    // metadata.json verbatim so the gateway need not hold object storage
+    // credentials of its own.
+    Response load_metadata_json(const std::string& table_name,
+                                const std::string& request_json,
+                                const RequestConfig* request_config = nullptr);
+
     Response plan_file_groups(const std::string& table_name,
                               const std::string& request_json,
                               const RequestConfig* request_config = nullptr);

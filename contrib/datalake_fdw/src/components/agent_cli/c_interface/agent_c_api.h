@@ -83,6 +83,7 @@ void agent_cli_wrapper_destroy(AgentCliHandle* handle);
 /* Table operations */
 void agent_cli_wrapper_create_table(AgentCliHandle* handle, const char* table_name, const char* json);
 void agent_cli_wrapper_load_table(AgentCliHandle* handle, const char* table_name, const char* json);
+void agent_cli_wrapper_load_metadata_json(AgentCliHandle* handle, const char* table_name, const char* json);
 void agent_cli_wrapper_table_exists(AgentCliHandle* handle, const char* table_name, const char* json);
 void agent_cli_wrapper_get_fragment(AgentCliHandle* handle, const char* table_name, const char* json);
 void agent_cli_wrapper_plan_file_groups(AgentCliHandle* handle, const char* table_name, const char* json);

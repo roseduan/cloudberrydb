@@ -184,6 +184,19 @@ RETURNS void
 AS 'MODULE_PATHNAME', 'pg_iceberg_alter_column_type_local'
 LANGUAGE C STRICT;
 
+-- Reader used by the datalake_rest_catalog gateway (via the SECURITY DEFINER wrapper
+-- pg_ext_aux.iceberg_load_metadata) to obtain a builtin table's metadata.json without
+-- holding object storage credentials of its own.  Does NO authorization itself --
+-- keep it revoked from PUBLIC.
+CREATE FUNCTION pg_catalog.pg_iceberg_load_metadata_json_local(
+    IN  relid oid,
+    OUT metadata_location text,
+    OUT metadata_json text)
+AS 'MODULE_PATHNAME', 'pg_iceberg_load_metadata_json_local'
+LANGUAGE C STRICT;
+
+REVOKE ALL ON FUNCTION pg_catalog.pg_iceberg_load_metadata_json_local(oid) FROM PUBLIC;
+
 
 -- The two iceberg catalog tables (pg_ext_aux.pg_iceberg_metadata,
 -- pg_ext_aux.pg_iceberg_deletion_queue) are no longer created here.

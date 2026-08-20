@@ -49,7 +49,8 @@ typedef enum {
 	ICEBERG_COMMIT_DELETE,    /* PRE_COMMIT delete (RowDelta + commit) */
 	ICEBERG_COMMIT_REWRITE,   /* VACUUM commit (RewriteFiles + commit) */
 	ICEBERG_TRUNCATE,         /* TRUNCATE: metadata-only delete of all rows */
-	ICEBERG_UPDATE_SCHEMA     /* ALTER TABLE: schema evolution, builtin only (#401) */
+	ICEBERG_UPDATE_SCHEMA,     /* ALTER TABLE: schema evolution, builtin only (#401) */
+	ICEBERG_LOAD_METADATA_JSON /* REST catalog gateway: fetch metadata.json verbatim (#382/#935) */
 } IcebergCatalogOperation;
 
 typedef enum {

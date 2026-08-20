@@ -402,6 +402,18 @@ executeScanOperation(IcebergCatalogFdwState *fdwState,
             agent_cli_wrapper_load_table(catalogState->agentHandle,
                                          fdwState->request.tableName, jsonString);
             break;
+        case ICEBERG_LOAD_METADATA_JSON:
+            /*
+             * Identical request shape to load_table (namespace + builtin
+             * properties carrying metadataLocation); only the endpoint
+             * differs, so reuse the load_table request builder rather than
+             * duplicating it (see createLoadTableRequestJson).
+             */
+            jsonString = createLoadTableRequestJson(fdwState, catalogState->catalogOption,
+                                                   catalogState->volumeOption, fdwState->request);
+            agent_cli_wrapper_load_metadata_json(catalogState->agentHandle,
+                                                 fdwState->request.tableName, jsonString);
+            break;
         case ICEBERG_RESTCATALOG_LISTCATALOG:
             jsonString = createListCatalogsRequestJson(fdwState, catalogState->catalogOption,
                                                       catalogState->volumeOption, fdwState->request);

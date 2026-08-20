@@ -129,6 +129,19 @@ extern IcebergLoadTableResult *pg_iceberg_load_table(const char *catalogName,
 								   const char *volumeName);
 extern void pg_iceberg_free_load_table_result(IcebergLoadTableResult *result);
 
+/*
+ * Result of fetching a builtin table's metadata.json verbatim (REST catalog
+ * gateway, #382/#935).  Both fields are palloc'd in the caller's context.
+ */
+typedef struct IcebergMetadataJsonResult
+{
+	char	   *metadata_location;
+	char	   *metadata_json;
+} IcebergMetadataJsonResult;
+
+extern IcebergMetadataJsonResult *pg_iceberg_load_metadata_json(Oid relid);
+extern void pg_iceberg_free_metadata_json_result(IcebergMetadataJsonResult *result);
+
 extern char *pg_iceberg_get_fragments(Relation relation,
 									  const char *catalogName,
 									  const char *nameSpace,

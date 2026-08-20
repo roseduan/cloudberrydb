@@ -14,6 +14,7 @@
 
 #include "postgres.h"
 
+#include "access/relation.h"
 #include "catalog/namespace.h"
 #include "catalog/pg_foreign_data_wrapper.h"
 #include "foreign/foreign.h"
@@ -34,6 +35,7 @@
 #include "include/pg_iceberg_metadata.h"
 #include "include/pg_iceberg_rewrite_plan.h"
 #include "include/pg_iceberg_deletion_queue.h"
+#include "include/pg_iceberg_am_handler.h"
 #include "utils/timestamp.h"
 
 /*
@@ -667,6 +669,120 @@ pg_iceberg_free_load_table_result(IcebergLoadTableResult *result)
 		pfree(result->location);
 	if (result->partition_spec_summary != NULL)
 		pfree(result->partition_spec_summary);
+	pfree(result);
+}
+
+/*
+ * pg_iceberg_load_metadata_json
+ *		Fetch a builtin table's metadata.json verbatim through dlagent, using
+ *		the volume's own object storage credentials.  Exists so the
+ *		datalake_rest_catalog gateway does not need object storage
+ *		credentials of its own (see pg_iceberg_metadata_reader.c).
+ *
+ *		The metadata location is NEVER taken from the caller: it is always
+ *		derived from the catalog registration for this relid.  Letting a
+ *		caller name the path would turn this into an arbitrary-fetch
+ *		primitive.
+ */
+IcebergMetadataJsonResult *
+pg_iceberg_load_metadata_json(Oid relid)
+{
+	IcebergTableInfo		   *table_info;
+	IcebergMetadataInfo		   *meta_info;
+	IcebergCatalogFdwState	   *fdwState;
+	FdwRoutine				   *fdwRoutine;
+	ForeignScanState		   *scanstate;
+	IcebergMetadataJsonResult  *result;
+	Relation					rel;
+	const char				   *nameSpace;
+	char					   *tableName;
+
+	/*
+	 * Caller MUST run this on the QD: it consults the local
+	 * pg_iceberg_metadata catalog (which is QD-only populated) via
+	 * pg_iceberg_get_metadata_info(), the same constraint documented on
+	 * pg_iceberg_list_data_fragments_json() (see pg_iceberg_am.c).  A QE has
+	 * no rows there, so fail loudly here rather than risk a wrong or empty
+	 * metadata document being returned from a segment.
+	 */
+	if (Gp_role == GP_ROLE_EXECUTE)
+		ereport(ERROR,
+				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+				 errmsg("pg_iceberg_load_metadata_json_local() must be executed on the coordinator"),
+				 errdetail("It reads the QD-only Iceberg metadata catalog and cannot run on a segment.")));
+
+	rel = relation_open(relid, AccessShareLock);
+
+	if (!is_iceberg_rel(rel))
+	{
+		relation_close(rel, AccessShareLock);
+		ereport(ERROR,
+				(errcode(ERRCODE_WRONG_OBJECT_TYPE),
+				 errmsg("relation \"%s\" is not a builtin iceberg table",
+						get_rel_name(relid))));
+	}
+
+	table_info = pg_iceberg_get_table_info(relid);
+	if (!pg_iceberg_is_builtin_catalog(table_info->catalog_server_name))
+	{
+		pg_iceberg_free_table_info(table_info);
+		relation_close(rel, AccessShareLock);
+		ereport(ERROR,
+				(errcode(ERRCODE_WRONG_OBJECT_TYPE),
+				 errmsg("relation \"%s\" is not a builtin iceberg table",
+						get_rel_name(relid))));
+	}
+
+	meta_info = pg_iceberg_get_metadata_info(relid);
+
+	nameSpace = pg_iceberg_resolve_namespace(table_info->opts ? table_info->opts->namespace : NULL,
+											 table_info->catalog_server_name,
+											 table_info->catalog_name,
+											 RelationGetNamespace(rel));
+	tableName = pstrdup(RelationGetRelationName(rel));
+
+	fdwRoutine = get_catalog_fdw_routine();
+	scanstate = makeNode(ForeignScanState);
+	fdwState = create_catalog_fdw_state(ICEBERG_LOAD_METADATA_JSON,
+										NULL,	/* builtin: no external catalog name */
+										nameSpace,
+										tableName,
+										table_info->catalog_server_name,
+										table_info->catalog_name,
+										table_info->volume_server_name,
+										table_info->volume_name,
+										NULL);
+	fdwState->request.metadataLocation = meta_info->metadata_location;
+	fdwState->request.buildInCatalog.metadataLocation = meta_info->metadata_location;
+	fdwState->request.buildInCatalog.tableExists = true;
+
+	scanstate->fdw_state = fdwState;
+	fdwRoutine->BeginForeignScan(scanstate, 0);
+	fdwRoutine->EndForeignScan(scanstate);
+	fdwState = (IcebergCatalogFdwState *) scanstate->fdw_state;
+
+	check_fdw_execution_error(fdwState, "Failed to load Iceberg metadata document");
+
+	result = (IcebergMetadataJsonResult *) palloc0(sizeof(IcebergMetadataJsonResult));
+	result->metadata_location = pstrdup(meta_info->metadata_location);
+	result->metadata_json = pstrdup(fdwState->response.responseBody);
+
+	pg_iceberg_free_metadata_info(meta_info);
+	pg_iceberg_free_table_info(table_info);
+	relation_close(rel, AccessShareLock);
+
+	return result;
+}
+
+void
+pg_iceberg_free_metadata_json_result(IcebergMetadataJsonResult *result)
+{
+	if (result == NULL)
+		return;
+	if (result->metadata_location != NULL)
+		pfree(result->metadata_location);
+	if (result->metadata_json != NULL)
+		pfree(result->metadata_json);
 	pfree(result);
 }
 

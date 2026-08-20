@@ -77,6 +77,13 @@ Response AgentClient::get_fragment(const std::string& table_name,
     return execute_request("POST", url, request_json, request_config);
 }
 
+Response AgentClient::load_metadata_json(const std::string& table_name,
+                                        const std::string& request_json,
+                                        const RequestConfig* request_config) {
+    std::string url = build_url(build_table_endpoint(table_name, "loadMetadataJson"));
+    return execute_request("POST", url, request_json, request_config);
+}
+
 Response AgentClient::plan_file_groups(const std::string& table_name,
                                        const std::string& request_json,
                                        const RequestConfig* request_config) {

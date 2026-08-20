@@ -246,6 +246,7 @@ static agent_cli_status_t func_name(agent_cli_handle_t handle, \
 /* Table operations (internal) */
 AGENT_CLI_OP_NO_TABLE(agent_cli_create_table_internal, create_table)
 AGENT_CLI_OP_WITH_TABLE(agent_cli_load_table_internal, load_table)
+AGENT_CLI_OP_WITH_TABLE(agent_cli_load_metadata_json_internal, load_metadata_json)
 AGENT_CLI_OP_WITH_TABLE(agent_cli_table_exists_internal, table_exists)
 AGENT_CLI_OP_WITH_TABLE(agent_cli_get_fragment_internal, get_fragment)
 AGENT_CLI_OP_WITH_TABLE(agent_cli_plan_file_groups_internal, plan_file_groups)
@@ -391,6 +392,7 @@ void agent_cli_wrapper_create_table(AgentCliHandle* handle, const char* table_na
 }
 
 WRAPPER_TABLE_OP(agent_cli_wrapper_load_table, agent_cli_load_table_internal)
+WRAPPER_TABLE_OP(agent_cli_wrapper_load_metadata_json, agent_cli_load_metadata_json_internal)
 WRAPPER_TABLE_OP(agent_cli_wrapper_table_exists, agent_cli_table_exists_internal)
 WRAPPER_TABLE_OP(agent_cli_wrapper_get_fragment, agent_cli_get_fragment_internal)
 WRAPPER_TABLE_OP(agent_cli_wrapper_plan_file_groups, agent_cli_plan_file_groups_internal)

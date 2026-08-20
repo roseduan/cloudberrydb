@@ -119,6 +119,7 @@ OBJS = 	src/datalake_fdw.o \
 		src/am_iceberg/pg_iceberg_metadata.o \
 		src/am_iceberg/pg_iceberg_deletion_queue.o \
 		src/am_iceberg/pg_iceberg_catalog_helper.o \
+		src/am_iceberg/pg_iceberg_metadata_reader.o \
 		src/am_iceberg/pg_iceberg_catalog_utils.o \
 		src/am_iceberg/pg_iceberg_options.o \
 		src/am_iceberg/pg_iceberg_metadata_tracker.o \
@@ -179,7 +180,7 @@ REGRESS = setup \
         orc_read parquet_read avro_read iresearch_orc_test iresearch_orc_vec_test \
         oss_read_new_text oss_read_text grammar_convert gphdfs_ignore_file gphdfs_custom \
         oss_read_new_text_limit_segment oss_read_orc_limit_segment oss_read_parquet_limit_segment oss_read_text_limit_segment \
-		iceberg_test iceberg_no_extension iceberg_am_misuse
+		iceberg_test iceberg_no_extension iceberg_am_misuse iceberg_metadata_reader
 endif
 REGRESS_OPTS += --init-file=test/init_file
 
