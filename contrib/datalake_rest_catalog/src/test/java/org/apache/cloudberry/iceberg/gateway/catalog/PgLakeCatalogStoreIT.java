@@ -7,7 +7,6 @@ import org.apache.cloudberry.iceberg.gateway.auth.RoleScopedConnection;
 import org.apache.cloudberry.iceberg.gateway.auth.RoleScopedConnection.ScopedSession;
 import java.util.Map;
 import org.apache.iceberg.TableMetadata;
-import org.apache.iceberg.aws.s3.S3FileIO;
 import org.apache.iceberg.catalog.Namespace;
 import org.apache.iceberg.catalog.TableIdentifier;
 import org.junit.jupiter.api.AfterAll;
@@ -34,7 +33,7 @@ class PgLakeCatalogStoreIT {
     private static final Namespace SALES = Namespace.of("sales");
 
     private static RoleScopedConnection pool;
-    private static final PgLakeCatalogStore STORE = new PgLakeCatalogStore(null);
+    private static final PgLakeCatalogStore STORE = new PgLakeCatalogStore();
 
     @BeforeAll
     static void setUp() {
@@ -48,22 +47,10 @@ class PgLakeCatalogStoreIT {
     @AfterAll
     static void tearDown() { if (pool != null) pool.close(); }
 
-    private static S3FileIO minioIO() {
-        S3FileIO io = new S3FileIO();
-        io.initialize(Map.of(
-                "s3.endpoint", "http://localhost:9000",
-                "s3.access-key-id", "minioadmin",
-                "s3.secret-access-key", "minioadmin",
-                "s3.path-style-access", "true",
-                "client.region", "us-east-1"));
-        return io;
-    }
-
     @Test
     void loadTableReadsRealMetadataJson() throws Exception {
-        PgLakeCatalogStore store = new PgLakeCatalogStore(minioIO());
         try (ScopedSession s = pool.openAsAuthenticator()) {
-            TableMetadata md = store.loadTableMetadata(s.connection(), "iceberg_reader", ORDERS);
+            TableMetadata md = STORE.loadTableMetadata(s.connection(), "iceberg_reader", ORDERS);
             assertThat(md.location()).isNotBlank();
             assertThat(md.schema().findField("id")).isNotNull();
             assertThat(md.schema().findField("name")).isNotNull();

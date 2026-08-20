@@ -17,8 +17,8 @@ import java.nio.charset.StandardCharsets;
 import java.util.EnumSet;
 import java.util.Map;
 import javax.servlet.DispatcherType;
-import org.apache.iceberg.aws.s3.S3FileIO;
 import org.apache.iceberg.catalog.Catalog;
+import org.apache.cloudberry.iceberg.gateway.catalog.NoStorageFileIO;
 import org.apache.iceberg.io.FileIO;
 import org.apache.iceberg.rest.RESTCatalogAdapter;
 import org.apache.iceberg.rest.RESTCatalogServlet;
@@ -229,18 +229,11 @@ public final class GatewayServer {
         PgCredentialVerifier verifier = new PgCredentialVerifier(config);
         JwtService jwt = new JwtService(config);
 
-        String s3Endpoint = config.get("s3.endpoint", "http://localhost:9000");
-        Map<String, String> s3Props = Map.of(
-                "s3.endpoint", s3Endpoint,
-                "s3.access-key-id", config.get("s3.access-key-id", ""),
-                "s3.secret-access-key", config.get("s3.secret-access-key", ""),
-                "s3.path-style-access", config.get("s3.path-style-access", "true"),
-                "client.region", config.get("s3.region", "us-east-1"));
-
-        S3FileIO s3 = new S3FileIO();
-        s3.initialize(s3Props);
-        FileIO sharedIO = s3;
-        CatalogStore store = new PgLakeCatalogStore(s3);
+        // No object storage credentials here by design: metadata.json arrives through the
+        // database (pg_ext_aux.iceberg_load_metadata) and data files are read by the client
+        // against its own credentials. TableOperations.io() still has to return something.
+        FileIO sharedIO = new NoStorageFileIO();
+        CatalogStore store = new PgLakeCatalogStore();
 
         // Production resolver: bind each request to a PG-role-scoped read-only catalog.
         CatalogResolver resolver = pgRole ->

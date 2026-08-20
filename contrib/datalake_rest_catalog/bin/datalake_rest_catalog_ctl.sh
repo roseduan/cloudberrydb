@@ -2,8 +2,10 @@
 # Managed start/stop/status for the datalake_rest_catalog REST gateway.
 # Runs the installed uber-jar under JDK11+ (the jar targets release 11, so any
 # JDK >= 11 works). Point DRC_JAVA_HOME at a JDK>=11 (default /opt/jdk17).
-# Non-secret config comes from the jar's bundled gateway.properties; secrets
-# (S3 creds) are sourced from an env file (see deploy/datalake_rest_catalog.env.example).
+# Non-secret config comes from the jar's bundled gateway.properties; any secrets
+# (e.g. PG_PASSWORD, JWT_SECRET) are sourced from an optional env file (see
+# deploy/datalake_rest_catalog.env.example). The gateway needs no object storage
+# credentials at all: metadata.json is read through the database.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -55,14 +57,14 @@ start() {
   if [ -z "${major:-}" ] || [ "$major" -lt 11 ] 2>/dev/null; then
     echo "ERROR: Java >= 11 required, but $JAVA is: $ver_line"; exit 1
   fi
-  # shellcheck disable=SC1090
-  [ -f "$ENV_FILE" ] && . "$ENV_FILE"
-  if [ -z "${S3_ACCESS_KEY_ID:-}" ] || [ -z "${S3_SECRET_ACCESS_KEY:-}" ]; then
-    echo "ERROR: S3_ACCESS_KEY_ID / S3_SECRET_ACCESS_KEY not set."
-    echo "       Create $ENV_FILE from deploy/datalake_rest_catalog.env.example."
-    exit 1
+  # The env file is optional now that the gateway holds no object storage credentials.
+  # Written as an if-block, not `[ -f x ] && . x`: under `set -e` that AND-list returns
+  # non-zero when the file is absent and kills the script before it ever starts the jar --
+  # which is exactly the credential-free deployment this change is meant to enable.
+  if [ -f "$ENV_FILE" ]; then
+    # shellcheck disable=SC1090
+    . "$ENV_FILE"
   fi
-  export S3_ACCESS_KEY_ID S3_SECRET_ACCESS_KEY
   local jar; jar="$(resolve_jar)"
   [ -n "$jar" ] || { echo "ERROR: jar not found; run 'make install' or set DRC_JAR"; exit 1; }
   local scheme="http"; local checkport="$SERVER_PORT"

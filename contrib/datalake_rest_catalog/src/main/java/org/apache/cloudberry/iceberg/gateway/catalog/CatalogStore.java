@@ -15,7 +15,10 @@ import org.apache.iceberg.catalog.TableIdentifier;
  * SECURITY DEFINER {@code pg_ext_aux.iceberg_visible_tables(p_role)} accessor so RBAC filtering
  * happens inside the database, keyed off the trusted caller-supplied role rather than
  * {@code current_user} (which would be the function owner). Implemented by
- * {@code PgLakeCatalogStore}, which reads the real pg_lake_table catalog.
+ * {@code PgLakeCatalogStore}, which reads the real pg_lake_table catalog. Since Task 4,
+ * {@code loadTableMetadata} reads the {@code metadata.json} document through
+ * {@code pg_ext_aux.iceberg_load_metadata} instead of a still-stubbed system-table reader that
+ * fetched only a pointer and left this process to read object storage itself.
  */
 public interface CatalogStore {
     List<Namespace> listNamespaces(Connection c, String pgRole);

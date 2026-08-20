@@ -11,7 +11,6 @@ import org.apache.iceberg.TableMetadataParser;
 import org.apache.iceberg.catalog.Namespace;
 import org.apache.iceberg.catalog.TableIdentifier;
 import org.apache.iceberg.exceptions.NoSuchTableException;
-import org.apache.iceberg.io.FileIO;
 
 /**
  * CatalogStore backed by the real builtin iceberg catalog: pg_lake_table + pg_ext_aux.pg_iceberg_metadata.
@@ -26,13 +25,16 @@ import org.apache.iceberg.io.FileIO;
  * JWT-authenticated end-user role — is bound as the function's {@code p_role} argument instead,
  * and the function does the {@code has_schema_privilege}/{@code has_table_privilege} filtering
  * server-side under its owner's elevated read access to {@code pg_ext_aux}.
+ *
+ * <p>Since Task 4 (issue #382 / #935, "kernel-side metadata load") this class does no object
+ * storage IO of its own: {@link #loadTableMetadata} reads the {@code metadata.json} document
+ * through {@code pg_ext_aux.iceberg_load_metadata}, which the database fetches using the
+ * volume's own credentials. There is no {@code FileIO} field here any more -- that absence is
+ * the point.
  */
 public final class PgLakeCatalogStore implements CatalogStore {
 
-    private final FileIO fileIO;   // used by loadTableMetadata (Task 4); null OK for browse-only.
-
-    public PgLakeCatalogStore(FileIO fileIO) {
-        this.fileIO = fileIO;
+    public PgLakeCatalogStore() {
     }
 
     @Override
@@ -97,26 +99,27 @@ public final class PgLakeCatalogStore implements CatalogStore {
 
     @Override
     public TableMetadata loadTableMetadata(Connection c, String pgRole, TableIdentifier id) {
-        String loc = queryMetadataLocation(c, pgRole, id);
-        if (loc == null) throw new NoSuchTableException("Table does not exist: %s", id);
-        String s3 = loc.replaceFirst("^s3a://", "s3://");
-        return TableMetadataParser.read(fileIO, s3);
-    }
-
-    private String queryMetadataLocation(Connection c, String pgRole, TableIdentifier id) {
-        // Sourced from the same authz-gated function as canSelect: a row is only returned when
-        // p_role has both USAGE on the namespace and SELECT on the table, so a non-null result
-        // here already implies canSelect() would be true.
-        String sql = "SELECT metadata_location FROM pg_ext_aux.iceberg_visible_tables(?) "
-                   + "WHERE nspname = ? AND relname = ?";
+        // One call, one document. The database reads metadata.json with the volume's own
+        // credentials, so this process needs no object storage access at all -- see the
+        // "kernel-side metadata load" design note. The location comes back alongside the
+        // document because TableMetadata carries it and clients compare it.
+        String sql = "SELECT metadata_location, metadata_json "
+                   + "FROM pg_ext_aux.iceberg_load_metadata(?, ?, ?)";
         try (PreparedStatement ps = c.prepareStatement(sql)) {
             ps.setString(1, pgRole);
             ps.setString(2, single(id.namespace()));
             ps.setString(3, id.name());
             try (ResultSet rs = ps.executeQuery()) {
-                return rs.next() ? rs.getString(1) : null;
+                // Zero rows covers both "no such table" and "no SELECT privilege": the
+                // accessor is anti-enumeration by contract, and so is this 404.
+                if (!rs.next()) {
+                    throw new NoSuchTableException("Table does not exist: %s", id);
+                }
+                return TableMetadataParser.fromJson(rs.getString(1), rs.getString(2));
             }
-        } catch (SQLException e) { throw new RuntimeException("queryMetadataLocation failed", e); }
+        } catch (SQLException e) {
+            throw new RuntimeException("loadTableMetadata failed", e);
+        }
     }
 
     private static String single(Namespace ns) {

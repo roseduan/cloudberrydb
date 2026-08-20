@@ -17,20 +17,12 @@
     <jetty.version>9.4.57.v20241219</jetty.version>
     <jackson.version>2.17.2</jackson.version>
     <jjwt.version>0.12.6</jjwt.version>
-    <awssdk.version>2.27.21</awssdk.version>
     <slf4j.version>2.0.16</slf4j.version>
     <mainClass>org.apache.cloudberry.iceberg.gateway.rest.GatewayServer</mainClass>
   </properties>
 
   <dependencyManagement>
     <dependencies>
-      <dependency>
-        <groupId>software.amazon.awssdk</groupId>
-        <artifactId>bom</artifactId>
-        <version>${awssdk.version}</version>
-        <type>pom</type>
-        <scope>import</scope>
-      </dependency>
       <dependency>
         <groupId>org.junit</groupId>
         <artifactId>junit-bom</artifactId>
@@ -42,16 +34,12 @@
   </dependencyManagement>
 
   <dependencies>
-    <!-- Iceberg core + REST server fixtures -->
+    <!-- Iceberg core + REST server fixtures. No iceberg-aws / awssdk here on purpose: the
+         gateway reads no object storage (metadata.json comes from the database), so it must
+         not carry an S3 client or the credential surface that comes with one. -->
     <dependency><groupId>org.apache.iceberg</groupId><artifactId>iceberg-api</artifactId><version>${iceberg.version}</version></dependency>
     <dependency><groupId>org.apache.iceberg</groupId><artifactId>iceberg-core</artifactId><version>${iceberg.version}</version></dependency>
     <dependency><groupId>org.apache.iceberg</groupId><artifactId>iceberg-core</artifactId><version>${iceberg.version}</version><classifier>tests</classifier></dependency>
-    <dependency><groupId>org.apache.iceberg</groupId><artifactId>iceberg-aws</artifactId><version>${iceberg.version}</version></dependency>
-    <dependency><groupId>software.amazon.awssdk</groupId><artifactId>s3</artifactId></dependency>
-    <!-- Required at S3FileIO.initialize() runtime: iceberg-aws's AwsProperties constructor
-         unconditionally touches software.amazon.awssdk.services.sts.model.Tag even when no
-         credential vending / AssumeRole is used by this gateway. Do not remove. -->
-    <dependency><groupId>software.amazon.awssdk</groupId><artifactId>sts</artifactId></dependency>
 
     <!-- HTTP server (Jetty 9 / javax.servlet — required by iceberg RESTCatalogServlet) -->
     <dependency><groupId>org.eclipse.jetty</groupId><artifactId>jetty-server</artifactId><version>${jetty.version}</version></dependency>
@@ -80,6 +68,7 @@
     <!-- Test -->
     <dependency><groupId>org.junit.jupiter</groupId><artifactId>junit-jupiter</artifactId><scope>test</scope></dependency>
     <dependency><groupId>org.assertj</groupId><artifactId>assertj-core</artifactId><version>3.26.3</version><scope>test</scope></dependency>
+    <dependency><groupId>org.mockito</groupId><artifactId>mockito-core</artifactId><version>5.14.1</version><scope>test</scope></dependency>
   </dependencies>
 
   <!-- Resolve dependencies from the internal Nexus mirror (same as contrib/datalake_agent).
