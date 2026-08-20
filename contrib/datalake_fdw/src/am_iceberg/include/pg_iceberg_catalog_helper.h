@@ -130,17 +130,21 @@ extern IcebergLoadTableResult *pg_iceberg_load_table(const char *catalogName,
 extern void pg_iceberg_free_load_table_result(IcebergLoadTableResult *result);
 
 /*
- * Result of fetching a builtin table's metadata.json verbatim (REST catalog
- * gateway, #382/#935).  Both fields are palloc'd in the caller's context.
+ * Upper bound on a metadata.json fetched through the coordinator (REST catalog
+ * gateway, #382/#935).  The document does not grow with row count, only with
+ * snapshot/schema history, so anything past this is a runaway history rather
+ * than a large table -- and it is buffered whole on the way out, so it must be
+ * bounded rather than left to exhaust coordinator memory.
  */
-typedef struct IcebergMetadataJsonResult
-{
-	char	   *metadata_location;
-	char	   *metadata_json;
-} IcebergMetadataJsonResult;
+#define ICEBERG_METADATA_JSON_MAX_BYTES (16 * 1024 * 1024)
 
-extern IcebergMetadataJsonResult *pg_iceberg_load_metadata_json(Oid relid);
-extern void pg_iceberg_free_metadata_json_result(IcebergMetadataJsonResult *result);
+/*
+ * Fetch a builtin table's metadata.json verbatim (REST catalog gateway,
+ * #382/#935).  Both out parameters are palloc'd in the caller's context.
+ */
+extern void pg_iceberg_load_metadata_json(Oid relid,
+										  char **metadata_location,
+										  char **metadata_json);
 
 extern char *pg_iceberg_get_fragments(Relation relation,
 									  const char *catalogName,

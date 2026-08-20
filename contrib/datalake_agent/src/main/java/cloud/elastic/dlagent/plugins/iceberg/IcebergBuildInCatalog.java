@@ -141,6 +141,11 @@ public class IcebergBuildInCatalog implements IcebergCatalog {
     }
 
     @Override
+    public org.apache.iceberg.io.FileIO io() {
+        return buildInCatalog.io();
+    }
+
+    @Override
     public Table loadTable(TableIdentifier tableId, String tableLocation,
                            Map<String, String> properties) throws Exception {
         Preconditions.checkState(tableId != null);

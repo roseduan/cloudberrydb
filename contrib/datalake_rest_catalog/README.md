@@ -16,6 +16,16 @@ Creates the SECURITY DEFINER accessors the gateway reads through, including
 metadata.json document gated by the same predicate as `iceberg_visible_tables`. Without it the
 gateway can authenticate but every `loadTable` returns 404.
 
+Both accessors filter to **builtin-catalog** tables. An iceberg table registered against an
+external Polaris/Hive catalog is not served here, and is not listed either — the two accessors
+share one predicate so `listTables` can never advertise a table whose `loadTable` would fail.
+
+This script depends on `pg_catalog.pg_iceberg_load_metadata_json()`, which ships in
+`datalake_fdw`. Note that `datalake_fdw` has no extension upgrade script, so after a binary
+upgrade an already-installed extension must be re-created before this script will apply — it
+fails at `CREATE FUNCTION` time with `function ... does not exist` if you skip that, rather than
+at runtime.
+
 ## Run (standalone)
     java -jar target/datalake-rest-catalog-1.0.0.jar   # HTTPS :8443 by default, HTTP :8181 if disabled
 
@@ -23,6 +33,12 @@ gateway can authenticate but every `loadTable` returns 404.
 and data files are read by the client with its own credentials, so there is no `S3_ENDPOINT` /
 `S3_ACCESS_KEY_ID` / `S3_SECRET_ACCESS_KEY` to set — those config keys no longer exist. What it
 does need is the authenticator's database password (`PG_AUTHENTICATOR_PASSWORD`).
+
+Documents are cached in-process by metadata location (`catalog.metadataCache.*` in
+gateway.properties). Safe by construction: an Iceberg commit writes a new metadata file rather
+than rewriting one, so a location maps to one immutable document and a commit invalidates the
+cache by simply not matching it. The per-role visibility lookup still runs on every request, so
+nothing about authorization is cached.
 
 Config: `src/main/resources/gateway.properties` (env-overridable). See design spec in
 `postgres-iceberg-restful/docs/superpowers/specs/2026-07-05-migrate-into-datalake-contrib-design.md`.

@@ -46,7 +46,7 @@ out=$(PGPASSWORD="${DRC_READER_PW:-reader_pw}" psql -h 127.0.0.1 -p "${DRC_PGPOR
       -Atc "SELECT count(*) FROM pg_ext_aux.pg_iceberg_metadata" 2>&1)
 case "$out" in *"permission denied"*) echo "  OK: denied" ;; *) echo "  FAIL: $out"; fail=1 ;; esac
 
-# [3]-[7] Task 3: pg_ext_aux.iceberg_load_metadata SECURITY DEFINER gate.
+# [3]-[8] Task 3: pg_ext_aux.iceberg_load_metadata SECURITY DEFINER gate.
 #
 # These use SET ROLE from a gpadmin unix-socket session rather than a TCP login as the
 # target role. pg_hba.conf has no TCP entries for iceberg_authenticator's callees under
@@ -64,9 +64,9 @@ out=$(psql -X -p "$PGP" -d postgres -Atc \
       "SET ROLE no_access; SELECT * FROM pg_ext_aux.iceberg_load_metadata('no_access','sales','orders');" 2>&1)
 case "$out" in *"permission denied"*) echo "  OK: denied" ;; *) echo "  FAIL: $out"; fail=1 ;; esac
 
-echo "[4] iceberg_load_metadata: underlying reader pg_iceberg_load_metadata_json_local must stay revoked from PUBLIC"
+echo "[4] iceberg_load_metadata: underlying reader pg_iceberg_load_metadata_json must stay revoked from PUBLIC"
 out=$(psql -X -p "$PGP" -d postgres -Atc \
-      "SET ROLE no_access; SELECT * FROM pg_catalog.pg_iceberg_load_metadata_json_local(0);" 2>&1)
+      "SET ROLE no_access; SELECT * FROM pg_catalog.pg_iceberg_load_metadata_json(0);" 2>&1)
 case "$out" in *"permission denied"*) echo "  OK: denied" ;; *) echo "  FAIL: $out"; fail=1 ;; esac
 
 echo "[5] iceberg_load_metadata: iceberg_authenticator on behalf of iceberg_reader must return the seeded table's metadata"
@@ -83,6 +83,17 @@ echo "[7] iceberg_load_metadata: iceberg_reader itself must not have EXECUTE (no
 out=$(psql -X -p "$PGP" -d postgres -Atc \
       "SET ROLE iceberg_reader; SELECT * FROM pg_ext_aux.iceberg_load_metadata('iceberg_reader','sales','orders');" 2>&1)
 case "$out" in *"permission denied"*) echo "  OK: denied" ;; *) echo "  FAIL: $out"; fail=1 ;; esac
+
+# [8] The two accessors must agree on which tables exist. iceberg_visible_tables filters to
+# builtin-catalog tables and pg_iceberg_load_metadata() rejects everything else, so every row
+# the first one lists must be readable by the second. If they ever drift, listTables advertises
+# a table whose loadTable 500s -- which is exactly what this assertion is here to catch.
+echo "[8] iceberg_load_metadata: every table iceberg_visible_tables lists must be loadable"
+out=$(psql -X -p "$PGP" -d postgres -Atc \
+      "SET ROLE iceberg_authenticator;
+       SELECT count(*) FROM pg_ext_aux.iceberg_visible_tables('iceberg_reader') v
+       WHERE NOT EXISTS (SELECT 1 FROM pg_ext_aux.iceberg_load_metadata('iceberg_reader', v.nspname, v.relname));" 2>&1)
+case "$out" in 0) echo "  OK: list and load agree" ;; *) echo "  FAIL: $out"; fail=1 ;; esac
 
 [ "$fail" -eq 0 ] && echo "ALL BYPASS CHECKS PASSED" || echo "BYPASS DETECTED"
 exit "$fail"

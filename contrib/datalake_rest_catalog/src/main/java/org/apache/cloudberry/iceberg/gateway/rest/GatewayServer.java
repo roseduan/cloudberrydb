@@ -15,7 +15,6 @@ import java.io.File;
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.util.EnumSet;
-import java.util.Map;
 import javax.servlet.DispatcherType;
 import org.apache.iceberg.catalog.Catalog;
 import org.apache.cloudberry.iceberg.gateway.catalog.NoStorageFileIO;
@@ -233,7 +232,9 @@ public final class GatewayServer {
         // database (pg_ext_aux.iceberg_load_metadata) and data files are read by the client
         // against its own credentials. TableOperations.io() still has to return something.
         FileIO sharedIO = new NoStorageFileIO();
-        CatalogStore store = new PgLakeCatalogStore();
+        CatalogStore store = new PgLakeCatalogStore(
+                Integer.parseInt(config.get("catalog.metadataCache.maxEntries", "128")),
+                Integer.parseInt(config.get("catalog.metadataCache.maxDocBytes", "1048576")));
 
         // Production resolver: bind each request to a PG-role-scoped read-only catalog.
         CatalogResolver resolver = pgRole ->

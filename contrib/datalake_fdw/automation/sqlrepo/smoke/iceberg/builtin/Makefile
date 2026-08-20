@@ -17,7 +17,8 @@ REGRESS = iceberg_buildin iceberg_buildin_statistics iceberg_buildin_vacuum iceb
           iceberg_drop_schema_cleanup \
           iceberg_truncate_cleanup iceberg_vacuum_cleanup \
           iceberg_txn_rollback_cleanup \
-          iceberg_buildin_flat_location
+          iceberg_buildin_flat_location \
+          iceberg_metadata_reader
 
 installcheck:
 	$(pg_regress_installcheck) $(REGRESS)

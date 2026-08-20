@@ -27,6 +27,14 @@ public interface IcebergService {
     Table loadTable(String namespace, String tableName, Map<String, String> properties, RequestContext context) throws Exception;
 
     /**
+     * Return the table's current metadata.json bytes verbatim, with exactly ONE object
+     * storage read. Not loadTable + read: a table load already GETs the document in order
+     * to build TableMetadata, so going through it would fetch the same object twice.
+     */
+    byte[] loadMetadataJson(String namespace, String tableName, Map<String, String> properties,
+            RequestContext context) throws Exception;
+
+    /**
      * Create a new table.
      *
      * @param spec partition spec built against {@code schema}; null means

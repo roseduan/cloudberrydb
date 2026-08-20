@@ -8,6 +8,12 @@
  * be a complete TableMetadata document, and the database already holds the
  * volume credentials needed to fetch it.
  *
+ * COORDINATOR ONLY: it reads the QD-only pg_iceberg_metadata catalog.  The SQL
+ * declaration carries EXECUTE ON COORDINATOR and the C reader re-checks
+ * Gp_role; note the deliberate absence of a "_local" suffix, which in this
+ * extension means the opposite thing (the segment-local half of an operation
+ * the QD dispatches -- see pg_iceberg_upsert_location_option_local).
+ *
  * SECURITY: this function performs NO authorization of its own.  It is
  * registered in pg_catalog and must stay revoked from PUBLIC; the only
  * intended caller is the SECURITY DEFINER wrapper
@@ -25,17 +31,18 @@
 
 #include "include/pg_iceberg_catalog_helper.h"
 
-PG_FUNCTION_INFO_V1(pg_iceberg_load_metadata_json_local);
+PG_FUNCTION_INFO_V1(pg_iceberg_load_metadata_json_sql);
 
 Datum
-pg_iceberg_load_metadata_json_local(PG_FUNCTION_ARGS)
+pg_iceberg_load_metadata_json_sql(PG_FUNCTION_ARGS)
 {
-	Oid							relid = PG_GETARG_OID(0);
-	IcebergMetadataJsonResult  *res;
-	TupleDesc					tupdesc;
-	Datum						values[2];
-	bool						nulls[2] = {false, false};
-	HeapTuple					tuple;
+	Oid			relid = PG_GETARG_OID(0);
+	char	   *metadata_location;
+	char	   *metadata_json;
+	TupleDesc	tupdesc;
+	Datum		values[2];
+	bool		nulls[2] = {false, false};
+	HeapTuple	tuple;
 
 	if (get_call_result_type(fcinfo, NULL, &tupdesc) != TYPEFUNC_COMPOSITE)
 		ereport(ERROR,
@@ -44,14 +51,15 @@ pg_iceberg_load_metadata_json_local(PG_FUNCTION_ARGS)
 						"that cannot accept type record")));
 	BlessTupleDesc(tupdesc);
 
-	res = pg_iceberg_load_metadata_json(relid);
+	pg_iceberg_load_metadata_json(relid, &metadata_location, &metadata_json);
 
-	values[0] = CStringGetTextDatum(res->metadata_location);
-	values[1] = CStringGetTextDatum(res->metadata_json);
+	values[0] = CStringGetTextDatum(metadata_location);
+	values[1] = CStringGetTextDatum(metadata_json);
 
 	tuple = heap_form_tuple(tupdesc, values, nulls);
 
-	pg_iceberg_free_metadata_json_result(res);
+	pfree(metadata_location);
+	pfree(metadata_json);
 
 	PG_RETURN_DATUM(HeapTupleGetDatum(tuple));
 }

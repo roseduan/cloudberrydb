@@ -33,9 +33,10 @@ import org.junit.jupiter.api.Test;
  * passes, the path really is IO-free, and if it ever stops being IO-free the stack trace names the
  * exact caller.
  *
- * <p>The path driven here is the production one: PgIcebergCatalog.loadTable ->
+ * <p>The path driven here is the production one throughout: PgIcebergCatalog.loadTable ->
  * CatalogHandlers.loadTable (what RESTCatalogAdapter itself calls) -> JSON serialization with the
- * REST serializers.
+ * REST serializers -- and the FileIO under test is the production {@link NoStorageFileIO}, not a
+ * test-only twin of it. Injecting a twin would have proved only that the twin is unreachable.
  */
 class NoObjectStorageIoTest {
 
@@ -85,7 +86,7 @@ class NoObjectStorageIoTest {
 
     @Test
     void loadTablePerformsNoObjectStorageIo() throws Exception {
-        PgIcebergCatalog catalog = catalogWith(new ThrowingFileIO());
+        PgIcebergCatalog catalog = catalogWith(new NoStorageFileIO());
         TableIdentifier id = TableIdentifier.of(Namespace.of("db"), "t");
 
         // Exactly what RESTCatalogAdapter does for GET /v1/namespaces/{ns}/tables/{table}.
@@ -109,10 +110,10 @@ class NoObjectStorageIoTest {
     @Test
     void theTableStillExposesTheInjectedIo() throws Exception {
         // Guards against the proof above going vacuous: if some refactor stopped threading the
-        // FileIO through to the table, ThrowingFileIO would never be reachable and the IO-free
+        // FileIO through to the table, NoStorageFileIO would never be reachable and the IO-free
         // assertion would pass for the wrong reason.
-        PgIcebergCatalog catalog = catalogWith(new ThrowingFileIO());
+        PgIcebergCatalog catalog = catalogWith(new NoStorageFileIO());
         Table table = catalog.loadTable(TableIdentifier.of(Namespace.of("db"), "t"));
-        assertThat(((BaseTable) table).io()).isInstanceOf(ThrowingFileIO.class);
+        assertThat(((BaseTable) table).io()).isInstanceOf(NoStorageFileIO.class);
     }
 }

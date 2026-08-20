@@ -45,6 +45,17 @@ public interface IcebergCatalog {
     Table loadTable(String tableName) throws Exception;
 
     /**
+     * The catalog's FileIO, obtained WITHOUT loading a table (and therefore without the
+     * metadata.json GET that a table load implies). Only implemented where a catalog-wide
+     * FileIO exists and a caller needs raw storage access -- see the loadMetadataJson
+     * endpoint, which reads one known object and needs no table state.
+     */
+    default org.apache.iceberg.io.FileIO io() {
+        throw new UnsupportedOperationException(
+                getClass().getSimpleName() + " does not expose a catalog-wide FileIO");
+    }
+
+    /**
      * Loads a native Iceberg table based on 'tableId' or 'tableLocation'.
      * @param tableId is the Iceberg table identifier to load the table via the catalog
      *     interface, e.g. HadoopCatalog.

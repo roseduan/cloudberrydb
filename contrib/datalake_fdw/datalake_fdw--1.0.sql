@@ -188,14 +188,20 @@ LANGUAGE C STRICT;
 -- pg_ext_aux.iceberg_load_metadata) to obtain a builtin table's metadata.json without
 -- holding object storage credentials of its own.  Does NO authorization itself --
 -- keep it revoked from PUBLIC.
-CREATE FUNCTION pg_catalog.pg_iceberg_load_metadata_json_local(
+--
+-- NOTE the absence of a "_local" suffix.  In this extension "_local" means the
+-- segment-local half of an operation the QD dispatches (see the two helpers above);
+-- this function is the opposite -- coordinator only, because it reads the QD-only
+-- pg_iceberg_metadata catalog.  EXECUTE ON COORDINATOR states that in the declaration
+-- instead of leaving it to a runtime ereport (which the C code still has, as a backstop).
+CREATE FUNCTION pg_catalog.pg_iceberg_load_metadata_json(
     IN  relid oid,
     OUT metadata_location text,
     OUT metadata_json text)
-AS 'MODULE_PATHNAME', 'pg_iceberg_load_metadata_json_local'
-LANGUAGE C STRICT;
+AS 'MODULE_PATHNAME', 'pg_iceberg_load_metadata_json_sql'
+LANGUAGE C STRICT EXECUTE ON COORDINATOR;
 
-REVOKE ALL ON FUNCTION pg_catalog.pg_iceberg_load_metadata_json_local(oid) FROM PUBLIC;
+REVOKE ALL ON FUNCTION pg_catalog.pg_iceberg_load_metadata_json(oid) FROM PUBLIC;
 
 
 -- The two iceberg catalog tables (pg_ext_aux.pg_iceberg_metadata,

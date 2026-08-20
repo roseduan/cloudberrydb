@@ -189,6 +189,18 @@ public class DlIcebergBuildInCatalog extends BaseMetastoreCatalog implements Sup
         return tableIdentifier.namespace().levels().length == 1;
     }
 
+    /**
+     * The catalog's FileIO, without loading any table.
+     *
+     * <p>newTableOps(id).io() returns exactly this object, but constructing TableOperations
+     * only to read io() invites someone to call refresh() on it -- which costs one
+     * metadata.json GET. Callers that need storage access but not table state (the
+     * loadMetadataJson endpoint) should use this instead.
+     */
+    public FileIO io() {
+        return fileIO;
+    }
+
     @Override
     public TableOperations newTableOps(TableIdentifier tableIdentifier) {
       String dbName = tableIdentifier.namespace().level(0);

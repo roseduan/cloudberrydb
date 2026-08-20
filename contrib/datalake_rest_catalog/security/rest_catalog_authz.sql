@@ -30,7 +30,29 @@ AS $$
   JOIN pg_class c     ON c.oid = lt.ltrelid
   JOIN pg_namespace n ON n.oid = c.relnamespace
   LEFT JOIN pg_ext_aux.pg_iceberg_metadata im ON im.relid = lt.ltrelid
+  -- Catalog server behind this table, so the builtin test below can be applied.
+  JOIN pg_foreign_catalog fc ON fc.oid = lt.ltforeign_catalog
+  JOIN pg_foreign_server  fs ON fs.oid = fc.fcserver
   WHERE lt.lttable_type = 'ICEBERG' AND im.is_internal = true
+    -- is_internal means "no `table` option", i.e. the table was created by us rather
+    -- than registered over an existing one.  It does NOT mean "on the builtin catalog":
+    -- CREATE ICEBERG TABLE against a Polaris/Hive catalog server yields is_internal =
+    -- true with an external catalog (pg_iceberg_catalog.c, the *is_internal = true
+    -- branch, refreshes the location from that external catalog).  This gateway serves
+    -- builtin tables only, and pg_iceberg_load_metadata() rejects anything else, so
+    -- without this predicate such a table would be listed by listTables and then fail
+    -- on loadTable.  Mirrors C's pg_iceberg_is_builtin_catalog(): prefer the legacy
+    -- "server_type" key, fall back to the standard "type" key, and treat a server with
+    -- no options at all as builtin.
+    AND (
+      lower(coalesce(
+        (SELECT option_value FROM pg_options_to_table(fs.srvoptions)
+          WHERE option_name = 'server_type'),
+        (SELECT option_value FROM pg_options_to_table(fs.srvoptions)
+          WHERE option_name = 'type')
+      )) = 'builtin'
+      OR fs.srvoptions IS NULL
+    )
     AND has_schema_privilege(p_role, n.oid, 'USAGE')
     AND has_table_privilege(p_role, c.oid, 'SELECT')
     -- Review item I-2 (defense-in-depth): has_*_privilege() is unconditionally TRUE for a
@@ -60,14 +82,16 @@ REVOKE ALL ON FUNCTION pg_ext_aux.iceberg_visible_tables(name) FROM PUBLIC;
 --
 -- Authorization notes:
 --   * The relid is resolved THROUGH iceberg_visible_tables(p_role), so a caller can only
---     ever reach a table that p_role holds SELECT on.  No path or oid is accepted.
+--     ever reach a table that p_role holds SELECT on.  No path or oid is accepted.  That
+--     accessor also filters to builtin-catalog tables, which is what keeps listTables and
+--     loadTable agreeing: anything it lists, the reader below can actually read.
 --   * Zero rows on "no permission" AND on "no such table" -- same anti-enumeration
 --     contract as iceberg_visible_tables; the gateway maps both to 404.
 --   * search_path is pinned for the same privilege-escalation reason documented above.
 --
 -- Performance/correctness note: the (p_nspname, p_relname) filter is applied INSIDE the
 -- subquery that drives the LATERAL join, not in an outer WHERE after the join. The
--- underlying reader, pg_iceberg_load_metadata_json_local(), is a LANGUAGE C function
+-- underlying reader, pg_iceberg_load_metadata_json(), is a LANGUAGE C function
 -- (default VOLATILE) that does a real dlagent HTTP round trip plus an object-storage GET
 -- per call -- there is no guarantee the planner would push a same-level WHERE predicate
 -- down before evaluating a LATERAL function for every row of iceberg_visible_tables(p_role).
@@ -94,7 +118,7 @@ AS $$
     WHERE v.nspname = p_nspname AND v.relname = p_relname
     LIMIT 1
   ) t
-  CROSS JOIN LATERAL pg_catalog.pg_iceberg_load_metadata_json_local(t.relid) r
+  CROSS JOIN LATERAL pg_catalog.pg_iceberg_load_metadata_json(t.relid) r
 $$;
 
 REVOKE ALL ON FUNCTION pg_ext_aux.iceberg_load_metadata(name, name, name) FROM PUBLIC;

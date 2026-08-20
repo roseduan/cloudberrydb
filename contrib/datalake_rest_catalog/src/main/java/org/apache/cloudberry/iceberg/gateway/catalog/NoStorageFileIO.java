@@ -10,9 +10,9 @@ import org.apache.iceberg.io.OutputFile;
  * directly. TableOperations.io() must still return something, so return an implementation
  * that fails with a clear message rather than a half-configured S3 client.
  *
- * <p>NoObjectStorageIoTest drives the whole loadTable + serialization path with the test-side
- * twin of this class and asserts nothing throws, so reaching any method here means a genuinely
- * new code path started wanting storage access -- not that this class is under-implemented.
+ * <p>NoObjectStorageIoTest drives the whole loadTable + serialization path with THIS class
+ * injected and asserts nothing throws, so reaching any method here means a genuinely new code
+ * path started wanting storage access -- not that this class is under-implemented.
  */
 public final class NoStorageFileIO implements FileIO {
 

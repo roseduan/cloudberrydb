@@ -1,15 +1,12 @@
-package cloud.elastic.dlagent.service.rest;
+package cloud.elastic.dlagent.plugins.iceberg.utilities;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
-import static org.mockito.Mockito.when;
 
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
-import java.util.HashMap;
-import java.util.Map;
 import org.apache.iceberg.exceptions.NoSuchTableException;
 import org.apache.iceberg.hadoop.HadoopFileIO;
 import org.apache.hadoop.conf.Configuration;
@@ -36,7 +33,7 @@ class LoadMetadataJsonTest {
         Files.write(f, DOC.getBytes(StandardCharsets.UTF_8));
 
         HadoopFileIO io = new HadoopFileIO(new Configuration());
-        byte[] out = IcebergRestController.readMetadataBytes(io, f.toUri().toString());
+        byte[] out = MetadataJsonReader.readMetadataBytes(io, f.toUri().toString());
 
         assertEquals(DOC, new String(out, StandardCharsets.UTF_8));
         assertTrue(new String(out, StandardCharsets.UTF_8).contains("unknown-future-field"),
@@ -46,9 +43,9 @@ class LoadMetadataJsonTest {
     @Test
     void rejectsBlankLocation() {
         HadoopFileIO io = new HadoopFileIO(new Configuration());
-        IllegalArgumentException e = org.junit.jupiter.api.Assertions.assertThrows(
+        IllegalArgumentException e = assertThrows(
                 IllegalArgumentException.class,
-                () -> IcebergRestController.readMetadataBytes(io, "  "));
+                () -> MetadataJsonReader.readMetadataBytes(io, "  "));
         assertTrue(e.getMessage().contains("metadataLocation"));
     }
 
@@ -61,13 +58,13 @@ class LoadMetadataJsonTest {
     @Test
     void requireMetadataLocationPresentThrowsNoSuchTableExceptionWhenBlank() {
         assertThrows(NoSuchTableException.class,
-                () -> IcebergRestController.requireMetadataLocationPresent("  ", "ns", "t"));
+                () -> MetadataJsonReader.requireMetadataLocationPresent("  ", "ns", "t"));
         assertThrows(NoSuchTableException.class,
-                () -> IcebergRestController.requireMetadataLocationPresent(null, "ns", "t"));
+                () -> MetadataJsonReader.requireMetadataLocationPresent(null, "ns", "t"));
     }
 
     @Test
     void requireMetadataLocationPresentAllowsNonBlank() {
-        IcebergRestController.requireMetadataLocationPresent("file:/warehouse/db/t/m.json", "ns", "t");
+        MetadataJsonReader.requireMetadataLocationPresent("file:/warehouse/db/t/m.json", "ns", "t");
     }
 }

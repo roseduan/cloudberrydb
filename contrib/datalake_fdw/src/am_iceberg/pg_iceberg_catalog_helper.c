@@ -36,6 +36,7 @@
 #include "include/pg_iceberg_rewrite_plan.h"
 #include "include/pg_iceberg_deletion_queue.h"
 #include "include/pg_iceberg_am_handler.h"
+#include "include/pg_iceberg_metadata_tracker.h"
 #include "utils/timestamp.h"
 
 /*
@@ -679,36 +680,44 @@ pg_iceberg_free_load_table_result(IcebergLoadTableResult *result)
  *		datalake_rest_catalog gateway does not need object storage
  *		credentials of its own (see pg_iceberg_metadata_reader.c).
  *
+ *		Both out parameters are palloc'd in the caller's context.
+ *
  *		The metadata location is NEVER taken from the caller: it is always
  *		derived from the catalog registration for this relid.  Letting a
  *		caller name the path would turn this into an arbitrary-fetch
  *		primitive.
  */
-IcebergMetadataJsonResult *
-pg_iceberg_load_metadata_json(Oid relid)
+void
+pg_iceberg_load_metadata_json(Oid relid,
+							  char **metadata_location,
+							  char **metadata_json)
 {
 	IcebergTableInfo		   *table_info;
-	IcebergMetadataInfo		   *meta_info;
 	IcebergCatalogFdwState	   *fdwState;
 	FdwRoutine				   *fdwRoutine;
 	ForeignScanState		   *scanstate;
-	IcebergMetadataJsonResult  *result;
 	Relation					rel;
 	const char				   *nameSpace;
 	char					   *tableName;
+	char					   *location;
+	Size						json_len;
+
+	Assert(metadata_location != NULL && metadata_json != NULL);
 
 	/*
 	 * Caller MUST run this on the QD: it consults the local
 	 * pg_iceberg_metadata catalog (which is QD-only populated) via
-	 * pg_iceberg_get_metadata_info(), the same constraint documented on
-	 * pg_iceberg_list_data_fragments_json() (see pg_iceberg_am.c).  A QE has
-	 * no rows there, so fail loudly here rather than risk a wrong or empty
-	 * metadata document being returned from a segment.
+	 * pg_iceberg_tracker_get_scan_metadata_location(), the same constraint
+	 * documented on pg_iceberg_list_data_fragments_json() (see
+	 * pg_iceberg_am.c).  A QE has no rows there, so fail loudly here rather
+	 * than risk a wrong or empty metadata document being returned from a
+	 * segment.  The SQL wrapper is also declared EXECUTE ON COORDINATOR, so
+	 * this check is the belt to that suspenders.
 	 */
 	if (Gp_role == GP_ROLE_EXECUTE)
 		ereport(ERROR,
 				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-				 errmsg("pg_iceberg_load_metadata_json_local() must be executed on the coordinator"),
+				 errmsg("pg_iceberg_load_metadata_json() must be executed on the coordinator"),
 				 errdetail("It reads the QD-only Iceberg metadata catalog and cannot run on a segment.")));
 
 	rel = relation_open(relid, AccessShareLock);
@@ -718,22 +727,44 @@ pg_iceberg_load_metadata_json(Oid relid)
 		relation_close(rel, AccessShareLock);
 		ereport(ERROR,
 				(errcode(ERRCODE_WRONG_OBJECT_TYPE),
-				 errmsg("relation \"%s\" is not a builtin iceberg table",
+				 errmsg("relation \"%s\" is not an iceberg table",
 						get_rel_name(relid))));
 	}
 
 	table_info = pg_iceberg_get_table_info(relid);
+
+	/*
+	 * Deliberately a different message from the one above: "not an iceberg
+	 * table at all" and "an iceberg table registered on an external catalog"
+	 * are different situations for the caller, and only the second one is
+	 * worth retrying against that catalog's own REST endpoint.  Callers that
+	 * resolve tables through pg_ext_aux.iceberg_visible_tables() never reach
+	 * this branch -- that accessor filters to builtin-catalog tables for
+	 * exactly this reason.
+	 */
 	if (!pg_iceberg_is_builtin_catalog(table_info->catalog_server_name))
 	{
+		char *catalog_server_name = pstrdup(table_info->catalog_server_name);
+
 		pg_iceberg_free_table_info(table_info);
 		relation_close(rel, AccessShareLock);
 		ereport(ERROR,
 				(errcode(ERRCODE_WRONG_OBJECT_TYPE),
-				 errmsg("relation \"%s\" is not a builtin iceberg table",
-						get_rel_name(relid))));
+				 errmsg("iceberg table \"%s\" is not registered on the builtin catalog",
+						get_rel_name(relid)),
+				 errdetail("Its catalog server \"%s\" is an external catalog.",
+						   catalog_server_name),
+				 errhint("Only builtin-catalog tables can have their metadata document read through the database.")));
 	}
 
-	meta_info = pg_iceberg_get_metadata_info(relid);
+	/*
+	 * Authoritative accessor, the same one the scan path uses
+	 * (pg_iceberg_am.c): when the current transaction has uncommitted DML on
+	 * this table it returns the rebased location, so the document handed out
+	 * here matches what a SELECT in the same transaction would read.  Reading
+	 * pg_iceberg_get_metadata_info() directly would silently diverge.
+	 */
+	location = pg_iceberg_tracker_get_scan_metadata_location(relid);
 
 	nameSpace = pg_iceberg_resolve_namespace(table_info->opts ? table_info->opts->namespace : NULL,
 											 table_info->catalog_server_name,
@@ -752,8 +783,7 @@ pg_iceberg_load_metadata_json(Oid relid)
 										table_info->volume_server_name,
 										table_info->volume_name,
 										NULL);
-	fdwState->request.metadataLocation = meta_info->metadata_location;
-	fdwState->request.buildInCatalog.metadataLocation = meta_info->metadata_location;
+	fdwState->request.buildInCatalog.metadataLocation = location;
 	fdwState->request.buildInCatalog.tableExists = true;
 
 	scanstate->fdw_state = fdwState;
@@ -763,27 +793,29 @@ pg_iceberg_load_metadata_json(Oid relid)
 
 	check_fdw_execution_error(fdwState, "Failed to load Iceberg metadata document");
 
-	result = (IcebergMetadataJsonResult *) palloc0(sizeof(IcebergMetadataJsonResult));
-	result->metadata_location = pstrdup(meta_info->metadata_location);
-	result->metadata_json = pstrdup(fdwState->response.responseBody);
+	/*
+	 * Bound what a single call can pull through the coordinator.  A
+	 * metadata.json does not grow with row count, but it does grow with
+	 * snapshot and schema history, and the document is buffered whole several
+	 * times on its way out (agent response, the copy below, the returned
+	 * datum).  A table whose history has run away should produce a
+	 * diagnosable error, not an OOM on the coordinator.
+	 */
+	json_len = strlen(fdwState->response.responseBody);
+	if (json_len > ICEBERG_METADATA_JSON_MAX_BYTES)
+		ereport(ERROR,
+				(errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED),
+				 errmsg("iceberg metadata document for relation \"%s\" is " UINT64_FORMAT " bytes, exceeding the %d byte limit",
+						get_rel_name(relid), (uint64) json_len,
+						ICEBERG_METADATA_JSON_MAX_BYTES),
+				 errhint("Expire old snapshots to shrink the metadata document.")));
 
-	pg_iceberg_free_metadata_info(meta_info);
+	*metadata_location = pstrdup(location);
+	*metadata_json = pstrdup(fdwState->response.responseBody);
+
+	pfree(location);
 	pg_iceberg_free_table_info(table_info);
 	relation_close(rel, AccessShareLock);
-
-	return result;
-}
-
-void
-pg_iceberg_free_metadata_json_result(IcebergMetadataJsonResult *result)
-{
-	if (result == NULL)
-		return;
-	if (result->metadata_location != NULL)
-		pfree(result->metadata_location);
-	if (result->metadata_json != NULL)
-		pfree(result->metadata_json);
-	pfree(result);
 }
 
 char *

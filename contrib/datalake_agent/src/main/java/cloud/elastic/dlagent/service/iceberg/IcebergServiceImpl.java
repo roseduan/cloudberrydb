@@ -13,6 +13,7 @@ import cloud.elastic.dlagent.plugins.iceberg.utilities.IcebergUtilities;
 import cloud.elastic.dlagent.plugins.iceberg.IcebergCatalogWrapper;
 import cloud.elastic.dlagent.plugins.iceberg.IcebergPolarisCatalogManager;
 import cloud.elastic.dlagent.service.ServiceResult;
+import cloud.elastic.dlagent.plugins.iceberg.utilities.MetadataJsonReader;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.google.common.collect.Lists;
@@ -58,6 +59,14 @@ import static org.apache.iceberg.FileContent.EQUALITY_DELETES;
 @Service
 @Slf4j
 public class IcebergServiceImpl implements IcebergService {
+
+    /**
+     * Property the kernel uses to hand the builtin catalog its metadata pointer; same key
+     * DlIcebergBuildInTableOperations reads (DATALAKEFDW_ICEBERG_KEY_METADATALOCATION on the
+     * C side, src/common/iceberg_constants.h).
+     */
+    private static final String BUILDIN_METADATA_LOCATION_PROP = "buildInCatalog.metadata_location";
+
     @Autowired(required = false)
     private IcebergCatalogFactory icebergCatalogFactory;
 
@@ -116,6 +125,38 @@ public class IcebergServiceImpl implements IcebergService {
         TableIdentifier tableId = TableIdentifier.of(namespace, tableName);
         Table table = catalog.loadTable(tableId, context.getPath(), properties);
         return table;
+    }
+
+    /**
+     * ONE object storage read, no table load.
+     *
+     * The builtin catalog's caller already knows the metadata pointer -- the kernel derives
+     * it from pg_iceberg_metadata and sends it as buildInCatalog.metadata_location, which is
+     * the very property DlIcebergBuildInTableOperations.doRefresh() would read in order to
+     * fetch the document. So a loadTable here would GET the object once to build
+     * TableMetadata, and the caller would then GET it a second time for its bytes. Reading
+     * the pointer directly is the same fetch, minus the duplicate (and minus the catalog
+     * round trip). Note this is not a new trust surface: doRefresh() already fetches this
+     * exact caller-supplied path.
+     *
+     * Catalogs that do not carry the pointer in the request (external catalogs, which resolve
+     * it themselves) fall back to a table load.
+     */
+    @Override
+    public byte[] loadMetadataJson(String namespace, String tableName, Map<String, String> properties,
+            RequestContext context) throws Exception {
+        IcebergCatalog catalog = icebergCatalogWrapper.getIcebergCatalog(context);
+        String metadataLocation = properties == null ? null : properties.get(BUILDIN_METADATA_LOCATION_PROP);
+
+        if (metadataLocation != null && !metadataLocation.trim().isEmpty()) {
+            return MetadataJsonReader.readMetadataBytes(catalog.io(), metadataLocation);
+        }
+
+        TableIdentifier tableId = TableIdentifier.of(namespace, tableName);
+        Table table = catalog.loadTable(tableId, context.getPath(), properties);
+        String resolved = ((BaseTable) table).operations().current().metadataFileLocation();
+        MetadataJsonReader.requireMetadataLocationPresent(resolved, namespace, tableName);
+        return MetadataJsonReader.readMetadataBytes(table.io(), resolved);
     }
 
     @Override
