@@ -52,6 +52,53 @@ $$;
 -- owner, so the authenticator still cannot read the table directly — only via the definer function.
 REVOKE ALL ON FUNCTION pg_ext_aux.iceberg_visible_tables(name) FROM PUBLIC;
 
+-- Companion accessor for the gateway's loadTable: returns the table's metadata.json
+-- document, gated by exactly the same predicate as iceberg_visible_tables.  Added so the
+-- gateway needs no object storage credentials of its own (the REST spec requires
+-- LoadTableResult.metadata to be a complete document, and only the database holds the
+-- volume credentials).
+--
+-- Authorization notes:
+--   * The relid is resolved THROUGH iceberg_visible_tables(p_role), so a caller can only
+--     ever reach a table that p_role holds SELECT on.  No path or oid is accepted.
+--   * Zero rows on "no permission" AND on "no such table" -- same anti-enumeration
+--     contract as iceberg_visible_tables; the gateway maps both to 404.
+--   * search_path is pinned for the same privilege-escalation reason documented above.
+--
+-- Performance/correctness note: the (p_nspname, p_relname) filter is applied INSIDE the
+-- subquery that drives the LATERAL join, not in an outer WHERE after the join. The
+-- underlying reader, pg_iceberg_load_metadata_json_local(), is a LANGUAGE C function
+-- (default VOLATILE) that does a real dlagent HTTP round trip plus an object-storage GET
+-- per call -- there is no guarantee the planner would push a same-level WHERE predicate
+-- down before evaluating a LATERAL function for every row of iceberg_visible_tables(p_role).
+-- Filtering to a single relid before the LATERAL join, plus the LIMIT 1 below, guarantees
+-- the reader function is invoked at most once no matter how many tables p_role can see --
+-- verified with EXPLAIN ANALYZE against a role with 2 visible builtin tables: the reader's
+-- function scan node reported "actual rows=1 loops=1". The LIMIT 1 turns "exactly one
+-- evaluation" into a structural guarantee rather than an inherited assumption that
+-- (nspname, relname) is unique in pg_iceberg_metadata -- true today (relid is its PK, and
+-- there is no duplicate nspname/relname pair), but a fact this function should not have to
+-- depend on to stay correct.
+CREATE OR REPLACE FUNCTION pg_ext_aux.iceberg_load_metadata(
+    p_role    name,
+    p_nspname name,
+    p_relname name)
+RETURNS TABLE (metadata_location text, metadata_json text)
+LANGUAGE sql SECURITY DEFINER STABLE
+SET search_path = pg_catalog, pg_ext_aux
+AS $$
+  SELECT r.metadata_location, r.metadata_json
+  FROM (
+    SELECT v.relid
+    FROM pg_ext_aux.iceberg_visible_tables(p_role) v
+    WHERE v.nspname = p_nspname AND v.relname = p_relname
+    LIMIT 1
+  ) t
+  CROSS JOIN LATERAL pg_catalog.pg_iceberg_load_metadata_json_local(t.relid) r
+$$;
+
+REVOKE ALL ON FUNCTION pg_ext_aux.iceberg_load_metadata(name, name, name) FROM PUBLIC;
+
 -- Review item I-1: a bare GRANT ... TO iceberg_authenticator silently errors (and psql keeps
 -- going, since we don't run with ON_ERROR_STOP by default) if the role doesn't exist yet — e.g.
 -- this script is re-run/applied before security/create_authenticator.sql, or against the wrong
@@ -63,4 +110,5 @@ DO $$ BEGIN
   END IF;
   GRANT USAGE ON SCHEMA pg_ext_aux TO iceberg_authenticator;
   GRANT EXECUTE ON FUNCTION pg_ext_aux.iceberg_visible_tables(name) TO iceberg_authenticator;
+  GRANT EXECUTE ON FUNCTION pg_ext_aux.iceberg_load_metadata(name, name, name) TO iceberg_authenticator;
 END $$;

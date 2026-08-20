@@ -46,5 +46,43 @@ out=$(PGPASSWORD="${DRC_READER_PW:-reader_pw}" psql -h 127.0.0.1 -p "${DRC_PGPOR
       -Atc "SELECT count(*) FROM pg_ext_aux.pg_iceberg_metadata" 2>&1)
 case "$out" in *"permission denied"*) echo "  OK: denied" ;; *) echo "  FAIL: $out"; fail=1 ;; esac
 
+# [3]-[7] Task 3: pg_ext_aux.iceberg_load_metadata SECURITY DEFINER gate.
+#
+# These use SET ROLE from a gpadmin unix-socket session rather than a TCP login as the
+# target role. pg_hba.conf has no TCP entries for iceberg_authenticator's callees under
+# test here beyond what Task 2 already wired (iceberg_authenticator, iceberg_reader), and
+# "no_access" has no pg_hba entry at all -- a TCP `psql -U no_access` would fail at
+# connection time ("no pg_hba.conf entry for host ...") rather than exercising the
+# permission check inside the database, which would be a false negative. ACL checks key
+# off the *current* role after SET ROLE, so a gpadmin session that SET ROLEs to an
+# unprivileged role sees exactly the same GRANT/REVOKE-driven denials or successes as a
+# real login by that role would -- these are genuine authorization checks, not simulated.
+PGP="${DRC_PGPORT:-${PGPORT:-7000}}"
+
+echo "[3] iceberg_load_metadata: no_access must not execute (permission denied)"
+out=$(psql -X -p "$PGP" -d postgres -Atc \
+      "SET ROLE no_access; SELECT * FROM pg_ext_aux.iceberg_load_metadata('no_access','sales','orders');" 2>&1)
+case "$out" in *"permission denied"*) echo "  OK: denied" ;; *) echo "  FAIL: $out"; fail=1 ;; esac
+
+echo "[4] iceberg_load_metadata: underlying reader pg_iceberg_load_metadata_json_local must stay revoked from PUBLIC"
+out=$(psql -X -p "$PGP" -d postgres -Atc \
+      "SET ROLE no_access; SELECT * FROM pg_catalog.pg_iceberg_load_metadata_json_local(0);" 2>&1)
+case "$out" in *"permission denied"*) echo "  OK: denied" ;; *) echo "  FAIL: $out"; fail=1 ;; esac
+
+echo "[5] iceberg_load_metadata: iceberg_authenticator on behalf of iceberg_reader must return the seeded table's metadata"
+out=$(psql -X -p "$PGP" -d postgres -Atc \
+      "SET ROLE iceberg_authenticator; SELECT (length(metadata_json) > 0) AND (metadata_location LIKE '%.metadata.json') FROM pg_ext_aux.iceberg_load_metadata('iceberg_reader','sales','orders');" 2>&1)
+case "$out" in t) echo "  OK: returned metadata for visible table" ;; *) echo "  FAIL: $out"; fail=1 ;; esac
+
+echo "[6] iceberg_load_metadata: a superuser p_role must yield zero rows"
+out=$(psql -X -p "$PGP" -d postgres -Atc \
+      "SET ROLE iceberg_authenticator; SELECT count(*) FROM pg_ext_aux.iceberg_load_metadata('gpadmin','sales','orders');" 2>&1)
+case "$out" in 0) echo "  OK: superuser p_role rejected" ;; *) echo "  FAIL: $out"; fail=1 ;; esac
+
+echo "[7] iceberg_load_metadata: iceberg_reader itself must not have EXECUTE (no grant)"
+out=$(psql -X -p "$PGP" -d postgres -Atc \
+      "SET ROLE iceberg_reader; SELECT * FROM pg_ext_aux.iceberg_load_metadata('iceberg_reader','sales','orders');" 2>&1)
+case "$out" in *"permission denied"*) echo "  OK: denied" ;; *) echo "  FAIL: $out"; fail=1 ;; esac
+
 [ "$fail" -eq 0 ] && echo "ALL BYPASS CHECKS PASSED" || echo "BYPASS DETECTED"
 exit "$fail"
