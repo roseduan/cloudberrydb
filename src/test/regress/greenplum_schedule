@@ -83,7 +83,7 @@ test: gp_connections
 
 # bitmap_index triggers recovery, run it seperately
 test: bitmap_index
-test: gp_dump_query_oids analyze gp_owner_permission incremental_analyze truncate_gp
+test: gp_dump_query_oids analyze gp_owner_permission truncate_gp
 test: indexjoin as_alias regex_gp gpparams with_clause transient_types gp_rules dispatch_encoding motion_gp gp_pullup_expr
 
 # interconnect tests
@@ -93,8 +93,13 @@ test: icudp/gp_interconnect_queue_depth icudp/gp_interconnect_queue_depth_longti
 test: event_trigger_gp
 
 # deadlock tests run separately - because we don't know which one gets stuck.
-# deadlock2 needs autovacuum off
+# deadlock2 needs autovacuum off.
+# incremental_analyze must also run with autovacuum off: it verifies pg_stats
+# after analyzing specific columns of leaf partitions, and a racing autovacuum
+# worker would auto-ANALYZE those leaves (all columns), injecting extra stats
+# rows and making the test flaky.
 test: disable_autovacuum
+test: incremental_analyze
 test: deadlock
 test: deadlock2
 test: enable_autovacuum
