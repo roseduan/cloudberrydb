@@ -74,9 +74,15 @@ def connect() -> RestCatalog:
         credential=os.environ.get("DRC_READER_CRED", "iceberg_reader:reader_pw"),
         **{
             "ssl": {"cabundle": CA_BUNDLE},
-            "s3.endpoint": "http://localhost:9000",
-            "s3.access-key-id": "minioadmin",  # client brings its own storage credentials (gateway does not vend creds)
-            "s3.secret-access-key": "minioadmin",
+            # The client brings its OWN storage credentials -- the gateway vends none and, since
+            # the kernel-side metadata change, holds none. Env-overridable because the MinIO
+            # root credentials differ per dev container (a container seeded with admin/admin12345
+            # made this test fail with S3 ACCESS_DENIED while the gateway itself was fine).
+            # Must match the credentials of the volume the tables actually live on:
+            #   SELECT umoptions FROM pg_user_mapping ...
+            "s3.endpoint": os.environ.get("DRC_S3_ENDPOINT", "http://localhost:9000"),
+            "s3.access-key-id": os.environ.get("DRC_S3_ACCESS_KEY_ID", "minioadmin"),
+            "s3.secret-access-key": os.environ.get("DRC_S3_SECRET_ACCESS_KEY", "minioadmin"),
             "s3.path-style-access": "true",
             "s3.region": "us-east-1",
         },
