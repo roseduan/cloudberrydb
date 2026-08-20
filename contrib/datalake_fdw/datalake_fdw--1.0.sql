@@ -192,14 +192,21 @@ LANGUAGE C STRICT;
 -- NOTE the absence of a "_local" suffix.  In this extension "_local" means the
 -- segment-local half of an operation the QD dispatches (see the two helpers above);
 -- this function is the opposite -- coordinator only, because it reads the QD-only
--- pg_iceberg_metadata catalog.  EXECUTE ON COORDINATOR states that in the declaration
--- instead of leaving it to a runtime ereport (which the C code still has, as a backstop).
+-- pg_iceberg_metadata catalog.
+--
+-- That constraint is NOT expressible as EXECUTE ON COORDINATOR here: the clause is
+-- rejected for anything that is not set-returning ("EXECUTE ON COORDINATOR is only
+-- supported for set-returning functions", validate_sql_exec_location() in
+-- src/backend/commands/functioncmds.c), and this function returns a single composite
+-- row via OUT parameters.  Adding the clause makes CREATE EXTENSION itself fail.
+-- Reshaping the function into an SRF just to earn the annotation is not worth it, so
+-- the coordinator-only rule is enforced by the Gp_role check in the C reader.
 CREATE FUNCTION pg_catalog.pg_iceberg_load_metadata_json(
     IN  relid oid,
     OUT metadata_location text,
     OUT metadata_json text)
 AS 'MODULE_PATHNAME', 'pg_iceberg_load_metadata_json_sql'
-LANGUAGE C STRICT EXECUTE ON COORDINATOR;
+LANGUAGE C STRICT;
 
 REVOKE ALL ON FUNCTION pg_catalog.pg_iceberg_load_metadata_json(oid) FROM PUBLIC;
 

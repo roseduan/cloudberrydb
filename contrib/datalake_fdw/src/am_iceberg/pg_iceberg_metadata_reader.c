@@ -8,11 +8,14 @@
  * be a complete TableMetadata document, and the database already holds the
  * volume credentials needed to fetch it.
  *
- * COORDINATOR ONLY: it reads the QD-only pg_iceberg_metadata catalog.  The SQL
- * declaration carries EXECUTE ON COORDINATOR and the C reader re-checks
- * Gp_role; note the deliberate absence of a "_local" suffix, which in this
- * extension means the opposite thing (the segment-local half of an operation
- * the QD dispatches -- see pg_iceberg_upsert_location_option_local).
+ * COORDINATOR ONLY: it reads the QD-only pg_iceberg_metadata catalog, enforced
+ * by the Gp_role check in pg_iceberg_load_metadata_json().  EXECUTE ON
+ * COORDINATOR cannot express that here -- the clause is rejected for anything
+ * that is not set-returning -- so the runtime check is the only guard; see the
+ * note on the CREATE FUNCTION in datalake_fdw--1.0.sql.  Note also the
+ * deliberate absence of a "_local" suffix, which in this extension means the
+ * opposite thing (the segment-local half of an operation the QD dispatches --
+ * see pg_iceberg_upsert_location_option_local).
  *
  * SECURITY: this function performs NO authorization of its own.  It is
  * registered in pg_catalog and must stay revoked from PUBLIC; the only

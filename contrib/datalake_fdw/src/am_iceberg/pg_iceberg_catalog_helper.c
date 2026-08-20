@@ -711,8 +711,9 @@ pg_iceberg_load_metadata_json(Oid relid,
 	 * documented on pg_iceberg_list_data_fragments_json() (see
 	 * pg_iceberg_am.c).  A QE has no rows there, so fail loudly here rather
 	 * than risk a wrong or empty metadata document being returned from a
-	 * segment.  The SQL wrapper is also declared EXECUTE ON COORDINATOR, so
-	 * this check is the belt to that suspenders.
+	 * segment.  This check is the ONLY guard: EXECUTE ON COORDINATOR is
+	 * rejected for functions that are not set-returning, so the SQL
+	 * declaration cannot carry it.
 	 */
 	if (Gp_role == GP_ROLE_EXECUTE)
 		ereport(ERROR,
