@@ -53,12 +53,39 @@ insert into test_waitevent select generate_series(1,1000);
 -- make a cursor so that we have a named portal
 1: declare cur12703 cursor for select * from t_12703;
 
+-- Helper: poll until FTS has marked the expected number of segments down.
+-- Using a fixed pg_sleep() below races with FTS probe + mirror promotion and
+-- lets the next statement reach the dispatch path before seg1 is seen as down,
+-- producing a spurious "Error on receive from seg1 ..." line (see issue 12703).
+CREATE or REPLACE FUNCTION wait_until_segments_are_down(num_segs int)
+RETURNS bool AS
+$$
+declare
+retries int; /* in func */
+begin /* in func */
+  retries := 120; /* in func */
+  loop /* in func */
+    if (select count(*) = num_segs from gp_segment_configuration where status = 'd') then /* in func */
+      return true; /* in func */
+    end if; /* in func */
+    if retries <= 0 then /* in func */
+      return false; /* in func */
+    end if; /* in func */
+    perform pg_sleep(1); /* in func */
+    retries := retries - 1; /* in func */
+  end loop; /* in func */
+end; /* in func */
+$$ language plpgsql;
+
 2: select pg_ctl((select datadir from gp_segment_configuration c where c.role='p' and c.content=1), 'stop');
 -- next sql will trigger FTS to mark seg1 as down
 2: select gp_request_fts_probe_scan();
 !\retcode gpfts -A -D;
--- sleep some seconds until the promotion of mirror 0 is done
-2: select pg_sleep(2);
+-- wait deterministically until seg1 (content=1 primary) is marked down and the
+-- mirror has been promoted, so the next statement reliably hits the
+-- cdbgang_createGang_async "gang was lost" path instead of racing into a
+-- dispatch-time connection error.
+2: select wait_until_segments_are_down(1);
 
 -- this will go to cdbgang_createGang_async's code path
 -- for some segments are DOWN. It should not PANIC even
