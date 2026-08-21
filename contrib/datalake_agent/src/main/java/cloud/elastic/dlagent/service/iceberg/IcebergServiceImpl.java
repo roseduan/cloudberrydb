@@ -154,6 +154,13 @@ public class IcebergServiceImpl implements IcebergService {
 
         TableIdentifier tableId = TableIdentifier.of(namespace, tableName);
         Table table = catalog.loadTable(tableId, context.getPath(), properties);
+        /* Guard the cast, for the same reason updateSchema() below does: a custom or future
+         * Iceberg catalog adapter may hand back a Table implementation that does not extend
+         * BaseTable, and an unchecked cast would surface as a bare ClassCastException. */
+        if (!(table instanceof BaseTable)) {
+            throw new IllegalStateException(
+                    "loadMetadataJson requires a BaseTable implementation, got: " + table.getClass().getName());
+        }
         String resolved = ((BaseTable) table).operations().current().metadataFileLocation();
         MetadataJsonReader.requireMetadataLocationPresent(resolved, namespace, tableName);
         return MetadataJsonReader.readMetadataBytes(table.io(), resolved);
