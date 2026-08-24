@@ -803,7 +803,7 @@ drop external table if exists external_sreh_bad_data_text;
 NOTICE:  foreign table "external_sreh_bad_data_text" does not exist, skipping
 create external table external_sreh_bad_data_text(name text) location('gpfdist://@hostname@:7070/exttab1/bad_data.tbl') format 'text' log errors segment reject limit 3;
 select * from external_sreh_bad_data_text;
-NOTICE:  found 2 data formatting errors (2 or more input rows), rejected related input data
+NOTICE:  found 1 data formatting errors (1 or more input rows), rejected related input data
  name  
 -------
  AAABB
