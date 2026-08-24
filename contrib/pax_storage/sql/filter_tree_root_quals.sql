@@ -3,6 +3,7 @@
 -- m/no filter/
 -- m/bloom filter/
 -- m/No sparse filter/
+-- m/Reader gang member waiting on a lock/
 -- end_matchignore
 
 set default_table_access_method to pax;
