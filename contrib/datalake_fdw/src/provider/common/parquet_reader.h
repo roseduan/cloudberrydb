@@ -13,6 +13,18 @@
 using Datalake::Internal::dataBufferArray;
 using Datalake::Internal::dataBuff;
 
+struct DatalakeFieldDescription;
+
+/*
+ * Iceberg column matching, shared by the row reader (ParquetReader::createMapping)
+ * and the vectorized RecordBatch reader (issue #424 / FDW-iceberg vectorization).
+ * Operates on the parquet C++ input schema; see parquet_reader.cpp for the rule.
+ */
+bool parquetFileHasFieldIds(const parquet::SchemaDescriptor *schema);
+int  matchParquetColumn(const parquet::SchemaDescriptor *schema,
+						const DatalakeFieldDescription *entry,
+						bool fileHasFieldIds);
+
 class ParquetReader : public BaseFileReader
 {
 private:

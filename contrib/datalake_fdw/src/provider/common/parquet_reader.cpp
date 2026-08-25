@@ -82,30 +82,73 @@ ParquetReader::getTimeUnit(const parquet::ColumnDescriptor *field)
 	}
 }
 
+/*
+ * Does this parquet file schema carry Iceberg field-ids?  The builtin writer
+ * stamps one (== PG attnum) on every column, so a file with none predates
+ * field-id stamping and must fall back to name matching.  #401
+ *
+ * Free function (not a ParquetReader method) so the vectorized RecordBatch
+ * reader can share the exact same Iceberg column-matching rule.  Operates on
+ * the parquet C++ SchemaDescriptor (the parquet *input* schema, common to both
+ * the row and batch stacks -- the "two arrows" split is in the Arrow *output*
+ * type, not here).
+ */
+bool
+parquetFileHasFieldIds(const parquet::SchemaDescriptor *schema)
+{
+	int n = schema->num_columns();
+	for (int j = 0; j < n; j++)
+		if (schema->Column(j)->schema_node()->field_id() >= 0)
+			return true;
+	return false;
+}
+
+/*
+ * Match one PG column (entry) to a physical parquet column index:
+ *  - Builtin iceberg (fileHasFieldIds): match by field-id == PG attnum
+ *    authoritatively.  Stable across RENAME COLUMN (name changes, id does not)
+ *    and, crucially, does NOT match a dropped-then-re-added same-name column --
+ *    the new column has a fresh (higher) attnum that no old data file carries,
+ *    so old data never resurrects.
+ *  - External iceberg (arbitrary Iceberg field-ids, name-mapped), non-iceberg
+ *    reads, or a legacy builtin file with no field-ids: match by physical name.
+ * Returns the physical column index, or -1 if unmatched (a column absent from
+ * this file, e.g. added after it was written, stays unmatched and reads NULL).
+ * #401
+ */
+int
+matchParquetColumn(const parquet::SchemaDescriptor *schema,
+				   const DatalakeFieldDescription *entry,
+				   bool fileHasFieldIds)
+{
+	int n = schema->num_columns();
+
+	if (entry->attnum > 0 && fileHasFieldIds)
+	{
+		for (int j = 0; j < n; j++)
+			if (schema->Column(j)->schema_node()->field_id() == entry->attnum)
+				return j;
+	}
+	else
+	{
+		for (int j = 0; j < n; j++)
+			if (pg_strcasecmp(entry->name, schema->Column(j)->name().c_str()) == 0)
+				return j;
+	}
+	return -1;
+}
+
 void
 ParquetReader::createMapping(List *columnDesc, bool *attrUsed)
 {
 	int       i;
-	int       j;
 	ListCell *lc;
 	auto      schema = metadata->schema();
 
 	numColumns_ = schema->num_columns();
 
-	/*
-	 * Does this file carry Iceberg field-ids?  The builtin writer stamps one
-	 * (== PG attnum) on every column, so a file with none predates field-id
-	 * stamping and must fall back to name matching.  Checked once up front. #401
-	 */
-	bool fileHasFieldIds = false;
-	for (j = 0; j < numColumns_; j++)
-	{
-		if (schema->Column(j)->schema_node()->field_id() >= 0)
-		{
-			fileHasFieldIds = true;
-			break;
-		}
-	}
+	/* Checked once up front (see parquetFileHasFieldIds). #401 */
+	bool fileHasFieldIds = parquetFileHasFieldIds(schema);
 
 	foreach_with_count(lc, columnDesc, i)
 	{
@@ -116,44 +159,7 @@ ParquetReader::createMapping(List *columnDesc, bool *attrUsed)
 		if (!attrUsed[i])
 			continue;
 
-		int matched = -1;
-
-		if (entry->attnum > 0 && fileHasFieldIds)
-		{
-			/*
-			 * Builtin iceberg: the writer stamps the field-id as the PG attnum,
-			 * so match by field-id authoritatively.  This is stable across
-			 * RENAME COLUMN (name changes, id does not) and, crucially, does
-			 * NOT match a dropped-then-re-added same-name column -- the new
-			 * column has a fresh (higher) attnum that no old data file carries,
-			 * so old data never resurrects.  A column absent from this file
-			 * (added after it was written) stays unmatched and reads NULL. #401
-			 */
-			for (j = 0; j < numColumns_; j++)
-			{
-				if (schema->Column(j)->schema_node()->field_id() == entry->attnum)
-				{
-					matched = j;
-					break;
-				}
-			}
-		}
-		else
-		{
-			/*
-			 * External iceberg (arbitrary Iceberg field-ids, name-mapped),
-			 * non-iceberg reads, or a legacy builtin file with no field-ids:
-			 * match by physical column name, as before.
-			 */
-			for (j = 0; j < numColumns_; j++)
-			{
-				if (pg_strcasecmp(entry->name, schema->Column(j)->name().c_str()) == 0)
-				{
-					matched = j;
-					break;
-				}
-			}
-		}
+		int matched = matchParquetColumn(schema, entry, fileHasFieldIds);
 
 		if (matched >= 0)
 		{
