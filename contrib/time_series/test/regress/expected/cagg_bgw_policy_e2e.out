@@ -372,7 +372,22 @@ SELECT count(*) AS stat_rows_after_remove
 
 -- ============================================================
 -- Cleanup
+--
+-- This file is the one E2E test that lets the REAL scheduler fork and
+-- reap background workers for real (schedule_interval=5s, dozens of
+-- ticks across E2E-01/E2E-02).  Stop it before DROP EXTENSION to avoid
+-- a catalog-lock ABBA against check_for_stopped_and_timed_out_jobs()'s
+-- BGWH_STOPPED path (unbounded lock wait; observed as "deadlock
+-- detected"), same class of race already guarded against in every
+-- iso2 test that ends in DROP EXTENSION -- see
+-- compress_insert_no_deadlock.sql.
 -- ============================================================
+SELECT time_series.stop_background_workers();
+ stop_background_workers 
+-------------------------
+ t
+(1 row)
+
 DROP VIEW cv_e2e;
 DROP TABLE m_e2e;
 DROP FUNCTION poll_runs(int);

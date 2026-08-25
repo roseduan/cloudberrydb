@@ -858,6 +858,17 @@
 -- ============================================================
 1: DROP TABLE cond CASCADE;
 1: DROP TABLE cond2 CASCADE;
+
+-- Stop the BGW scheduler before DROP EXTENSION to avoid a catalog-lock
+-- ABBA against check_for_stopped_and_timed_out_jobs()'s BGWH_STOPPED
+-- path (unbounded lock wait; observed as "deadlock detected").  This
+-- spec is the only cagg_* iso2 test that registers a real bgw_job
+-- (add_continuous_aggregate_policy on cv_1h, job 1001), so it is the
+-- only one of its siblings that can actually hit the race.  Consistent
+-- with every other iso2 test that ends in DROP EXTENSION -- see
+-- compress_insert_no_deadlock.sql.
+1: SELECT time_series.stop_background_workers();
+
 1: DROP EXTENSION time_series CASCADE;
 1q:
 2q:
