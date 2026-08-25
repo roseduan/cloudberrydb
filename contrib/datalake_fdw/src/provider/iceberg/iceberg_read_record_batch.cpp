@@ -108,6 +108,23 @@ icebergReadRecordBatch::openCurrentTask()
 		FileScanTask *task = (FileScanTask *) list_nth(fileScanTasks, curTaskIndex);
 		FileFragment *dataFile = task->dataFile;
 
+		/*
+		 * Equality deletes are not yet applied in the vectorized path (they can
+		 * only be produced by external streaming writers -- the iceberg AM writes
+		 * position deletes -- so there is no local way to exercise them).  Refuse
+		 * clearly rather than silently return rows an equality delete removed.
+		 */
+		{
+			ListCell *dc;
+			foreach(dc, task->deletes)
+			{
+				FileFragment *df = (FileFragment *) lfirst(dc);
+				if (df->content == EQUALITY_DELETES)
+					elog(ERROR, "datalake vectorized FDW-iceberg read does not support "
+						 "equality deletes yet; run with vectorization off");
+			}
+		}
+
 		/* Iceberg data-file paths are full URIs (s3://bucket/...); strip the
 		 * scheme+bucket to the gopher-relative path, as the row reader does
 		 * (ParquetReader::open -> convertToGopherPath). */
