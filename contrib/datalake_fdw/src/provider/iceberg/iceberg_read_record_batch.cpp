@@ -113,9 +113,14 @@ icebergReadRecordBatch::openCurrentTask()
 		bool hasFieldIds = parquetFileHasFieldIds(schema);
 
 		/*
-		 * Build the emit plan in table-attribute (ascending) order -- the order
-		 * BuildDescForScanExtract compacts referenced columns into, so the vec
-		 * engine's columnmap aligns regardless of physical file column order.
+		 * The row reader's datafileDesc IS the engine's compact scan descriptor:
+		 * createFieldDescription builds it from scanstate->scan_tupdesc, which for
+		 * a vec ForeignScan is the BuildDescForScanExtract projection of the
+		 * referenced columns (targetlist + qual), in that compact order.  Emit
+		 * exactly one output column per datafileDesc entry, in order, so the batch
+		 * matches the engine's columnmap.  Do NOT re-filter by includes_columns:
+		 * that array is indexed by full-table attno and would mis-map onto (or
+		 * drop entries from) the compact list.
 		 */
 		List *datafileDesc = protocolContext->file->reader->datafileDesc;
 		emitAttr.clear();
@@ -123,26 +128,12 @@ icebergReadRecordBatch::openCurrentTask()
 		std::vector<int> emitPhysical;
 
 		ListCell *lc;
-		int i = 0;
-		foreach_with_count(lc, datafileDesc, i)
+		foreach(lc, datafileDesc)
 		{
-			if (i >= (int) ncolumns)
-				break;
-			if (!includes_columns[i])
-				continue;
 			DatalakeFieldDescription *fd = (DatalakeFieldDescription *) lfirst(lc);
-			emitAttr.push_back(i);
+			/* index into scan_tupdesc (== position in datafileDesc) */
+			emitAttr.push_back((int) emitAttr.size());
 			emitPhysical.push_back(matchParquetColumn(schema, fd, hasFieldIds));
-		}
-		/*
-		 * count(*) / no referenced column: emit attr 0 (NULL-filled) so the
-		 * batch still carries the row count the engine expects (see
-		 * BuildDescForScanExtract, which forces col[0]).
-		 */
-		if (emitAttr.empty())
-		{
-			emitAttr.push_back(0);
-			emitPhysical.push_back(-1);
 		}
 
 		/* Distinct physical columns, sorted ascending -> deterministic raw
@@ -239,15 +230,16 @@ void
 icebergReadRecordBatch::assembleOut(const std::shared_ptr<::parquet_arrow::RecordBatch> &raw)
 {
 	int64_t nrows = raw->num_rows();
+	TupleDesc sd = scanstate->scan_tupdesc;		/* compact scan descriptor */
 	out.reset();
 	numericColIndices.clear();
 
 	for (size_t k = 0; k < emitAttr.size(); k++)
 	{
-		int attr = emitAttr[k];
+		int attr = emitAttr[k];					/* index into sd (== k) */
 		int rawPos = emitRawPos[k];
-		Oid typeOid = tupdesc->attrs[attr].atttypid;
-		std::string name(tupdesc->attrs[attr].attname.data);
+		Oid typeOid = sd->attrs[attr].atttypid;
+		std::string name(sd->attrs[attr].attname.data);
 		int batch_index = (int) k;
 
 		if (rawPos >= 0)
@@ -262,7 +254,7 @@ icebergReadRecordBatch::assembleOut(const std::shared_ptr<::parquet_arrow::Recor
 		}
 		else
 		{
-			parquetVecAddNullColumn(pool, out, numericColIndices, tupdesc,
+			parquetVecAddNullColumn(pool, out, numericColIndices, sd,
 									attr, batch_index, name, nrows);
 		}
 	}
