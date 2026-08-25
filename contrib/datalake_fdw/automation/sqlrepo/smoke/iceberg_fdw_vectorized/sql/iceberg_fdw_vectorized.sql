@@ -1,0 +1,90 @@
+-- FDW-iceberg vectorized SELECT read (FDW-iceberg vectorization).
+--
+-- An append-only iceberg AM table (parquet data files) is created on a Polaris
+-- catalog, then read back through a datalake_fdw foreign table with
+-- format 'iceberg' and the vectorization engine on.  vector.force_vectorization
+-- makes the scan ERROR if it cannot be vectorized, so a run that succeeds and
+-- returns the same values as the row-mode reads proves the vectorized reader
+-- (icebergReadRecordBatch) produced them.  Covers the iceberg-native T1 types:
+-- int, bigint, real, double, text, numeric (the numeric128 bridge) and date.
+-- (smallint is intentionally absent: iceberg has no 16-bit integer type, it
+-- stores smallint as int, so a smallint foreign column fails dlagent's schema
+-- check regardless of vectorization.)
+--
+-- Requires the lakehouse stack (MinIO http://minio:9000 admin/admin12345) and a
+-- Polaris server (http://polaris:8181, realm POLARIS, root/s3cr3t) with catalog
+-- polaris_default_catalog; see run.sh for the pre-clean of both layers.
+\i ../../../lib/sql/common_setup.sql
+SET client_min_messages = WARNING;
+
+-- ===== Producer side: iceberg AM table on the Polaris catalog =====
+DROP SERVER IF EXISTS ivt_vol_srv CASCADE;
+CREATE SERVER ivt_vol_srv FOREIGN DATA WRAPPER iceberg_volume_fdw
+    OPTIONS (type 's3', endpoint 'http://minio:9000', region 'us-east-1',
+             bucket_name 'warehouse', path_style_access 'true');
+CREATE USER MAPPING FOR current_user SERVER ivt_vol_srv
+    OPTIONS (access_key_id 'admin', secret_access_key 'admin12345');
+CREATE FOREIGN VOLUME ivt_vol SERVER ivt_vol_srv
+    OPTIONS (base_path '/iceberg_fdw_vectorized/', allow_writes 'true');
+SET iceberg_default_volume = 'ivt_vol';
+
+DROP SERVER IF EXISTS ivt_cat_srv CASCADE;
+CREATE SERVER ivt_cat_srv FOREIGN DATA WRAPPER iceberg_catalog_fdw
+    OPTIONS (type 'polaris', url 'http://polaris:8181/api/catalog',
+             polaris_server_realm 'POLARIS');
+CREATE USER MAPPING FOR current_user SERVER ivt_cat_srv
+    OPTIONS (client_id 'root', client_secret 's3cr3t', scope 'PRINCIPAL_ROLE:ALL');
+CREATE FOREIGN CATALOG ivt_cat SERVER ivt_cat_srv
+    OPTIONS (catalog_name 'polaris_default_catalog', default_namespace 'public');
+SET iceberg_default_catalog = 'ivt_cat';
+
+DROP TABLE IF EXISTS ivkbt;
+CREATE ICEBERG TABLE ivkbt (i4 int, i8 bigint, f4 real, f8 double precision,
+                            v text, amt numeric(20,4), dt date);
+INSERT INTO ivkbt VALUES
+    (100, 1000, 1.5, 2.5, 'alpha', 3.1400, '2020-01-01'),
+    (-200, -2000, -1.5, -2.5, 'beta', -2.7100, '2020-06-15'),
+    (2147483647, 9000000000000, 3.5, 4.5, 'gamma', 123456789.1234, '2021-12-31');
+
+-- ===== Consumer side: datalake_fdw foreign table (format 'iceberg') =====
+DROP SERVER IF EXISTS ivt_oss_srv CASCADE;
+CREATE SERVER ivt_oss_srv FOREIGN DATA WRAPPER datalake_fdw
+    OPTIONS (host 'minio:9000', protocol 's3', isvirtual 'false', ishttps 'false');
+CREATE USER MAPPING FOR current_user SERVER ivt_oss_srv
+    OPTIONS (user 'gpadmin', accesskey 'admin', secretkey 'admin12345');
+DROP SERVER IF EXISTS ivt_meta_srv CASCADE;
+CREATE SERVER ivt_meta_srv FOREIGN DATA WRAPPER datalake_fdw
+    OPTIONS (polaris_server_url 'http://polaris:8181/api/catalog', polaris_server_realm 'POLARIS');
+CREATE USER MAPPING FOR current_user SERVER ivt_meta_srv
+    OPTIONS (client_id 'root', client_secret 's3cr3t', scope 'PRINCIPAL_ROLE:ALL');
+
+DROP FOREIGN TABLE IF EXISTS ivt_read;
+CREATE FOREIGN TABLE ivt_read (i4 int, i8 bigint, f4 real, f8 double precision,
+                               v text, amt numeric(20,4), dt date)
+SERVER ivt_oss_srv
+OPTIONS (filePath '/warehouse/iceberg_fdw_vectorized/', catalog_type 'polaris',
+    server_name 'ivt_meta_srv', table_identifier 'polaris_default_catalog.public.ivkbt',
+    format 'iceberg');
+
+LOAD 'vectorization';
+
+-- ===== Baseline: row mode =====
+SET vector.enable_vectorization = off;
+SELECT i4, i8, f4, f8, v, amt, dt FROM ivt_read ORDER BY i4;
+SELECT count(*), sum(i4::bigint) si4, sum(i8) si8, sum(amt) samt,
+       min(dt) mn, max(dt) mx FROM ivt_read;
+
+-- ===== Vectorized: force_vectorization ERRORs if it cannot vectorize =====
+SET vector.enable_vectorization = on;
+SET vector.force_vectorization = on;
+SELECT i4, i8, f4, f8, v, amt, dt FROM ivt_read ORDER BY i4;
+SELECT count(*), sum(i4::bigint) si4, sum(i8) si8, sum(amt) samt,
+       min(dt) mn, max(dt) mx FROM ivt_read;
+SELECT count(*) FROM ivt_read WHERE amt > 0;
+SELECT i4, v FROM ivt_read WHERE i4 >= 100 ORDER BY i4;
+RESET vector.force_vectorization;
+RESET vector.enable_vectorization;
+
+-- cleanup
+DROP FOREIGN TABLE ivt_read;
+DROP TABLE ivkbt;

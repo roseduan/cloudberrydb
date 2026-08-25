@@ -63,6 +63,7 @@ CATEGORY_REQUIRES=(
     [iceberg/builtin]="minio"
     [iceberg/hive]="minio hive"
     [iceberg/polaris]="minio polaris"
+    [iceberg_fdw_vectorized]="minio polaris"
 )
 # Categories with no entry (guc, negative, pushdown, explain, datatypes, join)
 # need only the database.
