@@ -85,6 +85,19 @@ SELECT i4, v FROM ivt_read WHERE i4 >= 100 ORDER BY i4;
 RESET vector.force_vectorization;
 RESET vector.enable_vectorization;
 
+-- ===== MOR position deletes: DELETE rows via the iceberg AM, re-read via FDW =====
+-- The AM DELETE writes position delete files; the vectorized reader must drop
+-- exactly those rows.  Compare the vec read against the row-mode read.
+DELETE FROM ivkbt WHERE i4 IN (100, -200);
+SET vector.enable_vectorization = off;
+SELECT i4, v, amt, dt FROM ivt_read ORDER BY i4;
+SET vector.enable_vectorization = on;
+SET vector.force_vectorization = on;
+SELECT i4, v, amt, dt FROM ivt_read ORDER BY i4;
+SELECT count(*), sum(i4::bigint) si4, sum(amt) samt FROM ivt_read;
+RESET vector.force_vectorization;
+RESET vector.enable_vectorization;
+
 -- cleanup
 DROP FOREIGN TABLE ivt_read;
 DROP TABLE ivkbt;

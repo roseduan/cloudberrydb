@@ -99,6 +99,21 @@ private:
 	/* Output-column indices re-encoded as numeric128 (re-tagged on export). */
 	std::vector<int>			numericColIndices;
 
+	/*
+	 * MOR position-delete state.  deleteIndex maps data-file path -> Roaring
+	 * bitmap of deleted absolute row positions (NULL if the scan has no
+	 * position delete files); curBitmap is the current file's bitmap (NULL if
+	 * this file has no deletes).  The per-file row-group table maps a row's
+	 * index within the Arrow reader stream back to its absolute file position
+	 * so the bitmap can be probed (selected row groups need not be contiguous).
+	 */
+	void					   *deleteIndex;	/* IcebergDeleteIndex * */
+	void					   *curBitmap;		/* Roaring bitmap for current file */
+	std::vector<int64_t>		selAbsStart;	/* abs file start pos of each selected row group */
+	std::vector<int64_t>		selNumRows;		/* rows in each selected row group */
+	int							curSelRg;		/* cursor: selected row group index */
+	int64_t						posInSelRg;		/* cursor: row offset within curSelRg */
+
 	::parquet_arrow::MemoryPool	   *pool;
 	std::unique_ptr<IcebergCBatch>	c_batch;
 };

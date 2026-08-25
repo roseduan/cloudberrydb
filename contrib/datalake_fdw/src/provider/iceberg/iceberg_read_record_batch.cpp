@@ -28,6 +28,7 @@
 #include <parquet/arrow/reader.h>
 #include <parquet/internal/arrow/api.h>
 #include <parquet/internal/arrow/c/bridge.h>
+#include <parquet/internal/arrow/compute/api.h>		/* parquet_arrow::compute::Filter */
 
 #include "iceberg_read_record_batch.h"
 #include "src/provider/parquet/read/parquet_vec_batch_util.h"
@@ -39,6 +40,8 @@ extern "C" {
 #include "utils/builtins.h"
 #include "src/dlproxy/datalake.h"					/* FileScanTask, FileFragment */
 #include "src/provider/common/utils.h"
+#include "src/provider/iceberg/iceberg_delete_index.h"	/* position-delete Roaring index */
+#include "src/provider/common/delete_bitmap_c.h"		/* datalakeBitmapContains */
 }
 
 namespace Datalake {
@@ -59,7 +62,8 @@ makeIcebergReadRecordBatch()
 
 icebergReadRecordBatch::icebergReadRecordBatch()
 	: protocolContext(nullptr), fileScanTasks(nullptr), curTaskIndex(0),
-	  fileOpen(false), pool(nullptr), c_batch(new IcebergCBatch())
+	  fileOpen(false), deleteIndex(nullptr), curBitmap(nullptr),
+	  curSelRg(0), posInSelRg(0), pool(nullptr), c_batch(new IcebergCBatch())
 {}
 
 icebergReadRecordBatch::~icebergReadRecordBatch() = default;
@@ -74,6 +78,15 @@ icebergReadRecordBatch::createHandler(void *sstate)
 	curTaskIndex = 0;
 	fileOpen = false;
 	pool = ::parquet_arrow::default_memory_pool();
+
+	/*
+	 * Build the global position-delete index once (data-file path -> Roaring
+	 * bitmap of deleted positions); NULL when the scan has no position delete
+	 * files.  Equality deletes are handled separately (not yet).
+	 */
+	deleteIndex = icebergBuildDeleteIndex(TopMemoryContext,
+										  protocolContext->file->fileStream,
+										  fileScanTasks);
 }
 
 /* Mirrors ParquetReader::invalidFileOffset (parquet_reader.cpp). */
@@ -157,28 +170,41 @@ icebergReadRecordBatch::openCurrentTask()
 		 * split across tasks is read exactly once.
 		 */
 		std::vector<int> rowGroups;
+		selAbsStart.clear();
+		selNumRows.clear();
 		int64_t startOffset = task->start;
 		int64_t endOffset = task->start + task->length;
 		int64_t preStartIndex = 0, preCompressedSize = 0;
+		int64_t curRowCount = 0;		/* absolute row position over ALL row groups */
 		for (int rg = 0; rg < metadata->num_row_groups(); rg++)
 		{
+			auto rgmd = metadata->RowGroup(rg);
+			int64_t rgRows = rgmd->num_rows();
+			bool select;
 			if (startOffset == -1)
 			{
-				rowGroups.push_back(rg);
-				continue;
+				select = true;
 			}
-			auto rgmd = metadata->RowGroup(rg);
-			int64_t startIndex = rgmd->file_offset();
-			if (icebergInvalidFileOffset(startIndex, preStartIndex, preCompressedSize))
-				startIndex = (preStartIndex == 0) ? 4 : (preStartIndex + preCompressedSize);
-			preStartIndex = startIndex;
-			preCompressedSize = rgmd->total_compressed_size();
-			int64_t totalSize = 0;
-			for (int j = 0; j < rgmd->num_columns(); j++)
-				totalSize += rgmd->ColumnChunk(j)->total_compressed_size();
-			int64_t midPoint = startIndex + totalSize / 2;
-			if (midPoint >= startOffset && midPoint < endOffset)
+			else
+			{
+				int64_t startIndex = rgmd->file_offset();
+				if (icebergInvalidFileOffset(startIndex, preStartIndex, preCompressedSize))
+					startIndex = (preStartIndex == 0) ? 4 : (preStartIndex + preCompressedSize);
+				preStartIndex = startIndex;
+				preCompressedSize = rgmd->total_compressed_size();
+				int64_t totalSize = 0;
+				for (int j = 0; j < rgmd->num_columns(); j++)
+					totalSize += rgmd->ColumnChunk(j)->total_compressed_size();
+				int64_t midPoint = startIndex + totalSize / 2;
+				select = (midPoint >= startOffset && midPoint < endOffset);
+			}
+			if (select)
+			{
 				rowGroups.push_back(rg);
+				selAbsStart.push_back(curRowCount);	/* abs file pos of this rg's first row */
+				selNumRows.push_back(rgRows);
+			}
+			curRowCount += rgRows;
 		}
 
 		if (rowGroups.empty())
@@ -209,6 +235,13 @@ icebergReadRecordBatch::openCurrentTask()
 		PARQUET_VEC_CHECK(arrowReader->GetRecordBatchReader(rowGroups, colIndices, &reader),
 						  "get record batch reader");
 		rbr = std::move(reader);
+
+		/* MOR position deletes for this data file (NULL if none). */
+		curBitmap = deleteIndex
+			? icebergDeleteIndexLookup((IcebergDeleteIndex *) deleteIndex, dataFile->filePath)
+			: NULL;
+		curSelRg = 0;
+		posInSelRg = 0;
 
 		fileOpen = true;
 		return true;
@@ -259,6 +292,43 @@ icebergReadRecordBatch::assembleOut(const std::shared_ptr<::parquet_arrow::Recor
 		}
 	}
 
+	/*
+	 * MOR position deletes: drop rows whose absolute file position is in the
+	 * delete bitmap.  Map each batch row (read in row-group order) back to its
+	 * absolute file position via the selected-row-group cursor, build a keep
+	 * mask, and compact the batch with a single Arrow filter.  The mask does not
+	 * disturb column positions, so numericColIndices stays valid for the re-tag.
+	 */
+	if (curBitmap != NULL)
+	{
+		::parquet_arrow::BooleanBuilder mb(pool);
+		PARQUET_VEC_CHECK(mb.Reserve(nrows), "delete mask reserve");
+		bool anyDeleted = false;
+		for (int64_t i = 0; i < nrows; i++)
+		{
+			while (curSelRg < (int) selNumRows.size() && posInSelRg >= selNumRows[curSelRg])
+			{
+				curSelRg++;
+				posInSelRg = 0;
+			}
+			int64_t absPos = (curSelRg < (int) selAbsStart.size())
+				? selAbsStart[curSelRg] + posInSelRg : -1;
+			posInSelRg++;
+			bool deleted = (absPos >= 0) && datalakeBitmapContains(curBitmap, (uint64) absPos);
+			anyDeleted = anyDeleted || deleted;
+			mb.UnsafeAppend(!deleted);
+		}
+		if (anyDeleted)
+		{
+			std::shared_ptr<::parquet_arrow::Array> mask;
+			PARQUET_VEC_CHECK(mb.Finish(&mask), "delete mask finish");
+			auto res = ::parquet_arrow::compute::Filter(::parquet_arrow::Datum(out),
+														::parquet_arrow::Datum(mask));
+			PARQUET_VEC_CHECK(res.status(), "apply position deletes");
+			out = res.ValueOrDie().record_batch();
+		}
+	}
+
 	PARQUET_VEC_CHECK(::parquet_arrow::ExportRecordBatch(*out.get(),
 						&c_batch->batch, &c_batch->schema),
 					  "export record batch");
@@ -296,6 +366,12 @@ icebergReadRecordBatch::destroyHandler()
 {
 	closeCurrentFile();
 	out.reset();
+	if (deleteIndex)
+	{
+		icebergDeleteIndexDestroy((IcebergDeleteIndex *) deleteIndex);
+		deleteIndex = NULL;
+		curBitmap = NULL;
+	}
 	if (protocolContext)
 	{
 		protocolContext->record = NULL;
