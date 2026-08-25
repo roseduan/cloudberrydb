@@ -13,6 +13,7 @@
 #include "src/provider/avro/read/avroRead.h"
 #include "src/provider/avro/write/avroWrite.h"
 #include "src/provider/iceberg/iceberg_read.h"
+#include "src/provider/iceberg/iceberg_read_record_batch.h"
 #include "src/provider/iceberg/iceberg_write.h"
 
 
@@ -36,6 +37,7 @@ using Datalake::Internal::archiveWrite;
 using Datalake::Internal::orcReadRecordBatch;
 using Datalake::Internal::makeParquetReadRecordBatch;
 using Datalake::Internal::icebergRead;
+using Datalake::Internal::makeIcebergReadRecordBatch;
 using Datalake::Internal::icebergWrite;
 using Datalake::Internal::icebergPosDeleteWrite;
 using Datalake::Internal::hudiRead;
@@ -82,7 +84,16 @@ std::shared_ptr<Provider> getProvider(DLTblFmt type, DLCmdType cmd, bool vectori
 			}
 			else if (FORMAT_IS_ICEBERG(type))
 			{
-				return std::make_shared<icebergRead>();
+				if (vectorization)
+				{
+					/* FDW-iceberg vectorized read (parquet data files, no MOR
+					 * deletes yet); iceberg-vec plan/option gates open this. */
+					return makeIcebergReadRecordBatch();
+				}
+				else
+				{
+					return std::make_shared<icebergRead>();
+				}
 			}
 			else if (FORMAT_IS_HUDI(type))
 			{

@@ -1659,11 +1659,15 @@ void datalakeCheckValidRecordBatchOpt(dataLakeOptions *options)
 	{
 		/* generic parquet vectorized read (issue #424) */
 	}
+	else if (FORMAT_IS_ICEBERG(options->format))
+	{
+		/* FDW-iceberg vectorized read: parquet data files, no MOR deletes yet */
+	}
 	else
 	{
 		ereport(ERROR,
 					(errcode(ERRCODE_FDW_INVALID_OPTION_NAME),
-						errmsg("vectorization only support format orc or parquet.")));
+						errmsg("vectorization only support format orc, parquet or iceberg.")));
 	}
 }
 

@@ -1558,13 +1558,19 @@ is_relation_vectorable(Scan* seqscan, List *rtable, bool isForeign)
 			if (strcmp(def->defname, "format") == 0)
 			{
 				const char *fmt = defGetString(def);
-				if (strcmp(fmt, "orc") != 0 && strcmp(fmt, "parquet") != 0)
+				if (strcmp(fmt, "orc") != 0 && strcmp(fmt, "parquet") != 0 &&
+					strcmp(fmt, "iceberg") != 0)
 				{
-					FALLBACK_LOG("foreign table relation is not orc/parquet.");
+					FALLBACK_LOG("foreign table relation is not orc/parquet/iceberg.");
 					relation_close(rel, AccessShareLock);
 					return false;
 				}
-				if (strcmp(fmt, "parquet") == 0)
+				/*
+				 * iceberg data files are parquet, read through the same
+				 * vectorized RecordBatch path (FDW-iceberg vectorization), so
+				 * apply the parquet T1 column-type whitelist to it as well.
+				 */
+				if (strcmp(fmt, "parquet") == 0 || strcmp(fmt, "iceberg") == 0)
 					isParquet = true;
 			}
 		}

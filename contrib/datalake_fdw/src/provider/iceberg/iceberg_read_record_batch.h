@@ -1,0 +1,114 @@
+/*-------------------------------------------------------------------------
+ *
+ * iceberg_read_record_batch.h
+ *    Vectorized reader for the FDW-iceberg path (CREATE FOREIGN TABLE ...
+ *    OPTIONS(format 'iceberg')).  Reuses the iceberg task/metadata resolution
+ *    (datalakeProtocolImportStart -> FileScanTask list) but, for each parquet
+ *    data file, drives libparquet-19's parquet::arrow::FileReader to produce
+ *    Arrow RecordBatches and hands them to the vectorization engine across the
+ *    Arrow C Data Interface ("Scheme A"), sharing the column matching
+ *    (matchParquetColumn, #401) and Arrow batch helpers
+ *    (parquet_vec_batch_util) with the generic parquet vectorized reader (#424).
+ *
+ *    v1 scope: read-only, parquet data files only, no MOR deletes (append-only
+ *    tables; delete handling is a later package).  Columns are emitted in table
+ *    attribute order (matching BuildDescForScanExtract) so the engine's
+ *    columnmap aligns regardless of physical file column order / schema
+ *    evolution.
+ *
+ *    IMPORTANT: like parquetReadRecordBatch.h, this header pulls in NO
+ *    parquet-arrow C-ABI headers -- the parquet_arrow types appear only by
+ *    pointer / shared_ptr behind forward declarations, and construction is
+ *    exposed through a factory so provider.cpp (which also pulls the engine
+ *    Arrow ABI) does not hit "redefinition of struct ArrowArray".
+ *
+ * Portions Copyright (c) 2023-2025, HashData Technology Limited.
+ *
+ *-------------------------------------------------------------------------
+ */
+#ifndef DATALAKE_ICEBERG_READ_RECORD_BATCH_H
+#define DATALAKE_ICEBERG_READ_RECORD_BATCH_H
+
+/* Standard + parquet headers before the PG-pulling headers: PG's port.h
+ * `#define snprintf pg_snprintf` breaks a later first-time libstdc++ `using
+ * ::snprintf`.  (A .cpp that includes the parquet C-ABI must itself front-load
+ * the parquet headers too -- see iceberg_read_record_batch.cpp.) */
+#include <memory>
+#include <vector>
+
+#include "src/provider/parquet/read/parquetFileReader.h"
+#include "src/common/rewrLogical.h"
+#include "src/provider/provider.h"
+
+extern "C" {
+#include "src/provider/common/row_reader.h"
+}
+
+/* Forward declarations of the libparquet-19 (parquet_arrow) types referenced
+ * only by pointer / shared_ptr -- no parquet-arrow header is included here. */
+namespace parquet_arrow {
+	class MemoryPool;
+	class RecordBatch;
+	class RecordBatchReader;
+}
+namespace parquet { namespace arrow { class FileReader; } }
+
+namespace Datalake {
+namespace Internal {
+
+/* Defined in the .cpp; holds the parquet-arrow ArrowArray / ArrowSchema. */
+struct IcebergCBatch;
+
+class icebergReadRecordBatch : public Provider, public readLogical
+{
+public:
+	icebergReadRecordBatch();
+	virtual ~icebergReadRecordBatch();
+
+	virtual void createHandler(void *sstate);
+	virtual int64_t read(void **recordBatch);
+	virtual void destroyHandler();
+	virtual void reScan();
+
+private:
+	/* Open the current FileScanTask's parquet data file: build the field-id
+	 * column map, select row groups by the task byte range, and create the
+	 * Arrow RecordBatchReader.  Returns false when the task list is exhausted. */
+	bool openCurrentTask();
+	void closeCurrentFile();
+	/* Assemble one engine-Arrow batch (table-attribute order) from a raw
+	 * parquet-arrow batch and export it into c_batch. */
+	void assembleOut(const std::shared_ptr<::parquet_arrow::RecordBatch> &raw);
+
+	DatalakeProtocolContext	   *protocolContext;
+	List					   *fileScanTasks;		/* borrowed from the row reader */
+	int							curTaskIndex;
+	bool						fileOpen;
+
+	parquetFileReader							fileReader;
+	std::unique_ptr<::parquet::arrow::FileReader>		arrowReader;
+	std::shared_ptr<::parquet_arrow::RecordBatchReader>	rbr;
+	std::shared_ptr<::parquet_arrow::RecordBatch>		out;
+
+	/* Emit plan for the current file, in table-attribute (ascending) order:
+	 * emitAttr[k] = PG attnum index of the k-th emitted column;
+	 * emitRawPos[k] = its position in the raw batch, or -1 for absent -> NULL. */
+	std::vector<int>			emitAttr;
+	std::vector<int>			emitRawPos;
+
+	/* Output-column indices re-encoded as numeric128 (re-tagged on export). */
+	std::vector<int>			numericColIndices;
+
+	::parquet_arrow::MemoryPool	   *pool;
+	std::unique_ptr<IcebergCBatch>	c_batch;
+};
+
+/* Factory: constructs an icebergReadRecordBatch where the parquet-arrow types
+ * are complete (inside the .cpp), so provider.cpp need not include this class's
+ * parquet-arrow internals. */
+std::shared_ptr<Provider> makeIcebergReadRecordBatch();
+
+}
+}
+
+#endif /* DATALAKE_ICEBERG_READ_RECORD_BATCH_H */

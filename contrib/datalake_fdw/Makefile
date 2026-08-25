@@ -99,6 +99,7 @@ OBJS = 	src/datalake_fdw.o \
 		src/provider/iceberg/iceberg_position_filter.o \
 		src/provider/iceberg/iceberg_delete_index.o \
 		src/provider/iceberg/iceberg_read.o \
+		src/provider/iceberg/iceberg_read_record_batch.o \
 		src/provider/iceberg/iceberg_write.o \
 		src/provider/iceberg/iceberg_posdel_write.o \
 		src/provider/iceberg/iceberg_file_index.o \
