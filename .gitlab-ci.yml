@@ -833,3 +833,34 @@ test_datalake_feature:
     - !reference [ .common-rules ]
   artifacts:
     <<: *artifacts
+
+analyze_pipeline:
+  stage: .post
+  allow_failure: true
+  tags:
+    - docker
+    - 8c32g
+  script: |
+    trap 'test -e /tmp/.debugging && tmux new-session -d -s debug && tmux wait-for done' EXIT
+
+    env
+    set -euxo pipefail
+    git config --global --add safe.directory ${CI_PROJECT_DIR}
+    git config --global init.defaultBranch none
+    git config --global fetch.recurseSubmodules false
+    git config --global credential.interactive never
+    git config --global transfer.bundleURI true
+    git config --global url."https://gitlab-ci-token:${CI_JOB_TOKEN}@code.hashdata.xyz".insteadOf "https://code.hashdata.xyz"
+
+    git init ${CI_PROJECT_DIR}
+    cd ${CI_PROJECT_DIR}
+    
+    git remote add origin https://code.hashdata.xyz/cloudberry/database/hashdata-lightning-umbrella.git
+    git fetch origin --no-recurse-submodules --prune --quiet
+    git checkout -f main
+    export ENV=devel
+    make ai_analyze_pipeline
+  rules:
+    - when: on_failure
+  artifacts:
+    <<: *artifacts
