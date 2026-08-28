@@ -47,7 +47,8 @@
  *   PHJ_BUILD_ALLOCATING            -- one sets up the batches and table 0
  *   PHJ_BUILD_HASHING_INNER         -- all hash the inner rel
  *   PHJ_BUILD_HASHING_OUTER         -- (multi-batch only) all hash the outer
- *   PHJ_BUILD_DONE                  -- building done, probing can begin
+ *   PHJ_BUILD_RUNNING               -- building done, probing can begin
+ *   PHJ_BUILD_DONE                  -- all work complete, one frees batches
  *
  * While in the phase PHJ_BUILD_HASHING_INNER a separate pair of barriers may
  * be used repeatedly as required to coordinate expansions in the number of
@@ -75,7 +76,7 @@
  * batches whenever it encounters them while scanning and probing, which it
  * can do because it processes batches in serial order.
  *
- * Once PHJ_BUILD_DONE is reached, backends then split up and process
+ * Once PHJ_BUILD_RUNNING is reached, backends then split up and process
  * different batches, or gang up and work together on probing batches if there
  * aren't enough to go around.  For each batch there is a separate barrier
  * with the following phases:
@@ -101,8 +102,8 @@
  * finished.  Practically, that means that we never emit a tuple while attached
  * to a barrier, unless the barrier has reached a phase that means that no
  * process will wait on it again.  We emit tuples while attached to the build
- * barrier in phase PHJ_BUILD_RUN, and to a per-batch barrier in phase
- * PHJ_BATCH_PROBING.  These are advanced to PHJ_BUILD_FREE and PHJ_BATCH_SCAN
+ * barrier in phase PHJ_BUILD_RUNNING, and to a per-batch barrier in phase
+ * PHJ_BATCH_PROBING.  These are advanced to PHJ_BUILD_DONE and PHJ_BATCH_SCAN
  * respectively without waiting, using BarrierArriveAndDetach() and
  * BarrierArriveAndDetachExceptLast() respectively.  The last to detach
  * receives a different return value so that it knows that it's safe to
@@ -386,7 +387,22 @@ ExecHashJoinImpl(PlanState *pstate, bool parallel)
 				 * If LASJ_NOTIN and a null was found on the inner side, then clean out.
 				 */
 				if (node->js.jointype == JOIN_LASJ_NOTIN && hashNode->hs_hashkeys_null)
+				{
+					if (parallel)
+					{
+						/*
+						 * CBDB: this early quit has no upstream counterpart,
+						 * but like the empty-inner case below it abandons the
+						 * join before the build barrier reaches
+						 * PHJ_BUILD_RUNNING, so advance it here too.
+						 */
+						Barrier    *build_barrier = &parallel_state->build_barrier;
+
+						while (BarrierPhase(build_barrier) < PHJ_BUILD_RUNNING)
+							BarrierArriveAndWait(build_barrier, 0);
+					}
 					return NULL;
+				}
 
 				/*
 				 * If the inner relation is completely empty, and we're not
@@ -394,7 +410,21 @@ ExecHashJoinImpl(PlanState *pstate, bool parallel)
 				 * outer relation.
 				 */
 				if (hashtable->totalTuples == 0 && !HJ_FILL_OUTER(node))
+				{
+					if (parallel)
+					{
+						/*
+						 * Advance the build barrier to PHJ_BUILD_RUNNING
+						 * before proceeding so we can negotiate resource
+						 * cleanup.
+						 */
+						Barrier    *build_barrier = &parallel_state->build_barrier;
+
+						while (BarrierPhase(build_barrier) < PHJ_BUILD_RUNNING)
+							BarrierArriveAndWait(build_barrier, 0);
+					}
 					return NULL;
+				}
 
 				/*
 				 * Prefetch JoinQual or NonJoinQual to prevent motion hazard.
@@ -440,6 +470,7 @@ ExecHashJoinImpl(PlanState *pstate, bool parallel)
 
 					build_barrier = &parallel_state->build_barrier;
 					Assert(BarrierPhase(build_barrier) == PHJ_BUILD_HASHING_OUTER ||
+						   BarrierPhase(build_barrier) == PHJ_BUILD_RUNNING ||
 						   BarrierPhase(build_barrier) == PHJ_BUILD_DONE);
 					if (BarrierPhase(build_barrier) == PHJ_BUILD_HASHING_OUTER)
 					{
@@ -460,9 +491,18 @@ ExecHashJoinImpl(PlanState *pstate, bool parallel)
 						BarrierArriveAndWait(build_barrier,
 											 WAIT_EVENT_HASH_BUILD_HASH_OUTER);
 					}
-					Assert(BarrierPhase(build_barrier) == PHJ_BUILD_DONE);
+					else if (BarrierPhase(build_barrier) == PHJ_BUILD_DONE)
+					{
+						/*
+						 * If we attached so late that the job is finished and
+						 * the batch state has been freed, we can return
+						 * immediately.
+						 */
+						return NULL;
+					}
 
 					/* Each backend should now select a batch to work on. */
+					Assert(BarrierPhase(build_barrier) == PHJ_BUILD_RUNNING);
 					hashtable->curbatch = -1;
 					node->hj_JoinState = HJ_NEED_NEW_BATCH;
 
@@ -1469,14 +1509,6 @@ ExecParallelHashJoinNewBatch(HashJoinState *hjstate)
 	ParallelHashJoinState *pstate = hashtable->parallel_state;
 
 	/*
-	 * If we started up so late that the batch tracking array has been freed
-	 * already by ExecHashTableDetach(), then we are finished.  See also
-	 * ExecParallelHashEnsureBatchAccessors().
-	 */
-	if (hashtable->batches == NULL)
-		return false;
-
-	/*
 	 * If we were already attached to a batch, remember not to bother checking
 	 * it again, and detach from it (possibly freeing the hash table if we are
 	 * last to detach).
@@ -2202,7 +2234,7 @@ ExecHashJoinReInitializeDSM(HashJoinState *state, ParallelContext *cxt)
 	/*
 	 * It would be possible to reuse the shared hash table in single-batch
 	 * cases by resetting and then fast-forwarding build_barrier to
-	 * PHJ_BUILD_DONE and batch 0's batch_barrier to PHJ_BATCH_PROBING, but
+	 * PHJ_BUILD_RUNNING and batch 0's batch_barrier to PHJ_BATCH_PROBING, but
 	 * currently shared hash tables are already freed by now (by the last
 	 * participant to detach from the batch).  We could consider keeping it
 	 * around for single-batch joins.  We'd also need to adjust

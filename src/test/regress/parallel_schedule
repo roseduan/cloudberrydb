@@ -195,6 +195,8 @@ test: constraints_check
 test: stats
 # orca parallel
 test: orca_parallel
+# parallel-aware LASJ_NOTIN build barrier fast-forward
+test: parallel_hashjoin_lasj_notin
 # test of tag
 test: tag
 
