@@ -234,6 +234,20 @@ test: autostats_locking
 # so it needs to be run with autovacuum being disabled
 test: segwalrep/die_commit_pending_replication
 
+# Tests for unique indexes on AO/CO tables (uses fault injector).
+# These must run with autovacuum disabled: ao_unique_index_vacuum relies on
+# VACUUM recycling, within the same command, the segfile its compact phase just
+# marked AWAITING_DROP.  AppendOptimizedCollectDeadSegments() only collects that
+# segfile once the oldest-xmin horizon has advanced past the compact
+# transaction, so any same-database backend holding an older snapshot defers it
+# to a later VACUUM and vacuum_ao_after_index_delete never fires.  An autovacuum
+# worker is enough: Cloudberry deliberately does not set PROC_IN_VACUUM (see
+# vacuum_rel()), so lazy vacuums are not excluded from the horizon.
+test: ao_unique_index
+test: aocs_unique_index
+test: uao/ao_unique_index_vacuum_row
+test: uao/ao_unique_index_vacuum_column
+
 test: enable_autovacuum
 test: idle_gang_cleaner
 # test idle_in_transaction_session_timeout
@@ -322,12 +336,6 @@ test: check_gxid
 # test if GUC is synchronized from the QD to QEs.
 test: sync_guc
 
-
-# Tests for unique indexes on AO/CO tables (uses fault injector)
-test: ao_unique_index
-test: aocs_unique_index
-test: uao/ao_unique_index_vacuum_row
-test: uao/ao_unique_index_vacuum_column
 
 test: spilling_hashagg
 
