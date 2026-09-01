@@ -1257,8 +1257,12 @@ insert into statement_timeout_test select i,i+1 from generate_series(1,10000)i;
 prepare prestmt as select * from statement_timeout_test s1, statement_timeout_test s2, statement_timeout_test s3, statement_timeout_test s4, statement_timeout_test s5;
 set statement_timeout = 1000; -- 1 sec
 execute prestmt; -- should get cancelled automatically
-drop table statement_timeout_test;
+-- Reset the timeout before dropping the table.  The DROP needs an
+-- AccessExclusiveLock, and if anything (e.g. an autoanalyze worker holding
+-- ShareUpdateExclusiveLock) makes it wait, it is killed by the 1 sec
+-- statement_timeout long before deadlock_timeout can cancel the blocker.
 reset statement_timeout;
+drop table statement_timeout_test;
 set gp_autostats_mode=none;
 
 -- Test for an old bug with ANALYZE (analyze code has been rewritten since).
