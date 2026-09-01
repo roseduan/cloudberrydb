@@ -182,6 +182,7 @@ typedef struct IcebergCustomScanState
 {
 	CustomScanState	 css;			/* must be first */
 	TableScanDesc	 scanDesc;
+	bool			 vectorize;		/* EXEC_FLAG_VECTOR seen at BeginCustomScan */
 } IcebergCustomScanState;
 
 
@@ -716,8 +717,57 @@ IcebergBeginCustomScan(CustomScanState *node, EState *estate, int eflags)
 											 snapshot_id);
 	}
 
-	/* GPDB: the iceberg_volume_fdw layer reads ps.scandesc. */
-	node->ss.ps.scandesc = RelationGetDescr(rel);
+	/*
+	 * The vectorization engine ORs EXEC_FLAG_VECTOR into eflags for the whole
+	 * plan tree (its ExecutorStart hook).  When set, ExecInitVecCustomScan is
+	 * driving this node and expects ABI RecordBatch slots, so remember it and
+	 * flip the underlying read to the vectorized path.
+	 */
+	iss->vectorize = (eflags & ICEBERG_EXEC_FLAG_VECTOR) != 0;
+
+	/*
+	 * GPDB: the iceberg_volume_fdw layer reads ps.scandesc to decide which
+	 * columns the batch/row reader emits.  For the vectorized path the engine
+	 * (ExecInitScanTupleSlotVec) has already narrowed ss_ScanTupleSlot to the
+	 * COMPACT scan descriptor -- only the referenced columns, in attr order --
+	 * so the provider must emit exactly those columns, in that order, to line
+	 * up with the engine's columnmap.
+	 *
+	 * But BuildDescForScanExtract renumbered that compact descriptor's attnums
+	 * to 1..N, and builtin-iceberg parquet matching keys the Iceberg field-id
+	 * off attnum (createFieldDescription).  So hand the provider a private copy
+	 * of the compact descriptor with each attnum restored to the original
+	 * relation attnum (matched by name); the engine keeps its own renumbered
+	 * slot untouched.  The row path emits the full relation rowtype.
+	 */
+	if (iss->vectorize && node->ss.ss_ScanTupleSlot != NULL)
+	{
+		TupleDesc	compact = node->ss.ss_ScanTupleSlot->tts_tupleDescriptor;
+		TupleDesc	full = RelationGetDescr(rel);
+		TupleDesc	pdesc = CreateTupleDescCopy(compact);
+		int			j;
+
+		for (j = 0; j < pdesc->natts; j++)
+		{
+			Form_pg_attribute cattr = TupleDescAttr(pdesc, j);
+			int			i;
+
+			for (i = 0; i < full->natts; i++)
+			{
+				Form_pg_attribute fattr = TupleDescAttr(full, i);
+
+				if (!fattr->attisdropped &&
+					strcmp(NameStr(cattr->attname), NameStr(fattr->attname)) == 0)
+				{
+					cattr->attnum = fattr->attnum;
+					break;
+				}
+			}
+		}
+		node->ss.ps.scandesc = pdesc;
+	}
+	else
+		node->ss.ps.scandesc = RelationGetDescr(rel);
 
 	iss->scanDesc = NULL;
 }
@@ -742,7 +792,8 @@ iceberg_ensure_scan_open(IcebergCustomScanState *iss)
 														 estate->es_snapshot,
 														 0, NULL, NULL,
 														 &node->ss.ps,
-														 flags);
+														 flags,
+														 iss->vectorize);
 }
 
 
@@ -773,6 +824,17 @@ IcebergRecheckScan(CustomScanState *node, TupleTableSlot *slot)
 static TupleTableSlot *
 IcebergExecCustomScan(CustomScanState *node)
 {
+	IcebergCustomScanState *iss = (IcebergCustomScanState *) node;
+
+	/*
+	 * Vectorized path: the vec engine (ExecVecCustomScan) drives us and wants
+	 * the raw slot carrying an ABI RecordBatch, so skip ExecScan's row-at-a-
+	 * time projection and quals -- the engine applies vectorized quals and
+	 * projection on the imported batch.
+	 */
+	if (iss->vectorize)
+		return IcebergAccessScan(node);
+
 	return ExecScan(&node->ss,
 					(ExecScanAccessMtd) IcebergAccessScan,
 					(ExecScanRecheckMtd) IcebergRecheckScan);

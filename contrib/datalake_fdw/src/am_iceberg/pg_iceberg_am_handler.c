@@ -591,7 +591,7 @@ static TableScanDesc
 iceberg_scan_begin_extractcolumns(Relation rel, Snapshot snapshot, int nkeys, struct ScanKeyData *key,
 								  ParallelTableScanDesc parallel_scan, struct PlanState *ps, uint32 flags)
 {
-	return pg_iceberg_scan_begin_extractcolumns(rel, snapshot, nkeys, key, parallel_scan, ps, flags);
+	return pg_iceberg_scan_begin_extractcolumns(rel, snapshot, nkeys, key, parallel_scan, ps, flags, false);
 }
 
 static void

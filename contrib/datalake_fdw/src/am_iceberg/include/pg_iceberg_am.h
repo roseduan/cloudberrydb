@@ -60,6 +60,14 @@ typedef struct IcebergDMLStates
 	MemoryContextCallback	cb;
 } IcebergDMLStates;
 
+/*
+ * Vectorized-execution flag bit passed down to the volume FDW's
+ * BeginForeignScan.  Must match EXEC_FLAG_VECTOR in the vectorization engine
+ * (contrib/vectorization .../executor.h) and in common/fdwFunction.c: when set,
+ * the shared read layer produces Arrow RecordBatches instead of row slots.
+ */
+#define ICEBERG_EXEC_FLAG_VECTOR	0x8000
+
 /* Table scan callbacks */
 extern TableScanDesc pg_iceberg_beginscan(Relation rel, Snapshot snapshot,
 										  int nkeys, struct ScanKeyData *key,
@@ -76,7 +84,8 @@ extern TableScanDesc pg_iceberg_scan_begin_extractcolumns(Relation rel,
 														  struct ScanKeyData *key,
 														  ParallelTableScanDesc parallel_scan,
 														  struct PlanState *ps,
-														  uint32 flags);
+														  uint32 flags,
+														  bool vectorize);
 
 /* Planner related functions */
 extern void pg_iceberg_estimate_rel_size(Relation rel, int32 *attr_widths,

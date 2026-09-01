@@ -225,7 +225,7 @@ pg_iceberg_beginscan(Relation rel,
 					 ParallelTableScanDesc pscan,
 					 uint32 flags)
 {
-	return pg_iceberg_scan_begin_extractcolumns(rel, snapshot, nkeys, key, pscan, NULL, flags);
+	return pg_iceberg_scan_begin_extractcolumns(rel, snapshot, nkeys, key, pscan, NULL, flags, false);
 }
 
 TableScanDesc
@@ -235,7 +235,8 @@ pg_iceberg_scan_begin_extractcolumns(Relation rel,
 									 struct ScanKeyData *key,
 									 ParallelTableScanDesc parallel_scan,
 									 struct PlanState *ps,
-									 uint32 flags)
+									 uint32 flags,
+									 bool vectorize)
 {
 	IcebergScanDesc scan;
 	IcebergTableInfo *table_info;
@@ -286,7 +287,14 @@ pg_iceberg_scan_begin_extractcolumns(Relation rel,
 														table_info->volume_name,
 														am_private);
 	fdw_routine = scan->scanState->fdwroutine;
-	fdw_routine->BeginForeignScan(scan->scanState, 0);
+	/*
+	 * When the scan is driven by a vectorized CustomScan, hand the volume FDW
+	 * EXEC_FLAG_VECTOR so the shared read layer produces Arrow RecordBatches;
+	 * the vec engine imports them (see nodeCustomscan.c).  All other callers
+	 * (the plain tableam path) pass vectorize=false and read row slots.
+	 */
+	fdw_routine->BeginForeignScan(scan->scanState,
+								  vectorize ? ICEBERG_EXEC_FLAG_VECTOR : 0);
 
 	pg_iceberg_free_table_info(table_info);
 	return (TableScanDesc) scan;
@@ -1911,7 +1919,8 @@ pg_iceberg_begin_vacuum_scan(Relation rel,
 													 NULL,
 													 NULL,
 													 (PlanState *) scan_state,
-													 0);
+													 0,
+													 false);
 
 	if (out_scan_state)
 		*out_scan_state = scan_state;
