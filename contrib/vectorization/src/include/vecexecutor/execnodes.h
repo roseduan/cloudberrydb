@@ -109,6 +109,25 @@ typedef struct VecForeignScanState
 	GArrowSchema *schema;
 } VecForeignScanState;
 
+/*
+ * VecCustomScanState -- vec bookkeeping for a CustomScan node.
+ *
+ * Unlike ForeignScan (whose ForeignScanState the executor allocates and can
+ * subclass), a CustomScan's state is allocated by the provider via
+ * CreateCustomScanState, so the engine cannot subclass it.  Instead this
+ * struct is kept alongside the provider's CustomScanState and looked up by it
+ * (see nodeCustomscan.c).  csstate->ss.ss_ScanTupleSlot is TTSOpsVirtual for
+ * the provider's ABI batch; vscanslot is TTSOpsVecTuple for the imported batch.
+ */
+typedef struct VecCustomScanState
+{
+	CustomScanState *csstate;	/* the provider's state; the lookup key */
+	VecExecuteState vestate;
+	int			   *columnmap;
+	TupleTableSlot *vscanslot;
+	GArrowSchema   *schema;
+} VecCustomScanState;
+
 typedef struct VecSequenceState
 {
 	SequenceState base;	

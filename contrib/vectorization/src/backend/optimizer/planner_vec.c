@@ -24,6 +24,7 @@
 #include "optimizer/planshare.h"
 #include "optimizer/planmain.h"
 #include "miscadmin.h"
+#include "catalog/pg_am.h"
 #include "catalog/pg_attribute_encoding.h"
 #include "catalog/pg_collation.h"
 #include "catalog/pg_namespace.h"
@@ -38,6 +39,7 @@
 #include "access/heapam.h"
 #include "nodes/nodes.h"
 #include "nodes/makefuncs.h"
+#include "nodes/extensible.h"
 #include "cdb/cdbllize.h"
 #include "optimizer/walkers.h"
 #include "utils/guc.h"
@@ -75,6 +77,9 @@ static bool is_plan_vectorable(Plan* plan, List *rtable);
 static bool is_expr_vectorable(Expr* expr, void *context);
 static bool is_hash_expr_vectorable(Expr* expr, void *context);
 static bool is_relation_vectorable(SeqScan* seqscan, List *rtable, bool isForeign);
+static bool is_iceberg_customscan_vectorable(CustomScan *cscan, List *rtable);
+static bool is_iceberg_am_relid(Oid relid);
+static bool iceberg_scan_types_vectorable(Oid relid, List *targetlist, List *qual);
 static bool is_sort_collation_vectorable(Sort *sort);
 static bool fallback_distinct_junk(Plan *plan);
 static bool fallback_nested_loop_jointype(Plan *plan);
@@ -1105,9 +1110,29 @@ is_plan_vectorable(Plan* plan, List *rtable)
 		/* Check plan node to fallback unvectorable cases: */
 		case T_SeqScan:
 			{
-				SeqScan *seqscan = (SeqScan*)plan;
+				SeqScan		   *seqscan = (SeqScan *) plan;
+				RangeTblEntry  *srte = (seqscan->scanrelid > 0)
+					? rt_fetch(seqscan->scanrelid, rtable) : NULL;
 
-				if (!is_relation_vectorable((Scan *)seqscan, rtable, false))
+				/*
+				 * A SeqScan over an iceberg AM relation is rewritten into an
+				 * "Iceberg Scan" CustomScan by datalake_fdw's planner_hook.
+				 * Depending on extension load order that rewrite may run either
+				 * before or after this check, so accept the iceberg relation
+				 * here too (gated on the parquet T1 column types, not the
+				 * storage-AM SCAN_SUPPORT_VECTORIZATION flag): the vectorization
+				 * mark rides the PlannedStmt through the rewrite and execution
+				 * lands in ExecInitVecCustomScan.
+				 */
+				if (srte != NULL && srte->rtekind == RTE_RELATION &&
+					is_iceberg_am_relid(srte->relid))
+				{
+					if (!iceberg_scan_types_vectorable(srte->relid,
+													   plan->targetlist,
+													   plan->qual))
+						return false;
+				}
+				else if (!is_relation_vectorable((Scan *)seqscan, rtable, false))
 					return false;
 			}
 			break;
@@ -1384,6 +1409,15 @@ is_plan_vectorable(Plan* plan, List *rtable)
 			}
 			break;
 
+		case T_CustomScan:
+			{
+				CustomScan *cscan = (CustomScan *) plan;
+
+				if (!is_iceberg_customscan_vectorable(cscan, rtable))
+					return false;
+			}
+			break;
+
 		/* Plans fully vectorable: */
 		case T_AssertOp:
 		case T_Hash:
@@ -1418,6 +1452,114 @@ is_foreign_scan_vectorable(ForeignScan *foreignscan)
 			return true;
 	FALLBACK_LOG("unsupported foreign data wrapper: %s", fdw->fdwname);
 	return false;
+}
+
+/*
+ * is_iceberg_customscan_vectorable
+ *
+ * A CustomScan is vectorizable only when it is the datalake iceberg AM's
+ * "Iceberg Scan" -- the one provider known to return ABI RecordBatches (see
+ * nodeCustomscan.c).  The scanned object is a real relation using the iceberg
+ * row AM, so we must NOT go through is_relation_vectorable's non-foreign path
+ * (which requires the storage AM to advertise SCAN_SUPPORT_VECTORIZATION).
+ * Iceberg data files are parquet, so gate on the same parquet "T1" column-type
+ * whitelist the foreign iceberg path uses.
+ */
+/* Does relid use the datalake "iceberg" table access method? */
+static bool
+is_iceberg_am_relid(Oid relid)
+{
+	static Oid	iceberg_am_oid = InvalidOid;
+	HeapTuple	tup;
+	Oid			relam;
+
+	if (!OidIsValid(relid))
+		return false;
+
+	if (!OidIsValid(iceberg_am_oid))
+	{
+		iceberg_am_oid = GetSysCacheOid1(AMNAME, Anum_pg_am_oid,
+										 CStringGetDatum("iceberg"));
+		if (!OidIsValid(iceberg_am_oid))
+			return false;
+	}
+
+	tup = SearchSysCache1(RELOID, ObjectIdGetDatum(relid));
+	if (!HeapTupleIsValid(tup))
+		return false;
+	relam = ((Form_pg_class) GETSTRUCT(tup))->relam;
+	ReleaseSysCache(tup);
+
+	return OidIsValid(relam) && relam == iceberg_am_oid;
+}
+
+/*
+ * Are all columns a scan of `relid` would extract (from targetlist + qual)
+ * vectorizable under the parquet "T1" whitelist?  Iceberg data files are
+ * parquet, so this is the correct gate for both the iceberg SeqScan and the
+ * iceberg CustomScan (unlike the storage-AM SCAN_SUPPORT_VECTORIZATION flag).
+ */
+static bool
+iceberg_scan_types_vectorable(Oid relid, List *targetlist, List *qual)
+{
+	Relation	rel;
+	TupleDesc	reldesc;
+	TupleDesc	tupdesc;
+	int		   *columnmap;
+	AttrNumber	attnum;
+	bool		ok = true;
+
+	rel = relation_open(relid, AccessShareLock);
+	reldesc = RelationGetDescr(rel);
+	columnmap = palloc0((reldesc->natts + 1) * sizeof(int));
+	tupdesc = BuildDescForScanExtract(reldesc, targetlist, qual, columnmap);
+	relation_close(rel, AccessShareLock);
+
+	for (attnum = 1; attnum <= tupdesc->natts; attnum++)
+	{
+		Form_pg_attribute attr = TupleDescAttr(tupdesc, attnum - 1);
+
+		if (!is_scan_type_vectorable(attr) || !is_parquet_t1_type(attr->atttypid))
+		{
+			FALLBACK_LOG("iceberg scan: column type %u not supported in T1",
+						 attr->atttypid);
+			ok = false;
+			break;
+		}
+	}
+
+	pfree(columnmap);
+	return ok;
+}
+
+static bool
+is_iceberg_customscan_vectorable(CustomScan *cscan, List *rtable)
+{
+	RangeTblEntry *rte;
+
+	if (cscan->methods == NULL || cscan->methods->CustomName == NULL ||
+		strcmp(cscan->methods->CustomName, "Iceberg Scan") != 0)
+	{
+		FALLBACK_LOG("custom scan is not the iceberg scan; not vectorizable");
+		return false;
+	}
+
+	if (cscan->scan.scanrelid == 0)
+	{
+		FALLBACK_LOG("iceberg custom scan has no base relation");
+		return false;
+	}
+
+	rte = rt_fetch(cscan->scan.scanrelid, rtable);
+	if (rte == NULL || rte->rtekind != RTE_RELATION)
+	{
+		FALLBACK_LOG("iceberg custom scan: invalid relation");
+		return false;
+	}
+
+	return iceberg_scan_types_vectorable(rte->relid,
+										 cscan->scan.plan.targetlist,
+										 cscan->scan.plan.qual);
 }
 
 static Node *

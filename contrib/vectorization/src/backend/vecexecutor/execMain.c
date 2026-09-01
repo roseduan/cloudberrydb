@@ -34,6 +34,7 @@
 #include "executor/nodeSubplan.h"
 #include "vecexecutor/execslot.h"
 #include "vecexecutor/executor.h"
+#include "vecexecutor/nodeCustomscan.h"
 #include "vecexecutor/vec_motion_direct_send.h"
 #include "vecexecutor/vec_topk_bounds.h"
 #include "utils/numeric.h"
@@ -2266,6 +2267,14 @@ BuildVecPlan(PlanState *planstate, VecExecuteState *estate)
 			pcontext.map = scanstate->columnmap;
 		}
 		break;
+		case T_CustomScanState:
+		{
+			VecCustomScanState *scanstate =
+				GetVecCustomScanState((CustomScanState *) planstate);
+			pcontext.inputschema = scanstate->schema;
+			pcontext.map = scanstate->columnmap;
+		}
+		break;
 		case T_AssertOpState:
 		{
 			pcontext.inputschema = GetSchemaFromSlot(outerPlanState(planstate)->ps_ResultTupleSlot);
@@ -3398,6 +3407,29 @@ get_foreign_next_batch(PlanState *node)
 }
 
 static void *
+get_custom_next_batch(PlanState *node)
+{
+	VecCustomScanState *vcss = GetVecCustomScanState((CustomScanState *) node);
+	TupleTableSlot *slot;
+
+	while (true)
+	{
+		slot = ExecVecScanFetch((ScanState *) node,
+								(ExecScanAccessMtd) VecCustomNext,
+								(ExecScanRecheckMtd) VecCustomRecheck,
+								vcss->vscanslot);
+		if (TupIsNull(slot))
+			return NULL;
+		if (!GetNumRows(slot))
+			continue;
+		break;
+	}
+
+	Assert(!TTS_IS_DIRTY(slot));
+	return (void *) GetBatch(slot);
+}
+
+static void *
 get_current_next_batch(PlanState *node)
 {
 	/*
@@ -3444,6 +3476,10 @@ BuildSource(PlanBuildContext *pcontext)
 			break;
 		case T_ForeignScanState:
 			callback = (GetNextCallback) get_foreign_next_batch;
+			pstate = pcontext->planstate;
+			break;
+		case T_CustomScanState:
+			callback = (GetNextCallback) get_custom_next_batch;
 			pstate = pcontext->planstate;
 			break;
 		case T_SequenceState:

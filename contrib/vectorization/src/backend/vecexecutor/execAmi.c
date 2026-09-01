@@ -25,6 +25,7 @@
 #include "executor/nodeCtescan.h"
 #include "executor/nodeCustom.h"
 #include "executor/nodeForeignscan.h"
+#include "vecexecutor/nodeCustomscan.h"
 #include "executor/nodeFunctionscan.h"
 #include "executor/nodeGather.h"
 #include "executor/nodeGatherMerge.h"
@@ -294,7 +295,12 @@ ExecVecReScan(PlanState *node)
 			break;
 
 		case T_CustomScanState:
-			ExecReScanCustomScan((CustomScanState *) node);
+			/*
+			 * Within a vectorized plan a CustomScanState is always produced by
+			 * ExecInitVecCustomScan, so reset the vec scan too (not just the
+			 * provider via the core ExecReScanCustomScan).
+			 */
+			ExecReScanVecCustomScan((CustomScanState *) node);
 			break;
 
 		case T_NestLoopState:
@@ -792,6 +798,10 @@ ExecVecSquelchNode(PlanState *node)
 			 * what we want.
 			 */
 			ExecSquelchVecForeignScan((ForeignScanState *) node);
+			break;
+
+		case T_CustomScanState:
+			ExecSquelchVecCustomScan((CustomScanState *) node);
 			break;
 
 		case T_NestLoopState:
