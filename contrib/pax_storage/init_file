@@ -115,6 +115,17 @@ m/kind group, filter rate: 0 \/.*/
 m/kind group, no filter\..*/
 -- end_matchignore
 
+# The sparse-filter statistics below are logged independently by each QE, so
+# their interleaving order in the QD output (and the order of the per-scan
+# "file" vs "group" lines) is not deterministic.  Declare them as a sortable
+# message block: atmsort sorts the consecutive block on
+# both the expected and the actual side before diffing, so a single expected
+# file is stable regardless of the order the segments emit these lines.
+-- start_matchsort
+m/^LOG:  kind file, filter rate: /
+m/^kind group, filter rate: /
+-- end_matchsort
+
 -- start_matchsubs
 # entry db matches
 m/\s+\(entry db(.*)+\spid=\d+\)/

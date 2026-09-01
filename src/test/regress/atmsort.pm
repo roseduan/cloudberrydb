@@ -78,6 +78,7 @@ sub atmsort_init
 
     init_match_subs();
     init_matchignores();
+    init_matchsorts();
 
     _process_init_files();
 }
@@ -386,6 +387,95 @@ sub match_then_ignore
             {
                 print $atmsort_outfh "GP_IGNORE: matched $ff->[-3]\t$ff->[-2]\t$ff->[-1]\n"
             }
+            return 1; # matched
+        }
+    }
+    return 0; # no match
+}
+
+my $glob_match_then_sort_fnlist;
+
+# Build the list of "match then sort" expressions.
+#
+# These identify lines that belong to a block of interchangeable server
+# messages (typically LOG lines emitted independently by several QEs) whose
+# order in the QD output is not deterministic.  Lines matching one of these
+# expressions participate in the same consecutive-message-block sort that is
+# already applied to NOTICE/ERROR/HINT/DETAIL/WARNING, so the block is
+# canonicalized before diffing.  This is opt-in: only lines matching a
+# pattern defined here (e.g. from an init_file's start_matchsort section) are
+# affected, so other tests are untouched.
+sub _build_match_sorts
+{
+    my ($here_matchsorts, $whomatch) = @_;
+
+    my $stat = [1];
+
+    # filter out the comments and blank lines
+    $here_matchsorts =~ s/^\s*(?:#.*)?(?:[\r\n]|\x0D\x0A)//gm;
+
+    # split up the document into separate lines
+    my @matchsorts_arr = split(/\n/, $here_matchsorts);
+
+    my $bigdef;
+
+    my $fn1;
+
+    # build a lambda function for each expression, and load it into an array
+    my $mscount = 1;
+
+    for my $defi (@matchsorts_arr)
+    {
+        $bigdef = '$fn1 = sub { my $ini = shift; '. "\n";
+        $bigdef .= 'return ($ini =~ ' . $defi;
+        $bigdef .= ') ; } ' . "\n";
+
+        if (eval $bigdef)
+        {
+            my $cmt = $whomatch . " matchsorts \#" . $mscount;
+            $mscount++;
+
+            # store the function pointer and the text of the function
+            # definition
+            push @{$glob_match_then_sort_fnlist},
+                    [$fn1, $bigdef, $cmt, $defi, "(sort)"];
+            if ($glob_verbose && defined $atmsort_outfh)
+            {
+                print $atmsort_outfh "GP_IGNORE: Defined $cmt\t$defi\n"
+            }
+        }
+        else
+        {
+            my $err1 = "bad eval: $bigdef";
+            $stat->[0] = 1;
+            $stat->[1] = $err1;
+            return $stat;
+        }
+    }
+
+    return $stat;
+
+} # end _build_match_sorts
+
+# There are no default match/sort expressions; the list is populated only
+# from init_file start_matchsort sections.
+sub init_matchsorts
+{
+    $glob_match_then_sort_fnlist = [];
+}
+
+# if the input line belongs to a sortable message block, return 1, else 0
+sub match_then_sort
+{
+    my $ini = shift;
+
+    for my $ff (@{$glob_match_then_sort_fnlist})
+    {
+        # get the function and execute it
+        my $fn1 = $ff->[0];
+
+        if (&$fn1($ini))
+        {
             return 1; # matched
         }
     }
@@ -991,6 +1081,7 @@ sub atmsort_bigloop
     my @outarr;
 
     my $lastmsg = -1;
+    my $lastsort = -1;
     my $getrows = 0;
     my $getstatement = 0;
     my $has_order = 0;
@@ -1011,7 +1102,7 @@ sub atmsort_bigloop
         # look for match/substitution or match/ignore expressions
         if (%define_match_expression)
         {
-            if ($ini =~ m/\-\-\s*end\_match(subs|ignore)\s*$/)
+            if ($ini =~ m/\-\-\s*end\_match(subs|ignore|sort)\s*$/)
             {
                 if ($define_match_expression{"type"} ne $1)
                 {
@@ -1044,6 +1135,10 @@ sub atmsort_bigloop
 			if ($define_match_expression{"type"} eq 'subs')
             {
                 $stat = _build_match_subs($doc1, "USER");
+            }
+            elsif ($define_match_expression{"type"} eq 'sort')
+            {
+                $stat = _build_match_sorts($doc1, "USER");
             }
             else
             {
@@ -1177,7 +1272,7 @@ sub atmsort_bigloop
 			# trailing characters at all.
 			my $has_comment = ((m/\s*\-\-.+$/) ? 1 : 0);
 
-            if ($has_comment && $ini =~ m/\-\-\s*start\_match(subs|ignore)\s*$/)
+            if ($has_comment && $ini =~ m/\-\-\s*start\_match(subs|ignore|sort)\s*$/)
             {
                 $define_match_expression{"type"} = $1;
                 $define_match_expression{"expr"} = $ini;
@@ -1319,6 +1414,25 @@ sub atmsort_bigloop
 
             } # end if pruning notices
 
+            # Lines matching a user-defined matchsort expression form a block
+            # of interchangeable messages (typically per-QE LOG lines) whose
+            # order in the QD output is not deterministic.  Track the extent of
+            # the consecutive block so it can be sorted before diffing.  Unlike
+            # the NOTICE block above, matchsort lines are only sorted, never
+            # de-duplicated, so repeated identical messages are preserved.
+            elsif (match_then_sort($ini))
+            {
+                my $outsize = scalar(@outarr);
+
+                $lastsort = -1;
+
+                for my $jj (1..$outsize)
+                {
+                    last if (!match_then_sort($outarr[$lastsort]));
+                    $lastsort--;
+                }
+            } # end if matchsort block
+
             # MPP-1492 allow:
             #  copy (select ...) to stdout
             #  \copy (select ...) to stdout
@@ -1449,6 +1563,19 @@ L_push_outarr:
             @msgblock = sort @msgblock;
             splice @outarr, $lastmsg, abs $lastmsg, @msgblock;
             $lastmsg = -1;
+        }
+
+        # lastsort < -1 means we found a consecutive block of lines matching a
+        # user-defined matchsort expression.  Such lines (typically per-QE LOG
+        # messages) can reach the QD in an unstable order, so sort the block to
+        # aid diff comparison.  Unlike the message block above, these lines are
+        # NOT de-duplicated, so repeated identical lines are preserved.
+        if ($lastsort < -1)
+        {
+            my @sortblock = @outarr[$lastsort..-1];
+            @sortblock = sort @sortblock;
+            splice @outarr, $lastsort, abs $lastsort, @sortblock;
+            $lastsort = -1;
         }
 
     } # end big while

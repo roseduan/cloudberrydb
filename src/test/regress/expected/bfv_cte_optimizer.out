@@ -510,6 +510,14 @@ DETAIL:  Falling back to Postgres-based planner because GPORCA does not support 
 -- s/slice=4\): initialized xslice state/slice={2|4}): initialized xslice state/g
 -- s/One-Time Filter: \(gp_execution_segment\(\) =\d+\)/One-Time Filter: \(gp_execution_segment\(\) =#\)/
 -- end_matchsubs
+-- The SISC reader-side LOG lines on seg2 (the xslice-state initialization and
+-- the readers' notify_done) are emitted independently by the reader slices, so
+-- their relative order in the output is not deterministic.  Sort just these
+-- lines (they are not de-duplicated, so both readers' notify_done are kept).
+-- start_matchsort
+-- m/^LOG:  SISC \(shareid=0, slice=\{2\|4\}\): initialized xslice state/
+-- m/^LOG:  SISC READER \(shareid=0, slice=\{2\|4\}\): wrote notify_done/
+-- end_matchsort
 -- Filter out irrelevant LOG messages from segments other than seg2.
 \! cat /tmp/bfv_cte.out | grep -P '^(?!LOG)|^(LOG.*seg2)' | grep -vP 'LOG.*fault|decreased xslice state refcount'
 LOG:  SISC (shareid=0, slice=2): initialized xslice state  (seg2 slice2 127.0.1.1:7004 pid=1048240)
