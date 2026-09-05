@@ -751,6 +751,7 @@ IcebergBeginCustomScan(CustomScanState *node, EState *estate, int eflags)
 		{
 			Form_pg_attribute cattr = TupleDescAttr(pdesc, j);
 			int			i;
+			bool		matched = false;
 
 			for (i = 0; i < full->natts; i++)
 			{
@@ -760,9 +761,25 @@ IcebergBeginCustomScan(CustomScanState *node, EState *estate, int eflags)
 					strcmp(NameStr(cattr->attname), NameStr(fattr->attname)) == 0)
 				{
 					cattr->attnum = fattr->attnum;
+					matched = true;
 					break;
 				}
 			}
+
+			/*
+			 * A compact-descriptor entry with no relation column of that name
+			 * is not a stored column at all -- ExecInitScanTupleSlotVec()
+			 * appends a synthetic INT8 "ctid" column when the targetlist needs
+			 * a row identifier.  Leaving the renumbered compact position in
+			 * attnum would make createFieldDescription() hand it to the
+			 * builtin-iceberg field-id match, which then selects whatever
+			 * physical column happens to carry that field-id.  Clear it so the
+			 * reader can only fall back to a name match (and find nothing)
+			 * instead of silently reading an unrelated column.  Plans that
+			 * need ctid are refused vectorization outright in planner_vec.c.
+			 */
+			if (!matched)
+				cattr->attnum = InvalidAttrNumber;
 		}
 		node->ss.ps.scandesc = pdesc;
 	}

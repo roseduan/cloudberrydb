@@ -1557,6 +1557,31 @@ is_iceberg_customscan_vectorable(CustomScan *cscan, List *rtable)
 		return false;
 	}
 
+	/*
+	 * A scan whose targetlist needs ctid cannot be vectorized here.
+	 * ExecInitScanTupleSlotVec() answers such a targetlist by appending a
+	 * synthetic INT8 "ctid" column to the compact scan descriptor, and the
+	 * storage provider is expected to fill it with a unique row identifier
+	 * (see VecAdapter::FullWithCTID2 for how PAX does it).  The Iceberg
+	 * reader has no such column: it maps every scan-descriptor entry onto a
+	 * physical parquet column, so the synthetic entry gets matched against
+	 * the file too.  Its attnum was never restored to a real relation attnum
+	 * (pg_iceberg_custom_scan.c matches by name, and no relation column is
+	 * called "ctid"), so it keeps its compact position and selects an
+	 * unrelated physical column by Iceberg field-id.  That either errors out
+	 * ("column type 20 expects a matching fixed-width arrow type, got
+	 * date32[day]" on TPC-DS q94) or, when the wrongly selected column
+	 * happens to be int64, silently yields bogus row identifiers -- and the
+	 * planner only asks for ctid to deduplicate a semi-join, so bogus values
+	 * mean wrong answers.  Fall back to the row engine, which takes ctid from
+	 * the slot's TID instead of from a column.
+	 */
+	if (has_ctid((Expr *) cscan->scan.plan.targetlist, NULL))
+	{
+		FALLBACK_LOG("iceberg scan: targetlist needs ctid; not vectorizable");
+		return false;
+	}
+
 	return iceberg_scan_types_vectorable(rte->relid,
 										 cscan->scan.plan.targetlist,
 										 cscan->scan.plan.qual);
