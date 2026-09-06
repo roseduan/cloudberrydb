@@ -1509,6 +1509,30 @@ iceberg_scan_types_vectorable(Oid relid, List *targetlist, List *qual)
 	AttrNumber	attnum;
 	bool		ok = true;
 
+	/*
+	 * A scan whose targetlist needs ctid cannot be vectorized over Iceberg.
+	 * ExecInitScanTupleSlotVec() answers such a targetlist by appending a
+	 * synthetic INT8 "ctid" column to the compact scan descriptor, and the
+	 * storage provider is expected to fill it with a unique row identifier
+	 * (see VecAdapter::FullWithCTID2 for how PAX does it).  The Iceberg
+	 * reader has no such column: it maps every scan-descriptor entry onto a
+	 * physical parquet column, so the synthetic entry gets matched against
+	 * the file too and either errors out or, worse, resolves to an unrelated
+	 * column.  The planner only asks for ctid to deduplicate a semi-join, so
+	 * a wrong or NULL row identifier means wrong answers, not a slow query.
+	 * Fall back to the row engine, which takes ctid from the slot's TID.
+	 *
+	 * Checked here rather than in is_iceberg_customscan_vectorable() because
+	 * datalake_fdw's planner_hook may not have rewritten the SeqScan into an
+	 * "Iceberg Scan" CustomScan yet (see the T_SeqScan case above); both
+	 * paths funnel through this helper.
+	 */
+	if (has_ctid((Expr *) targetlist, NULL))
+	{
+		FALLBACK_LOG("iceberg scan: targetlist needs ctid; not vectorizable");
+		return false;
+	}
+
 	rel = relation_open(relid, AccessShareLock);
 	reldesc = RelationGetDescr(rel);
 	columnmap = palloc0((reldesc->natts + 1) * sizeof(int));
@@ -1554,31 +1578,6 @@ is_iceberg_customscan_vectorable(CustomScan *cscan, List *rtable)
 	if (rte == NULL || rte->rtekind != RTE_RELATION)
 	{
 		FALLBACK_LOG("iceberg custom scan: invalid relation");
-		return false;
-	}
-
-	/*
-	 * A scan whose targetlist needs ctid cannot be vectorized here.
-	 * ExecInitScanTupleSlotVec() answers such a targetlist by appending a
-	 * synthetic INT8 "ctid" column to the compact scan descriptor, and the
-	 * storage provider is expected to fill it with a unique row identifier
-	 * (see VecAdapter::FullWithCTID2 for how PAX does it).  The Iceberg
-	 * reader has no such column: it maps every scan-descriptor entry onto a
-	 * physical parquet column, so the synthetic entry gets matched against
-	 * the file too.  Its attnum was never restored to a real relation attnum
-	 * (pg_iceberg_custom_scan.c matches by name, and no relation column is
-	 * called "ctid"), so it keeps its compact position and selects an
-	 * unrelated physical column by Iceberg field-id.  That either errors out
-	 * ("column type 20 expects a matching fixed-width arrow type, got
-	 * date32[day]" on TPC-DS q94) or, when the wrongly selected column
-	 * happens to be int64, silently yields bogus row identifiers -- and the
-	 * planner only asks for ctid to deduplicate a semi-join, so bogus values
-	 * mean wrong answers.  Fall back to the row engine, which takes ctid from
-	 * the slot's TID instead of from a column.
-	 */
-	if (has_ctid((Expr *) cscan->scan.plan.targetlist, NULL))
-	{
-		FALLBACK_LOG("iceberg scan: targetlist needs ctid; not vectorizable");
 		return false;
 	}
 
