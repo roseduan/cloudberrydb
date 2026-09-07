@@ -4,7 +4,8 @@ PGXS := $(shell pg_config --pgxs)
 include $(PGXS)
 
 REGRESS = iceberg_polaris iceberg_polaris_types iceberg_polaris_statistics iceberg_polaris_deferred_commit \
-          iceberg_polaris_options iceberg_polaris_toolkit
+          iceberg_polaris_options iceberg_polaris_toolkit \
+          iceberg_polaris_metadata_cache
 
 POLARIS_CLI = ../../../../docker/singlecluster/scripts/polaris_cli.sh
 # Multi-container topology (vs singlecluster all-in-one): override the

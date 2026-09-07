@@ -185,6 +185,31 @@ public class IcebergRestController {
 
         log.info("Loading table: {}.{}", namespace, table);
 
+        /*
+         * issue #393 external-catalog metadata cache.  The caller (PG) passes
+         * the head it last resolved (metadata_location), when it did so
+         * (metadata_timestamp, epoch ms) and the per-table TTL (metadata_cache,
+         * minutes; 0 = no cache).  While that head is younger than the TTL,
+         * reuse it verbatim and skip the external catalog entirely -- this is
+         * the "agent decides" reuse path.  Only the head + timestamp are echoed
+         * because the head-resolution caller consumes only those.
+         */
+        int metadataCacheTtlMin = asInt(request.get("metadata_cache"), 0);
+        long callerMetadataTs = asLong(request.get("metadata_timestamp"), 0L);
+        String cachedMetadataLocation = asString(request.get("metadata_location"), null);
+        if (metadataCacheTtlMin > 0 && callerMetadataTs > 0
+                && cachedMetadataLocation != null && !cachedMetadataLocation.isEmpty()
+                && (System.currentTimeMillis() - callerMetadataTs)
+                        < (long) metadataCacheTtlMin * 60_000L) {
+            log.info("Reusing cached metadata head for {}.{} (age {}ms < ttl {}min)",
+                    namespace, table,
+                    System.currentTimeMillis() - callerMetadataTs, metadataCacheTtlMin);
+            Map<String, Object> reuse = new HashMap<>();
+            reuse.put("metadata-location", cachedMetadataLocation);
+            reuse.put("metadata-timestamp", callerMetadataTs);
+            return ResponseEntity.ok(reuse);
+        }
+
         // Extract configurations from request
         Map<String, String> properties = extractProperties(request);
 
@@ -204,6 +229,9 @@ public class IcebergRestController {
         response.put("metadata-location", metadataLocation);
         response.put("table-location", icebergTable.location());
         response.put("partition-spec-summary", partitionSpecSummary(icebergTable));
+        // issue #393: stamp the refresh time so the caller can cache this head
+        // for its TTL window (the agent's clock is the single source of truth).
+        response.put("metadata-timestamp", System.currentTimeMillis());
 
         // Add config to response - static S3 configuration (non-sensitive)
         Map<String, String> config = new HashMap<>();
@@ -1898,6 +1926,49 @@ public class IcebergRestController {
             }
             tupleDescription.add(new ColumnDescriptor(name, oid, index++, null, typeMods));
         }
+    }
+
+    /**
+     * Coerce a JSON-decoded request value to int (issue #393 metadata cache).
+     * Accepts both JSON numbers and numeric strings; returns def when absent or
+     * unparsable.
+     */
+    private static int asInt(Object v, int def) {
+        if (v instanceof Number) {
+            return ((Number) v).intValue();
+        }
+        if (v instanceof String) {
+            try {
+                return Integer.parseInt(((String) v).trim());
+            } catch (NumberFormatException ignore) {
+                return def;
+            }
+        }
+        return def;
+    }
+
+    /** Coerce a JSON-decoded request value to long; see {@link #asInt}. */
+    private static long asLong(Object v, long def) {
+        if (v instanceof Number) {
+            return ((Number) v).longValue();
+        }
+        if (v instanceof String) {
+            try {
+                return Long.parseLong(((String) v).trim());
+            } catch (NumberFormatException ignore) {
+                return def;
+            }
+        }
+        return def;
+    }
+
+    /**
+     * Coerce a JSON-decoded request value to String; see {@link #asInt}.
+     * Returns def for a null or non-string value instead of throwing
+     * ClassCastException on a malformed request.
+     */
+    private static String asString(Object v, String def) {
+        return (v instanceof String) ? (String) v : def;
     }
 
     private Map<String, String> extractProperties(Map<String, Object> request) {

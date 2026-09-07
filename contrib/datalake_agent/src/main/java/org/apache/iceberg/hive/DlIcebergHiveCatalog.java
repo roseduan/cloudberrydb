@@ -115,6 +115,15 @@ public class DlIcebergHiveCatalog extends BaseMetastoreCatalog implements Suppor
         this.clients = new DlCachedClientPool(conf, properties, secureLogin, serverName, configFile);
     }
 
+    /**
+     * The catalog-level FileIO built from configuration in {@link #initialize}
+     * (issue #393).  Shared across all tables of this catalog; obtaining it here
+     * avoids a loadTable()/HMS round-trip whose only purpose is FileIO.
+     */
+    public FileIO io() {
+        return fileIO;
+    }
+
     @Override
     public List<TableIdentifier> listTables(Namespace namespace) {
         Preconditions.checkArgument(

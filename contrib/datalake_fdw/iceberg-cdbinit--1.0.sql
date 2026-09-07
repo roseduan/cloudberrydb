@@ -78,7 +78,12 @@ CREATE TABLE pg_ext_aux.pg_iceberg_metadata (
     metadata_location           text  COLLATE "C",
     previous_metadata_location  text  COLLATE "C",
     is_internal                 bool,
-    default_spec_id             int4
+    default_spec_id             int4,
+    -- epoch milliseconds of the last time metadata_location was refreshed
+    -- from the external catalog's current head (issue #393 metadata cache).
+    -- NULL means "never refreshed" -> treated as expired.  int8 (not text)
+    -- so it needs no COLLATE "C".
+    metadata_cached_at          int8
 );
 
 -- Pin OIDs to 8330 (table) and 8331 (pkey index) following the same

@@ -722,10 +722,10 @@ public class IcebergMetadataFetcher extends BasePlugin implements MetadataFetche
      */
     public FragmentDescription getFragmentsByUncommittedMetadata(
             String uncommittedMetadataLocation, long requestedSnapshotId) throws Exception {
-        // 1. Load table from catalog to get FileIO
-        IcebergCatalog catalog = icebergClientWrapper.getIcebergCatalog(context);
-        Table catalogTable = catalog.loadTable(context.getDataSource());
-        FileIO io = catalogTable.io();
+        // 1. Obtain FileIO WITHOUT a loadTable()/external-catalog round-trip
+        //    where possible (issue #393): Hive hands out its shared config
+        //    FileIO; vending catalogs (Polaris) use the TTL-cached vended one.
+        FileIO io = icebergClientWrapper.getScanFileIO(context);
 
         // 2. Build scannable Table using uncommitted metadata location
         //    StaticTableOperations reads the metadata.json internally

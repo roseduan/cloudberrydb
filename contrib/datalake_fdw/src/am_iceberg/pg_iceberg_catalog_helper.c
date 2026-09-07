@@ -512,7 +512,10 @@ execute_load_table_via_fdw(const char *catalogName,
 						   const char *catalogServer,
 						   const char *foreignCatalogName,
 						   const char *volumeServer,
-						   const char *volumeName)
+						   const char *volumeName,
+						   const char *cached_metadata_location,
+						   int64 cached_timestamp_ms,
+						   int metadata_cache_ttl)
 {
 	FdwRoutine		   *fdwRoutine;
 	ForeignScanState   *scanstate;
@@ -529,6 +532,11 @@ execute_load_table_via_fdw(const char *catalogName,
 										volumeServer,
 										volumeName,
 										NULL);
+
+	/* issue #393: hand the cached head + TTL to the agent for the reuse/refresh decision. */
+	fdwState->request.metadataLocation = cached_metadata_location;
+	fdwState->request.metadataTimestamp = cached_timestamp_ms;
+	fdwState->request.metadataCacheTtl = metadata_cache_ttl;
 
 	scanstate->fdw_state = fdwState;
 	fdwRoutine->BeginForeignScan(scanstate, 0);
@@ -736,6 +744,25 @@ pg_iceberg_load_table(const char *catalogName,
 					  const char *volumeServer,
 					  const char *volumeName)
 {
+	/* Force-fresh: no cached head, TTL 0 -> agent always resolves latest. */
+	return pg_iceberg_load_table_cached(catalogName, nameSpace, tableName,
+										catalogServer, foreignCatalogName,
+										volumeServer, volumeName,
+										NULL, 0, 0);
+}
+
+IcebergLoadTableResult *
+pg_iceberg_load_table_cached(const char *catalogName,
+							 const char *nameSpace,
+							 const char *tableName,
+							 const char *catalogServer,
+							 const char *foreignCatalogName,
+							 const char *volumeServer,
+							 const char *volumeName,
+							 const char *cached_metadata_location,
+							 int64 cached_timestamp_ms,
+							 int metadata_cache_ttl)
+{
 	IcebergCatalogFdwState *fdwState;
 
 	fdwState = execute_load_table_via_fdw(catalogName,
@@ -743,8 +770,11 @@ pg_iceberg_load_table(const char *catalogName,
 										  tableName,
 										  catalogServer,
 										  foreignCatalogName,
-											  volumeServer,
-											  volumeName);
+										  volumeServer,
+										  volumeName,
+										  cached_metadata_location,
+										  cached_timestamp_ms,
+										  metadata_cache_ttl);
 	return extract_load_table_result_from_fdw_state(fdwState);
 }
 
@@ -1252,8 +1282,9 @@ pg_iceberg_commit_rewrite(Relation rel, List *all_private_results)
 	table_info = pg_iceberg_get_table_info(RelationGetRelid(rel));
 	is_internal =
 		(table_info->opts == NULL || table_info->opts->table == NULL);
+	/* Commit-rewrite path: resolve the latest head, never a cached snapshot. */
 	metadata_location = pg_iceberg_get_latest_metadata_location(
-		RelationGetRelid(rel), table_info);
+		RelationGetRelid(rel), table_info, false);
 
 	nameSpace = pg_iceberg_resolve_namespace(
 		table_info->opts ? table_info->opts->namespace : NULL,

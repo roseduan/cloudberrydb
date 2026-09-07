@@ -48,6 +48,7 @@ static const OptionDef icebergTableOptionDefs[] = {
 	OPTION_STRING("compression", IcebergTableOptions, compression, "zstd"),
 	OPTION_INT("compression_level", IcebergTableOptions, compression_level, -1),
 	OPTION_STRING("iceberg_partition_by", IcebergTableOptions, partition_by, NULL),
+	OPTION_INT("metadata_cache", IcebergTableOptions, metadata_cache, 0),
 	/* Add new Iceberg table options here */
 };
 

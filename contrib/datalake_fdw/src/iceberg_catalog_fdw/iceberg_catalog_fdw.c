@@ -581,6 +581,21 @@ createLoadTableRequestJson(IcebergCatalogFdwState* fdwState, IcebergCatalogOptio
         agentcli_cJSON_AddItemToObject(request, DATALAKEFDW_ICEBERG_KEY_PROPERTIES, buildInProp);
     }
 
+    /*
+     * issue #393 external-catalog metadata cache.  Top-level fields (the
+     * properties bag is string-only, so ttl/timestamp go here as JSON numbers).
+     * metadata_cache <= 0 tells the agent "no cache, always resolve latest";
+     * with a positive TTL the agent reuses metadata_location while it is younger
+     * than the TTL.  Only meaningful for external catalogs; builtin ignores it.
+     */
+    if (req.metadataLocation != NULL)
+        agentcli_cJSON_AddStringToObject(request,
+            DATALAKEFDW_ICEBERG_KEY_DEFERRED_METADATA_LOCATION, req.metadataLocation);
+    agentcli_cJSON_AddNumberToObject(request,
+        DATALAKEFDW_ICEBERG_KEY_METADATA_CACHE, req.metadataCacheTtl);
+    agentcli_cJSON_AddNumberToObject(request,
+        DATALAKEFDW_ICEBERG_KEY_METADATA_TIMESTAMP, (double) req.metadataTimestamp);
+
     char *json_string = agentcli_cJSON_PrintUnformatted(request);
     agentcli_cJSON_Delete(request);
     return json_string;

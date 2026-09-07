@@ -38,6 +38,7 @@ import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.hive.conf.HiveConf;
 import org.apache.iceberg.Schema;
 import org.apache.iceberg.Table;
+import org.apache.iceberg.io.FileIO;
 import org.apache.iceberg.types.Types;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -59,6 +60,16 @@ public class IcebergCatalogWrapper {
     private static final Logger LOG = LoggerFactory.getLogger(IcebergCatalogWrapper.class);
 
     private final Cache<String, IcebergHiveCatalog> catalogCache;
+
+    /**
+     * issue #393: per-table FileIO cache for credential-vending / per-request
+     * catalogs (Polaris/REST, and hadoop/s3/builtin which build a fresh catalog
+     * per request).  Lets a scan reuse the vended FileIO (temporary S3
+     * credentials) within the TTL instead of re-resolving it via loadTable.
+     * Config-based Hive bypasses this -- it returns its shared FileIO directly
+     * from IcebergCatalog.io(), which must never be cached/closed here.
+     */
+    private final Cache<String, FileIO> vendedFileIoCache;
 
     private IcebergUtilities icebergUtilities;
     private SecureLogin secureLogin;
@@ -101,6 +112,83 @@ public class IcebergCatalogWrapper {
                     }
                 })
                 .build();
+
+        Duration fileIoTtl = serverProperties.getIceberg().getFileIoCacheTtl();
+        if (fileIoTtl.isZero() || fileIoTtl.isNegative()) {
+            throw new IllegalArgumentException(
+                    "dlagent.iceberg.file-io-cache-ttl must be positive, got: " + fileIoTtl);
+        }
+        LOG.info("Creating iceberg vendedFileIoCache with TTL {} ...", fileIoTtl);
+        vendedFileIoCache = CacheBuilder.newBuilder()
+                .expireAfterWrite(fileIoTtl.toMillis(), TimeUnit.MILLISECONDS)
+                .removalListener((RemovalListener<String, FileIO>) notification -> {
+                    /*
+                     * Deliberately do NOT close the evicted FileIO here.  This
+                     * wrapper is a singleton, so getScanFileIO() hands the same
+                     * cached FileIO to every concurrent scan; because eviction is
+                     * driven by a hard expireAfterWrite TTL (not idle time), an
+                     * in-flight scan on one thread can still be reading through a
+                     * FileIO that another thread's access has just expired.
+                     * Closing it would yank the FileIO out from under that scan
+                     * (use-after-close).  Instead let the entry become
+                     * unreachable and GC reclaim it once the last scan releases
+                     * its reference -- the same lifecycle the scan path relied on
+                     * before this cache existed (getFragmentsByUncommittedMetadata
+                     * never closed its per-scan FileIO either).
+                     */
+                    LOG.debug("Evicted vendedFileIoCache entry key={} cause={}",
+                            notification.getKey(), notification.getCause());
+                })
+                .build();
+    }
+
+    /**
+     * Returns the FileIO to use for scanning {@code context}'s table (issue
+     * #393), avoiding the loadTable()/external-catalog round-trip whose only
+     * purpose is FileIO where possible.
+     *
+     * <p>Config-based catalogs (Hive) hand out their shared, already-built
+     * FileIO directly.  Credential-vending / per-request catalogs
+     * (Polaris/REST, hadoop/s3, builtin) have no shareable config FileIO, so
+     * their FileIO is cached per connection+table with a TTL and re-resolved
+     * only when it expires.
+     */
+    public FileIO getScanFileIO(RequestContext context) throws Exception {
+        /*
+         * Config-based catalogs (Hive) expose a shared, already-built FileIO via
+         * io(); hand it out directly.  Hive is the only catalog type that
+         * overrides io() to non-null and constructing it is cheap (the
+         * underlying HMS catalog is itself cached), so gate on the catalog type
+         * -- probing io() generically would mean building the (expensive)
+         * vending catalog just to discover io() == null on every cache hit.
+         */
+        if ("hive".equals(context.getCatalogType())) {
+            FileIO configIo = getIcebergCatalog(context).io();
+            if (configIo != null) {
+                return configIo;
+            }
+        }
+
+        /*
+         * Credential-vending / per-request catalogs (Polaris/REST, s3, hadoop,
+         * builtin) have no shareable config FileIO.  Cache the vended FileIO per
+         * connection+table and build the catalog only inside the loader, on a
+         * miss: IcebergPolarisCatalog's constructor runs RESTCatalog.initialize
+         * (a /v1/config + OAuth2 round-trip), so constructing it on every cache
+         * hit would defeat the cache for Polaris tables at high scan rates.
+         */
+        String key = formCatalogCacheKey(context) + "|" + context.getDataSource();
+        try {
+            return vendedFileIoCache.get(key,
+                    () -> getIcebergCatalog(context).loadTable(context.getDataSource()).io());
+        } catch (ExecutionException | UncheckedExecutionException e) {
+            Throwable cause = e.getCause();
+            if (cause instanceof Exception) {
+                throw (Exception) cause;
+            }
+            throw new DlRuntimeException(
+                    "Failed to resolve FileIO for " + context.getDataSource(), e);
+        }
     }
 
     /**

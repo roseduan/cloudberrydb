@@ -93,6 +93,16 @@ final class InvalidatingHiveCatalog implements IcebergCatalog {
     }
 
     @Override
+    public org.apache.iceberg.io.FileIO io() throws Exception {
+        try {
+            return delegate.io();
+        } catch (Exception e) {
+            maybeInvalidate(e);
+            throw e;
+        }
+    }
+
+    @Override
     public boolean dropTable(String tableName, boolean purge) {
         try {
             return delegate.dropTable(tableName, purge);

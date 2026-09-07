@@ -33,6 +33,9 @@ typedef struct IcebergMetadataInfo
 	char *previous_metadata_location; /* Previous metadata file location */
 	bool is_internal;                 /* Flag indicating if table is internal */
 	int32 default_spec_id;            /* Default partition spec id */
+	int64 metadata_cached_at;         /* epoch ms of last external-catalog head
+									   * refresh (issue #393); 0 when NULL */
+	bool metadata_cached_at_isnull;   /* true when metadata_cached_at is NULL */
 } IcebergMetadataInfo;
 
 /* Helper to retrieve iceberg metadata information */
@@ -51,6 +54,16 @@ extern void pg_iceberg_add_metadata(Oid relid, char *metadata_location,
 
 /* Function to update iceberg metadata location */
 extern void pg_iceberg_update_metadata(Oid relid, const char *metadata_location);
+
+/*
+ * Write back the result of an external-catalog head refresh (issue #393):
+ * update metadata_location and stamp metadata_cached_at with the agent-supplied
+ * epoch-millis timestamp.  Unconditional (last-writer-wins); intended for the
+ * read/scan refresh path, never for commit lineage (does not roll previous).
+ */
+extern void pg_iceberg_update_metadata_cache(Oid relid,
+											 const char *metadata_location,
+											 int64 cached_at_ms);
 
 /*
  * Update metadata location with Compare-And-Swap (CAS) semantics.

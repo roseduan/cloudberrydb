@@ -230,6 +230,17 @@ public class IcebergHiveCatalog implements IcebergCatalog, AutoCloseable {
         return hiveCatalog.loadTable(tableId);
     }
 
+    /**
+     * Expose the underlying Hive catalog's config-built FileIO (issue #393) so
+     * scan paths can skip a loadTable()/HMS round-trip whose only purpose is to
+     * obtain FileIO.
+     */
+    @Override
+    public org.apache.iceberg.io.FileIO io() throws Exception {
+        ensureOpen();
+        return hiveCatalog.io();
+    }
+
     @Override
     public boolean dropTable(String tableName, boolean purge) {
         ensureOpen();

@@ -89,5 +89,16 @@ public class DlServerProperties {
          */
         private Duration hiveCatalogCacheTtl = Duration.ofMinutes(5);
 
+        /**
+         * Expiration (expireAfterWrite) for the per-table FileIO cache used by
+         * credential-vending catalogs (Polaris/REST) in IcebergCatalogWrapper
+         * (issue #393).  A scan reuses the cached vended FileIO until it
+         * expires, then re-vends fresh credentials via loadTable.  Keep this at
+         * or below the catalog's credential lifetime, otherwise a reused scan
+         * may fail authentication.  Config-based catalogs (Hive) bypass this
+         * cache entirely -- they hand out their shared config FileIO directly.
+         */
+        private Duration fileIoCacheTtl = Duration.ofMinutes(5);
+
     }
 }

@@ -25,6 +25,7 @@ import org.apache.iceberg.PartitionSpec;
 import org.apache.iceberg.Schema;
 import org.apache.iceberg.Table;
 import org.apache.iceberg.catalog.TableIdentifier;
+import org.apache.iceberg.io.FileIO;
 
 /**
  * Interface for Iceberg catalogs. Only contains a minimal set of methods to make
@@ -48,9 +49,16 @@ public interface IcebergCatalog {
      * The catalog's FileIO, obtained WITHOUT loading a table (and therefore without the
      * metadata.json GET that a table load implies). Only implemented where a catalog-wide
      * FileIO exists and a caller needs raw storage access -- see the loadMetadataJson
-     * endpoint, which reads one known object and needs no table state.
+     * endpoint, which reads one known object and needs no table state, and the issue #393
+     * scan path, which reuses it instead of a loadTable() round-trip.
+     *
+     * <p>Config-based catalogs (Hive) build their FileIO from static storage settings and
+     * share it across all tables, so they override this.  Credential-vending catalogs
+     * (Polaris/REST) do not: their FileIO carries per-table temporary credentials issued
+     * by loadTable and must not be shared, so they leave this default in place and callers
+     * fall back to a per-table cache.
      */
-    default org.apache.iceberg.io.FileIO io() {
+    default FileIO io() throws Exception {
         throw new UnsupportedOperationException(
                 getClass().getSimpleName() + " does not expose a catalog-wide FileIO");
     }

@@ -1248,6 +1248,27 @@ components:
           type: string
           description: "Namespace as string, supports nested namespaces with dot notation"
           example: "accounting.tax.reports"
+        metadata_location:
+          type: string
+          nullable: true
+          description: |
+            (issue #393 external-catalog metadata cache) The metadata head the
+            caller last resolved. While it is younger than metadata_cache the
+            agent reuses it verbatim and skips the external catalog.
+        metadata_cache:
+          type: integer
+          description: |
+            (issue #393) Per-table metadata cache TTL in minutes; 0 = no cache
+            (always resolve the latest head).
+          default: 0
+        metadata_timestamp:
+          type: integer
+          format: int64
+          description: |
+            (issue #393) Epoch milliseconds when the caller last resolved
+            metadata_location, compared against metadata_cache to decide reuse
+            vs refresh. 0 when unknown.
+          default: 0
         properties:
           type: object
           description: |
@@ -1754,6 +1775,14 @@ components:
           type: string
           description: May be null if the table is staged as part of a transaction
           nullable: true
+        metadata-timestamp:
+          type: integer
+          format: int64
+          description: |
+            (issue #393 external-catalog metadata cache) Epoch milliseconds when
+            the agent resolved this head (its own clock). Echoed back unchanged
+            on a cache reuse; set to "now" on a refresh. The caller stores it and
+            passes it back as metadata_timestamp on the next load.
         table-location:
           type: string
           description: The table's base data storage location URI (e.g., s3://bucket/warehouse/ns/table)

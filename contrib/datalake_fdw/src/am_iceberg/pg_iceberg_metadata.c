@@ -51,8 +51,8 @@ pg_iceberg_add_metadata(Oid relid, char *metadata_location,
 					  bool is_internal, int32 default_spec_id)
 {
 	Relation	metadata_rel;
-	Datum		values[5];
-	bool		nulls[5];
+	Datum		values[6];
+	bool		nulls[6];
 	HeapTuple	tuple;
 	Oid			metadata_relid;
 
@@ -77,11 +77,89 @@ pg_iceberg_add_metadata(Oid relid, char *metadata_location,
 	values[3] = BoolGetDatum(is_internal);
 	values[4] = Int32GetDatum(default_spec_id);
 
+	/*
+	 * metadata_cached_at (issue #393): unset at CREATE so the first external
+	 * read triggers a fresh catalog resolve.  Refreshes stamp it later via
+	 * pg_iceberg_update_metadata_cache().
+	 */
+	nulls[5] = true;
+
 	tuple = heap_form_tuple(metadata_rel->rd_att, values, nulls);
 	CatalogTupleInsert(metadata_rel, tuple);
 	heap_freetuple(tuple);
 
 	table_close(metadata_rel, RowExclusiveLock);
+}
+
+/*
+ * iceberg_metadata_heap_update
+ *    Update a pg_iceberg_metadata tuple, returning the TM_Result instead of
+ *    raising on a concurrent modification.
+ *
+ * CatalogTupleUpdate() goes through simple_heap_update(), which elog(ERROR)s
+ * ("tuple concurrently updated") on TM_Updated/TM_Deleted.  Callers here must
+ * instead treat a concurrent update gracefully -- a CAS retry, or last-writer-
+ * wins for the read-path cache refresh -- so we call heap_update() directly and
+ * hand the result code back.
+ *
+ * On TM_Ok the tuple's indexes are maintained exactly as CatalogTupleUpdate
+ * would; CatalogIndexInsert() is static, so its logic is replicated here.
+ */
+static TM_Result
+iceberg_metadata_heap_update(Relation metadata_rel, ItemPointer otid,
+							 HeapTuple newtuple)
+{
+	TM_Result		result;
+	TM_FailureData	tmfd;
+	LockTupleMode	lockmode;
+
+	result = heap_update(metadata_rel, otid, newtuple,
+						 GetCurrentCommandId(true), InvalidSnapshot,
+						 true /* wait for commit */,
+						 &tmfd, &lockmode);
+
+	if (result == TM_Ok && !HeapTupleIsHeapOnly(newtuple))
+	{
+		CatalogIndexState indstate;
+		int			i;
+		int			numIndexes;
+		RelationPtr	indexDescs;
+		IndexInfo **indexInfos;
+		TupleTableSlot *slot;
+		Datum		idxvalues[INDEX_MAX_KEYS];
+		bool		idxisnull[INDEX_MAX_KEYS];
+
+		indstate = CatalogOpenIndexes(metadata_rel);
+		numIndexes = indstate->ri_NumIndices;
+		indexDescs = indstate->ri_IndexRelationDescs;
+		indexInfos = indstate->ri_IndexRelationInfo;
+
+		slot = MakeSingleTupleTableSlot(RelationGetDescr(metadata_rel),
+										&TTSOpsHeapTuple);
+		ExecStoreHeapTuple(newtuple, slot, false);
+
+		for (i = 0; i < numIndexes; i++)
+		{
+			IndexInfo  *indexInfo = indexInfos[i];
+			Relation	index = indexDescs[i];
+
+			if (!indexInfo->ii_ReadyForInserts)
+				continue;
+
+			FormIndexDatum(indexInfo, slot, NULL, idxvalues, idxisnull);
+			index_insert(index, idxvalues, idxisnull,
+						 &newtuple->t_self,
+						 metadata_rel,
+						 index->rd_index->indisunique ?
+						 UNIQUE_CHECK_YES : UNIQUE_CHECK_NO,
+						 false, indexInfo);
+		}
+
+		ExecDropSingleTupleTableSlot(slot);
+		CatalogCloseIndexes(indstate);
+	}
+
+	return result;
 }
 
 /*
@@ -118,9 +196,9 @@ pg_iceberg_update_metadata_cas(Oid relid,
 	HeapTuple	newtuple;
 	Oid			metadata_relid;
 	Oid			index_oid;
-	Datum		values[5];
-	bool		nulls[5];
-	bool		replaces[5];
+	Datum		values[6];
+	bool		nulls[6];
+	bool		replaces[6];
 	Datum		old_metadata_datum;
 	bool		old_metadata_isnull;
 
@@ -188,73 +266,19 @@ pg_iceberg_update_metadata_cas(Oid relid,
 								 values, nulls, replaces);
 
 	/*
-	 * Perform the catalog update manually instead of using CatalogTupleUpdate,
-	 * so we can detect concurrent updates via TM_Result and return false
-	 * instead of raising an ERROR.
-	 *
-	 * CatalogTupleUpdate calls simple_heap_update internally, which calls
-	 * elog(ERROR) on TM_Updated/TM_Deleted.  By calling heap_update directly,
-	 * we can inspect the result code and handle conflicts gracefully.
-	 *
-	 * After a successful heap_update, we still need to update indexes.
-	 * We use CatalogOpenIndexes/CatalogCloseIndexes (public) and replicate the
-	 * index insertion logic from CatalogIndexInsert (which is static).
+	 * Update the tuple without raising on a concurrent modification, so we can
+	 * detect a conflict via TM_Result and return false for a graceful retry
+	 * instead of the ERROR that CatalogTupleUpdate would raise.
 	 */
 	{
-		TM_Result		result;
-		TM_FailureData	tmfd;
-		LockTupleMode	lockmode;
+		TM_Result	result;
 
-		result = heap_update(metadata_rel, &tuple->t_self, newtuple,
-							 GetCurrentCommandId(true), InvalidSnapshot,
-							 true /* wait for commit */,
-							 &tmfd, &lockmode);
+		result = iceberg_metadata_heap_update(metadata_rel, &tuple->t_self,
+											  newtuple);
 
 		switch (result)
 		{
 			case TM_Ok:
-				{
-					/* Success – update indexes like CatalogTupleUpdate does */
-					CatalogIndexState indstate;
-
-					indstate = CatalogOpenIndexes(metadata_rel);
-
-					if (!HeapTupleIsHeapOnly(newtuple))
-					{
-						int			i;
-						int			numIndexes = indstate->ri_NumIndices;
-						RelationPtr	indexDescs = indstate->ri_IndexRelationDescs;
-						IndexInfo **indexInfos = indstate->ri_IndexRelationInfo;
-						TupleTableSlot *slot;
-						Datum		idxvalues[INDEX_MAX_KEYS];
-						bool		idxisnull[INDEX_MAX_KEYS];
-
-						slot = MakeSingleTupleTableSlot(RelationGetDescr(metadata_rel),
-														&TTSOpsHeapTuple);
-						ExecStoreHeapTuple(newtuple, slot, false);
-
-						for (i = 0; i < numIndexes; i++)
-						{
-							IndexInfo  *indexInfo = indexInfos[i];
-							Relation	index = indexDescs[i];
-
-							if (!indexInfo->ii_ReadyForInserts)
-								continue;
-
-							FormIndexDatum(indexInfo, slot, NULL, idxvalues, idxisnull);
-							index_insert(index, idxvalues, idxisnull,
-										 &newtuple->t_self,
-										 metadata_rel,
-										 index->rd_index->indisunique ?
-										 UNIQUE_CHECK_YES : UNIQUE_CHECK_NO,
-										 false, indexInfo);
-						}
-
-						ExecDropSingleTupleTableSlot(slot);
-					}
-
-					CatalogCloseIndexes(indstate);
-				}
 				break;
 
 			case TM_Updated:
@@ -293,6 +317,90 @@ void
 pg_iceberg_update_metadata(Oid relid, const char *metadata_location)
 {
 	(void) pg_iceberg_update_metadata_cas(relid, metadata_location, NULL);
+}
+
+/*
+ * pg_iceberg_update_metadata_cache
+ *    Write back a read-path external-catalog head refresh (issue #393).
+ *
+ * Sets metadata_location to the (possibly unchanged) head returned by the
+ * agent and stamps metadata_cached_at with the agent-supplied epoch-millis so
+ * subsequent reads within the TTL reuse it without hitting the external
+ * catalog.  Unlike pg_iceberg_update_metadata_cas() this does NOT roll
+ * previous_metadata_location: an external head change is not our own commit,
+ * so it must not enter our commit lineage / orphan-cleanup bookkeeping.
+ *
+ * Last-writer-wins: two concurrent readers may both refresh; the loser's
+ * heap_update sees TM_Updated and is silently dropped (see
+ * iceberg_metadata_heap_update), which is harmless since both persist a freshly
+ * resolved head.  Callers must guard against read-only transactions / hot
+ * standby before invoking.
+ */
+void
+pg_iceberg_update_metadata_cache(Oid relid,
+								 const char *metadata_location,
+								 int64 cached_at_ms)
+{
+	Relation	metadata_rel;
+	ScanKeyData skey[1];
+	SysScanDesc scan;
+	HeapTuple	tuple;
+	HeapTuple	newtuple;
+	Oid			metadata_relid;
+	Oid			index_oid;
+	Datum		values[6];
+	bool		nulls[6];
+	bool		replaces[6];
+
+	/* Iceberg native catalog: OIDs are pinned at initdb (iceberg-cdbinit). */
+	metadata_relid = ICEBERG_METADATA_RELID;
+	index_oid = ICEBERG_METADATA_PKEY_OID;
+
+	metadata_rel = table_open(metadata_relid, RowExclusiveLock);
+
+	ScanKeyInit(&skey[0],
+				1,
+				BTEqualStrategyNumber, F_OIDEQ,
+				ObjectIdGetDatum(relid));
+
+	scan = systable_beginscan(metadata_rel, index_oid, true,
+							  NULL, 1, skey);
+	tuple = systable_getnext(scan);
+
+	if (!HeapTupleIsValid(tuple))
+		ereport(ERROR,
+				(errcode(ERRCODE_UNDEFINED_OBJECT),
+				 errmsg("iceberg metadata entry not found for relation %u", relid)));
+
+	memset(values, 0, sizeof(values));
+	memset(nulls, false, sizeof(nulls));
+	memset(replaces, false, sizeof(replaces));
+
+	/* metadata_location (col 2) */
+	if (metadata_location != NULL)
+	{
+		replaces[1] = true;
+		values[1] = CStringGetTextDatum(metadata_location);
+	}
+
+	/* metadata_cached_at (col 6) */
+	replaces[5] = true;
+	values[5] = Int64GetDatum(cached_at_ms);
+
+	newtuple = heap_modify_tuple(tuple, RelationGetDescr(metadata_rel),
+								 values, nulls, replaces);
+
+	/*
+	 * Last-writer-wins: if a concurrent reader refreshed the same tuple first,
+	 * heap_update returns TM_Updated/TM_Deleted.  Their write already persisted
+	 * a freshly resolved head, so silently drop ours rather than let
+	 * CatalogTupleUpdate raise "tuple concurrently updated" and fail the SELECT.
+	 */
+	(void) iceberg_metadata_heap_update(metadata_rel, &tuple->t_self, newtuple);
+
+	heap_freetuple(newtuple);
+	systable_endscan(scan);
+	table_close(metadata_rel, RowExclusiveLock);
 }
 
 void
@@ -397,6 +505,19 @@ pg_iceberg_get_metadata_info_internal(Oid relid, bool missing_ok)
 	datum = heap_getattr(tuple, 5, metadata_rel->rd_att, &isnull);
 	if (!isnull)
 		info->default_spec_id = DatumGetInt32(datum);
+
+	/* metadata_cached_at (issue #393); NULL -> treated as never refreshed */
+	datum = heap_getattr(tuple, 6, metadata_rel->rd_att, &isnull);
+	if (isnull)
+	{
+		info->metadata_cached_at = 0;
+		info->metadata_cached_at_isnull = true;
+	}
+	else
+	{
+		info->metadata_cached_at = DatumGetInt64(datum);
+		info->metadata_cached_at_isnull = false;
+	}
 
 	systable_endscan(scan);
 	table_close(metadata_rel, AccessShareLock);

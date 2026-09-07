@@ -88,6 +88,9 @@ typedef struct IcebergTableOptions
 	char *compression;		/* Parquet write compression codec (default zstd) */
 	int  compression_level;	/* Parquet write compression level; -1 = codec default */
 	char *partition_by;		/* Iceberg partition columns from PARTITION BY, comma-separated */
+	int  metadata_cache;	/* External-catalog metadata cache TTL in minutes;
+							 * 0 = no cache (resolve latest head every time). Only
+							 * meaningful for external-catalog tables. */
 } IcebergTableOptions;
 
 /*

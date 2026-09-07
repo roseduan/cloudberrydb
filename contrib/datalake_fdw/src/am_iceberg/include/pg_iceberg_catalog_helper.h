@@ -60,6 +60,15 @@ typedef struct IcebergLoadTableResult
 	 * unpartitioned (or the agent predates the field).
 	 */
 	char *partition_spec_summary;
+	/*
+	 * issue #393: epoch-ms timestamp the agent stamped when it (re)resolved the
+	 * external-catalog head.  If it differs from the timestamp the caller sent,
+	 * the agent refreshed and the caller should persist the new head/timestamp.
+	 * timestamp_present is false when the agent did not return the field (e.g.
+	 * an older agent) so callers can tell 0 apart from "absent".
+	 */
+	int64 timestamp;
+	bool timestamp_present;
 } IcebergLoadTableResult;
 
 /*
@@ -120,13 +129,39 @@ extern char *pg_iceberg_create_table(Relation relation,
 									 const char *location,
 									 char **partition_spec_summary_out);
 
+/*
+ * Load (resolve) an Iceberg table's current metadata head from the agent.
+ * Always resolves the latest head (force-fresh): used by CREATE / DML / commit
+ * / vacuum paths that must not act on a cached snapshot.
+ */
 extern IcebergLoadTableResult *pg_iceberg_load_table(const char *catalogName,
 									   const char *nameSpace,
 									   const char *tableName,
 									   const char *catalogServer,
 									   const char *foreignCatalogName,
 									   const char *volumeServer,
-								   const char *volumeName);
+									   const char *volumeName);
+
+/*
+ * Same as pg_iceberg_load_table() but honoring the issue #393 metadata cache.
+ * cached_metadata_location / cached_timestamp_ms are the head this backend last
+ * saw and when (epoch ms; 0 if none); metadata_cache_ttl is the per-table TTL
+ * in minutes (0 = no cache = always resolve latest).  The agent reuses
+ * cached_metadata_location while it is younger than the TTL, otherwise it
+ * re-resolves the external catalog; the (possibly refreshed) head and its
+ * timestamp come back in the result (timestamp_present tells whether the agent
+ * returned one).
+ */
+extern IcebergLoadTableResult *pg_iceberg_load_table_cached(const char *catalogName,
+									   const char *nameSpace,
+									   const char *tableName,
+									   const char *catalogServer,
+									   const char *foreignCatalogName,
+									   const char *volumeServer,
+									   const char *volumeName,
+									   const char *cached_metadata_location,
+									   int64 cached_timestamp_ms,
+									   int metadata_cache_ttl);
 extern void pg_iceberg_free_load_table_result(IcebergLoadTableResult *result);
 
 /*

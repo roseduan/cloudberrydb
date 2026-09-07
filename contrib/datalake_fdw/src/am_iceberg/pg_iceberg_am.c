@@ -498,15 +498,38 @@ static char *
 iceberg_fetch_fragments_json(Relation rel, IcebergTableInfo *table_info,
 							 const char *pushdown_filter,
 							 bool *is_internal_out,
-							 int64 snapshot_id)
+							 int64 snapshot_id,
+							 bool allow_cache)
 {
 	char	   *fragments;
 	char	   *scan_metadata_location;
 	bool		is_internal;
 
-	scan_metadata_location =
-		pg_iceberg_resolve_scan_metadata_location(RelationGetRelid(rel),
-												  &is_internal);
+	if (allow_cache &&
+		pg_iceberg_tracker_get_table_state(RelationGetRelid(rel)) == NULL &&
+		table_info->opts != NULL && table_info->opts->table != NULL)
+	{
+		/*
+		 * External-catalog table, not modified in this transaction, being read
+		 * by a plain SELECT (issue #393): resolve the head from the external
+		 * catalog bounded by the per-table metadata_cache TTL.  This is what
+		 * lets a SELECT observe snapshots committed externally -- the agent
+		 * reuses the cached head while younger than the TTL (metadata_cache=0 =
+		 * always latest) and a refresh is persisted to pg_iceberg_metadata.
+		 *
+		 * A table already tracked in this transaction must keep going through
+		 * the tracker instead, for Read-Your-Own-Writes; allow_cache is false
+		 * for DML fragment seeding and for time travel (see the call sites).
+		 */
+		scan_metadata_location =
+			pg_iceberg_get_latest_metadata_location(RelationGetRelid(rel),
+													table_info, true);
+		is_internal = false;
+	}
+	else
+		scan_metadata_location =
+			pg_iceberg_resolve_scan_metadata_location(RelationGetRelid(rel),
+													  &is_internal);
 
 	fragments = pg_iceberg_get_fragments_with_catalog(rel,
 													  table_info,
@@ -602,10 +625,28 @@ pg_iceberg_build_scan_am_private(Relation rel, struct PlanState *ps, int random_
 		!iceberg_rel_has_dropped_attrs(rel))
 		pushdown_filter = serializeDlProxyFilterQuals(ps->plan->qual);
 
-	/* snapshot_id 0 = HEAD; a time-travel CustomScan passes the snapshot bound
-	 * to its relation (recovered from the RTE alias in IcebergBeginCustomScan). */
-	fragments = iceberg_fetch_fragments_json(rel, table_info, pushdown_filter,
-											 &is_internal, snapshot_id);
+	/*
+	 * issue #393: only a plain SELECT may serve its scan from the metadata
+	 * cache.  For a DML (or a data-modifying CTE) the scanned row set must come
+	 * from the same force-fresh head the tracker commits against, so disable
+	 * the cache and keep the pre-#393 behavior for those statements.
+	 *
+	 * Time travel opts out too: a cached head only knows the snapshots its own
+	 * metadata.json listed, so an externally committed snapshot newer than the
+	 * cached head would not be resolvable.  Those scans resolve force-fresh.
+	 */
+	{
+		bool	allow_cache = (ps != NULL && ps->state != NULL &&
+							   ps->state->es_plannedstmt != NULL &&
+							   ps->state->es_plannedstmt->commandType == CMD_SELECT &&
+							   !ps->state->es_plannedstmt->hasModifyingCTE &&
+							   snapshot_id == 0);
+
+		/* snapshot_id 0 = HEAD; a time-travel CustomScan passes the snapshot bound
+		 * to its relation (recovered from the RTE alias in IcebergBeginCustomScan). */
+		fragments = iceberg_fetch_fragments_json(rel, table_info, pushdown_filter,
+												 &is_internal, snapshot_id, allow_cache);
+	}
 
 	/*
 	 * Carry the raw JSON in the plan; pg_iceberg_materialize_am_private()
@@ -670,8 +711,13 @@ pg_iceberg_list_data_fragments_json(Relation rel, int64 snapshot_id)
 	IcebergTableInfo   *table_info;
 
 	table_info = pg_iceberg_get_table_info(RelationGetRelid(rel));
+	/*
+	 * DML fragment seeding (issue #333): never use the #393 metadata cache --
+	 * the modify's file set must match the force-fresh head, and this runs at
+	 * planner-hook time before the table is tracked.
+	 */
 	fragments = iceberg_fetch_fragments_json(rel, table_info, NULL, NULL,
-											 snapshot_id);
+											 snapshot_id, false);
 	pg_iceberg_free_table_info(table_info);
 
 	return fragments;
@@ -1760,8 +1806,9 @@ pg_iceberg_relation_vacuum_get_dispatch_tasks(Relation rel, struct VacuumParams 
 	table_info = pg_iceberg_get_table_info(RelationGetRelid(rel));
 	is_internal =
 		(table_info->opts == NULL || table_info->opts->table == NULL);
+	/* VACUUM rewrites the current head; never operate on a cached snapshot. */
 	metadata_location = pg_iceberg_get_latest_metadata_location(
-		RelationGetRelid(rel), table_info);
+		RelationGetRelid(rel), table_info, false);
 
 	/*
 	 * Keep vacuum private data compatible with scan am_private layout:

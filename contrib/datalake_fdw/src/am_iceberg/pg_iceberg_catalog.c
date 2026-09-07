@@ -18,6 +18,8 @@
 #include "access/table.h"
 #include "access/heapam.h"
 #include "access/genam.h"
+#include "access/xact.h"		/* XactReadOnly */
+#include "access/xlog.h"		/* RecoveryInProgress */
 #include "commands/vacuum.h"
 #include "commands/dbcommands.h"
 #include "catalog/namespace.h"
@@ -261,7 +263,8 @@ pg_iceberg_free_table_info(IcebergTableInfo *info)
  * Get latest metadata location for both internal and external iceberg tables.
  */
 char *
-pg_iceberg_get_latest_metadata_location(Oid relid, IcebergTableInfo *table_info)
+pg_iceberg_get_latest_metadata_location(Oid relid, IcebergTableInfo *table_info,
+										bool allow_cache)
 {
 	IcebergMetadataInfo *meta_info;
 	IcebergLoadTableResult *load_result;
@@ -270,6 +273,7 @@ pg_iceberg_get_latest_metadata_location(Oid relid, IcebergTableInfo *table_info)
 	const char *catalogName;
 	char	   *latest_metadata_location;
 	bool		is_internal;
+	int			ttl;
 
 	is_internal = (table_info->opts == NULL || table_info->opts->table == NULL);
 
@@ -297,6 +301,68 @@ pg_iceberg_get_latest_metadata_location(Oid relid, IcebergTableInfo *table_info)
 
 	tableName = table_info->opts->table;
 	catalogName = table_info->opts->catalog;
+	ttl = table_info->opts ? table_info->opts->metadata_cache : 0;
+
+	/*
+	 * issue #393 metadata cache.  On read/scan paths (allow_cache) with a
+	 * positive per-table TTL, hand the agent the head we last resolved and its
+	 * timestamp; the agent reuses it while younger than the TTL, otherwise it
+	 * re-resolves the external catalog and returns a fresh head + timestamp.
+	 * A refresh is persisted so later reads within the window reuse it.  TTL 0
+	 * (no cache) and every write/maintenance path fall through to force-fresh.
+	 */
+	if (allow_cache && ttl > 0)
+	{
+		const char *cached_location = NULL;
+		int64		cached_ts = 0;
+
+		meta_info = pg_iceberg_get_metadata_info_missing_ok(relid);
+		if (meta_info != NULL)
+		{
+			cached_location = meta_info->metadata_location;
+			cached_ts = meta_info->metadata_cached_at_isnull ?
+				0 : meta_info->metadata_cached_at;
+		}
+
+		load_result = pg_iceberg_load_table_cached(catalogName,
+												   nameSpace,
+												   tableName,
+												   table_info->catalog_server_name,
+												   table_info->catalog_name,
+												   table_info->volume_server_name,
+												   table_info->volume_name,
+												   cached_location,
+												   cached_ts,
+												   ttl);
+		if (load_result == NULL || load_result->metadata_location == NULL)
+			ereport(ERROR,
+					(errcode(ERRCODE_UNDEFINED_OBJECT),
+					 errmsg("failed to load iceberg table metadata for relation %u",
+							relid)));
+
+		latest_metadata_location = pstrdup(load_result->metadata_location);
+
+		/*
+		 * Persist only when the agent actually refreshed (returned a new
+		 * timestamp) and we are allowed to write: a plain SELECT that reused the
+		 * cache leaves the catalog untouched, and a read-only transaction / hot
+		 * standby skips the write (still using the freshly resolved head for
+		 * this query, just not caching it).
+		 */
+		if (meta_info != NULL &&
+			load_result->timestamp_present &&
+			load_result->timestamp != cached_ts &&
+			!XactReadOnly && !RecoveryInProgress())
+			pg_iceberg_update_metadata_cache(relid,
+											 load_result->metadata_location,
+											 load_result->timestamp);
+
+		if (meta_info != NULL)
+			pg_iceberg_free_metadata_info(meta_info);
+		pg_iceberg_free_load_table_result(load_result);
+
+		return latest_metadata_location;
+	}
 
 	load_result = pg_iceberg_load_table(catalogName,
 										nameSpace,
@@ -329,8 +395,12 @@ pg_iceberg_get_latest_metadata_and_mode(Oid relid, bool *is_internal_out)
 		*is_internal_out =
 			(table_info->opts == NULL || table_info->opts->table == NULL);
 
+	/*
+	 * and_mode() feeds the DML tracker's base; always resolve the latest head
+	 * (never cached) so commits are not built on a stale snapshot.
+	 */
 	latest_metadata_location =
-		pg_iceberg_get_latest_metadata_location(relid, table_info);
+		pg_iceberg_get_latest_metadata_location(relid, table_info, false);
 
 	pg_iceberg_free_table_info(table_info);
 

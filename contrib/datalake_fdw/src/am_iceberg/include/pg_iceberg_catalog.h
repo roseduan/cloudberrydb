@@ -109,8 +109,17 @@ extern char *pg_iceberg_commit_data_with_catalog(Relation rel,
 												 const char *metadata_location,
 												 CmdType operation);
 
+/*
+ * Resolve the current metadata head.  For external-catalog tables, allow_cache
+ * enables the issue #393 metadata cache: when the table's metadata_cache TTL is
+ * positive the agent may reuse the last-resolved head instead of hitting the
+ * external catalog, and a refresh is persisted back to pg_iceberg_metadata.
+ * Read/scan paths pass true; write/maintenance paths (DML, commit, vacuum,
+ * tracker) pass false to always resolve the latest head.
+ */
 extern char *pg_iceberg_get_latest_metadata_location(Oid relid,
-													 IcebergTableInfo *table_info);
+													 IcebergTableInfo *table_info,
+													 bool allow_cache);
 extern char *pg_iceberg_get_latest_metadata_and_mode(Oid relid,
 													 bool *is_internal_out);
 

@@ -70,6 +70,12 @@
 #define DATALAKEFDW_ICEBERG_KEY_BUILDIN_TABLE_EXISTS     "buildInCatalog.table_exists"
 #define DATALAKEFDW_ICEBERG_KEY_METADATALOCATION         "buildInCatalog.metadata_location"
 #define DATALAKEFDW_ICEBERG_KEY_DEFERRED_METADATA_LOCATION  "metadata_location"
+/* issue #393 external-catalog metadata cache: per-table TTL (minutes) and the
+ * cached head's timestamp (epoch ms) sent on load-table; the agent echoes a
+ * (possibly refreshed) timestamp back as "metadata-timestamp". */
+#define DATALAKEFDW_ICEBERG_KEY_METADATA_CACHE           "metadata_cache"
+#define DATALAKEFDW_ICEBERG_KEY_METADATA_TIMESTAMP       "metadata_timestamp"
+#define DATALAKEFDW_ICEBERG_KEY_METADATA_TIMESTAMP_RESP  "metadata-timestamp"
 #define DATALAKEFDW_ICEBERG_KEY_NAMESPACE                "namespace"
 #define DATALAKEFDW_ICEBERG_KEY_PURGEREQUESTED           "purgeRequested"
 

@@ -128,6 +128,16 @@ typedef struct IcebergCatalogRequest {
 	const char* pushdownFilter;  /* serialized dlproxy scan filter for data-file pruning (get-fragment only) */
 	List* schemaOps;  /* List of IcebergSchemaOp*, for ICEBERG_UPDATE_SCHEMA ALTER TABLE (#401) */
 	int64 snapshotId;  /* time travel: read this Iceberg snapshot (0 = HEAD/current) */
+	/*
+	 * issue #393 external-catalog metadata cache (load-table only).  On a
+	 * load-table the AM layer passes the cached head (metadataLocation above),
+	 * when it was last refreshed (metadataTimestamp, epoch ms) and the per-table
+	 * TTL (metadataCacheTtl, minutes; 0 = no cache = always resolve latest).
+	 * The agent compares and either reuses metadataLocation or re-resolves the
+	 * external catalog head.
+	 */
+	int64 metadataTimestamp;
+	int metadataCacheTtl;
 } IcebergCatalogRequest;
 
 typedef struct IcebergCatalogInfo {

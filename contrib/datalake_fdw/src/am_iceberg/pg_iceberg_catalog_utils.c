@@ -230,7 +230,8 @@ typedef enum
 	LT_PARSE_TABLE_LOCATION,
 	LT_PARSE_PARTITION_SPEC_SUMMARY,
 	LT_PARSE_CONFIG,
-	LT_PARSE_STORAGE_CREDENTIALS
+	LT_PARSE_STORAGE_CREDENTIALS,
+	LT_PARSE_METADATA_TIMESTAMP
 } LoadTableParseField;
 
 typedef struct
@@ -243,6 +244,10 @@ typedef struct
 	char			   *metadata_location;
 	char			   *location;
 	char			   *partition_spec_summary;
+
+	/* issue #393: agent-stamped epoch-ms of the resolved head, if returned */
+	int64				metadata_timestamp;
+	bool				metadata_timestamp_present;
 
 	/* raw JSON capture for config / storage-credentials */
 	const char		   *config_start;		/* pointer into input */
@@ -319,6 +324,8 @@ lt_object_field_start(void *state, char *fname, bool isnull)
 		s->capture_depth = s->depth;
 		s->credentials_start = s->lex->token_terminator;
 	}
+	else if (pg_strcasecmp(fname, DATALAKEFDW_ICEBERG_KEY_METADATA_TIMESTAMP_RESP) == 0)
+		s->current_field = LT_PARSE_METADATA_TIMESTAMP;
 }
 
 static void
@@ -345,6 +352,20 @@ lt_scalar(void *state, char *token, JsonTokenType tokentype)
 			 tokentype == JSON_TOKEN_STRING)
 	{
 		s->partition_spec_summary = pstrdup(token);
+		s->current_field = LT_PARSE_NONE;
+	}
+	else if (s->current_field == LT_PARSE_METADATA_TIMESTAMP &&
+			 s->depth == 1 &&
+			 tokentype == JSON_TOKEN_NUMBER)
+	{
+		int64	ts;
+
+		/* Plain integer epoch-ms emitted by the agent; ignore if unparsable. */
+		if (scanint8(token, true, &ts))
+		{
+			s->metadata_timestamp = ts;
+			s->metadata_timestamp_present = true;
+		}
 		s->current_field = LT_PARSE_NONE;
 	}
 }
@@ -429,6 +450,8 @@ parse_load_table_response(char *json_response)
 	result->catalog_properties = buf.data;
 	result->location = ps.location;
 	result->partition_spec_summary = ps.partition_spec_summary;
+	result->timestamp = ps.metadata_timestamp;
+	result->timestamp_present = ps.metadata_timestamp_present;
 
 	pfree(lex);
 

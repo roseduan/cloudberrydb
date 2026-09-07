@@ -565,7 +565,8 @@ tracker_sync_local_metadata_after_external_commit(TableMetadataState *state,
 	bool	synced;
 
 	external_head = pg_iceberg_get_latest_metadata_location(state->relid,
-															table_info);
+															table_info,
+															false);
 	synced = pg_iceberg_update_metadata_cas(state->relid,
 											external_head,
 											NULL);
@@ -1981,7 +1982,7 @@ pg_iceberg_tracker_apply_updates_with_rebase(Oid relid,
 	 * This may differ from our last_base if another transaction committed.
 	 */
 	latest_global_location = pg_iceberg_get_latest_metadata_location(
-		relid, table_info);
+		relid, table_info, false);
 
 	/*
 	 * Step 2: Optimization - skip rebase if:
