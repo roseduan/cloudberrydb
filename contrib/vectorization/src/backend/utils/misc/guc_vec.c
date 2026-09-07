@@ -55,3 +55,7 @@ bool enable_sonic_hashjoin = false;
 /* backpressure for vectorized execution (push_pipeline / yield / SinkNode) */
 bool enable_vec_pipeline = false;
 int backpressure_memory_mb = 256;
+
+bool enable_window_hash_agg = true;
+bool enable_partition_topk = true;
+bool partition_topk_require_topk_qual = false;

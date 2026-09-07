@@ -69,6 +69,7 @@
 #include "miscadmin.h"
 #include "pgstat.h"
 #include "storage/condition_variable.h"
+#include "storage/fd.h"
 #include "storage/lwlock.h"
 #include "storage/shmem.h"
 #include "utils/faultinjector.h"
@@ -187,7 +188,14 @@ typedef struct shareinput_local_state
 } shareinput_local_state;
 
 static shareinput_Xslice_reference *get_shareinput_reference_vec(int share_id);
-static void release_shareinput_reference_vec(shareinput_Xslice_reference *ref);
+static void release_shareinput_reference_vec(shareinput_Xslice_reference *ref,
+											 bool cleanup_share_files);
+static void shareinput_release_callback_vec(ResourceReleasePhase phase,
+											bool isCommit,
+											bool isTopLevel,
+											void *arg);
+
+static bool shareinput_resowner_callback_registered_vec = false;
 
 static void shareinput_writer_notifyready_vec(shareinput_Xslice_reference *ref);
 static void shareinput_reader_waitready_vec(shareinput_Xslice_reference *ref);
@@ -195,6 +203,82 @@ static void shareinput_reader_notifydone_vec(shareinput_Xslice_reference *ref, i
 static void shareinput_writer_waitdone_vec(shareinput_Xslice_reference *ref, int nconsumers);
 
 static void ExecVecShareInputScanExplainEnd(PlanState *planstate, struct StringInfoData *buf);
+
+static void shareinput_cleanup_share_files_vec(int32 session_id,
+											   int32 command_count,
+											   int share_id);
+
+
+/*
+ * Remove the Arrow files backing one shared scan.
+ *
+ * The Arrow side names every file of a share after the share's domain path,
+ * "base/pgsql_tmp/VECTORIZATION_<session>_<command>_vec.<share_id>_.store",
+ * and derives the rest of its file names from it by appending suffixes
+ * (.map, .ready, .consumers, and the two counter files).  Nothing on the
+ * Arrow side ever removes them: of the three variants of
+ * SharedSourceNode::HandleCounterAndClear(), the one that is compiled in
+ * only maintains the counters, so the files survive until the cluster is
+ * restarted.  A single TPC-DS query can leak tens of gigabytes that way.
+ *
+ * Deleting them from here is only correct because the caller has already
+ * established that no process can open the store any more -- see the call
+ * site in ExecEndVecShareInputScan().  Removing them any earlier makes
+ * consumers that have not started yet fail in ShareFileStore::SyncReader()
+ * with "ready file not found".
+ *
+ * Note that the Arrow side hardcodes the "base/pgsql_tmp" prefix rather
+ * than honouring temp_tablespaces, so the files are always in the default
+ * tablespace and this function looks for them there only.
+ */
+static void
+shareinput_cleanup_share_files_vec(int32 session_id, int32 command_count,
+								   int share_id)
+{
+	char		dirpath[MAXPGPATH];
+	char		prefix[MAXPGPATH];
+	size_t		prefix_len;
+	DIR		   *dir;
+	struct dirent *de;
+
+	snprintf(dirpath, sizeof(dirpath), "base/%s", PG_TEMP_FILES_DIR);
+
+	/*
+	 * The trailing underscore is significant: without it, share_id 1 would
+	 * also match the files of share_id 10.
+	 */
+	snprintf(prefix, sizeof(prefix), "%s_%d_%d_vec.%d_",
+			 VECPATH, session_id, command_count, share_id);
+	prefix_len = strlen(prefix);
+
+	dir = AllocateDir(dirpath);
+	if (dir == NULL)
+		return;
+
+	while ((de = ReadDirExtended(dir, dirpath, LOG)) != NULL)
+	{
+		char		path[MAXPGPATH];
+
+		if (strncmp(de->d_name, prefix, prefix_len) != 0)
+			continue;
+
+		snprintf(path, sizeof(path), "%s/%s", dirpath, de->d_name);
+
+		if (unlink(path) != 0)
+		{
+			if (errno != ENOENT)
+				ereport(LOG,
+						(errcode_for_file_access(),
+						 errmsg("could not remove vectorized shared scan file \"%s\": %m",
+								path)));
+		}
+		else
+			elog(DEBUG1, "SISC (shareid=%d, slice=%d): removed %s",
+				 share_id, currentSliceId, path);
+	}
+
+	FreeDir(dir);
+}
 
 
 /*
@@ -588,6 +672,29 @@ ExecEndVecShareInputScan(ShareInputScanState *node)
 					}
 				}
 				shareinput_writer_waitdone_vec(node->ref, sisc->nconsumers);
+
+				/*
+				 * Every consumer slice has now reported that it is done
+				 * reading, so nobody can open the Arrow store of this
+				 * share on this segment any more.  This is the only point
+				 * in the lifecycle where that is known, so it is where the
+				 * store's files have to be removed: the Arrow side never
+				 * removes them, and otherwise the next cluster restart is
+				 * the first thing that does.
+				 *
+				 * The barrier above is what makes this safe.  It waits for
+				 * a count fixed at plan time (sisc->nconsumers), not for a
+				 * count that consumers maintain as they register; deleting
+				 * on the latter removes the files while consumer slices
+				 * that have not started yet still need them.
+				 */
+				{
+					VecShareInputScanState *vsisstate = (VecShareInputScanState *) node;
+
+					shareinput_cleanup_share_files_vec(vsisstate->gp_session_id,
+													   vsisstate->gp_command_count,
+													   sisc->share_id);
+				}
 			}
 			else
 			{
@@ -598,8 +705,34 @@ ExecEndVecShareInputScan(ShareInputScanState *node)
 				}
 			}
 		}
-		release_shareinput_reference_vec(node->ref);
+		release_shareinput_reference_vec(node->ref, false);
 		node->ref = NULL;
+	}
+
+	/*
+	 * Building the Arrow store of a share also creates a persistent counter
+	 * file in the coordinator's own temp directory, and nothing removes it:
+	 * the producer of a cross-slice share runs on the segments, where the
+	 * cleanup above only ever reaches that segment's own files.  The result
+	 * is one 8-byte file left behind per query until the cluster restarts.
+	 *
+	 * Cleaning up here is safe on the coordinator only.  Segments run one
+	 * backend per slice against a shared temp directory, so a slice that is
+	 * done cannot conclude anything about its siblings -- that is what the
+	 * producer-side barrier above is for.  The coordinator has a single
+	 * backend per query, and segments never write into its temp directory,
+	 * so once its own node is shut down the files cannot be needed again.
+	 *
+	 * Note this is deliberately outside the block above: on the coordinator
+	 * currentSliceId does not match this_slice_id, so none of it runs.
+	 */
+	if (Gp_role == GP_ROLE_DISPATCH)
+	{
+		VecShareInputScanState *vsisstate = (VecShareInputScanState *) node;
+
+		shareinput_cleanup_share_files_vec(vsisstate->gp_session_id,
+										   vsisstate->gp_command_count,
+										   sisc->share_id);
 	}
 
 	if (local_state && local_state->ts_state)
@@ -707,7 +840,7 @@ ExecSquelchVecShareInputScan(ShareInputScanState *node)
 				shareinput_reader_notifydone_vec(node->ref, sisc->nconsumers);
 				local_state->closed = true;
 			}
-			release_shareinput_reference_vec(node->ref);
+			release_shareinput_reference_vec(node->ref, false);
 			node->ref = NULL;
 		}
 	}
@@ -787,6 +920,10 @@ get_shareinput_fileset_vec(void)
 
 /*
  * Get or create a reference to a cross-slice shared scan state.
+ *
+ * The reference is tracked by the current ResourceOwner, so that it is
+ * released -- and the share's files cleaned up -- if the transaction
+ * aborts before ExecEndVecShareInputScan() gets to run.
  */
 static shareinput_Xslice_reference *
 get_shareinput_reference_vec(int share_id)
@@ -795,6 +932,13 @@ get_shareinput_reference_vec(int share_id)
 	shareinput_Xslice_state *xslice_state;
 	bool		found;
 	shareinput_Xslice_reference *ref;
+
+	/* Register our resource owner callback to clean up on first call. */
+	if (!shareinput_resowner_callback_registered_vec)
+	{
+		RegisterResourceReleaseCallback(shareinput_release_callback_vec, NULL);
+		shareinput_resowner_callback_registered_vec = true;
+	}
 
 	ref = MemoryContextAllocZero(TopMemoryContext,
 								 sizeof(shareinput_Xslice_reference));
@@ -843,11 +987,25 @@ get_shareinput_reference_vec(int share_id)
  *
  * The reference count in the shared memory slot is decreased, and if
  * it reaches zero, it is destroyed.
+ *
+ * 'cleanup_share_files' asks for the share's Arrow files to be removed if
+ * this turns out to be the last reference on this segment.  Only the abort
+ * path passes true.  On the normal path the producer removes them after its
+ * barrier instead (see ExecEndVecShareInputScan()), because "last reference
+ * on this segment" is not the same thing as "every consumer slice is done":
+ * references are taken as slices start, so a consumer that finishes before a
+ * sibling slice has even started would delete files that are still needed.
+ * When the transaction is aborting, no slice is going to start or read
+ * anything any more, so the distinction no longer matters and this is the
+ * only remaining chance to clean up.
  */
 static void
-release_shareinput_reference_vec(shareinput_Xslice_reference *ref)
+release_shareinput_reference_vec(shareinput_Xslice_reference *ref,
+								 bool cleanup_share_files)
 {
 	shareinput_Xslice_state *state = ref->xslice_state;
+	shareinput_tag		saved_tag = state->tag;	/* copy before HASH_REMOVE frees the slot */
+	bool		was_last = false;
 
 	LWLockAcquire(ShareInputScanLock, LW_EXCLUSIVE);
 
@@ -860,6 +1018,7 @@ release_shareinput_reference_vec(shareinput_Xslice_reference *ref)
 						   HASH_REMOVE,
 						   &found);
 		Assert(found);
+		was_last = true;
 	}
 	else
 		state->refcount--;
@@ -868,7 +1027,52 @@ release_shareinput_reference_vec(shareinput_Xslice_reference *ref)
 
 	LWLockRelease(ShareInputScanLock);
 
+	/*
+	 * Deliberately outside the lock: unlinking touches the filesystem, and
+	 * the entry is already gone, so nobody can reach it any more.  The tag
+	 * is read from our own copy of the state for the same reason.
+	 */
+	if (cleanup_share_files && was_last)
+		shareinput_cleanup_share_files_vec(saved_tag.session_id,
+										  saved_tag.command_count,
+										  saved_tag.share_id);
+
 	pfree(ref);
+}
+
+/*
+ * Callback to release references, and clean up the files behind them, when
+ * the transaction aborts.
+ *
+ * Without this, an aborted query leaves both its shared memory entries and
+ * its Arrow files behind: the cleanup in ExecEndVecShareInputScan() never
+ * runs on the abort path.  The row engine registers the same callback for
+ * the same reason; see shareinput_release_callback() in
+ * src/backend/executor/nodeShareInputScan.c.
+ */
+static void
+shareinput_release_callback_vec(ResourceReleasePhase phase,
+								bool isCommit,
+								bool isTopLevel,
+								void *arg)
+{
+	dlist_mutable_iter miter;
+
+	if (phase != RESOURCE_RELEASE_BEFORE_LOCKS)
+		return;
+
+	dlist_foreach_modify(miter, &shareinput_Xslice_refs_vec)
+	{
+		shareinput_Xslice_reference *ref =
+			dlist_container(shareinput_Xslice_reference, node, miter.cur);
+
+		if (ref->owner == CurrentResourceOwner)
+		{
+			if (isCommit)
+				elog(WARNING, "shareinput lease reference leak: lease %p still referenced", ref);
+			release_shareinput_reference_vec(ref, true);
+		}
+	}
 }
 
 /*

@@ -75,5 +75,22 @@ extern bool enable_sonic_hashjoin;
 /* backpressure for vectorized execution (push_pipeline / yield / SinkNode) */
 extern bool enable_vec_pipeline;
 extern int backpressure_memory_mb;
+/*
+ * Experimental knob: allow ORCA to consider WindowHashAgg for vector plans.
+ * Historically this was hardwired to !optimizer_force_partition_topk, which
+ * made the two window-plan factors impossible to vary independently.  Off
+ * keeps WindowHashAgg out of the search space regardless of the Partition
+ * Top-K setting, so a plain ordered WindowAgg can be measured on its own.
+ */
+extern bool enable_window_hash_agg;
+/*
+ * Ask ORCA for the Partition Top-K world when planning a window query, instead
+ * of letting it choose.  Off restores ORCA's own pick, which is needed to
+ * measure the window plan factors separately -- while this is on, the setting
+ * above has no effect (Partition Top-K short-circuits it in
+ * planner_hook_wrapper).
+ */
+extern bool enable_partition_topk;
+extern bool partition_topk_require_topk_qual;
 
 #endif   /* GUC_VEC_H */

@@ -26,6 +26,7 @@
 #include "miscadmin.h"
 #include "catalog/pg_attribute_encoding.h"
 #include "catalog/pg_collation.h"
+#include "catalog/pg_namespace.h"
 #include "catalog/pg_operator.h"
 #include "catalog/pg_type.h"
 #include "parser/parsetree.h"
@@ -105,6 +106,8 @@ typedef struct
 
 static bool windowhashagg_check_walker(Node *node, windowhashagg_check_context *context);
 static bool windowhashagg_is_in_plan_tree(struct PlannedStmt *stmt);
+static bool should_force_partition_topk(Query *parse);
+static bool query_has_topk_qual(Query *parse);
 
 static bool
 is_type_vectorable(Oid typeOid)
@@ -304,12 +307,291 @@ generate_plan(Query *parse, const char *query_string, int cursorOptions, ParamLi
 
 static void local_topk_pushdown(Plan *plan);
 
+typedef struct
+{
+	bool		has_window;		/* query defines at least one window */
+	bool		has_unpartitioned;	/* ... and one of them has no PARTITION BY */
+} window_gate_context;
+
+/*
+ * Walker for query_windows_are_all_partitioned().  Always returns false so the
+ * whole tree gets visited: we need to see every window, not just the first.
+ */
+static bool
+window_gate_walker(Node *node, void *context)
+{
+	window_gate_context *ctx = (window_gate_context *) context;
+
+	if (node == NULL)
+		return false;
+
+	if (IsA(node, Query))
+	{
+		Query	   *query = (Query *) node;
+		ListCell   *lc;
+
+		foreach(lc, query->windowClause)
+		{
+			WindowClause *wc = lfirst_node(WindowClause, lc);
+
+			ctx->has_window = true;
+			if (wc->partitionClause == NIL)
+				ctx->has_unpartitioned = true;
+		}
+
+		return query_tree_walker(query, window_gate_walker, context, 0);
+	}
+
+	return expression_tree_walker(node, window_gate_walker, context);
+}
+
+/*
+ * Should we ask ORCA for the Partition Top-K world when planning this query?
+ *
+ * Two things have to hold, and both are easy to get wrong.
+ *
+ * First, the query has to use a window somewhere.  Testing
+ * parse->windowClause alone is not enough: the flag lives on the Query level
+ * that actually defines the window, and real workloads compute it one or more
+ * levels down.  TPC-DS Q67 ranks inside a derived table (`select * from
+ * (select ... rank() over (...) rk from ...) where rk <= 100`) and Q51 does it
+ * inside a WITH, so both look window-free at the top level.  Walk the tree.
+ *
+ * Second, every window has to carry a PARTITION BY.  A Top-K within partitions
+ * is meaningless without partition keys, but ORCA's
+ * CXformPushdownTopKThroughPartition still fires on a global `rank() over
+ * (order by ...) <= K` and hands us a PartitionTopK with an empty key array,
+ * which the vector executor refuses to build ("PartitionTopKNode requires
+ * partition keys").  TPC-DS Q44 and Q49 rank globally like that, so a query
+ * mixing both window kinds is left alone rather than risk the error.  (The
+ * xform's missing precondition is a separate ORCA-side bug: it is reachable
+ * today by setting optimizer_force_partition_topk by hand.)
+ */
+
+/*
+ * Is this a window function a Partition Top-K can pre-filter for?
+ *
+ * ORCA's CXformPushdownTopKThroughPartition only has something to push down
+ * when the query ranks rows and then keeps the first few of each partition.
+ * Anything else (sum, min, lead, ...) has no K to cut on.
+ */
+static bool
+is_ranking_window_func(Oid winfnoid)
+{
+	char	   *name;
+	bool		match;
+
+	/* Restrict to built-in pg_catalog functions; a user-defined function
+	 * that happens to share the same proname (e.g. myschema.rank()) must
+	 * not be mistaken for a ranking function ORCA can optimise. */
+	if (get_func_namespace(winfnoid) != PG_CATALOG_NAMESPACE)
+		return false;
+
+	name = get_func_name(winfnoid);
+	if (name == NULL)
+		return false;
+
+	match = (strcmp(name, "rank") == 0 ||
+			 strcmp(name, "dense_rank") == 0 ||
+			 strcmp(name, "row_number") == 0);
+	pfree(name);
+	return match;
+}
+
+/*
+ * If this Var reads a column of a subquery or of a CTE defined at this same
+ * query level, return the expression that column computes.  NULL for anything
+ * else -- a base table column has no window function behind it.
+ */
+static Node *
+resolve_var_to_subquery_expr(Query *query, Var *var)
+{
+	RangeTblEntry *rte;
+	Query	   *sub = NULL;
+	ListCell   *lc;
+
+	if (var->varlevelsup != 0 ||
+		var->varno < 1 || var->varno > (Index) list_length(query->rtable))
+		return NULL;
+
+	rte = rt_fetch(var->varno, query->rtable);
+
+	if (rte->rtekind == RTE_SUBQUERY)
+		sub = rte->subquery;
+	else if (rte->rtekind == RTE_CTE)
+	{
+		/* TPC-DS Q51 ranks inside a WITH, so CTEs have to be followed too */
+		foreach(lc, query->cteList)
+		{
+			CommonTableExpr *cte = (CommonTableExpr *) lfirst(lc);
+
+			if (strcmp(cte->ctename, rte->ctename) == 0 &&
+				cte->ctequery != NULL && IsA(cte->ctequery, Query))
+			{
+				sub = (Query *) cte->ctequery;
+				break;
+			}
+		}
+	}
+
+	if (sub == NULL)
+		return NULL;
+
+	foreach(lc, sub->targetList)
+	{
+		TargetEntry *tle = (TargetEntry *) lfirst(lc);
+
+		if (!tle->resjunk && tle->resno == var->varattno)
+			return (Node *) tle->expr;
+	}
+	return NULL;
+}
+
+typedef struct
+{
+	Query	   *query;			/* level whose rtable the Vars refer to */
+	bool		found;
+} topk_qual_context;
+
+/*
+ * Look for `<ranking window function> <= K` (or `< K`) in one query level's
+ * quals.  `= K` is deliberately not accepted: it constrains a single rank, not
+ * a prefix, and ORCA does not turn it into a Partition Top-K.
+ */
+static bool
+topk_qual_walker(Node *node, topk_qual_context *ctx)
+{
+	if (node == NULL || ctx->found)
+		return ctx->found;
+
+	/* a nested Query is a separate level; the caller visits it on its own */
+	if (IsA(node, Query))
+		return false;
+
+	if (IsA(node, OpExpr))
+	{
+		OpExpr	   *op = (OpExpr *) node;
+
+		if (list_length(op->args) == 2)
+		{
+			char	   *opname = get_opname(op->opno);
+
+			if (opname != NULL &&
+				(strcmp(opname, "<=") == 0 || strcmp(opname, "<") == 0))
+			{
+				Node	   *lhs = (Node *) linitial(op->args);
+				Node	   *rhs = (Node *) lsecond(op->args);
+
+				if (IsA(lhs, Var) && (IsA(rhs, Const) || IsA(rhs, Param)))
+				{
+					Node	   *src = resolve_var_to_subquery_expr(ctx->query,
+																   (Var *) lhs);
+
+					if (src != NULL && IsA(src, WindowFunc) &&
+						is_ranking_window_func(((WindowFunc *) src)->winfnoid))
+						ctx->found = true;
+				}
+			}
+			if (opname != NULL)
+				pfree(opname);
+		}
+	}
+
+	if (ctx->found)
+		return true;
+
+	return expression_tree_walker(node, topk_qual_walker, (void *) ctx);
+}
+
+static bool
+query_topk_walker(Node *node, void *context)
+{
+	bool	   *found = (bool *) context;
+
+	if (node == NULL || *found)
+		return *found;
+
+	if (IsA(node, Query))
+	{
+		Query			   *query = (Query *) node;
+		topk_qual_context	qctx;
+
+		qctx.query = query;
+		qctx.found = false;
+
+		if (query->jointree != NULL)
+			(void) topk_qual_walker((Node *) query->jointree, &qctx);
+		if (!qctx.found)
+			(void) topk_qual_walker((Node *) query->havingQual, &qctx);
+
+		if (qctx.found)
+		{
+			*found = true;
+			return true;
+		}
+		return query_tree_walker(query, query_topk_walker, context, 0);
+	}
+
+	return expression_tree_walker(node, query_topk_walker, context);
+}
+
+static bool
+query_has_topk_qual(Query *parse)
+{
+	bool		found = false;
+
+	(void) query_topk_walker((Node *) parse, &found);
+	return found;
+}
+
+static bool
+should_force_partition_topk(Query *parse)
+{
+	window_gate_context ctx;
+
+	ctx.has_window = false;
+	ctx.has_unpartitioned = false;
+
+	(void) window_gate_walker((Node *) parse, &ctx);
+
+	if (!ctx.has_window || ctx.has_unpartitioned)
+		return false;
+
+	/*
+	 * An optional third condition, off by default: the query has to actually
+	 * keep a prefix of a ranking.
+	 *
+	 * Do not turn this on expecting a win.  Forcing the Partition Top-K world
+	 * does three separate things, and only the first needs a `rank() <= K`:
+	 * it lets ORCA emit a PartitionTopK, it withholds the hash window (via
+	 * create_vectorization_plan below), and -- when the resulting plan is no
+	 * longer vectorizable at all -- it drops the query back to the row engine.
+	 * Measured on TPC-DS SF1000, 32 segments, forcing on versus off:
+	 *
+	 *   q67   213s vs 1549s   7.3x   PartitionTopK, the only one with <= K
+	 *   q51    73s vs  396s   5.4x   falls back to the row engine
+	 *   q47    41s vs   69s   1.7x   ordered window, no PartitionTopK
+	 *   q57    18s vs   21s   1.2x   ordered window, no PartitionTopK
+	 *
+	 * Three of the four gain nothing from a Top-K predicate, so gating on one
+	 * would give most of that back.  This knob exists to isolate the hash
+	 * window from the ordered one without disabling Partition Top-K as well,
+	 * which vector.enable_partition_topk cannot express, and to let a test ask
+	 * for the plan shape it had before any of this.
+	 */
+	if (partition_topk_require_topk_qual)
+		return query_has_topk_qual(parse);
+
+	return true;
+}
+
 PlannedStmt *
 planner_hook_wrapper(Query *parse, const char *query_string, int cursorOptions, ParamListInfo boundParams, OptimizerOptions *optimizer_options)
 {
 	PlannedStmt *result;
 	bool try_result;
 	bool optimizer_origin;
+	bool force_topk_origin;
 	extern bool force_vectorization;
 	const int64 orca_spilling_mem_threshold = 1000LL * 1204 * 1024 * 1024;
 
@@ -342,10 +624,40 @@ planner_hook_wrapper(Query *parse, const char *query_string, int cursorOptions, 
 	 * plans. Honour the force GUC by keeping the regular window plan shape
 	 * (Partition Top-K under an ordered WindowAgg), which the vector
 	 * executor supports as well.
+	 *
+	 * vector.enable_window_hash_agg additionally allows WindowHashAgg to be
+	 * withheld while Partition Top-K stays off, which the expression above
+	 * cannot express on its own.  That combination is only reachable through
+	 * this knob, so keep it available for plan-shape comparisons.
+	 *
+	 * For a window query we ask ORCA for the Partition Top-K world outright.
+	 * Measured on TPC-DS SF1000, the shape ORCA picks on its own is the slowest
+	 * of the four available ones (Q67: 1234s, versus 277s with Partition Top-K
+	 * under an ordered WindowAgg), because a hash window costs exactly the same
+	 * as an ordered one in CCostModelGPDB while requiring no sorted input, so
+	 * it wins by the price of a Sort no matter how it executes.  ORCA cannot
+	 * reach the good shape by itself until CLogicalPartitionTopK derives a
+	 * pruned row count and the hash window is costed honestly; until then,
+	 * force it here.  Note this also drops create_vectorization_plan through
+	 * the expression above, which is what keeps Q51 off the hash window -- do
+	 * not "simplify" that coupling away.
 	 */
-	vec_optimizer_options->create_vectorization_plan =
-		!optimizer_force_partition_topk;
-	result = generate_plan(parse, query_string, cursorOptions, boundParams, vec_optimizer_options);
+	force_topk_origin = optimizer_force_partition_topk;
+	if (enable_partition_topk && should_force_partition_topk(parse))
+		optimizer_force_partition_topk = true;
+
+	PG_TRY();
+	{
+		vec_optimizer_options->create_vectorization_plan =
+			!optimizer_force_partition_topk && enable_window_hash_agg;
+		result = generate_plan(parse, query_string, cursorOptions, boundParams, vec_optimizer_options);
+	}
+	PG_FINALLY();
+	{
+		optimizer_force_partition_topk = force_topk_origin;
+	}
+	PG_END_TRY();
+
 	try_result = try_vectorize_plan(result);
 	if (try_result)
 		return result;

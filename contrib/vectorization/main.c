@@ -95,6 +95,44 @@ _PG_init(void)
                              PGC_USERSET,
 							 GUC_GPDB_NEED_SYNC,
                              NULL, NULL, NULL);
+    DefineCustomBoolVariable("vector.enable_window_hash_agg",
+                             "Let ORCA consider WindowHashAgg when building a vector plan."
+                             "Off keeps the ordered WindowAgg shape in the search space only, "
+                             "independently of optimizer_force_partition_topk, so that the "
+                             "window operator and the Partition Top-K pre-filter can be varied "
+                             "as two separate factors.",
+                             NULL,
+                             &enable_window_hash_agg,
+                             true,
+                             PGC_USERSET,
+                             GUC_GPDB_NEED_SYNC,
+                             NULL, NULL, NULL);
+    DefineCustomBoolVariable("vector.enable_partition_topk",
+                             "Ask ORCA for the Partition Top-K world when planning "
+                             "a window query. Off lets ORCA choose, which restores "
+                             "the slower shape it prefers on its own but is needed "
+                             "to attribute a plan change to a single factor.",
+                             NULL,
+                             &enable_partition_topk,
+                             true,
+                             PGC_USERSET,
+                             GUC_GPDB_NEED_SYNC,
+                             NULL, NULL, NULL);
+    DefineCustomBoolVariable("vector.partition_topk_require_topk_qual",
+                             "Only ask ORCA for the Partition Top-K world when the "
+                             "query actually keeps a prefix of a ranking, that is, "
+                             "when some rank()/dense_rank()/row_number() output is "
+                             "constrained by <= or <. Off (the default) forces it for "
+                             "every window query whose windows all have a PARTITION BY, "
+                             "which is what the measured TPC-DS gains rely on. On is for "
+                             "isolating the hash window from the ordered one, and for "
+                             "tests that want the untouched plan shape.",
+                             NULL,
+                             &partition_topk_require_topk_qual,
+                             false,
+                             PGC_USERSET,
+                             GUC_GPDB_NEED_SYNC,
+                             NULL, NULL, NULL);
     DefineCustomIntVariable("vector.min_concatenate_rows",
                             "Minimum number of rows to motion concatenate",
                             NULL,

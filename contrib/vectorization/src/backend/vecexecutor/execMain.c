@@ -255,6 +255,8 @@ static void BuildMaterializePlan(PlanBuildContext *pcontext, VecExecuteState *es
 static GArrowStoreType to_arrow_storetype(StoreType type);
 static void BuildShareScanPlan(PlanBuildContext *pcontext, VecExecuteState *estate);
 static bool HasPaxScanInSubtree(PlanState *planstate);
+static bool HasSameSliceShareScanInSubtree(PlanState *planstate);
+static bool QueryHasSameSliceShareScan(PlanState *planstate);
 static bool CanUsePushPipeline(PlanBuildContext *pcontext);
 
 static int plan_num = 0;
@@ -342,6 +344,192 @@ HasPaxScanInSubtree(PlanState *planstate)
 
 	return HasPaxScanInSubtree(planstate->lefttree) ||
 		HasPaxScanInSubtree(planstate->righttree);
+}
+
+/*
+ * VEC-SHARESCAN-SUBTREE
+ *
+ * True if this subtree reads a ShareInputScan whose producer runs in the same
+ * slice.  Such a share has no ready handshake to rely on: Arrow's
+ * SharedSourceNode::RunConsumeLoop() calls store_->SyncReader() only when
+ * is_cross_ is false, and that call merely tests for the .ready file, so the
+ * ordering has to come from the producer's plan having already run.  A
+ * thread-pool execute context makes the producer start asynchronously, and the
+ * consumer then fails with "ShareFileStore::SyncReader: ready file not found".
+ *
+ * Motion nodes are not crossed, for the same reason as HasPaxScanInSubtree:
+ * children below a Motion execute in a different process.
+ *
+ * Sequence, Append, MergeAppend and SubqueryScan keep their children in a
+ * type-specific array or field rather than in lefttree/righttree, so each is
+ * descended into explicitly.  This mirrors plan_has_same_slice_share_walker
+ * below; the two walkers have to agree, or the VEC-DIAG-CTX log reports a
+ * different answer from the one the branch below actually took.
+ */
+static bool
+HasSameSliceShareScanInSubtree(PlanState *planstate)
+{
+	if (planstate == NULL)
+		return false;
+
+	if (IsA(planstate, MotionState))
+		return false;
+
+	if (IsA(planstate, ShareInputScanState))
+	{
+		ShareInputScan *sisc = (ShareInputScan *) planstate->plan;
+
+		if (!sisc->cross_slice)
+			return true;
+	}
+
+	if (IsA(planstate, SequenceState))
+	{
+		SequenceState  *sstate = (SequenceState *) planstate;
+		int				i;
+
+		for (i = 0; i < sstate->numSubplans; i++)
+		{
+			if (HasSameSliceShareScanInSubtree(sstate->subplans[i]))
+				return true;
+		}
+	}
+
+	if (IsA(planstate, AppendState))
+	{
+		AppendState	   *astate = (AppendState *) planstate;
+		int				i;
+
+		for (i = 0; i < astate->as_nplans; i++)
+		{
+			if (HasSameSliceShareScanInSubtree(astate->appendplans[i]))
+				return true;
+		}
+	}
+
+	if (IsA(planstate, MergeAppendState))
+	{
+		MergeAppendState *mstate = (MergeAppendState *) planstate;
+		int				i;
+
+		for (i = 0; i < mstate->ms_nplans; i++)
+		{
+			if (HasSameSliceShareScanInSubtree(mstate->mergeplans[i]))
+				return true;
+		}
+	}
+
+	if (IsA(planstate, SubqueryScanState))
+	{
+		SubqueryScanState *substate = (SubqueryScanState *) planstate;
+
+		if (HasSameSliceShareScanInSubtree(substate->subplan))
+			return true;
+	}
+
+	return HasSameSliceShareScanInSubtree(planstate->lefttree) ||
+		HasSameSliceShareScanInSubtree(planstate->righttree);
+}
+
+/*
+ * VEC-SHARESCAN-QUERYWIDE
+ *
+ * garrow_execute_context_new() does not create a private thread pool: it
+ * takes the process-global CPU pool and calls SetCapacity(nthreads) on it
+ * (see the comment at the allocation site below).  The effect is therefore
+ * process-wide, not per plan.  A same-slice ShareInputScan needs its
+ * producer plan to have run to completion before a consumer starts -- Arrow
+ * only tests for the .ready file, it does not wait for it -- and that only
+ * holds while the plans run synchronously.
+ *
+ * Looking down from the node being built is not enough: the nodes inside the
+ * producer's own subtree (HashAggregate, HashJoin, SeqScan, ...) see no share
+ * scan below them, so they would still take the pool branch and raise the
+ * global capacity, which is enough to make the share scan's own plan
+ * asynchronous even though that plan uses the default context.  Verified on
+ * TPC-DS q39 at SF1000: with the subtree-only test, one QE process logged
+ * both POOL_CTX and SYNC plans and the query still failed.
+ *
+ * So the question has to be asked about the whole query.  The walk is
+ * O(plan size) and is not cached: see the commit message for why caching
+ * on the raw PlannedStmt pointer is unsafe.
+ */
+static bool
+plan_has_same_slice_share_walker(Plan *plan)
+{
+	ListCell   *lc;
+
+	if (plan == NULL)
+		return false;
+
+	if (IsA(plan, ShareInputScan))
+	{
+		ShareInputScan *sisc = (ShareInputScan *) plan;
+
+		if (!sisc->cross_slice)
+			return true;
+	}
+
+	if (IsA(plan, Sequence))
+	{
+		foreach(lc, ((Sequence *) plan)->subplans)
+		{
+			if (plan_has_same_slice_share_walker((Plan *) lfirst(lc)))
+				return true;
+		}
+	}
+
+	if (IsA(plan, Append))
+	{
+		foreach(lc, ((Append *) plan)->appendplans)
+		{
+			if (plan_has_same_slice_share_walker((Plan *) lfirst(lc)))
+				return true;
+		}
+	}
+
+	if (IsA(plan, MergeAppend))
+	{
+		foreach(lc, ((MergeAppend *) plan)->mergeplans)
+		{
+			if (plan_has_same_slice_share_walker((Plan *) lfirst(lc)))
+				return true;
+		}
+	}
+
+	if (IsA(plan, SubqueryScan))
+	{
+		if (plan_has_same_slice_share_walker(((SubqueryScan *) plan)->subplan))
+			return true;
+	}
+
+	return plan_has_same_slice_share_walker(plan->lefttree) ||
+		plan_has_same_slice_share_walker(plan->righttree);
+}
+
+static bool
+QueryHasSameSliceShareScan(PlanState *planstate)
+{
+	PlannedStmt	   *stmt;
+	ListCell	   *lc;
+
+	if (planstate == NULL || planstate->state == NULL)
+		return false;
+
+	stmt = planstate->state->es_plannedstmt;
+	if (stmt == NULL)
+		return false;
+
+	if (plan_has_same_slice_share_walker(stmt->planTree))
+		return true;
+
+	foreach(lc, stmt->subplans)
+	{
+		if (plan_has_same_slice_share_walker((Plan *) lfirst(lc)))
+			return true;
+	}
+
+	return false;
 }
 
 static PlanState *
@@ -1995,6 +2183,33 @@ BuildVecPlan(PlanState *planstate, VecExecuteState *estate)
 		case T_ShareInputScanState:
 		{
 			VecShareInputScanState *vmatstate = (VecShareInputScanState *)planstate;
+
+			/*
+			 * VEC-SHARESCAN-NOPARALLEL
+			 *
+			 * ShareInputScan materialises in the producer and reads back in
+			 * the consumers, so it depends on the producer's plan having run
+			 * to completion before a consumer starts -- exactly like
+			 * T_MaterialState above.  For a same-slice share there is no
+			 * handshake at all to fall back on: Arrow's
+			 * SharedSourceNode::RunConsumeLoop() only calls
+			 * store_->SyncReader() when is_cross_ is false, and that call
+			 * just tests for the .ready file with access(); the ordering
+			 * itself comes from Vec Sequence running the producer subtree
+			 * first.  A thread-pool execute context
+			 * (garrow_execute_plan_new_with_context) turns the producer into
+			 * an asynchronous start, so it returns before its data is
+			 * materialised and the consumer fails with
+			 * "ShareFileStore::SyncReader: ready file not found".
+			 *
+			 * Reproduced on TPC-DS q39 at SF1000: pool_threads=0 succeeds,
+			 * while 1, 2 and 4 all fail after ~0.6s, i.e. it is the
+			 * asynchronous start and not the degree of parallelism that
+			 * breaks it.  Keep these plans on the synchronous start+wait
+			 * path.
+			 */
+			support_parallel = false;
+
 			pcontext.inputschema = vmatstate->vecdesc->schema;
 			pcontext.is_sharescan = true;
 			pcontext.gp_session_id = vmatstate->gp_session_id;
@@ -2134,15 +2349,65 @@ BuildVecPlan(PlanState *planstate, VecExecuteState *estate)
 	 *   to balance parallelism vs memory (e.g., Q4 with 43 MPPEXEC:
 	 *   pool_threads=4 → 24GB/3min OOM; pool_threads=2 → ~15GB OK).
 	 */
-	if (CanUsePushPipeline(&pcontext))
+	/*
+	 * VEC-POOL1-DEADLOCK-FIX: a pool capacity of 1 always deadlocks.
+	 *
+	 * An acero worker synchronously Wait()s on another Future inside
+	 * MapNode::InputFinished, and that Future can only be resolved by a
+	 * task still sitting in the same pool's queue.  With a capacity of 1
+	 * there is no second thread left to drain the queue, so the single
+	 * worker and the main thread both block forever in pthread_cond_wait:
+	 *
+	 *   Thread 1: garrow_execute_plan_wait -> FutureImpl::Wait
+	 *   Thread N: MapNode::InputFinished   -> FutureImpl::Wait
+	 *
+	 * Measured on TPC-DS q37 at SF1000: pool_threads=0 finishes in 3708ms,
+	 * while pool_threads=1 has not returned after six minutes at 0% CPU,
+	 * waiting on IPC/Interconnect.
+	 *
+	 * A single worker is equivalent to serial execution anyway, so
+	 * normalise 1 to 0 and take the synchronous path that the full
+	 * regression already covers, rather than silently promoting it to 2 and
+	 * handing back a degree of parallelism the user did not ask for.
+	 */
+	const int	eff_pool_threads = (pool_threads == 1) ? 0 : pool_threads;
+
+	/*
+	 * VEC-DIAG-CTX: record which context branch this plan took.  The three
+	 * predicates below each walk the plan tree, so ask whether anyone is
+	 * listening before paying for them.
+	 */
+	if (message_level_is_interesting(DEBUG1))
 	{
-		int nthreads = pool_threads > 0 ? pool_threads : 4;
+		bool		d_push = CanUsePushPipeline(&pcontext);
+		bool		d_sub = HasSameSliceShareScanInSubtree(planstate);
+		bool		d_q = QueryHasSameSliceShareScan(planstate);
+		const char *d_branch = d_push && !d_q ? "PUSH_CTX"
+			: ((eff_pool_threads > 0 && support_parallel && !d_sub && !d_q) ? "POOL_CTX" : "SYNC");
+
+		elog(DEBUG1, "VEC-DIAG-CTX pid=%d slice=%d node=%d branch=%s pool_threads=%d(raw=%d) support_parallel=%d "
+			 "push=%d subtree_sameslice_share=%d query_sameslice_share=%d is_sharescan=%d is_producer=%d "
+			 "is_cross_slice=%d parallel_scan=%d",
+			 MyProcPid, currentSliceId,
+			 planstate ? (int) nodeTag(planstate) : -1,
+			 d_branch, eff_pool_threads, pool_threads, support_parallel ? 1 : 0,
+			 d_push ? 1 : 0, d_sub ? 1 : 0, d_q ? 1 : 0,
+			 pcontext.is_sharescan ? 1 : 0, pcontext.is_producer ? 1 : 0,
+			 pcontext.is_cross_slice ? 1 : 0, pcontext.parallel_scan ? 1 : 0);
+	}
+
+	if (CanUsePushPipeline(&pcontext) &&
+		!QueryHasSameSliceShareScan(planstate))	/* VEC-SHARESCAN-QUERYWIDE */
+	{
+		int nthreads = eff_pool_threads > 0 ? eff_pool_threads : 4;
 		estate->exectx = garrow_execute_context_new(nthreads);
 		pcontext.plan = garrow_execute_plan_new_with_context(estate->exectx, &error);
 	}
-	else if (pool_threads > 0 && support_parallel)
+	else if (eff_pool_threads > 0 && support_parallel &&
+			 !HasSameSliceShareScanInSubtree(planstate) &&	/* VEC-SHARESCAN-SUBTREE */
+			 !QueryHasSameSliceShareScan(planstate))			/* VEC-SHARESCAN-QUERYWIDE */
 	{
-		estate->exectx = garrow_execute_context_new(pool_threads);
+		estate->exectx = garrow_execute_context_new(eff_pool_threads);
 		pcontext.plan = garrow_execute_plan_new_with_context(estate->exectx, &error);
 	}
 	else
@@ -2374,7 +2639,23 @@ BuildJoinPlan(PlanBuildContext *pcontext, VecExecuteState *estate)
 			garrow_store_ptr(vslot->vec_schema.schema, join_out);
 			vslot->vec_schema.schema_rebuilt = true;
 		}
-		g_object_unref(join_out);
+
+		/*
+		 * VEC-JOINOUT-UNREF-FIX
+		 *
+		 * garrow_store_ptr() steals its source ("Notice that SRC pointer
+		 * will be stolen, cannot be release" -- utils/arrow.h) and leaves
+		 * join_out NULL, so the unconditional g_object_unref() below used
+		 * to run as g_object_unref(NULL) whenever the slot was a vector
+		 * slot.  That trips g_return_if_fail(G_IS_OBJECT(object)) inside
+		 * GLib, which logged
+		 *
+		 *   g_object_unref: assertion 'G_IS_OBJECT (object)' failed
+		 *
+		 * on every such plan build.  g_clear_object() is NULL-safe and
+		 * releases the schema on the path where store_ptr did not run.
+		 */
+		g_clear_object(&join_out);
 	}
 
 	ARROW_FREE(GArrowSchema, &pcontext->left_in_schema);
@@ -2474,11 +2755,55 @@ FreeVecExecuteState(VecExecuteState *estate)
  *
  * ------------------------------------------------------------------------
  */
+/*
+ * VEC-CANCEL-FIX: true only on the thread that drives ExecuteVecPlan.
+ *
+ * The PG-side source callbacks below (get_*_next_batch) are invoked by arrow.
+ * Under SYNC they run on this backend's own thread, but once a thread pool is
+ * attached they can run on an arrow worker.  CHECK_FOR_INTERRUPTS() must never
+ * fire off-thread -- its longjmp would unwind a stack PostgreSQL does not own.
+ * Thread-local storage settles it: workers never enter ExecuteVecPlan, so the
+ * flag stays false for them.
+ */
+static __thread bool vec_is_plan_driver_thread = false;
+
+/*
+ * VEC-CANCEL-FIX: give PostgreSQL a chance to act on a pending interrupt.
+ *
+ * A vectorized query spends nearly all of its time inside arrow calls that
+ * never reach a CHECK_FOR_INTERRUPTS() -- chiefly
+ * garrow_record_batch_reader_read_next(), which blocks until the sink has a
+ * batch.  Cancellation only sets InterruptPending and signals the process, so
+ * a backend parked in there ignored pg_cancel_backend() and
+ * statement_timeout outright; only pg_terminate_backend() could remove it.
+ *
+ * Call this right before each such blocking call.  When nothing is pending it
+ * costs a single flag test.  When something is pending, stop the arrow plan
+ * first so its worker threads stop touching executor state, then let
+ * CHECK_FOR_INTERRUPTS() unwind.  The post-stop wait is bounded: cancelling
+ * must not itself be able to hang on a plan that refuses to wind down.
+ */
+static inline void
+VecCheckForInterrupts(VecExecuteState *estate)
+{
+	if (!INTERRUPTS_PENDING_CONDITION())
+		return;
+
+	if (estate != NULL && estate->plan != NULL && estate->started)
+	{
+		garrow_execute_plan_stop(estate->plan);
+		(void) garrow_execute_plan_wait_for(estate->plan, 5.0, NULL);
+	}
+	CHECK_FOR_INTERRUPTS();
+}
+
 TupleTableSlot *
 ExecuteVecPlan(VecExecuteState *estate)
 {
 	g_autoptr(GArrowRecordBatch) batch = NULL;
 	g_autoptr(GError) error = NULL;
+
+	vec_is_plan_driver_thread = true;	/* VEC-CANCEL-FIX */
 
 	/*
 	 * Build deferred by PostBuildVecPlan(): exec params referenced by this
@@ -2534,6 +2859,7 @@ ExecuteVecPlan(VecExecuteState *estate)
 			estate->started = true;
 		}
 
+		VecCheckForInterrupts(estate);
 		batch = garrow_record_batch_reader_read_next(estate->reader, &error);
 		if (error)
 			elog(ERROR, "Push-pipeline read error: %s.", error->message);
@@ -2634,6 +2960,7 @@ ExecuteVecPlan(VecExecuteState *estate)
 		 */
 		if (estate->yield_remaining > 0)
 		{
+			VecCheckForInterrupts(estate);
 			batch = garrow_record_batch_reader_read_next(estate->reader,
 														 &error);
 			if (error)
@@ -2654,6 +2981,7 @@ ExecuteVecPlan(VecExecuteState *estate)
 				garrow_execute_plan_get_yielded_batch_count(estate->plan);
 			if (estate->yield_remaining > 0)
 			{
+				VecCheckForInterrupts(estate);
 				batch = garrow_record_batch_reader_read_next(
 							estate->reader, &error);
 				if (error)
@@ -2670,6 +2998,7 @@ ExecuteVecPlan(VecExecuteState *estate)
 		}
 
 		/* Source finished: read remaining batches from queue */
+		VecCheckForInterrupts(estate);
 		batch = garrow_record_batch_reader_read_next(estate->reader,
 													 &error);
 		if (error)
@@ -2695,13 +3024,38 @@ ExecuteVecPlan(VecExecuteState *estate)
 			if (!isok || error)
 				elog(ERROR, "Start plan for vector plan error: %s.",
 					 error ? error->message : "unknown");
-			isok = garrow_execute_plan_wait(estate->plan, &error);
-			if (!isok || error)
-				elog(ERROR, "Execute plan for vector plan error: %s.",
-					 error ? error->message : "unknown");
+
+			/*
+			 * VEC-CANCEL-FIX: wait in slices so the query stays cancellable.
+			 *
+			 * garrow_execute_plan_wait() parks this thread in an unbounded
+			 * arrow::FutureImpl::Wait().  A cancel request only sets
+			 * InterruptPending and signals the process; it takes effect at the
+			 * next CHECK_FOR_INTERRUPTS(), which a parked thread never reaches.
+			 * That is why a vectorized query used to ignore
+			 * pg_cancel_backend() and statement_timeout entirely, and only
+			 * pg_terminate_backend() could get rid of it.
+			 *
+			 * Poll in 100ms slices instead.  When an interrupt is pending, stop
+			 * the arrow plan first so its worker threads are no longer touching
+			 * the executor state, then let CHECK_FOR_INTERRUPTS() unwind.  The
+			 * post-stop wait is itself bounded: cancellation must not be able
+			 * to hang on a plan that refuses to wind down.
+			 */
 			estate->started = true;
+			for (;;)
+			{
+				if (garrow_execute_plan_wait_for(estate->plan, 0.1, &error))
+					break;			/* finished; error carries its status */
+
+				VecCheckForInterrupts(estate);
+			}
+			if (error)
+				elog(ERROR, "Execute plan for vector plan error: %s.",
+					 error->message);
 		}
 
+		VecCheckForInterrupts(estate);
 		batch = garrow_record_batch_reader_read_next(estate->reader,
 													 &error);
 		if (error)
@@ -2944,6 +3298,15 @@ static GArrowAssertOpNodeOptions *build_assertop_options(List *filterInfo, PlanB
 static void *
 get_scan_next_batch(PlanState *node)
 {
+	/*
+	 * VEC-CANCEL-FIX: arrow pulls batches through here.  Under SYNC the whole
+	 * plan runs inside a single read_next(), so this callback is the only
+	 * place PostgreSQL regains control often enough to honour a cancel.
+	 * Guarded to the driver thread -- see vec_is_plan_driver_thread.
+	 */
+	if (vec_is_plan_driver_thread)
+		CHECK_FOR_INTERRUPTS();
+
 	VecSeqScanState *vnode = (VecSeqScanState *)node;
 	TupleTableSlot *slot;
 
@@ -2967,6 +3330,15 @@ get_scan_next_batch(PlanState *node)
 static void *
 get_foreign_next_batch(PlanState *node)
 {
+	/*
+	 * VEC-CANCEL-FIX: arrow pulls batches through here.  Under SYNC the whole
+	 * plan runs inside a single read_next(), so this callback is the only
+	 * place PostgreSQL regains control often enough to honour a cancel.
+	 * Guarded to the driver thread -- see vec_is_plan_driver_thread.
+	 */
+	if (vec_is_plan_driver_thread)
+		CHECK_FOR_INTERRUPTS();
+
 	VecForeignScanState *vnode = (VecForeignScanState *)node;
 	TupleTableSlot *slot;
 
@@ -2991,6 +3363,15 @@ get_foreign_next_batch(PlanState *node)
 static void *
 get_current_next_batch(PlanState *node)
 {
+	/*
+	 * VEC-CANCEL-FIX: arrow pulls batches through here.  Under SYNC the whole
+	 * plan runs inside a single read_next(), so this callback is the only
+	 * place PostgreSQL regains control often enough to honour a cancel.
+	 * Guarded to the driver thread -- see vec_is_plan_driver_thread.
+	 */
+	if (vec_is_plan_driver_thread)
+		CHECK_FOR_INTERRUPTS();
+
 	TupleTableSlot *slot;
 
 	while (true) {

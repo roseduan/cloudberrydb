@@ -3190,6 +3190,11 @@ FROM empsalary GROUP BY depname;
  14600 |          3 |              | sales
 (3 rows)
 
+-- These four plans are about qual pushdown and sort collapsing, not about
+-- the Partition Top-K rewrite.  Ask for the untouched window shape here:
+-- forcing Partition Top-K is what the vectorised TPC-DS window queries
+-- rely on and stays on by default.
+SET vector.partition_topk_require_topk_qual = on;
 -- Test pushdown of quals into a subquery containing window functions
 -- pushdown is safe because all PARTITION BY clauses include depname:
 EXPLAIN (COSTS OFF)
@@ -3367,6 +3372,7 @@ WHERE first_emp = 1 OR last_emp = 1;
  sales     |     4 |   4800 | 08-08-2007  |         3 |        1
 (6 rows)
 
+RESET vector.partition_topk_require_topk_qual;
 -- cleanup
 DROP TABLE empsalary;
 -- test user-defined window function with named args and default args

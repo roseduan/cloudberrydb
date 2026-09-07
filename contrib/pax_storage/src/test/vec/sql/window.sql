@@ -918,6 +918,11 @@ SELECT sum(salary), row_number() OVER (ORDER BY depname), sum(
     depname
 FROM empsalary GROUP BY depname;
 
+-- These four plans are about qual pushdown and sort collapsing, not about
+-- the Partition Top-K rewrite.  Ask for the untouched window shape here:
+-- forcing Partition Top-K is what the vectorised TPC-DS window queries
+-- rely on and stays on by default.
+SET vector.partition_topk_require_topk_qual = on;
 -- Test pushdown of quals into a subquery containing window functions
 
 -- pushdown is safe because all PARTITION BY clauses include depname:
@@ -984,6 +989,7 @@ SELECT * FROM
           row_number() OVER (PARTITION BY depname ORDER BY enroll_date DESC) AS last_emp
    FROM empsalary) emp
 WHERE first_emp = 1 OR last_emp = 1;
+RESET vector.partition_topk_require_topk_qual;
 
 -- cleanup
 DROP TABLE empsalary;
