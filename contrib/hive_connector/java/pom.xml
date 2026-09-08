@@ -34,8 +34,9 @@
              4.1.136 adds the fixes for CVE-2026-56745 / CVE-2026-55831 / CVE-2026-55833
              (netty-codec-http), CVE-2026-56817 (netty-codec-xml) and the matching
              codec / codec-haproxy / codec-http2 / codec-stomp / handler-ssl-ocsp
-             advisories that 4.1.135 is still flagged for. -->
-        <netty.version>4.1.136.Final</netty.version>
+             advisories that 4.1.135 is still flagged for.
+             4.1.137 adds CVE-2026-59902 (netty-transport-sctp). -->
+        <netty.version>4.1.137.Final</netty.version>
         <!-- zookeeper 3.9.5: CVE-2023-44981 (old 3.4.x) + CVE-2026-24308/24281 (3.9.x);
              overrides the transitive version pulled via hive/curator. -->
         <zookeeper.version>3.9.5</zookeeper.version>
