@@ -17,7 +17,7 @@ endif
 override CPPFLAGS := -I$(srcdir) -I$(libpq_srcdir) -I$(srcdir)/../regress $(CPPFLAGS)
 override LDLIBS := $(libpq_pgport) $(LDLIBS)
 
-all: pg_isolation2_regress$(X) all-lib data extended_protocol_test test_parallel_retrieve_cursor_extended_query test_parallel_retrieve_cursor_extended_query_error
+all: pg_isolation2_regress$(X) all-lib data extended_protocol_test test_parallel_retrieve_cursor_extended_query test_parallel_retrieve_cursor_extended_query_error xmax_extquery_test
 
 extended_protocol_test: extended_protocol_test.c
 	$(CC) $(CPPFLAGS) $(rpath) -I$(top_builddir)/src/interfaces/libpq -L$(GPHOME)/lib -L$(top_builddir)/src/interfaces/libpq  -o $@ $< -lpq
@@ -26,6 +26,9 @@ test_parallel_retrieve_cursor_extended_query: test_parallel_retrieve_cursor_exte
 	$(CC) $(CPPFLAGS) $(rpath) -I$(top_builddir)/src/interfaces/libpq -L$(GPHOME)/lib -L$(top_builddir)/src/interfaces/libpq  -o $@ $< -lpq
 
 test_parallel_retrieve_cursor_extended_query_error: test_parallel_retrieve_cursor_extended_query_error.c
+	$(CC) $(CPPFLAGS) $(rpath) -I$(top_builddir)/src/interfaces/libpq -L$(GPHOME)/lib -L$(top_builddir)/src/interfaces/libpq  -o $@ $< -lpq
+
+xmax_extquery_test: xmax_extquery_test.c
 	$(CC) $(CPPFLAGS) $(rpath) -I$(top_builddir)/src/interfaces/libpq -L$(GPHOME)/lib -L$(top_builddir)/src/interfaces/libpq  -o $@ $< -lpq
 
 pg_regress.o:
@@ -56,7 +59,7 @@ pg_isolation2_regress$(X): isolation2_main.o pg_regress.o submake-libpq submake-
 clean distclean:
 	rm -f pg_isolation2_regress$(X) $(OBJS) isolation2_main.o
 	rm -f isolation2_regress.so
-	rm -f pg_regress.o test_parallel_retrieve_cursor_extended_query test_parallel_retrieve_cursor_extended_query_error
+	rm -f pg_regress.o test_parallel_retrieve_cursor_extended_query test_parallel_retrieve_cursor_extended_query_error xmax_extquery_test
 	rm -f gpstringsubs.pl gpdiff.pl atmsort.pm explain.pm
 	rm -f data
 	rm -rf $(pg_regress_clean_files)

@@ -1,0 +1,209 @@
+-- A reader gang must inherit the writer's subtransaction state.
+--
+-- readSharedLocalSnapshot_forCursor() (src/backend/utils/time/sharedsnapshot.c)
+-- hand-copies the writer's shared local snapshot.  When it forgets
+-- subxcnt / subxip[] / suboverflowed, the reader cannot see another session's
+-- running SUBTRANSACTION: XidInMVCCSnapshot_Local() says "not running", CLOG
+-- says "not committed", so HeapTupleSatisfiesMVCC() concludes "the deleter must
+-- have aborted" and stamps a permanent, un-WAL-logged, never-revalidated
+-- HEAP_XMAX_INVALID.  Once the deleter commits, the deleted tuple is
+-- resurrected and the unique index holds two live entries for one key.
+--
+-- That snapshot path is taken whenever DtxContextInfo.cursorContext is set,
+-- which is just portal->is_extended_query, and THREE different things set it:
+--
+--   1. DECLARE CURSOR                      portalcmds.c, PerformCursorOpen()
+--   2. an SPI cursor, i.e. every
+--      PL/pgSQL "FOR rec IN SELECT ..."    spi.c, SPI_cursor_open_internal()
+--   3. any extended-protocol Bind, i.e.
+--      a parameterized statement from
+--      JDBC / psycopg2 / ODBC / libpq      postgres.c, exec_bind_message()
+--
+-- All three are exercised below.  Entry point 3 needs the extended query
+-- protocol, which this driver does not speak, so it runs out of the
+-- xmax_extquery_test helper program.
+--
+-- Every scenario needs the same three ingredients:
+--   a. the reader gang is warmed up while NO subtransaction exists anywhere, so
+--      the reader QE's process-static snapshot keeps subxcnt = 0 (the cursor
+--      path never writes that field again);
+--   b. the DELETE runs in a subtransaction -- a subxid reaches a snapshot only
+--      through subxip[];
+--   c. another transaction commits afterwards, so the subxid falls strictly
+--      inside (snap_xmin, snap_xmax) and the range check at the top of
+--      XidInMVCCSnapshot() does not mask the bug.
+
+-- ----------------------------------------------------------------------------
+-- 1. explicit DECLARE CURSOR
+-- ----------------------------------------------------------------------------
+
+create table xmax_cursor (id int, pad text) distributed by (id);
+CREATE
+create unique index xmax_cursor_uniq on xmax_cursor (id);
+CREATE
+create table xmax_cursor_bump (id int) distributed by (id);
+CREATE
+insert into xmax_cursor select i, 'orig-' || i from generate_series(1, 20) i;
+INSERT 20
+-- settle the xmin hint bits so the reader goes straight to the xmax path
+vacuum (freeze, analyze) xmax_cursor;
+VACUUM
+
+-- warm the reader gang up while no subtransaction exists
+1: begin;
+BEGIN
+1: declare c0 cursor for select id from xmax_cursor order by id;
+DECLARE
+1: fetch 3 from c0;
+ id 
+----
+ 1  
+ 2  
+ 3  
+(3 rows)
+1: close c0;
+CLOSE
+1: commit;
+COMMIT
+
+-- delete inside a subtransaction, re-insert the key at the top level, hold open
+2: begin;
+BEGIN
+2: savepoint s1;
+SAVEPOINT
+2: delete from xmax_cursor where id = 1;
+DELETE 1
+2: release savepoint s1;
+RELEASE
+2: insert into xmax_cursor values (1, 'new-1');
+INSERT 1
+
+-- commit a write on every segment
+3: insert into xmax_cursor_bump select generate_series(1, 300);
+INSERT 300
+
+-- the trigger
+1: begin;
+BEGIN
+1: declare c1 cursor for select id, pad from xmax_cursor order by id;
+DECLARE
+1: fetch 3 from c1;
+ id | pad    
+----+--------
+ 1  | orig-1 
+ 2  | orig-2 
+ 3  | orig-3 
+(3 rows)
+1: close c1;
+CLOSE
+1: commit;
+COMMIT
+
+2: commit;
+COMMIT
+
+-- exactly one live row with id = 1, and it must be 'new-1'
+1: select id, pad from xmax_cursor where id = 1 order by pad;
+ id | pad   
+----+-------
+ 1  | new-1 
+(1 row)
+1: select id, count(*) as n from xmax_cursor group by id having count(*) > 1;
+ id | n 
+----+---
+(0 rows)
+-- and rebuilding the existing unique index must still succeed
+1: reindex index xmax_cursor_uniq;
+REINDEX
+
+1q: ... <quitting>
+2q: ... <quitting>
+3q: ... <quitting>
+drop table xmax_cursor;
+DROP
+drop table xmax_cursor_bump;
+DROP
+
+-- ----------------------------------------------------------------------------
+-- 2. SPI cursor: a PL/pgSQL FOR loop, no DECLARE CURSOR anywhere
+-- ----------------------------------------------------------------------------
+
+create table xmax_plpgsql (id int, pad text) distributed by (id);
+CREATE
+create unique index xmax_plpgsql_uniq on xmax_plpgsql (id);
+CREATE
+create table xmax_plpgsql_bump (id int) distributed by (id);
+CREATE
+insert into xmax_plpgsql select i, 'orig-' || i from generate_series(1, 20) i;
+INSERT 20
+vacuum (freeze, analyze) xmax_plpgsql;
+VACUUM
+
+4: do $$ declare r record; n int := 0; begin for r in select id from xmax_plpgsql order by id loop n := n + 1; end loop; raise notice 'warmup scanned % rows', n; end $$;
+DO
+
+5: begin;
+BEGIN
+5: savepoint s1;
+SAVEPOINT
+5: delete from xmax_plpgsql where id = 1;
+DELETE 1
+5: release savepoint s1;
+RELEASE
+5: insert into xmax_plpgsql values (1, 'new-1');
+INSERT 1
+
+6: insert into xmax_plpgsql_bump select generate_series(1, 300);
+INSERT 300
+
+4: do $$ declare r record; n int := 0; begin for r in select id, pad from xmax_plpgsql order by id loop n := n + 1; end loop; raise notice 'trigger scanned % rows', n; end $$;
+DO
+
+5: commit;
+COMMIT
+
+4: select id, pad from xmax_plpgsql where id = 1 order by pad;
+ id | pad   
+----+-------
+ 1  | new-1 
+(1 row)
+4: select id, count(*) as n from xmax_plpgsql group by id having count(*) > 1;
+ id | n 
+----+---
+(0 rows)
+4: reindex index xmax_plpgsql_uniq;
+REINDEX
+
+4q: ... <quitting>
+5q: ... <quitting>
+6q: ... <quitting>
+drop table xmax_plpgsql;
+DROP
+drop table xmax_plpgsql_bump;
+DROP
+
+-- ----------------------------------------------------------------------------
+-- 3. extended query protocol (Parse/Bind/Execute), no cursor at all
+-- ----------------------------------------------------------------------------
+
+! ./xmax_extquery_test dbname=isolation2test;
+xmax_extquery_test: interleaving done
+
+
+7: select id, pad from xmax_extquery where id = 1 order by pad;
+ id | pad   
+----+-------
+ 1  | new-1 
+(1 row)
+7: select id, count(*) as n from xmax_extquery group by id having count(*) > 1;
+ id | n 
+----+---
+(0 rows)
+7: reindex index xmax_extquery_uniq;
+REINDEX
+
+7q: ... <quitting>
+drop table xmax_extquery;
+DROP
+drop table xmax_extquery_bump;
+DROP

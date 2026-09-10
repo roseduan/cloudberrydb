@@ -748,7 +748,37 @@ readSharedLocalSnapshot_forCursor(Snapshot snapshot, DtxContext distributedTrans
 	/* zero out the slack in the xip-array */
 	memset(snapshot->xip + snapshot->xcnt, 0, (xipEntryCount - snapshot->xcnt)*sizeof(TransactionId));
 
+	/*
+	 * Sub-transaction state is part of the snapshot and must be copied too.
+	 *
+	 * Without it, XidInMVCCSnapshot_Local() cannot find a running subxid of
+	 * another session: subxip[] is empty and suboverflowed is false, so it
+	 * neither matches the array nor falls back to
+	 * SubTransGetTopmostTransaction().  The xid is then reported as "not
+	 * running", TransactionIdDidCommit() says "not committed", and
+	 * HeapTupleSatisfiesMVCC() concludes "it must have aborted" -- stamping a
+	 * permanent HEAP_XMAX_INVALID (or HEAP_XMIN_INVALID) that is written
+	 * without WAL and never re-validated.  A deleted tuple is resurrected for
+	 * every session forever, which shows up as a unique index that is no
+	 * longer unique.
+	 *
+	 * Note these fields are process-static across snapshots, so failing to
+	 * assign them does not leave them zeroed -- it leaves the previous
+	 * snapshot's stale answer in place, which is why the symptom is
+	 * intermittent.
+	 */
+	snapshot->subxcnt = dumpsnapshot->subxcnt;
+	snapshot->suboverflowed = dumpsnapshot->suboverflowed;
+	snapshot->takenDuringRecovery = dumpsnapshot->takenDuringRecovery;
+
+	if (snapshot->subxcnt > 0)
+		memcpy(snapshot->subxip, dumpsnapshot->subxip,
+			   snapshot->subxcnt * sizeof(TransactionId));
+
 	snapshot->curcid = dumpsnapshot->curcid;
+
+	if (TransactionIdPrecedes(snapshot->xmin, TransactionXmin))
+		TransactionXmin = snapshot->xmin;
 
 	SetSharedTransactionId_reader(
 		localXid,
