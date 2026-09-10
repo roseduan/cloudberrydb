@@ -1,0 +1,173 @@
+-- Site-config parser: what the coordinator makes of s3.conf / gphdfs.conf.
+--
+-- test/sitediff holds this parser to the datalake agent, but needs maven and
+-- an agent build.  This needs neither, so it is what a normal regression run
+-- relies on to notice the parser's behaviour changed.  Same fixtures, so the
+-- two cannot drift apart.
+--
+-- Each case asserts the fields it is about rather than the whole dump: a new
+-- field in the renderer should not turn every case red, and the field named in
+-- a query says what the case is testing.
+-- Quiet, so the result does not depend on whether an earlier test in the
+-- schedule already created the extension.
+SET client_min_messages = warning;
+CREATE EXTENSION IF NOT EXISTS datalake_fdw;
+RESET client_min_messages;
+\set s3 '@abs_srcdir@/test/sitediff/fixtures/s3'
+\set hdfs '@abs_srcdir@/test/sitediff/fixtures/hdfs'
+\set empty '@abs_srcdir@/test/sitediff/fixtures/empty'
+\set nofile '@abs_srcdir@/test/sitediff/fixtures/nofile'
+-- A plain section.
+SELECT j->>'volumeEndpoint' AS endpoint, j->>'volumeRegion' AS region,
+       j->>'bucketName' AS bucket, j->>'pathStyleAccess' AS path_style,
+       j->>'accessKeyId' AS akid, j->>'username' AS username
+FROM (SELECT pg_iceberg_site_config('minio', 's3', :'s3')::json) AS t(j);
+     endpoint      |  region   |  bucket   | path_style |    akid     | username 
+-------------------+-----------+-----------+------------+-------------+----------
+ http://minio:9000 | us-east-1 | warehouse | true       | AKIAEXAMPLE | gpadmin
+(1 row)
+
+-- Two steps decide a boolean, and they disagree about case.  YAML 1.1's
+-- resolver only recognises fixed spellings (yes/Yes/YES, true/True/TRUE), so
+-- bare yes is a boolean while yEs and tRue stay strings.  Whatever survives as
+-- a string then meets Boolean.parseBoolean, which matches "true"
+-- case-insensitively.  Hence tRue is true, yEs is false, and 1 -- resolved as
+-- an integer, rendered "1" -- is false as well.  Quoting "yes" keeps it a
+-- string that parseBoolean rejects, so quoting flips the value.
+SELECT s AS section, (pg_iceberg_site_config(s, 's3', :'s3')::json)->>'pathStyleAccess' AS path_style
+FROM unnest(ARRAY['bool_yes','bool_quoted','bool_tRue','bool_yEs','bool_one','bool_absent']) AS s;
+   section   | path_style 
+-------------+------------
+ bool_yes    | true
+ bool_quoted | false
+ bool_tRue   | true
+ bool_yEs    | false
+ bool_one    | false
+ bool_absent | 
+(6 rows)
+
+-- Retyped scalars.  01234567 is octal to YAML 1.1, which rewrites a
+-- credential; 1_000 carries a digit separator; 0x1F is hex; a key with no
+-- value is null, not an empty string.  Getting any of these wrong hands the
+-- storage layer a secret nobody configured.
+SELECT j->>'volumeEndpoint' AS endpoint, j->>'volumeRegion' AS region,
+       j->>'bucketName' AS bucket, j->>'accessKeyId' AS akid,
+       j->>'secretAccessKey' AS secret, j->>'username' AS username
+FROM (SELECT pg_iceberg_site_config('typing', 's3', :'s3')::json) AS t(j);
+ endpoint | region | bucket |  akid  | secret | username 
+----------+--------+--------+--------+--------+----------
+          | false  | 1000   | 342391 | 31     | 42
+(1 row)
+
+-- A value YAML reads as a float, a timestamp or a sexagesimal is refused
+-- rather than guessed at: the agent would render it by Java rules this parser
+-- cannot reproduce, and a silently different endpoint is the failure mode the
+-- whole equivalence exercise exists to avoid.  One statement each, since the
+-- first error would otherwise hide the rest.
+SELECT pg_iceberg_site_config('floaty', 's3', :'s3');
+ERROR:  configuration file s3.conf, server "floaty": value of key "endpoint" is a floating-point number
+HINT:  Quote the value so it is read as text.
+SELECT pg_iceberg_site_config('stamp', 's3', :'s3');
+ERROR:  configuration file s3.conf, server "stamp": value of key "endpoint" is a timestamp
+HINT:  Quote the value so it is read as text.
+SELECT pg_iceberg_site_config('sexa', 's3', :'s3');
+ERROR:  configuration file s3.conf, server "sexa": value of key "endpoint" is a sexagesimal number
+HINT:  Quote the value so it is read as text.
+-- Unknown keys travel through opaquely; a valueless one is dropped.
+SELECT j->>'volumeEndpoint' AS endpoint, j->'extraProperties' AS extras
+FROM (SELECT pg_iceberg_site_config('extras', 's3', :'s3')::json) AS t(j);
+     endpoint      |                                     extras                                      
+-------------------+---------------------------------------------------------------------------------
+ http://minio:9000 | {"fs.defaultFS":"hdfs://nn:8020","numeric_extra":"8","some_unknown_key":"kept"}
+(1 row)
+
+-- Duplicates follow the agent's Map semantics -- last wins.  The older reader
+-- in provider/common/config.c takes the first, which is why this is pinned.
+SELECT s AS section, (pg_iceberg_site_config(s, 's3', :'s3')::json)->>'volumeEndpoint' AS endpoint
+FROM unnest(ARRAY['dupkey','dupsec']) AS s;
+ section |      endpoint      
+---------+--------------------
+ dupkey  | http://second:9000
+ dupsec  | http://second:9000
+(2 rows)
+
+-- HDFS typed fields.
+SELECT j->>'hdfsNamenodeHost' AS namenode, j->>'hdfsNamenodePort' AS port,
+       j->>'username' AS username, j->>'hdfsAuthMethod' AS auth
+FROM (SELECT pg_iceberg_site_config('nn', 'hdfs', :'hdfs')::json) AS t(j);
+       namenode       | port | username |  auth  
+----------------------+------+----------+--------
+ namenode.example.com | 8020 | gpadmin  | simple
+(1 row)
+
+-- HA keys are carried verbatim, not rewritten into hadoop spellings.
+SELECT j->>'isHaSupported' AS ha, j->>'dfsNameservices' AS nameservices,
+       j->>'dfsHaNamenodes' AS namenodes, j->>'dfsNamenodeRpcAddress' AS rpc_addr,
+       j->>'dfsClientUseDatanodeHostname' AS use_hostname
+FROM (SELECT pg_iceberg_site_config('ha', 'hdfs', :'hdfs')::json) AS t(j);
+  ha  | nameservices | namenodes |       rpc_addr       | use_hostname 
+------+--------------+-----------+----------------------+--------------
+ true | mycluster    | nn1,nn2   | nn1.example.com:8020 | true
+(1 row)
+
+SELECT j->>'hdfsAuthMethod' AS auth, j->>'krbPrincipal' AS principal,
+       j->>'hadoopRpcProtection' AS rpc_protection, j->'extraProperties' AS extras
+FROM (SELECT pg_iceberg_site_config('kerberos', 'hdfs', :'hdfs')::json) AS t(j);
+   auth   |      principal      | rpc_protection |                      extras                      
+----------+---------------------+----------------+--------------------------------------------------
+ kerberos | gpadmin@EXAMPLE.COM | privacy        | {"krb_service_principal":"nn/_HOST@EXAMPLE.COM"}
+(1 row)
+
+SELECT j->>'dataTransferProtocol' AS dtp, j->>'dataTransferProtection' AS protection,
+       j->'extraProperties' AS extras
+FROM (SELECT pg_iceberg_site_config('dtp', 'hdfs', :'hdfs')::json) AS t(j);
+ dtp  | protection |                 extras                 
+------+------------+----------------------------------------
+ true | privacy    | {"data_transfer_protection":"privacy"}
+(1 row)
+
+-- An empty file is not an error: the agent's YAML load returns null, warns,
+-- and carries on, so refusing it would reject a deployment the agent accepts.
+SELECT pg_iceberg_site_config('anything', 's3', :'empty') IS NOT NULL AS parsed_without_error;
+ parsed_without_error 
+----------------------
+ t
+(1 row)
+
+-- An empty server_name means the agent never opens a file, so neither do we.
+SELECT pg_iceberg_site_config('', 's3', :'s3') IS NOT NULL AS parsed_without_error;
+ parsed_without_error 
+----------------------
+ t
+(1 row)
+
+-- Section lookup is case-sensitive, because the agent does Map.get().
+SELECT pg_iceberg_site_config('MinIO', 's3', :'s3');
+ERROR:  server "MinIO" not found in s3.conf
+-- Missing file, missing section, non-scalar value, and a key YAML retypes to
+-- a boolean -- all errors.
+SELECT pg_iceberg_site_config('minio', 's3', :'nofile');
+ERROR:  unable to read configuration for server "minio" from "s3.conf": No such file or directory
+SELECT pg_iceberg_site_config('nosuchsection', 's3', :'s3');
+ERROR:  server "nosuchsection" not found in s3.conf
+SELECT pg_iceberg_site_config('nested', 's3', :'s3');
+ERROR:  configuration file s3.conf, server "nested": value of key "endpoint" must be a scalar
+SELECT pg_iceberg_site_config('badkey', 's3', :'s3');
+ERROR:  configuration file s3.conf, server "badkey": section keys must be strings
+HINT:  Quote the key to keep it a string.
+-- Legacy spellings are refused rather than ignored, so a conf file the agent
+-- rejects cannot appear to work here.
+SELECT pg_iceberg_site_config('legacy1', 's3', :'s3');
+ERROR:  configuration file s3.conf, server "legacy1": legacy key(s) no longer supported: "fs.s3a.endpoint" (use "endpoint"); keys must match the SQL OPTION names
+SELECT pg_iceberg_site_config('legacy_many', 's3', :'s3');
+ERROR:  configuration file s3.conf, server "legacy_many": legacy key(s) no longer supported: "fs.gopher.ufs_type" (use "type"), "fs.s3a.access.key" (use "access_key_id"), "fs.s3a.some.other.key" (use the matching SQL OPTION name), "fs.gopher.whatever" (use the matching SQL OPTION name); keys must match the SQL OPTION names
+SELECT pg_iceberg_site_config('legacy_dotted', 'hdfs', :'hdfs');
+ERROR:  configuration file gphdfs.conf, server "legacy_dotted": legacy key(s) no longer supported: "dfs.nameservices" (use "dfs_nameservices"); keys must match the SQL OPTION names
+-- Superuser only: base_dir is otherwise an arbitrary-file reader.
+CREATE ROLE site_config_unpriv LOGIN;
+NOTICE:  resource queue required -- using default resource queue "pg_default"
+SET SESSION AUTHORIZATION site_config_unpriv;
+SELECT pg_iceberg_site_config('minio', 's3', :'s3');
+ERROR:  permission denied for function pg_iceberg_site_config
+RESET SESSION AUTHORIZATION;
+DROP ROLE site_config_unpriv;

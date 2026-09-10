@@ -55,6 +55,12 @@ SET iceberg_default_volume = 's3_acid_vol';
 -- ============================================================
 DROP TABLE IF EXISTS c_s3_acid_raw;
 CREATE ICEBERG TABLE c_s3_acid_raw (id int, n int);
+-- The mc pre-clean in the Makefile is a no-op wherever mc is not on PATH,
+-- and DROP TABLE does not reliably purge the warehouse either, so CREATE
+-- above re-attaches to the rows a previous run left behind and every count
+-- below doubles.  Clear them.  The DO wrapper hides the row count, which is
+-- 0 on a first run; TRUNCATE is a no-op on this access method.
+DO $$ BEGIN DELETE FROM c_s3_acid_raw; END $$;
 INSERT INTO c_s3_acid_raw VALUES (1, 10);
 
 BEGIN;
@@ -66,7 +72,10 @@ COMMIT;
 SELECT id, n FROM c_s3_acid_raw ORDER BY n;
 SELECT COUNT(*) AS cnt, SUM(n) AS sumn FROM c_s3_acid_raw;
 
-DROP TABLE c_s3_acid_raw;
+-- The iceberg tables are deliberately left in place.  DROP purges the
+-- metadata tree only partially, and this catalog keeps the current version in
+-- version-hint.text: once that points at a vN.metadata.json the purge removed,
+-- the next CREATE fails with "Metadata file for version N is missing".
 
 -- ============================================================
 -- Case B: LANGUAGE plpgsql function wrapping two UPDATEs.
@@ -76,6 +85,7 @@ DROP TABLE c_s3_acid_raw;
 -- ============================================================
 DROP TABLE IF EXISTS c_s3_acid_pl;
 CREATE ICEBERG TABLE c_s3_acid_pl (id int, n int);
+DO $$ BEGIN DELETE FROM c_s3_acid_pl; END $$;
 INSERT INTO c_s3_acid_pl VALUES (1, 10);
 
 CREATE OR REPLACE FUNCTION s3_acid_upd2_pl() RETURNS bigint AS $$
@@ -93,13 +103,13 @@ SELECT id, n FROM c_s3_acid_pl ORDER BY n;
 SELECT COUNT(*) AS cnt, SUM(n) AS sumn FROM c_s3_acid_pl;
 
 DROP FUNCTION s3_acid_upd2_pl();
-DROP TABLE c_s3_acid_pl;
 
 -- ============================================================
 -- Case C: LANGUAGE sql function wrapping two UPDATEs.
 -- ============================================================
 DROP TABLE IF EXISTS c_s3_acid_sql;
 CREATE ICEBERG TABLE c_s3_acid_sql (id int, n int);
+DO $$ BEGIN DELETE FROM c_s3_acid_sql; END $$;
 INSERT INTO c_s3_acid_sql VALUES (1, 10);
 
 CREATE OR REPLACE FUNCTION s3_acid_upd2_sql() RETURNS bigint AS $$
@@ -113,7 +123,6 @@ SELECT id, n FROM c_s3_acid_sql ORDER BY n;
 SELECT COUNT(*) AS cnt, SUM(n) AS sumn FROM c_s3_acid_sql;
 
 DROP FUNCTION s3_acid_upd2_sql();
-DROP TABLE c_s3_acid_sql;
 
 -- ============================================================
 -- Cleanup

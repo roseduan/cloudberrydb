@@ -1,0 +1,57 @@
+# case	dir	server	type	expect
+#
+# A field written as "-" means the empty string.  Tabs collapse when the
+# shell reads them, so an actually empty column would silently shift the row.
+#
+# expect:
+#   same           both sides must produce identical output (JSON, or an
+#                  identical error message)
+#   error_category both must fail, but the text differs because Java's is a
+#                  wrapped JVM exception -- only the failure is contractual
+#   c_rejects      a declared divergence: the agent accepts the value, the C
+#                  parser refuses it because its Java rendering cannot be
+#                  reproduced.  See W1-equivalence-spec.md 8.4 / 8.6.
+# --- S3: values and typing ------------------------------------------------
+s3_basic	s3	minio	s3	same
+s3_typing	s3	typing	s3	same
+s3_extras	s3	extras	s3	same
+# --- S3: the boolean truth table -----------------------------------------
+s3_bool_yes	s3	bool_yes	s3	same
+s3_bool_quoted_yes	s3	bool_quoted	s3	same
+s3_bool_mixed_true	s3	bool_tRue	s3	same
+s3_bool_mixed_yes	s3	bool_yEs	s3	same
+s3_bool_one	s3	bool_one	s3	same
+s3_bool_absent	s3	bool_absent	s3	same
+# --- S3: duplicate keys and sections resolve to the last one --------------
+s3_dup_key	s3	dupkey	s3	same
+s3_dup_section	s3	dupsec	s3	same
+# --- S3: dispatch on the SQL-layer type ----------------------------------
+s3_type_unknown	s3	minio	weirdtype	same
+s3_type_empty	s3	minio	-	same
+# --- S3: files and sections ----------------------------------------------
+s3_empty_file	empty	whatever	s3	same
+s3_empty_server	nofile	-	s3	same
+s3_missing_file	nofile	whatever	s3	error_category
+s3_missing_section	s3	nosuch	s3	error_category
+s3_section_case	s3	MinIO	s3	error_category
+s3_nonstring_key	s3	badkey	s3	error_category
+# --- S3: legacy keys, message text is contractual ------------------------
+s3_legacy_one	s3	legacy1	s3	same
+s3_legacy_many	s3	legacy_many	s3	same
+# --- S3: declared divergences --------------------------------------------
+s3_float	s3	floaty	s3	c_rejects
+s3_float_no_point	s3	expo	s3	c_rejects
+s3_float_signed_dot	s3	signdot	s3	c_rejects
+s3_float_dot_exponent	s3	dotexp	s3	c_rejects
+s3_timestamp	s3	stamp	s3	c_rejects
+s3_sexagesimal	s3	sexa	s3	c_rejects
+s3_nonscalar	s3	nested	s3	c_rejects
+# --- HDFS -----------------------------------------------------------------
+hdfs_basic	hdfs	nn	hdfs	same
+hdfs_spliced_port	hdfs	spliced	hdfs	same
+hdfs_no_port_default	hdfs	noport	hdfs	same
+hdfs_ha_keys_not_rewritten	hdfs	ha	hdfs	same
+hdfs_dtp_typed_and_extra	hdfs	dtp	hdfs	same
+hdfs_kerberos	hdfs	kerberos	hdfs	same
+hdfs_legacy_dotted	hdfs	legacy_dotted	hdfs	same
+hdfs_legacy_prefix	hdfs	legacy_prefix	hdfs	same

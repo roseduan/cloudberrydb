@@ -41,6 +41,12 @@ SET iceberg_default_volume = 's3_smoke_vol';
 
 DROP TABLE IF EXISTS s3_smoke;
 CREATE ICEBERG TABLE s3_smoke (id INT, name VARCHAR(50), val DECIMAL(10,2));
+-- The mc pre-clean in the Makefile is a no-op wherever mc is not on PATH,
+-- and DROP TABLE does not reliably purge the warehouse either, so CREATE
+-- above re-attaches to the rows a previous run left behind and every count
+-- below doubles.  Clear them.  The DO wrapper hides the row count, which is
+-- 0 on a first run; TRUNCATE is a no-op on this access method.
+DO $$ BEGIN DELETE FROM s3_smoke; END $$;
 
 \echo === T1 INSERT seed (5 rows) ===
 INSERT INTO s3_smoke
@@ -75,4 +81,7 @@ SELECT count(*) AS final_rows,
        sum(val) AS sum_val
 FROM s3_smoke;
 
-DROP TABLE s3_smoke;
+-- The iceberg tables are deliberately left in place.  DROP purges the
+-- metadata tree only partially, and this catalog keeps the current version in
+-- version-hint.text: once that points at a vN.metadata.json the purge removed,
+-- the next CREATE fails with "Metadata file for version N is missing".

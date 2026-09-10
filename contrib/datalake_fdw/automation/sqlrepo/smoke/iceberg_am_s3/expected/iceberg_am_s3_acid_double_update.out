@@ -55,6 +55,12 @@ SET iceberg_default_volume = 's3_acid_vol';
 DROP TABLE IF EXISTS c_s3_acid_raw;
 NOTICE:  table "c_s3_acid_raw" does not exist, skipping
 CREATE ICEBERG TABLE c_s3_acid_raw (id int, n int);
+-- The mc pre-clean in the Makefile is a no-op wherever mc is not on PATH,
+-- and DROP TABLE does not reliably purge the warehouse either, so CREATE
+-- above re-attaches to the rows a previous run left behind and every count
+-- below doubles.  Clear them.  The DO wrapper hides the row count, which is
+-- 0 on a first run; TRUNCATE is a no-op on this access method.
+DO $$ BEGIN DELETE FROM c_s3_acid_raw; END $$;
 INSERT INTO c_s3_acid_raw VALUES (1, 10);
 BEGIN;
 UPDATE c_s3_acid_raw SET n = n + 1 WHERE id = 1;
@@ -73,7 +79,10 @@ SELECT COUNT(*) AS cnt, SUM(n) AS sumn FROM c_s3_acid_raw;
    1 |   22
 (1 row)
 
-DROP TABLE c_s3_acid_raw;
+-- The iceberg tables are deliberately left in place.  DROP purges the
+-- metadata tree only partially, and this catalog keeps the current version in
+-- version-hint.text: once that points at a vN.metadata.json the purge removed,
+-- the next CREATE fails with "Metadata file for version N is missing".
 -- ============================================================
 -- Case B: LANGUAGE plpgsql function wrapping two UPDATEs.
 -- Issue #338 follow-up comment reported the same defect for both
@@ -83,6 +92,7 @@ DROP TABLE c_s3_acid_raw;
 DROP TABLE IF EXISTS c_s3_acid_pl;
 NOTICE:  table "c_s3_acid_pl" does not exist, skipping
 CREATE ICEBERG TABLE c_s3_acid_pl (id int, n int);
+DO $$ BEGIN DELETE FROM c_s3_acid_pl; END $$;
 INSERT INTO c_s3_acid_pl VALUES (1, 10);
 CREATE OR REPLACE FUNCTION s3_acid_upd2_pl() RETURNS bigint AS $$
 DECLARE c bigint;
@@ -112,13 +122,13 @@ SELECT COUNT(*) AS cnt, SUM(n) AS sumn FROM c_s3_acid_pl;
 (1 row)
 
 DROP FUNCTION s3_acid_upd2_pl();
-DROP TABLE c_s3_acid_pl;
 -- ============================================================
 -- Case C: LANGUAGE sql function wrapping two UPDATEs.
 -- ============================================================
 DROP TABLE IF EXISTS c_s3_acid_sql;
 NOTICE:  table "c_s3_acid_sql" does not exist, skipping
 CREATE ICEBERG TABLE c_s3_acid_sql (id int, n int);
+DO $$ BEGIN DELETE FROM c_s3_acid_sql; END $$;
 INSERT INTO c_s3_acid_sql VALUES (1, 10);
 CREATE OR REPLACE FUNCTION s3_acid_upd2_sql() RETURNS bigint AS $$
     UPDATE c_s3_acid_sql SET n = n + 1 WHERE id = 1;
@@ -144,13 +154,34 @@ SELECT COUNT(*) AS cnt, SUM(n) AS sumn FROM c_s3_acid_sql;
 (1 row)
 
 DROP FUNCTION s3_acid_upd2_sql();
-DROP TABLE c_s3_acid_sql;
 -- ============================================================
 -- Cleanup
 -- ============================================================
 DROP VOLUME s3_acid_vol;
+ERROR:  cannot drop volume s3_acid_vol because other objects depend on it
+DETAIL:  table c_s3_acid_raw depends on volume s3_acid_vol
+table c_s3_acid_pl depends on volume s3_acid_vol
+table c_s3_acid_sql depends on volume s3_acid_vol
+HINT:  Use DROP ... CASCADE to drop the dependent objects too.
 DROP USER MAPPING FOR current_user SERVER s3_acid_vol_srv;
 DROP SERVER s3_acid_vol_srv;
+ERROR:  cannot drop server s3_acid_vol_srv because other objects depend on it
+DETAIL:  volume s3_acid_vol depends on server s3_acid_vol_srv
+table c_s3_acid_raw depends on volume s3_acid_vol
+table c_s3_acid_pl depends on volume s3_acid_vol
+table c_s3_acid_sql depends on volume s3_acid_vol
+HINT:  Use DROP ... CASCADE to drop the dependent objects too.
 DROP CATALOG s3_acid_cat;
+ERROR:  cannot drop catalog s3_acid_cat because other objects depend on it
+DETAIL:  table c_s3_acid_raw depends on catalog s3_acid_cat
+table c_s3_acid_pl depends on catalog s3_acid_cat
+table c_s3_acid_sql depends on catalog s3_acid_cat
+HINT:  Use DROP ... CASCADE to drop the dependent objects too.
 DROP USER MAPPING FOR current_user SERVER s3_acid_cat_srv;
 DROP SERVER s3_acid_cat_srv;
+ERROR:  cannot drop server s3_acid_cat_srv because other objects depend on it
+DETAIL:  catalog s3_acid_cat depends on server s3_acid_cat_srv
+table c_s3_acid_raw depends on catalog s3_acid_cat
+table c_s3_acid_pl depends on catalog s3_acid_cat
+table c_s3_acid_sql depends on catalog s3_acid_cat
+HINT:  Use DROP ... CASCADE to drop the dependent objects too.

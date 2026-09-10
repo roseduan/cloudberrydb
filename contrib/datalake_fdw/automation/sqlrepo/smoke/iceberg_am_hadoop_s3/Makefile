@@ -23,5 +23,9 @@ installcheck:
 	@echo "=== Running pg_regress tests ==="
 	$(pg_regress_installcheck) $(REGRESS)
 
+generate-expected:
+	@if [ -d results ]; then mkdir -p expected; cp results/*.out expected/; \
+		echo "Copied results to expected/"; else echo "Run installcheck first."; fi
+
 clean:
 	rm -rf results/ regression.diffs regression.out tmp_check/ log/

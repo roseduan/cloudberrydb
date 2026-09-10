@@ -97,7 +97,7 @@ static const GopherConfigMapping gopher_config_mapping[] = {
     {"gopher.hdfs_tbds_securekey", "hdfs_tbds_securekey", GOPHER_TYPE_STRING, GOPHER_FIELD_NONE},
     {"gopher.hdfs_tbds_username", "hdfs_tbds_username", GOPHER_TYPE_STRING, GOPHER_FIELD_NONE},
     {"gopher.hdfs_username", "hdfs_username", GOPHER_TYPE_STRING, offsetof(gopherOptions, hdfs_user)},
-    {"gopher.dfs_client_use_datanode_hostname", "dfs_client_use_datanode_hostname", GOPHER_TYPE_BOOL, GOPHER_FIELD_NONE},
+    {"gopher.dfs_client_use_datanode_hostname", "dfs_client_use_datanode_hostname", GOPHER_TYPE_BOOL, offsetof(gopherOptions, dfs_client_use_datanode_hostname)},
 
     /* HDFS HA configuration */
     {"gopher.dfs_nameservices", "dfs_nameservices", GOPHER_TYPE_STRING, offsetof(gopherOptions, dfs_name_services)},

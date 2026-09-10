@@ -5,7 +5,12 @@
 -- code path the #338 fix touched.  Even though storage is HDFS rather
 -- than S3, the catalog-side RPC plumbing is the same and the bug shape
 -- is the same.
+-- Suppress the "already exists, skipping" NOTICE: this file runs second in
+-- the suite, so the extension is already there, and the notice made the test
+-- pass alone and fail as part of the suite.
+SET client_min_messages = WARNING;
 CREATE EXTENSION IF NOT EXISTS datalake_fdw;
+RESET client_min_messages;
 SET DateStyle = 'ISO, YMD';
 DROP SERVER IF EXISTS hd_hdfs_acid_cat_srv CASCADE;
 NOTICE:  server "hd_hdfs_acid_cat_srv" does not exist, skipping
@@ -28,6 +33,7 @@ SET iceberg_default_volume = 'hd_hdfs_acid_vol';
 DROP TABLE IF EXISTS hd_hdfs_acid_raw;
 NOTICE:  table "hd_hdfs_acid_raw" does not exist, skipping
 CREATE ICEBERG TABLE hd_hdfs_acid_raw (id int, n int);
+DO $$ BEGIN DELETE FROM hd_hdfs_acid_raw; END $$;
 INSERT INTO hd_hdfs_acid_raw VALUES (1, 10);
 BEGIN;
 UPDATE hd_hdfs_acid_raw SET n = n + 1 WHERE id = 1;
@@ -45,11 +51,11 @@ SELECT COUNT(*) AS cnt, SUM(n) AS sumn FROM hd_hdfs_acid_raw;
    1 |   22
 (1 row)
 
-DROP TABLE hd_hdfs_acid_raw;
 -- Case B: plpgsql function double UPDATE
 DROP TABLE IF EXISTS hd_hdfs_acid_pl;
 NOTICE:  table "hd_hdfs_acid_pl" does not exist, skipping
 CREATE ICEBERG TABLE hd_hdfs_acid_pl (id int, n int);
+DO $$ BEGIN DELETE FROM hd_hdfs_acid_pl; END $$;
 INSERT INTO hd_hdfs_acid_pl VALUES (1, 10);
 CREATE OR REPLACE FUNCTION hd_hdfs_acid_upd2_pl() RETURNS bigint AS $$
 DECLARE c bigint;
@@ -79,11 +85,11 @@ SELECT COUNT(*) AS cnt, SUM(n) AS sumn FROM hd_hdfs_acid_pl;
 (1 row)
 
 DROP FUNCTION hd_hdfs_acid_upd2_pl();
-DROP TABLE hd_hdfs_acid_pl;
 -- Case C: sql function double UPDATE
 DROP TABLE IF EXISTS hd_hdfs_acid_sql;
 NOTICE:  table "hd_hdfs_acid_sql" does not exist, skipping
 CREATE ICEBERG TABLE hd_hdfs_acid_sql (id int, n int);
+DO $$ BEGIN DELETE FROM hd_hdfs_acid_sql; END $$;
 INSERT INTO hd_hdfs_acid_sql VALUES (1, 10);
 CREATE OR REPLACE FUNCTION hd_hdfs_acid_upd2_sql() RETURNS bigint AS $$
     UPDATE hd_hdfs_acid_sql SET n = n + 1 WHERE id = 1;
@@ -109,11 +115,35 @@ SELECT COUNT(*) AS cnt, SUM(n) AS sumn FROM hd_hdfs_acid_sql;
 (1 row)
 
 DROP FUNCTION hd_hdfs_acid_upd2_sql();
-DROP TABLE hd_hdfs_acid_sql;
--- Cleanup
+-- Cleanup.  The three tables are deliberately left in place: dropping them
+-- purges their metadata trees, and the next run would then re-register a
+-- v1.metadata.json that gophermeta already has a different length for -- a
+-- collision it reports as a FATAL that takes the agent JVM down.
 DROP VOLUME hd_hdfs_acid_vol;
+ERROR:  cannot drop volume hd_hdfs_acid_vol because other objects depend on it
+DETAIL:  table hd_hdfs_acid_raw depends on volume hd_hdfs_acid_vol
+table hd_hdfs_acid_pl depends on volume hd_hdfs_acid_vol
+table hd_hdfs_acid_sql depends on volume hd_hdfs_acid_vol
+HINT:  Use DROP ... CASCADE to drop the dependent objects too.
 DROP USER MAPPING FOR current_user SERVER hd_hdfs_acid_vol_srv;
 DROP SERVER hd_hdfs_acid_vol_srv;
+ERROR:  cannot drop server hd_hdfs_acid_vol_srv because other objects depend on it
+DETAIL:  volume hd_hdfs_acid_vol depends on server hd_hdfs_acid_vol_srv
+table hd_hdfs_acid_raw depends on volume hd_hdfs_acid_vol
+table hd_hdfs_acid_pl depends on volume hd_hdfs_acid_vol
+table hd_hdfs_acid_sql depends on volume hd_hdfs_acid_vol
+HINT:  Use DROP ... CASCADE to drop the dependent objects too.
 DROP CATALOG hd_hdfs_acid_cat;
+ERROR:  cannot drop catalog hd_hdfs_acid_cat because other objects depend on it
+DETAIL:  table hd_hdfs_acid_raw depends on catalog hd_hdfs_acid_cat
+table hd_hdfs_acid_pl depends on catalog hd_hdfs_acid_cat
+table hd_hdfs_acid_sql depends on catalog hd_hdfs_acid_cat
+HINT:  Use DROP ... CASCADE to drop the dependent objects too.
 DROP USER MAPPING FOR current_user SERVER hd_hdfs_acid_cat_srv;
 DROP SERVER hd_hdfs_acid_cat_srv;
+ERROR:  cannot drop server hd_hdfs_acid_cat_srv because other objects depend on it
+DETAIL:  catalog hd_hdfs_acid_cat depends on server hd_hdfs_acid_cat_srv
+table hd_hdfs_acid_raw depends on catalog hd_hdfs_acid_cat
+table hd_hdfs_acid_pl depends on catalog hd_hdfs_acid_cat
+table hd_hdfs_acid_sql depends on catalog hd_hdfs_acid_cat
+HINT:  Use DROP ... CASCADE to drop the dependent objects too.

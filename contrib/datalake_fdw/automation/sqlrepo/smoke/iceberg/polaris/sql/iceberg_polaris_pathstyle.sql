@@ -1,0 +1,75 @@
+-- Iceberg addressing-style default (path_style_access unset)
+-- Purpose: A volume that never mentions path_style_access must default to
+--          path-style addressing.  Before the fix, the unset option mapped to
+--          useVirtualHost=true on the segments, whose S3 requests then went to
+--          "warehouse.minio" -- an unresolvable host on any path-style-only
+--          store -- and every INSERT died in the liboss2 retry loop.
+--          Also exercises the catalog gap-fill: Polaris returns
+--          s3.path-style-access=true, which may fill the unset option on the
+--          QD but must never be required for the segments to work.
+
+CREATE EXTENSION IF NOT EXISTS datalake_fdw;
+
+-- volume: note NO path_style_access option
+CREATE SERVER pstyle_volume_server
+FOREIGN DATA WRAPPER iceberg_volume_fdw
+OPTIONS (
+    type 's3',
+    endpoint 'http://minio:9000',
+    region 'us-west-2',
+    bucket_name 'warehouse'
+);
+CREATE USER MAPPING FOR current_user
+SERVER pstyle_volume_server
+OPTIONS (
+    access_key_id 'admin',
+    secret_access_key 'admin12345');
+
+CREATE FOREIGN VOLUME pstyle_volume SERVER pstyle_volume_server OPTIONS(base_path '/');
+set iceberg_default_volume='pstyle_volume';
+
+-- catalog
+CREATE SERVER pstyle_catalog_server
+FOREIGN DATA WRAPPER iceberg_catalog_fdw
+OPTIONS (
+    type 'polaris',
+    url 'http://polaris:8181/api/catalog'
+);
+CREATE USER MAPPING FOR current_user
+SERVER pstyle_catalog_server
+OPTIONS (
+    client_id 'root', client_secret 's3cr3t', scope 'PRINCIPAL_ROLE:ALL'
+);
+CREATE FOREIGN CATALOG pstyle_catalog
+SERVER pstyle_catalog_server
+OPTIONS (
+    catalog_name 'polaris_default_catalog'
+);
+set iceberg_default_catalog='pstyle_catalog';
+
+CREATE ICEBERG TABLE pstyle_tab (
+    id bigint,
+    name text)
+OPTIONS (namespace 'public', table 'pstyle_tab');
+
+-- The write path runs on the segments, which see only the volume options:
+-- this INSERT is the assertion that an unset path_style_access defaults to
+-- path style there.
+INSERT INTO pstyle_tab VALUES (1, 'path'), (2, 'style');
+INSERT INTO pstyle_tab SELECT 3, 'default';
+
+SELECT * FROM pstyle_tab ORDER BY id;
+SELECT COUNT(*) FROM pstyle_tab;
+
+UPDATE pstyle_tab SET name = 'updated' WHERE id = 2;
+DELETE FROM pstyle_tab WHERE id = 1;
+SELECT * FROM pstyle_tab ORDER BY id;
+
+-- cleanup
+DROP TABLE pstyle_tab;
+DROP VOLUME pstyle_volume;
+DROP USER MAPPING FOR current_user SERVER pstyle_volume_server;
+DROP SERVER pstyle_volume_server;
+DROP CATALOG pstyle_catalog;
+DROP USER MAPPING FOR current_user SERVER pstyle_catalog_server;
+DROP SERVER pstyle_catalog_server;

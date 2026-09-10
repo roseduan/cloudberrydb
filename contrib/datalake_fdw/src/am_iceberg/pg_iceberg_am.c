@@ -73,6 +73,7 @@
 #include "include/pg_iceberg_rewrite_plan.h"
 #include "../iceberg_catalog_fdw/iceberg_catalog_fdw.h"
 #include "../iceberg_volume_fdw/iceberg_volume_fdw.h"
+#include "../iceberg_volume_fdw/iceberg_volume_option.h"
 #include "../dlproxy/iceberg_common.h"
 #include "../dlproxy/filters.h"
 #include "../common/random_segment.h"
@@ -455,6 +456,37 @@ pg_iceberg_getnextslot(TableScanDesc sscan, ScanDirection direction, TupleTableS
 /* --- Planner Helpers --- */
 
 /*
+ * Does this table's volume leave part of its description in a conf section?
+ *
+ * Such a volume carries `server_name` and lets the agent merge the named
+ * section of s3.conf / gphdfs.conf on the metadata plane; the segments cannot
+ * read those files, so the merged result has to travel to them inside the
+ * plan.  Everything else -- a volume that spells its endpoint, bucket and
+ * credentials out in SQL -- needs nothing extra, and asking the agent for it
+ * would add a load-table round trip to every plan for no gain.
+ *
+ * Catalog lookups only; no network.
+ */
+static bool
+iceberg_volume_names_conf_section(IcebergTableInfo *table_info)
+{
+	IcebergVolumeOptions   *vopt;
+
+	if (table_info == NULL ||
+		table_info->volume_server_name == NULL ||
+		table_info->volume_name == NULL)
+		return false;
+
+	vopt = getIcebergVolumeOptions(table_info->volume_server_name,
+								   table_info->volume_name);
+	if (vopt == NULL)
+		return false;
+
+	return vopt->volume_server.server_name != NULL &&
+		vopt->volume_server.server_name[0] != '\0';
+}
+
+/*
  * Fetch the current snapshot's fragment list for `rel` from the datalake
  * agent and return it as the agent's JSON wire format (which carries the
  * delete files deduplicated in a global "deleteFiles" array referenced by
@@ -682,6 +714,22 @@ pg_iceberg_build_scan_am_private(Relation rel, struct PlanState *ps, int random_
 		}
 		pg_iceberg_free_load_table_result(load_result);
 	}
+	else
+	{
+		/*
+		 * Any other external catalog, for a volume that needs the merge --
+		 * pg_iceberg_get_catalog_properties_json returns NULL for the ones that
+		 * do not, so this costs nothing for a fully specified volume.
+		 * Tolerant on purpose: a load-table miss here is not the "vanished
+		 * from the external catalog" case the Polaris branch reports above --
+		 * this path also covers tables this AM created, whose absence the
+		 * statement's own code reports with the message it always did.
+		 */
+		char	   *props = pg_iceberg_get_catalog_properties_json(rel);
+
+		if (props != NULL)
+			am_private = lappend(am_private, makeString(props));
+	}
 
 	am_private = list_concat(am_private,
 							 datalakeSelectRandomSegments(segment_count, random_segment_num));
@@ -723,6 +771,224 @@ pg_iceberg_list_data_fragments_json(Relation rel, int64 snapshot_id)
 	return fragments;
 }
 
+
+/*
+ * pg_iceberg_get_catalog_properties_json
+ *
+ * The catalog_properties blob for `rel`, or NULL when the table's catalog does
+ * not vend one.  QD only: it reaches the datalake agent, which does not run on
+ * the segments.
+ *
+ * The scan path gets this for free by carrying it in the plan's am_private.
+ * The modify path has no such carrier, which is why a volume that leaves its
+ * endpoint or credentials in a conf section could be read but not written
+ * (issue #410): the segments had no way to see anything the agent resolved.
+ */
+char *
+pg_iceberg_get_catalog_properties_json(Relation rel)
+{
+	IcebergTableInfo	   *table_info;
+	IcebergLoadTableResult *load_result;
+	const char			   *nameSpace;
+	const char			   *tableName;
+	const char			   *catalogName;
+	char				   *result = NULL;
+
+	/*
+	 * The comment above says QD only; assert it, as the other QD-only helpers
+	 * here do.  A QE reaching this would ask an agent that does not run there,
+	 * and the client's retry budget turns that into a minute of silence per
+	 * statement rather than a visible error.
+	 */
+	Assert(Gp_role == GP_ROLE_DISPATCH);
+
+	table_info = pg_iceberg_get_table_info(RelationGetRelid(rel));
+	if (table_info == NULL)
+		return NULL;
+
+	/*
+	 * Only a volume that leaves part of its description in a conf section has
+	 * anything to gain here.  The gate lives inside the function rather than at
+	 * the call sites: it was at the call sites, the modify path did not have it,
+	 * and every iceberg DML therefore paid for a load-table round trip it had
+	 * no use for -- including on catalogs and volumes that never read a conf
+	 * file at all.
+	 */
+	if (!iceberg_volume_names_conf_section(table_info))
+	{
+		pg_iceberg_free_table_info(table_info);
+		return NULL;
+	}
+
+	/*
+	 * Ask any catalog that is not the builtin one.  The scan path narrows the
+	 * same request to Polaris because Polaris was the only catalog it had a
+	 * reason to ask, but what the modify path needs from the answer -- an
+	 * endpoint, a namenode, credentials merged from a conf section -- comes
+	 * back from every catalog the agent can load a table from.  Asking only
+	 * Polaris is what left HDFS deployments, which use hadoop or hive
+	 * catalogs, unable to write to a volume that names only a conf section.
+	 *
+	 * The builtin catalog is excluded: its tables carry no external
+	 * configuration to merge, so the round trip would buy nothing.
+	 */
+	if (checkIsBuiltinCatalog(table_info->catalog_server_name,
+							  table_info->catalog_name))
+	{
+		pg_iceberg_free_table_info(table_info);
+		return NULL;
+	}
+
+	/*
+	 * Resolve the table's identity exactly as the fragment and statistics
+	 * paths do, rather than reading opts->table directly.  A table this AM
+	 * created carries no `table` OPTION -- and hence no catalog name -- so
+	 * reading the option would pass NULL and skip precisely the common case:
+	 * CREATE ICEBERG TABLE on a hadoop catalog, which is how an HDFS
+	 * deployment gets a table in the first place.
+	 */
+	nameSpace = pg_iceberg_resolve_namespace(
+		table_info->opts ? table_info->opts->namespace : NULL,
+		table_info->catalog_server_name,
+		table_info->catalog_name,
+		RelationGetNamespace(rel));
+
+	if (table_info->opts == NULL || table_info->opts->table == NULL)
+	{
+		tableName = RelationGetRelationName(rel);
+		catalogName = NULL;
+	}
+	else
+	{
+		tableName = table_info->opts->table;
+		catalogName = table_info->opts->catalog;
+	}
+
+	load_result = pg_iceberg_load_table(catalogName,
+										nameSpace,
+										tableName,
+										table_info->catalog_server_name,
+										table_info->catalog_name,
+										table_info->volume_server_name,
+										table_info->volume_name);
+
+	/*
+	 * A missing table is not reported here.  This runs at plan time purely to
+	 * enrich the dispatched plan; the statement's own path reports it with the
+	 * message it always did.
+	 */
+	if (load_result != NULL)
+	{
+		if (load_result->catalog_properties != NULL)
+		{
+			result = load_result->catalog_properties;
+			load_result->catalog_properties = NULL;	/* ownership moves out */
+		}
+		pg_iceberg_free_load_table_result(load_result);
+	}
+
+	pg_iceberg_free_table_info(table_info);
+	return result;
+}
+
+/* ----------------------------------------------------------------
+ * Modify-time catalog properties cache (issue #410)
+ *
+ * Same three carriers as the fragments cache below, and deliberately a
+ * separate table: the fragments entry is consumed after BeginForeignModify
+ * runs, so sharing one entry would mean whichever consumer ran first deleted
+ * what the other still needed.
+ * ----------------------------------------------------------------
+ */
+typedef struct ModifyCatalogPropsEntry
+{
+	Oid		relid;			/* hash key */
+	char   *properties;
+} ModifyCatalogPropsEntry;
+
+static HTAB *modify_catalog_props_cache = NULL;
+
+void
+pg_iceberg_stash_modify_catalog_properties(Oid relid, const char *properties)
+{
+	ModifyCatalogPropsEntry	   *entry;
+	MemoryContext				oldcxt;
+	bool						found;
+
+	if (!OidIsValid(relid) || properties == NULL || properties[0] == '\0')
+		return;
+
+	if (modify_catalog_props_cache == NULL)
+	{
+		HASHCTL ctl;
+
+		MemSet(&ctl, 0, sizeof(ctl));
+		ctl.keysize = sizeof(Oid);
+		ctl.entrysize = sizeof(ModifyCatalogPropsEntry);
+		ctl.hcxt = TopMemoryContext;
+		modify_catalog_props_cache =
+			hash_create("iceberg modify catalog properties cache",
+						16, &ctl, HASH_ELEM | HASH_BLOBS | HASH_CONTEXT);
+	}
+
+	entry = (ModifyCatalogPropsEntry *) hash_search(modify_catalog_props_cache,
+													&relid, HASH_ENTER, &found);
+
+	/*
+	 * Free the string this entry already held.  Every DML statement on such a
+	 * table stashes twice for the same relid -- once from the planner hook and
+	 * again from the ExecutorStart restash -- so without this the first of the
+	 * two allocations leaks, permanently, on every statement.  The table lives
+	 * in TopMemoryContext, so nothing else ever reclaims it.
+	 */
+	if (found && entry->properties != NULL)
+		pfree(entry->properties);
+
+	/* The value has to outlive the executor context this is called from. */
+	oldcxt = MemoryContextSwitchTo(TopMemoryContext);
+	entry->properties = pstrdup(properties);
+	MemoryContextSwitchTo(oldcxt);
+}
+
+/*
+ * Hand the stashed properties to the caller in the caller's own memory
+ * context and release the copy this module owns.
+ *
+ * Returning the TopMemoryContext string directly leaked it once per
+ * statement per relation: the consumer (iceberg_modify_init) parks it on a
+ * per-query struct and never frees it, and removing the entry means the next
+ * statement's stash finds no entry to free either -- nothing reclaims
+ * TopMemoryContext short of the backend exiting.  A batch of DML over a long
+ * connection therefore grew without bound, and since these properties carry
+ * s3.secret-access-key, the leaked copies kept plaintext credentials in the
+ * process for the life of the session.
+ */
+char *
+pg_iceberg_take_modify_catalog_properties(Oid relid)
+{
+	ModifyCatalogPropsEntry	   *entry;
+	char					   *stashed;
+	char					   *properties;
+
+	if (modify_catalog_props_cache == NULL || !OidIsValid(relid))
+		return NULL;
+
+	entry = (ModifyCatalogPropsEntry *) hash_search(modify_catalog_props_cache,
+													&relid, HASH_FIND, NULL);
+	if (entry == NULL)
+		return NULL;
+
+	stashed = entry->properties;
+	hash_search(modify_catalog_props_cache, &relid, HASH_REMOVE, NULL);
+
+	if (stashed == NULL)
+		return NULL;
+
+	properties = pstrdup(stashed);
+	pfree(stashed);
+
+	return properties;
+}
 
 /* ----------------------------------------------------------------
  * Modify-time fragments cache (issue #333)
@@ -1867,6 +2133,14 @@ pg_iceberg_relation_vacuum_get_dispatch_tasks(Relation rel, struct VacuumParams 
 			load_result->catalog_properties = NULL;
 		}
 		pg_iceberg_free_load_table_result(load_result);
+	}
+	else
+	{
+		/* Same fallback as the scan path; see the comment there. */
+		char	   *props = pg_iceberg_get_catalog_properties_json(rel);
+
+		if (props != NULL)
+			tasks = lappend(tasks, makeString(props));
 	}
 
 	tasks = list_concat(tasks,

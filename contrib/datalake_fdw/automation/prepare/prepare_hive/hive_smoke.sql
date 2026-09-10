@@ -4,6 +4,14 @@
 
 SET hive.txn.manager = org.apache.hadoop.hive.ql.lockmgr.DummyTxnManager;
 
+-- The test_text_large insert below is a CROSS JOIN of 50 x 10 rows.  Hive
+-- converts it to a map join, which runs as a MapredLocalTask in a child JVM,
+-- and that task fails on this stack -- "return code 1 from
+-- org.apache.hadoop.hive.ql.exec.mr.MapredLocalTask" -- taking the whole
+-- fixture load with it, so none of the tables that follow get created.  500
+-- rows do not need a map join.
+SET hive.auto.convert.join = false;
+
 -- Basic ORC table with partition
 DROP TABLE IF EXISTS test_orc;
 CREATE TABLE test_orc (id int, name string)

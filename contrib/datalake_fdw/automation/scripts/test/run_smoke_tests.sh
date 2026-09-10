@@ -49,11 +49,17 @@ CATEGORY_REQUIRES=(
     [hudi]="minio hdfs hive"
     [s3]="minio hive"
     [compression]="minio hdfs"
+    [fdw_binding]="hdfs hive"
     [parallel]="minio hdfs"
     [fdw]="minio"
     [iceberg_conf_merge]="minio"
     [iceberg_am_timestamptz]="minio"
     [iceberg_am_namespace_fallback]="minio"
+    [iceberg_volume_guard]="minio hdfs"
+    [iceberg_conf_only]="minio polaris"
+    [iceberg_conf_only_hdfs]="hdfs"
+    [iceberg_conf_only_hive]="minio hive"
+    [iceberg_am_hadoop_hdfs]="hdfs"
     [iceberg/builtin]="minio"
     [iceberg/hive]="minio hive"
     [iceberg/polaris]="minio polaris"
@@ -160,6 +166,12 @@ declare -a SKIPPED_TEST_LIST
 # before any iceberg ops run.  Re-enable once spark conf points at the
 # split-container hosts.
 #
+# iceberg_am_hadoop_hdfs used to be on this list and did not belong: it needs
+# no spark fixtures at all, it creates its own tables with CREATE ICEBERG
+# TABLE.  Being skipped is how it stayed broken -- it passed once and then
+# failed on every later run, which nobody saw because nobody ran it.  It is
+# repeatable now (three consecutive green runs), so it runs again.
+#
 # iceberg_am_time_travel is skipped for a different reason: it orchestrates
 # Docker from the HOST (a Spark container to build a multi-schema fixture +
 # the CBDB container to read it), so it cannot run inside the CBDB container
@@ -168,7 +180,7 @@ declare -a SKIPPED_TEST_LIST
 # be tallied as passed while asserting nothing.  Its database-only coverage
 # lives in iceberg_am_time_travel_basic (pg_regress, always runs).  Remove it
 # from SMOKE_SKIP in an environment that has host Docker + a Spark container.
-SMOKE_SKIP="${SMOKE_SKIP:-hudi iceberg_am_tpcds iceberg_am_tpch iceberg_am_hadoop_hdfs iceberg_am_time_travel}"
+SMOKE_SKIP="${SMOKE_SKIP:-hudi iceberg_am_tpcds iceberg_am_tpch iceberg_am_time_travel}"
 
 # ===================================================================
 # Run tests

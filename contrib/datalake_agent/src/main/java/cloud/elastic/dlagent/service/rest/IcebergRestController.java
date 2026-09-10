@@ -261,6 +261,7 @@ public class IcebergRestController {
         if (ioProps.containsKey("client.region")) {
             config.put("client.region", ioProps.get("client.region"));
         }
+        addResolvedVolumeConfig(config, properties);
         response.put("config", config);
 
         // Add storage-credentials - sensitive credentials from FileIO
@@ -274,6 +275,7 @@ public class IcebergRestController {
         if (ioProps.containsKey("s3.session-token")) {
             credConfig.put("s3.session-token", ioProps.get("s3.session-token"));
         }
+        addResolvedVolumeCredentials(credConfig, properties);
 
         if (!credConfig.isEmpty()) {
             List<Map<String, Object>> storageCredentials = new ArrayList<>();
@@ -1925,6 +1927,133 @@ public class IcebergRestController {
                 }
             }
             tupleDescription.add(new ColumnDescriptor(name, oid, index++, null, typeMods));
+        }
+    }
+
+    /**
+     * Fill the load-table response's S3 configuration from the request config
+     * this agent already resolved, for the keys {@code fileIO.properties()}
+     * did not supply.
+     *
+     * <p>The FileIO behind a volume-backed table is GopherFileIO, which does
+     * not implement {@code properties()}, so the block above produced an empty
+     * map for every such table -- including on catalogs that do vend S3
+     * settings. The segments consume this object to reach object storage, so
+     * an empty one leaves them with whatever the SQL OPTIONS happened to carry
+     * and no way to see the rest: precisely the gap that made a volume naming
+     * only a conf section creatable but unusable (issue #410).
+     *
+     * <p>The values come from the parsed request, which the parser has already
+     * merged with the {@code server_name} section of s3.conf, SQL winning per
+     * key. Existing entries are never overwritten: a FileIO that does report
+     * properties stays authoritative.
+     */
+    /* Package-private, not private: the two halves below have to agree on
+     * which volume types they serve, and they have drifted apart twice.
+     * IcebergResolvedVolumeConfigTest pins that they do not again. */
+    static void addResolvedVolumeConfig(Map<String, String> config,
+                                        Map<String, String> properties) {
+        String type = properties.get(volKey(
+            IcebergConfigConstants.ICEBERG_VOLUME_CONFIG.VOLUME_SERVER_TYPE));
+
+        if ("hdfs".equalsIgnoreCase(type)) {
+            addResolvedHdfsVolumeConfig(config, properties);
+            return;
+        }
+
+        /*
+         * Everything else takes the S3 keys below, which is deliberate rather
+         * than a fall-through: buildDataConfig groups s3, s3v2 and abfss into
+         * one branch and configures all three with S3-style settings, so a
+         * conf-only volume of those types needs the same keys returned to the
+         * segments.  This did nothing for s3v2 and abfss before -- the guard
+         * here returned early for any type that was not exactly "s3", so they
+         * got an empty config.  Only "s3" is exercised end to end; the other
+         * two have no environment here.
+         */
+
+        putResolved(config, "s3.endpoint", properties,
+                    volKey(IcebergConfigConstants.ICEBERG_VOLUME_CONFIG.VOLUME_ENDPOINT));
+        putResolved(config, "s3.region", properties,
+                    volKey(IcebergConfigConstants.ICEBERG_VOLUME_CONFIG.VOLUME_REGION));
+        putResolved(config, "client.region", properties,
+                    volKey(IcebergConfigConstants.ICEBERG_VOLUME_CONFIG.VOLUME_REGION));
+        putResolved(config, "s3.path-style-access", properties,
+                    volKey(IcebergConfigConstants.ICEBERG_VOLUME_CONFIG.PATH_STYLE_ACCESS));
+    }
+
+    /**
+     * The HDFS counterpart. Keys keep the SQL OPTION spelling rather than
+     * taking an "hdfs." prefix, so a value can be traced from the conf file
+     * through this response to gopher without a rename in the middle -- and
+     * they are the same names iceberg_site_config uses on the C side.
+     *
+     * <p>Nothing here is sensitive: a keytab path and a principal name are
+     * configuration, and the keytab's contents never travel.
+     */
+    private static void addResolvedHdfsVolumeConfig(Map<String, String> config,
+                                             Map<String, String> properties) {
+        String[] keys = {
+            IcebergConfigConstants.ICEBERG_VOLUME_CONFIG.HDFS_NAMENODES,
+            IcebergConfigConstants.ICEBERG_VOLUME_CONFIG.HDFS_PORT,
+            IcebergConfigConstants.ICEBERG_VOLUME_CONFIG.HDFS_AUTH_METHOD,
+            IcebergConfigConstants.ICEBERG_VOLUME_CONFIG.KRB_PRINCIPAL,
+            IcebergConfigConstants.ICEBERG_VOLUME_CONFIG.KRB_PRINCIPAL_KEYTAB,
+            IcebergConfigConstants.ICEBERG_VOLUME_CONFIG.HADOOP_RPC_PROTECTION,
+            IcebergConfigConstants.ICEBERG_VOLUME_CONFIG.DATA_TRANSFER_PROTOCOL,
+            IcebergConfigConstants.ICEBERG_VOLUME_CONFIG.DATA_TRANSFER_PROTECTION,
+            IcebergConfigConstants.ICEBERG_VOLUME_CONFIG.IS_HA_SUPPORTED,
+            IcebergConfigConstants.ICEBERG_VOLUME_CONFIG.DFS_NAMESERVICES,
+            IcebergConfigConstants.ICEBERG_VOLUME_CONFIG.DFS_HA_NAMENODES,
+            IcebergConfigConstants.ICEBERG_VOLUME_CONFIG.DFS_NAMENODE_RPC_ADDRESS,
+            IcebergConfigConstants.ICEBERG_VOLUME_CONFIG.DFS_CLIENT_FAILOVER_PROXY_PROVIDER,
+            IcebergConfigConstants.ICEBERG_VOLUME_CONFIG.DFS_CLIENT_USE_DATANODE_HOSTNAME,
+            IcebergConfigConstants.ICEBERG_VOLUME_CONFIG.USERNAME,
+        };
+
+        for (String key : keys) {
+            putResolved(config, key, properties, volKey(key));
+        }
+    }
+
+    /**
+     * The credential half of {@link #addResolvedVolumeConfig}. Kept separate
+     * because these belong in storage-credentials rather than config, and must
+     * never be logged.
+     */
+    static void addResolvedVolumeCredentials(Map<String, String> credConfig,
+                                             Map<String, String> properties) {
+        String type = properties.get(volKey(
+            IcebergConfigConstants.ICEBERG_VOLUME_CONFIG.VOLUME_SERVER_TYPE));
+
+        /*
+         * Only HDFS is excluded, matching addResolvedVolumeConfig.  This used
+         * to return for any type that was not exactly "s3", which stopped
+         * mattering for the config half once that method started treating
+         * s3v2 and abfss as the S3 family -- but left this half behind: those
+         * volumes then received an endpoint, a region and a path-style flag
+         * with no credentials to authenticate with, so a conf-only s3v2 or
+         * abfss volume would fail at authentication rather than at
+         * configuration, which is much harder to read.
+         */
+        if ("hdfs".equalsIgnoreCase(type)) {
+            return;
+        }
+
+        putResolved(credConfig, "s3.access-key-id", properties,
+                    volKey(IcebergConfigConstants.ICEBERG_VOLUME_CONFIG.ACCESS_KEY_ID));
+        putResolved(credConfig, "s3.secret-access-key", properties,
+                    volKey(IcebergConfigConstants.ICEBERG_VOLUME_CONFIG.SECRET_ACCESS_KEY));
+    }
+
+    private static void putResolved(Map<String, String> out, String outKey,
+                                    Map<String, String> properties, String inKey) {
+        if (out.containsKey(outKey)) {
+            return;
+        }
+        String value = properties.get(inKey);
+        if (value != null && !value.isEmpty()) {
+            out.put(outKey, value);
         }
     }
 

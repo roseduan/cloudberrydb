@@ -35,6 +35,11 @@ SET iceberg_default_volume = 'hd_s3_acid_vol';
 -- Case A: raw BEGIN/UPDATE/UPDATE/COMMIT
 DROP TABLE IF EXISTS hd_s3_acid_raw;
 CREATE ICEBERG TABLE hd_s3_acid_raw (id int, n int);
+-- The mc pre-clean in the Makefile is a no-op wherever mc is not on PATH, so
+-- CREATE above re-attaches to the rows a previous run left behind.  Clear
+-- them; the DO wrapper hides the row count, which is 0 on a first run, and
+-- TRUNCATE is a no-op on this access method.
+DO $$ BEGIN DELETE FROM hd_s3_acid_raw; END $$;
 INSERT INTO hd_s3_acid_raw VALUES (1, 10);
 BEGIN;
 UPDATE hd_s3_acid_raw SET n = n + 1 WHERE id = 1;
@@ -42,11 +47,15 @@ UPDATE hd_s3_acid_raw SET n = n * 2 WHERE id = 1;
 COMMIT;
 SELECT id, n FROM hd_s3_acid_raw ORDER BY n;
 SELECT COUNT(*) AS cnt, SUM(n) AS sumn FROM hd_s3_acid_raw;
-DROP TABLE hd_s3_acid_raw;
+-- The iceberg tables are deliberately left in place.  DROP purges the
+-- metadata tree only partially, and this catalog keeps the current version in
+-- version-hint.text: once that points at a vN.metadata.json the purge removed,
+-- the next CREATE fails with "Metadata file for version N is missing".
 
 -- Case B: plpgsql function double UPDATE
 DROP TABLE IF EXISTS hd_s3_acid_pl;
 CREATE ICEBERG TABLE hd_s3_acid_pl (id int, n int);
+DO $$ BEGIN DELETE FROM hd_s3_acid_pl; END $$;
 INSERT INTO hd_s3_acid_pl VALUES (1, 10);
 CREATE OR REPLACE FUNCTION hd_s3_acid_upd2_pl() RETURNS bigint AS $$
 DECLARE c bigint;
@@ -61,11 +70,11 @@ SELECT hd_s3_acid_upd2_pl() AS rows_seen_inside_func;
 SELECT id, n FROM hd_s3_acid_pl ORDER BY n;
 SELECT COUNT(*) AS cnt, SUM(n) AS sumn FROM hd_s3_acid_pl;
 DROP FUNCTION hd_s3_acid_upd2_pl();
-DROP TABLE hd_s3_acid_pl;
 
 -- Case C: sql function double UPDATE
 DROP TABLE IF EXISTS hd_s3_acid_sql;
 CREATE ICEBERG TABLE hd_s3_acid_sql (id int, n int);
+DO $$ BEGIN DELETE FROM hd_s3_acid_sql; END $$;
 INSERT INTO hd_s3_acid_sql VALUES (1, 10);
 CREATE OR REPLACE FUNCTION hd_s3_acid_upd2_sql() RETURNS bigint AS $$
     UPDATE hd_s3_acid_sql SET n = n + 1 WHERE id = 1;
@@ -76,7 +85,6 @@ SELECT hd_s3_acid_upd2_sql() AS rows_seen_inside_func;
 SELECT id, n FROM hd_s3_acid_sql ORDER BY n;
 SELECT COUNT(*) AS cnt, SUM(n) AS sumn FROM hd_s3_acid_sql;
 DROP FUNCTION hd_s3_acid_upd2_sql();
-DROP TABLE hd_s3_acid_sql;
 
 -- Cleanup
 DROP VOLUME hd_s3_acid_vol;

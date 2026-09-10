@@ -1,0 +1,150 @@
+-- A volume that names only a gphdfs.conf section (issue #410), HDFS half.
+--
+-- The volume carries type and server_name and nothing else: the namenode,
+-- port and auth method live in the gphdfs.conf section it names.  Only the
+-- agent reads conf files, so those settings reach the segments solely through
+-- the load-table response the AM stashes in the plan.  Before that plumbing
+-- existed such a volume could be created but every read and write failed with
+-- "resolved no namenode".
+--
+-- The catalog is a hadoop one, which is what an HDFS deployment uses, so this
+-- also covers asking a non-Polaris catalog for its properties -- and the table
+-- is one this AM created rather than one registered onto an existing external
+-- table, which is the shape that carries no `table` OPTION.
+--
+-- The Makefile appends the co_hdfs_* sections this file names to the
+-- coordinator's gphdfs.conf and restores it afterwards.  The suite owns them
+-- rather than reading paa_cluster: that section's contents depend on which
+-- other suite last wrote the file, and hudi's version of it carries legacy
+-- keys the agent refuses.
+
+SET client_min_messages = WARNING;
+CREATE EXTENSION IF NOT EXISTS datalake_fdw;
+RESET client_min_messages;
+SET DateStyle = 'ISO, YMD';
+
+DROP SERVER IF EXISTS co_hdfs_cat_srv CASCADE;
+CREATE SERVER co_hdfs_cat_srv FOREIGN DATA WRAPPER iceberg_catalog_fdw
+    OPTIONS (type 'hadoop');
+CREATE USER MAPPING FOR current_user SERVER co_hdfs_cat_srv;
+CREATE FOREIGN CATALOG co_hdfs_cat SERVER co_hdfs_cat_srv
+    OPTIONS (warehouse_location_prefix 'hdfs://hadoop:8020/iceberg_conf_only_hdfs/');
+SET iceberg_default_catalog = 'co_hdfs_cat';
+
+-- The volume under test: type and section name, nothing more.
+DROP SERVER IF EXISTS co_hdfs_vol_srv CASCADE;
+CREATE SERVER co_hdfs_vol_srv FOREIGN DATA WRAPPER iceberg_volume_fdw
+    OPTIONS (type 'hdfs', server_name 'co_hdfs_cluster');
+CREATE USER MAPPING FOR current_user SERVER co_hdfs_vol_srv
+    OPTIONS (username 'gpadmin');
+CREATE FOREIGN VOLUME co_hdfs_vol SERVER co_hdfs_vol_srv
+    OPTIONS (base_path '/iceberg_conf_only_hdfs/', allow_writes 'true');
+SET iceberg_default_volume = 'co_hdfs_vol';
+
+CREATE ICEBERG TABLE co_hdfs_t (id int, name text);
+
+-- pg_regress recreates the database, but not the warehouse: CREATE above
+-- re-attached to whatever a previous run left in HDFS.  Clear the rows so the
+-- counts below are the same on every run.  The DO wrapper hides the row count,
+-- which is 0 on the first run and 2 later; TRUNCATE is not an option, it is a
+-- no-op on this access method.
+DO $$ BEGIN DELETE FROM co_hdfs_t; END $$;
+
+\echo === write ===
+INSERT INTO co_hdfs_t VALUES (1, 'alpha'), (2, 'beta'), (3, 'gamma');
+SELECT count(*) AS after_insert FROM co_hdfs_t;
+UPDATE co_hdfs_t SET name = 'BETA' WHERE id = 2;
+DELETE FROM co_hdfs_t WHERE id = 3;
+
+\echo === read back ===
+SELECT id, name FROM co_hdfs_t ORDER BY id;
+
+-- co_hdfs_t is deliberately NOT dropped.  Dropping it purges the metadata
+-- tree, so the next run would write v1.metadata.json again -- a second file at
+-- a path gophermeta already has a length registered for, which it rejects with
+-- a FATAL that takes the agent JVM down with it.  Leaving the table lets the
+-- version counter keep climbing and no path is ever rewritten.
+
+-- ============================================================
+-- The same shape, HA: every HA key comes from the conf section
+-- ============================================================
+-- HA is where dropping a conf-file boolean stops being a lost knob and
+-- becomes a wrong address.  dfs_nameservices and its friends reach the
+-- segments through the same gap-fill as everything else, but is_ha_supported
+-- is a bool, and a bool that gap-fill refused to write left the segments with
+-- a nameservice and HA switched off -- so gopher dialled the nameservice name
+-- as a hostname on port 8020, which resolves nowhere.
+--
+-- The section below names a nameservice with a single namenode.  That is a
+-- legitimate HA configuration, and the only one a one-namenode test cluster
+-- can offer; what it exercises is the merge, not a failover.
+\echo === ha: nameservice, namenodes and rpc address from the conf section ===
+DROP SERVER IF EXISTS co_hdfs_ha_srv CASCADE;
+CREATE SERVER co_hdfs_ha_srv FOREIGN DATA WRAPPER iceberg_volume_fdw
+    OPTIONS (type 'hdfs', server_name 'co_hdfs_ha_cluster');
+CREATE USER MAPPING FOR current_user SERVER co_hdfs_ha_srv
+    OPTIONS (username 'gpadmin');
+CREATE FOREIGN VOLUME co_hdfs_ha_vol SERVER co_hdfs_ha_srv
+    OPTIONS (base_path '/iceberg_conf_only_hdfs/', allow_writes 'true');
+SET iceberg_default_volume = 'co_hdfs_ha_vol';
+
+CREATE ICEBERG TABLE co_hdfs_ha_t (id int, name text);
+DO $$ BEGIN DELETE FROM co_hdfs_ha_t; END $$;
+INSERT INTO co_hdfs_ha_t VALUES (1, 'alpha'), (2, 'bravo');
+SELECT count(*) AS ha_after_insert FROM co_hdfs_ha_t;
+SELECT id, name FROM co_hdfs_ha_t ORDER BY id;
+-- Left in place for the same reason as co_hdfs_t above.
+
+-- ============================================================
+-- Boundary cases: nothing to merge
+-- ============================================================
+-- Both are rejected on the metadata plane, where the conf file is read: a
+-- named section that does not exist and a named section that carries no keys
+-- are configuration errors, not an invitation to guess a namenode.  Only the
+-- first line of the message is asserted; the rest is a Java stack trace whose
+-- line numbers move with the agent build.
+\echo === negative: the named section does not exist ===
+DROP SERVER IF EXISTS co_hdfs_missing_srv CASCADE;
+CREATE SERVER co_hdfs_missing_srv FOREIGN DATA WRAPPER iceberg_volume_fdw
+    OPTIONS (type 'hdfs', server_name 'co_hdfs_no_such_section');
+CREATE USER MAPPING FOR current_user SERVER co_hdfs_missing_srv
+    OPTIONS (username 'gpadmin');
+CREATE FOREIGN VOLUME co_hdfs_missing_vol SERVER co_hdfs_missing_srv
+    OPTIONS (base_path '/iceberg_conf_only_hdfs/', allow_writes 'true');
+SET iceberg_default_volume = 'co_hdfs_missing_vol';
+DO $$
+BEGIN
+    CREATE ICEBERG TABLE co_hdfs_missing_t (id int);
+    RAISE NOTICE 'unexpected: a table was created on a section that does not exist';
+EXCEPTION WHEN OTHERS THEN
+    RAISE NOTICE 'rejected: %', split_part(SQLERRM, E'\n', 1);
+END $$;
+
+\echo === negative: the named section is empty ===
+DROP SERVER IF EXISTS co_hdfs_empty_srv CASCADE;
+CREATE SERVER co_hdfs_empty_srv FOREIGN DATA WRAPPER iceberg_volume_fdw
+    OPTIONS (type 'hdfs', server_name 'co_hdfs_empty');
+CREATE USER MAPPING FOR current_user SERVER co_hdfs_empty_srv
+    OPTIONS (username 'gpadmin');
+CREATE FOREIGN VOLUME co_hdfs_empty_vol SERVER co_hdfs_empty_srv
+    OPTIONS (base_path '/iceberg_conf_only_hdfs/', allow_writes 'true');
+SET iceberg_default_volume = 'co_hdfs_empty_vol';
+DO $$
+BEGIN
+    CREATE ICEBERG TABLE co_hdfs_empty_t (id int);
+    RAISE NOTICE 'unexpected: a table was created on an empty section';
+EXCEPTION WHEN OTHERS THEN
+    RAISE NOTICE 'rejected: %', split_part(SQLERRM, E'\n', 1);
+END $$;
+
+-- ============================================================
+-- Cleanup -- servers only; see the note on co_hdfs_t above.
+-- ============================================================
+RESET iceberg_default_volume;
+RESET iceberg_default_catalog;
+DROP SERVER co_hdfs_empty_srv CASCADE;
+DROP SERVER co_hdfs_missing_srv CASCADE;
+DROP SERVER co_hdfs_ha_srv CASCADE;
+DROP SERVER co_hdfs_vol_srv CASCADE;
+DROP CATALOG co_hdfs_cat;
+DROP SERVER co_hdfs_cat_srv CASCADE;

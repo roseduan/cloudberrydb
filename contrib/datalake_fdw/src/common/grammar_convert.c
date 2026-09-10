@@ -7,7 +7,14 @@
 #include "commands/copy.h"
 #include "utils/elog.h"
 #include "utils/builtins.h"
+#include "catalog/pg_foreign_data_wrapper.h"
 #include "catalog/pg_foreign_server.h"
+#include "foreign/foreign.h"
+#include "lib/stringinfo.h"
+#include "catalog/dependency.h"
+#include "catalog/pg_proc.h"
+#include "commands/extension.h"
+#include "utils/syscache.h"
 #include "access/genam.h"
 #include "access/table.h"
 #include "access/reloptions.h"
@@ -145,16 +152,158 @@ FAIL:
 	return NULL;
 }
 
-static char*
-find_foreign_server(char *host)
+/*
+ * Identity of the wrapper behind gphdfs:// / oss:// / ftp:// / datalake://.
+ *
+ * Both halves are needed.  The extension that ships our handler also ships the
+ * Iceberg catalog and volume handlers, so membership alone would accept a volume
+ * server -- exactly the binding this filter exists to reject.  The C symbol
+ * alone would accept an unrelated library that exports the same symbol name,
+ * since a symbol only resolves within its own library.
+ */
+#define DATALAKE_EXTENSION_NAME "datalake_fdw"
+#define DATALAKE_FDW_HANDLER_SYMBOL "datalake_fdw_handler"
+
+/* Server options whose value names the storage address. */
+#define OPTION_NAMES_ADDRESS(name) \
+	(pg_strcasecmp((name), "host") == 0 || \
+	 pg_strcasecmp((name), "hdfs_namenodes") == 0)
+
+/* Result of one pass over pg_foreign_server; see find_foreign_server(). */
+typedef struct ServerLookup
+{
+	char *serverName;			/* chosen server, NULL when none matched */
+	int nmatched;				/* matching servers backed by our handler */
+	int nother;					/* matching servers backed by another wrapper */
+} ServerLookup;
+
+/*
+ * server_uses_datalake_handler
+ *		Does this server belong to a wrapper implemented by datalake_fdw?
+ *
+ * Neither name in sight is usable as the key.  The wrapper name is out because
+ * datalake_fdw--1.0.sql creates only the handler and validator functions, never
+ * the wrapper object: each installation creates the wrapper by hand (see
+ * automation/lib/sql/common_setup.sql) and may call it anything, or rename it
+ * later.  The handler's SQL name is out because ALTER FUNCTION ... RENAME
+ * changes it while the OID the wrapper stores stays valid.  pg_proc.probin is
+ * out because this extension is relocatable and its own handlers already
+ * disagree on the spelling ($libdir/datalake_fdw versus $libdir/datalake_fdw.so).
+ *
+ * What is left is the pair (owning extension, C symbol), and both halves carry
+ * their weight: our extension also ships iceberg_catalog_fdw_handler and
+ * iceberg_volume_fdw_handler, so membership alone would accept a volume server
+ * -- the very binding this filter exists to reject -- while the symbol alone
+ * would accept an unrelated library that exports the same symbol name, since a
+ * symbol only resolves within its own library.
+ */
+static bool
+server_uses_datalake_handler(Oid srvfdw, Oid extensionId)
+{
+	HeapTuple	wraptup;
+	Oid			fdwhandler;
+	HeapTuple	proctup;
+	Datum		prosrc;
+	bool		isnull;
+	bool		matches;
+
+	if (!OidIsValid(extensionId))
+		return false;		/* extension not installed here */
+
+	/*
+	 * Read the wrapper straight from the syscache rather than through
+	 * GetForeignDataWrapper(), which raises on a missing row.  This runs
+	 * inside an open scan of pg_foreign_server, and the row we are looking at
+	 * comes from our snapshot: a concurrent DROP ... CASCADE can have removed
+	 * the wrapper already.  Treating that as "not our handler" keeps the
+	 * caller's scan and lock cleanup on the normal path, and the server still
+	 * gets counted as another wrapper's, which is what it now is.
+	 */
+	wraptup = SearchSysCache1(FOREIGNDATAWRAPPEROID, ObjectIdGetDatum(srvfdw));
+	if (!HeapTupleIsValid(wraptup))
+		return false;
+
+	fdwhandler = ((Form_pg_foreign_data_wrapper) GETSTRUCT(wraptup))->fdwhandler;
+	ReleaseSysCache(wraptup);
+
+	/* A wrapper without a handler cannot serve a scan at all. */
+	if (!OidIsValid(fdwhandler))
+		return false;
+
+	if (getExtensionOfObject(ProcedureRelationId, fdwhandler) != extensionId)
+		return false;
+
+	proctup = SearchSysCache1(PROCOID, ObjectIdGetDatum(fdwhandler));
+	if (!HeapTupleIsValid(proctup))
+		return false;		/* handler dropped from under the wrapper */
+
+	prosrc = SysCacheGetAttr(PROCOID, proctup, Anum_pg_proc_prosrc, &isnull);
+	if (isnull)
+		matches = false;
+	else
+	{
+		char	   *symbol = TextDatumGetCString(prosrc);
+
+		matches = strcmp(symbol, DATALAKE_FDW_HANDLER_SYMBOL) == 0;
+		pfree(symbol);
+	}
+
+	ReleaseSysCache(proctup);
+
+	return matches;
+}
+
+/*
+ * find_foreign_server
+ *		Resolve the foreign server that backs an external table at "host".
+ *
+ * The external table grammar has no SERVER clause, so the server has to be
+ * inferred from the address.  An option name and value do NOT identify a server
+ * on their own, though, so the wrapper has to be part of the search key.
+ *
+ * Since 2.7 an iceberg_volume_fdw server also carries hdfs_namenodes: the volume
+ * options were deliberately given the same names as the datalake_fdw HDFS SERVER
+ * options and the gphdfs.conf keys, so that one vocabulary covers all three.
+ * Matching on the option alone therefore binds a gphdfs:// external table to an
+ * iceberg_volume_fdw server, and since that wrapper expects scan state prepared
+ * by the Iceberg access method, the standard ForeignScan path later reaches
+ * icebergVolumeBeginForeignScan() with a NULL fdw_state and crashes the backend.
+ *
+ * The plain "host" option carries the same hazard: postgres_fdw and
+ * cloudberry_fdw servers accept it as a libpq option.  Filtering by wrapper here
+ * is the only durable fix -- the shared vocabulary is intentional, and the option
+ * names of other wrappers are not ours to constrain.
+ *
+ * One pass fills all of "result": the chosen server, how many of our own servers
+ * matched (for the ambiguity warning) and how many servers of other wrappers
+ * matched (so the caller's "no server" error can explain itself).
+ */
+static void
+find_foreign_server(const char *host, ServerLookup *result)
 {
 	Relation	rel;
 	HeapTuple	tuple;
 	SysScanDesc scan;
-	char		*serverName = NULL;
+	StringInfoData matched;
 	Datum		datum;
 	bool		isnull;
 	ListCell	*lc;
+	Oid			extensionId;
+
+	result->serverName = NULL;
+	result->nmatched = 0;
+	result->nother = 0;
+
+	initStringInfo(&matched);
+
+	/*
+	 * Invariant for the whole scan, so look it up once.  An invalid OID (the
+	 * extension is not installed here) is not a reason to skip the scan: the
+	 * servers still have to be counted in result->nother, which is what lets
+	 * the caller's "no server" error say that something matched the address
+	 * but belonged to another wrapper.
+	 */
+	extensionId = get_extension_oid(DATALAKE_EXTENSION_NAME, true);
 
 	rel = table_open(ForeignServerRelationId, AccessShareLock);
 
@@ -162,31 +311,75 @@ find_foreign_server(char *host)
 	while (HeapTupleIsValid(tuple = systable_getnext(scan)))
 	{
 		Form_pg_foreign_server server = (Form_pg_foreign_server) GETSTRUCT(tuple);
+		List	   *options;
+		bool		addressMatches = false;
+
 		datum = heap_getattr(tuple, Anum_pg_foreign_server_srvoptions, RelationGetDescr(rel), &isnull);
 		if (isnull)
 			continue;
 
-		List *options = untransformRelOptions(datum);
+		options = untransformRelOptions(datum);
 		foreach(lc, options)
 		{
 			DefElem *def = (DefElem *) lfirst(lc);
-			if (pg_strcasecmp(def->defname, "host") == 0
-				|| pg_strcasecmp(def->defname, "hdfs_namenodes") == 0)
+
+			if (OPTION_NAMES_ADDRESS(def->defname) &&
+				pg_strcasecmp(defGetString(def), host) == 0)
 			{
-				char *hostName = defGetString(def);
-				if (pg_strcasecmp(hostName, host) == 0)
-				{
-					serverName = pstrdup(NameStr(server->srvname));
-					break;
-				}
+				addressMatches = true;
+				break;
 			}
 		}
+
+		if (!addressMatches)
+			continue;
+
+		if (!server_uses_datalake_handler(server->srvfdw, extensionId))
+		{
+			result->nother++;
+			continue;
+		}
+
+		result->nmatched++;
+		if (result->nmatched > 1)
+			appendStringInfoString(&matched, ", ");
+		appendStringInfo(&matched, "\"%s\"", NameStr(server->srvname));
+
+		/*
+		 * Keep the last match, which is what this function has always
+		 * effectively returned: the original loop broke out of the option list
+		 * only, so every later match overwrote the previous one.  The choice is
+		 * arbitrary either way -- both ends of an unordered heap scan move when
+		 * the catalog is rewritten -- so preserve the existing answer rather
+		 * than silently rebinding tables on upgrade, and warn instead.
+		 */
+		if (result->serverName != NULL)
+			pfree(result->serverName);
+		result->serverName = pstrdup(NameStr(server->srvname));
 	}
 
 	systable_endscan(scan);
 	table_close(rel, AccessShareLock);
 
-	return serverName;
+	/*
+	 * Several of our servers describe the same address.  They can still differ
+	 * in everything else -- auth method, Kerberos principal, the user mapping
+	 * that supplies the credentials -- so binding to the wrong one reads the
+	 * data as the wrong identity.  The grammar gives the user no way to
+	 * disambiguate, so warn rather than fail, and point at the foreign table
+	 * syntax that can name a server.
+	 */
+	if (result->nmatched > 1)
+		ereport(WARNING,
+				(errmsg("address \"%s\" matches %d foreign servers: %s",
+						host, result->nmatched, matched.data),
+				 errdetail("Server \"%s\" was selected, but the choice depends on catalog "
+						   "storage order and may change after maintenance such as VACUUM FULL.",
+						   result->serverName),
+				 errhint("Use CREATE FOREIGN TABLE ... SERVER to name the server explicitly, "
+						 "or configure a single server per address.")));
+
+	pfree(matched.data);
 }
 
 static void
@@ -468,6 +661,12 @@ ConvertExternalTableStmt(CreateExternalStmt *createExtStmt)
 			char* url = filterString(uri_str);
 			List *foreignOptions = NIL;
 			char *foreignServerName = NULL;
+			/*
+			 * Address that was looked up, kept so the "no server" error can name
+			 * it, together with the lookup counters behind that diagnosis.
+			 */
+			const char *searchedAddress = NULL;
+			ServerLookup serverLookup = {NULL, 0, 0};
 
 			// 1. get filePath
 			char *url_with_path = get_url_with_path(url);
@@ -487,7 +686,9 @@ ConvertExternalTableStmt(CreateExternalStmt *createExtStmt)
 				ftp_host[filePath - ftp_prefix] = '\0';
 
 				// get ftp server name
-				foreignServerName = find_foreign_server(ftp_host);
+				searchedAddress = ftp_host;
+				find_foreign_server(ftp_host, &serverLookup);
+				foreignServerName = serverLookup.serverName;
 				if (!foreignServerName)
 					return NULL;
 			}
@@ -512,7 +713,15 @@ ConvertExternalTableStmt(CreateExternalStmt *createExtStmt)
 				oss_host[filePath - oss_prefix] = '\0';
 
 				// get oss server name
-				foreignServerName = find_foreign_server(oss_host);
+				/*
+				 * Unreachable today: the oss:// branch is rejected earlier with
+				 * "oss protocol is not supported".  Kept in step with the other
+				 * protocols so the conversion is correct once that FIXME is
+				 * lifted, rather than reintroducing the wrong-wrapper binding.
+				 */
+				searchedAddress = oss_host;
+				find_foreign_server(oss_host, &serverLookup);
+				foreignServerName = serverLookup.serverName;
 			}
 			else if (IS_DATALAKE_PROTOCOL(uri->customprotocol))
 			{
@@ -691,7 +900,9 @@ ConvertExternalTableStmt(CreateExternalStmt *createExtStmt)
 					DatalakeHdfsConfigInfo *hdfs = datalakeParseHdfsConfig("gphdfs.conf", hdfs_cluster_name);
 					if (hdfs && hdfs->namenodeHost)
 					{
-						foreignServerName = find_foreign_server(hdfs->namenodeHost);
+						searchedAddress = hdfs->namenodeHost;
+						find_foreign_server(hdfs->namenodeHost, &serverLookup);
+						foreignServerName = serverLookup.serverName;
 					}
 				}
 			}
@@ -701,9 +912,36 @@ ConvertExternalTableStmt(CreateExternalStmt *createExtStmt)
 			foreignStmt->options = foreignOptions;
 
 			if (foreignServerName == NULL)
+			{
+				if (searchedAddress == NULL)
+					ereport(ERROR,
+							(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+							 errmsg("cannot find foreign server")));
+
+				/*
+				 * Name the address and say how many servers of other wrappers
+				 * describe it.  A bare "cannot find foreign server" leaves the
+				 * user nothing to act on, which is especially unhelpful right
+				 * after an upgrade: the setup worked before iceberg_volume_fdw
+				 * started carrying hdfs_namenodes, and the server they created
+				 * for this cluster is still there -- just not usable here.
+				 */
 				ereport(ERROR,
-						(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
-						 errmsg("cannot find foreign server")));
+						(errcode(ERRCODE_UNDEFINED_OBJECT),
+						 errmsg("no %s foreign server describes address \"%s\"",
+								DATALAKE_EXTENSION_NAME, searchedAddress),
+						 serverLookup.nother > 0 ?
+						 errdetail_plural("%d foreign server matches this address but belongs "
+										  "to a different foreign data wrapper, which cannot "
+										  "back an external table.",
+										  "%d foreign servers match this address but belong "
+										  "to different foreign data wrappers, which cannot "
+										  "back an external table.",
+										  serverLookup.nother, serverLookup.nother) : 0,
+						 errhint("Create a foreign server for this address on a wrapper whose "
+								 "HANDLER is the %s.%s function.",
+								 DATALAKE_EXTENSION_NAME, DATALAKE_FDW_HANDLER_SYMBOL)));
+			}
 			foreignStmt->servername = foreignServerName;
 
 			ereport(NOTICE,

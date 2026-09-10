@@ -6,7 +6,12 @@
 -- than S3, the catalog-side RPC plumbing is the same and the bug shape
 -- is the same.
 
+-- Suppress the "already exists, skipping" NOTICE: this file runs second in
+-- the suite, so the extension is already there, and the notice made the test
+-- pass alone and fail as part of the suite.
+SET client_min_messages = WARNING;
 CREATE EXTENSION IF NOT EXISTS datalake_fdw;
+RESET client_min_messages;
 SET DateStyle = 'ISO, YMD';
 
 DROP SERVER IF EXISTS hd_hdfs_acid_cat_srv CASCADE;
@@ -29,6 +34,7 @@ SET iceberg_default_volume = 'hd_hdfs_acid_vol';
 -- Case A: raw BEGIN/UPDATE/UPDATE/COMMIT
 DROP TABLE IF EXISTS hd_hdfs_acid_raw;
 CREATE ICEBERG TABLE hd_hdfs_acid_raw (id int, n int);
+DO $$ BEGIN DELETE FROM hd_hdfs_acid_raw; END $$;
 INSERT INTO hd_hdfs_acid_raw VALUES (1, 10);
 BEGIN;
 UPDATE hd_hdfs_acid_raw SET n = n + 1 WHERE id = 1;
@@ -36,11 +42,11 @@ UPDATE hd_hdfs_acid_raw SET n = n * 2 WHERE id = 1;
 COMMIT;
 SELECT id, n FROM hd_hdfs_acid_raw ORDER BY n;
 SELECT COUNT(*) AS cnt, SUM(n) AS sumn FROM hd_hdfs_acid_raw;
-DROP TABLE hd_hdfs_acid_raw;
 
 -- Case B: plpgsql function double UPDATE
 DROP TABLE IF EXISTS hd_hdfs_acid_pl;
 CREATE ICEBERG TABLE hd_hdfs_acid_pl (id int, n int);
+DO $$ BEGIN DELETE FROM hd_hdfs_acid_pl; END $$;
 INSERT INTO hd_hdfs_acid_pl VALUES (1, 10);
 CREATE OR REPLACE FUNCTION hd_hdfs_acid_upd2_pl() RETURNS bigint AS $$
 DECLARE c bigint;
@@ -55,11 +61,11 @@ SELECT hd_hdfs_acid_upd2_pl() AS rows_seen_inside_func;
 SELECT id, n FROM hd_hdfs_acid_pl ORDER BY n;
 SELECT COUNT(*) AS cnt, SUM(n) AS sumn FROM hd_hdfs_acid_pl;
 DROP FUNCTION hd_hdfs_acid_upd2_pl();
-DROP TABLE hd_hdfs_acid_pl;
 
 -- Case C: sql function double UPDATE
 DROP TABLE IF EXISTS hd_hdfs_acid_sql;
 CREATE ICEBERG TABLE hd_hdfs_acid_sql (id int, n int);
+DO $$ BEGIN DELETE FROM hd_hdfs_acid_sql; END $$;
 INSERT INTO hd_hdfs_acid_sql VALUES (1, 10);
 CREATE OR REPLACE FUNCTION hd_hdfs_acid_upd2_sql() RETURNS bigint AS $$
     UPDATE hd_hdfs_acid_sql SET n = n + 1 WHERE id = 1;
@@ -70,9 +76,11 @@ SELECT hd_hdfs_acid_upd2_sql() AS rows_seen_inside_func;
 SELECT id, n FROM hd_hdfs_acid_sql ORDER BY n;
 SELECT COUNT(*) AS cnt, SUM(n) AS sumn FROM hd_hdfs_acid_sql;
 DROP FUNCTION hd_hdfs_acid_upd2_sql();
-DROP TABLE hd_hdfs_acid_sql;
 
--- Cleanup
+-- Cleanup.  The three tables are deliberately left in place: dropping them
+-- purges their metadata trees, and the next run would then re-register a
+-- v1.metadata.json that gophermeta already has a different length for -- a
+-- collision it reports as a FATAL that takes the agent JVM down.
 DROP VOLUME hd_hdfs_acid_vol;
 DROP USER MAPPING FOR current_user SERVER hd_hdfs_acid_vol_srv;
 DROP SERVER hd_hdfs_acid_vol_srv;

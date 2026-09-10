@@ -1,0 +1,8 @@
+# pg_regress builds these from input/ and output/ at run time.
+/sql/iceberg_site_config.sql
+/expected/iceberg_site_config.out
+
+# Test run output.
+/results/
+/regression.diffs
+/regression.out

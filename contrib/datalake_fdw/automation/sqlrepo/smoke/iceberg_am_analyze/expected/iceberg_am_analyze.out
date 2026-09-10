@@ -82,6 +82,12 @@ SET iceberg_default_volume = 'anlz_vol';
 -- ============================================================
 DROP TABLE IF EXISTS anlz_t;
 CREATE ICEBERG TABLE anlz_t (id int, country text, val int);
+-- DROP TABLE does not reliably purge the warehouse, and pg_regress
+-- recreates only the database, so CREATE above re-attaches to the rows a
+-- previous run left behind and every count below doubles.  Clear them.
+-- The DO wrapper hides the row count, which is 0 on a first run; TRUNCATE
+-- is a no-op on this access method.
+DO $$ BEGIN DELETE FROM anlz_t; END $$;
 INSERT INTO anlz_t
   SELECT g, (ARRAY['US','CA','MX'])[1 + (g % 3)], g FROM generate_series(1, 1000) g;
 ANALYZE anlz_t;
@@ -105,6 +111,7 @@ SELECT reltuples FROM pg_class WHERE relname = 'anlz_t';
 -- ============================================================
 DROP TABLE IF EXISTS anlz_t2;
 CREATE ICEBERG TABLE anlz_t2 (id int, color text, amt int);
+DO $$ BEGIN DELETE FROM anlz_t2; END $$;
 INSERT INTO anlz_t2
   SELECT g, (ARRAY['red','green','blue','pink'])[1 + (g % 4)], g FROM generate_series(1, 800) g;
 ANALYZE anlz_t, anlz_t2;
@@ -188,6 +195,7 @@ SELECT tablename, count(*) AS ncols FROM pg_stats
 -- ============================================================
 DROP TABLE IF EXISTS anlz_upd;
 CREATE ICEBERG TABLE anlz_upd (id bigint, v int);
+DO $$ BEGIN DELETE FROM anlz_upd; END $$;
 INSERT INTO anlz_upd SELECT g, g % 100 FROM generate_series(1, 10000) g;
 ANALYZE anlz_upd;
 SELECT reltuples::bigint AS reltuples_after_insert FROM pg_class WHERE relname = 'anlz_upd';
@@ -220,7 +228,8 @@ SELECT count(*) AS live_rows FROM anlz_upd;
 (1 row)
 
 -- cleanup
-DROP TABLE anlz_t;
-DROP TABLE anlz_t2;
+-- The iceberg tables are deliberately left in place.  DROP purges the
+-- metadata tree only partially, and this catalog keeps the current version in
+-- version-hint.text: once that points at a vN.metadata.json the purge removed,
+-- the next CREATE fails with "Metadata file for version N is missing".
 DROP TABLE anlz_heap;
-DROP TABLE anlz_upd;

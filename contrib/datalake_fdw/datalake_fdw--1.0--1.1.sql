@@ -87,3 +87,27 @@ AS $$
       FROM (SELECT iceberg_snapshot_list_json(tbl)::jsonb AS j) t,
            LATERAL jsonb_array_elements(t.j->'snapshots') AS s;
 $$ LANGUAGE SQL STABLE;
+
+-- ------------------------------------------------------------------
+-- Iceberg volume configuration on the QE data plane (issue #410)
+--
+-- Added in 1.1 for the same reason as the functions above: a 1.0
+-- install picks it up through ALTER EXTENSION datalake_fdw UPDATE
+-- rather than only on a fresh CREATE EXTENSION.
+-- ------------------------------------------------------------------
+-- Renders the s3.conf / gphdfs.conf section a volume's server_name selects,
+-- as the QD parsed it.  Its reason to exist is the differential test that
+-- holds this parser to the agent's SiteConfigLoader: both sides dump the
+-- same section and the fixtures compare them field by field.  It doubles as
+-- the way to answer "what did the coordinator actually read" on a live
+-- system.  Superuser only -- base_dir would otherwise let any user aim the
+-- backend at an arbitrary YAML file and read pieces of it back.
+CREATE FUNCTION pg_catalog.pg_iceberg_site_config(server_name text,
+                                                  volume_type text,
+                                                  base_dir text DEFAULT NULL)
+RETURNS text
+AS 'MODULE_PATHNAME', 'pg_iceberg_site_config'
+LANGUAGE C;
+
+REVOKE ALL ON FUNCTION pg_catalog.pg_iceberg_site_config(text, text, text)
+    FROM PUBLIC;

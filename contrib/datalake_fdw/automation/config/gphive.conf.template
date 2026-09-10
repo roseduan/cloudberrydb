@@ -1,3 +1,22 @@
+# Hive metastore sections for the datalake_fdw tests.
+#
+# hive_cluster is what the smoke and feature tests name.  hive_s3_cluster is
+# what the main regression suite's *_s3 tests name (sync_hive_table_s3's first
+# argument); it was missing here, so a gphive.conf deployed from this template
+# left all thirteen of them failing.  The only place it was written down was
+# the legacy test/create_env.sh, which points it at a second metastore on port
+# 9183 for a topology that no longer exists; one shared metastore serves both.
+#
+# The key is `url`, and it has to stay `url`: the agent has two readers of this
+# file and only that spelling suits both.  BaseConfigurationFactory (the
+# hive_connector / hudi / dlproxy path, reached through the
+# X-GP-OPTIONS-CONFIG header) normalizes `url` to its internal `uris` via
+# hiveNewToLegacyKeys, so it accepts either.  SiteConfigLoader (the iceberg
+# catalog path) accepts only `url` and rejects `uris` outright as a legacy key.
 hive_cluster:
+    url: thrift://${HIVE_METASTORE_HOST}:${HIVE_METASTORE_PORT}
+    auth_method: simple
+
+hive_s3_cluster:
     url: thrift://${HIVE_METASTORE_HOST}:${HIVE_METASTORE_PORT}
     auth_method: simple

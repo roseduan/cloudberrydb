@@ -42,6 +42,12 @@ SET iceberg_default_volume = 'tz_vol';
 DROP TABLE IF EXISTS tz_repro;
 CREATE ICEBERG TABLE tz_repro (id int, descr text, t timestamptz)
   OPTIONS (namespace 'demo', table 'tz_repro');
+-- The mc pre-clean in the Makefile is a no-op wherever mc is not on PATH,
+-- and DROP TABLE does not reliably purge the warehouse either, so CREATE
+-- above re-attaches to the rows a previous run left behind and every count
+-- below doubles.  Clear them.  The DO wrapper hides the row count, which is
+-- 0 on a first run; TRUNCATE is a no-op on this access method.
+DO $$ BEGIN DELETE FROM tz_repro; END $$;
 
 INSERT INTO tz_repro VALUES
   (1, 'New Year 2024 02:00 +08 (Beijing)', timestamptz '2024-01-01 02:00:00+08'),

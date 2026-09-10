@@ -290,6 +290,189 @@ public class IcebergRequestConfigParserTest {
         verify(siteLoader, never()).loadS3Site(any(), any());
     }
 
+    /**
+     * A conf-only HDFS volume must survive the flattening, not just the merge.
+     *
+     * <p>The test above proves the site file reaches the typed VolumeInfo.  The
+     * load-table response is built from {@code toFlatPropertiesMap()}, though,
+     * and that emitted none of the HDFS fields: the merged namenode was dropped
+     * on the way out, so the segments got a response with nothing in it about a
+     * namenode and every read and write failed with "resolved no namenode"
+     * (issue #410).  A volume that spells its settings out in SQL hid the bug,
+     * because those keys reach the response through the raw request map instead.
+     *
+     * <p>The expected keys are spelled literally: they are the wire contract the
+     * C side parses, so a rename here has to be a deliberate edit to this test.
+     */
+    @Test
+    public void parse_hdfsSiteValuesSurviveFlattening() {
+        Map<String, Object> request = new HashMap<>();
+        Map<String, Object> ic = new HashMap<>();
+        Map<String, Object> volume = new HashMap<>();
+        /* Everything else is left in the conf section this names. */
+        volume.put("server_name", "hdfsvolume");
+        volume.put("volume_server_type", "hdfs");
+        ic.put("IcebergVolumeConfig", volume);
+        request.put("IcebergConfig", ic);
+
+        VolumeInfo siteResult = new VolumeInfo();
+        siteResult.setHdfsNamenodeHost("hadoop");
+        siteResult.setHdfsNamenodePort("8020");
+        siteResult.setHdfsAuthMethod("simple");
+        siteResult.setHadoopRpcProtection("authentication");
+        siteResult.setKrbPrincipal("nn/_HOST@REALM.COM");
+        siteResult.setKrbPrincipalKeytab("/etc/security/nn.keytab");
+        siteResult.setIsHaSupported(Boolean.TRUE);
+        siteResult.setDfsNameservices("ns1");
+        siteResult.setDfsClientUseDatanodeHostname(Boolean.TRUE);
+        when(siteLoader.loadHdfsSite("hdfsvolume")).thenReturn(siteResult);
+
+        Map<String, String> flat = parser.parse(request).toFlatPropertiesMap();
+
+        /* The namenode is the load-bearing one: without it the segments fail. */
+        assertEquals("hadoop", flat.get("IcebergVolumeConfig.hdfs_namenodes"));
+        assertEquals("8020", flat.get("IcebergVolumeConfig.hdfs_port"));
+        assertEquals("simple", flat.get("IcebergVolumeConfig.hdfs_auth_method"));
+        assertEquals("authentication",
+                     flat.get("IcebergVolumeConfig.hadoop_rpc_protection"));
+        /* Auth and HA travel with it: a secured or HA cluster is unreachable
+         * without them and they are equally absent from the SQL OPTIONS. */
+        assertEquals("nn/_HOST@REALM.COM",
+                     flat.get("IcebergVolumeConfig.krb_principal"));
+        assertEquals("/etc/security/nn.keytab",
+                     flat.get("IcebergVolumeConfig.krb_principal_keytab"));
+        assertEquals("true", flat.get("IcebergVolumeConfig.is_ha_supported"));
+        assertEquals("ns1", flat.get("IcebergVolumeConfig.dfs_nameservices"));
+        assertEquals("true",
+                     flat.get("IcebergVolumeConfig.dfs_client_use_datanode_hostname"));
+    }
+
+    /**
+     * The port arrives on its own key even when the conf section spliced it
+     * into the namenode value, because that is the pair the C side's
+     * setGopherNamenode expects.
+     */
+    @Test
+    public void parse_hdfsSplicedPortFlattensAsSeparateKey() {
+        Map<String, Object> request = new HashMap<>();
+        Map<String, Object> ic = new HashMap<>();
+        Map<String, Object> volume = new HashMap<>();
+        volume.put("server_name", "hdfsvolume");
+        volume.put("volume_server_type", "hdfs");
+        ic.put("IcebergVolumeConfig", volume);
+        request.put("IcebergConfig", ic);
+
+        VolumeInfo siteResult = new VolumeInfo();
+        siteResult.applyHdfsNamenodes("nn.example.com:9820", null);
+        when(siteLoader.loadHdfsSite("hdfsvolume")).thenReturn(siteResult);
+
+        Map<String, String> flat = parser.parse(request).toFlatPropertiesMap();
+
+        assertEquals("nn.example.com",
+                     flat.get("IcebergVolumeConfig.hdfs_namenodes"));
+        assertEquals("9820", flat.get("IcebergVolumeConfig.hdfs_port"));
+    }
+
+    /**
+     * An S3 volume gains no HDFS keys.  The flattener writes only what the
+     * typed object holds, so an absent field must stay absent rather than
+     * arrive as an empty string the C side would then treat as set.
+     */
+    @Test
+    public void parse_s3VolumeEmitsNoHdfsKeys() {
+        Map<String, Object> request = new HashMap<>();
+        Map<String, Object> ic = new HashMap<>();
+        Map<String, Object> volume = new HashMap<>();
+        volume.put("volume_server_type", "s3");
+        volume.put("volume_endpoint", "http://minio:9000");
+        ic.put("IcebergVolumeConfig", volume);
+        request.put("IcebergConfig", ic);
+
+        Map<String, String> flat = parser.parse(request).toFlatPropertiesMap();
+
+        assertEquals("http://minio:9000",
+                     flat.get("IcebergVolumeConfig.volume_endpoint"));
+        assertNull(flat.get("IcebergVolumeConfig.hdfs_namenodes"));
+        assertNull(flat.get("IcebergVolumeConfig.hdfs_port"));
+        assertNull(flat.get("IcebergVolumeConfig.hdfs_auth_method"));
+    }
+
+    /**
+     * Both sides set the same S3 keys: SQL must win, per key, and the win must
+     * survive into the flat map the load-table response is built from.
+     *
+     * <p>This is the case the review asked for and it belongs here rather than
+     * in a smoke suite.  End to end it cannot be asserted at all: when a volume
+     * names a section, {@code buildDataConfig} reads the whole DATA domain from
+     * that section and ignores the inline options, so the agent's own FileIO
+     * uses the conf value while the segments use the SQL one.  Staging a
+     * section that disagrees therefore breaks the coordinator before the
+     * segments are reached -- verified, it fails in
+     * {@code GopherFileIO.initialize}.  The data plane's precedence is decided
+     * here, in one place, and this is where it can be pinned.
+     */
+    @Test
+    public void parse_volumeSqlOptionsWinPerKeyOverSiteFile() {
+        Map<String, Object> request = new HashMap<>();
+        Map<String, Object> ic = new HashMap<>();
+        Map<String, Object> volume = new HashMap<>();
+        volume.put("server_name", "s3volume");
+        volume.put("volume_server_type", "s3");
+        volume.put("volume_endpoint", "http://minio:9000");
+        volume.put("volume_region", "us-east-1");
+        volume.put("bucket_name", "warehouse");
+        volume.put("path_style_access", "true");
+        ic.put("IcebergVolumeConfig", volume);
+        request.put("IcebergConfig", ic);
+
+        /* The section disagrees on every one of those keys. */
+        VolumeInfo siteResult = new VolumeInfo();
+        siteResult.setVolumeEndpoint("http://127.0.0.1:1");
+        siteResult.setVolumeRegion("nonexistent-region");
+        siteResult.setBucketName("nonexistent-bucket");
+        siteResult.setPathStyleAccess(Boolean.FALSE);
+        /* ...and supplies one key SQL left out, which must still come through. */
+        siteResult.setSecretAccessKey("from-conf");
+        when(siteLoader.loadS3Site(eq("s3volume"), any())).thenReturn(siteResult);
+
+        Map<String, String> flat = parser.parse(request).toFlatPropertiesMap();
+
+        assertEquals("http://minio:9000",
+                     flat.get("IcebergVolumeConfig.volume_endpoint"));
+        assertEquals("us-east-1", flat.get("IcebergVolumeConfig.volume_region"));
+        assertEquals("warehouse", flat.get("IcebergVolumeConfig.bucket_name"));
+        assertEquals("true", flat.get("IcebergVolumeConfig.path_style_access"));
+        /* The gap-fill direction, in the same request as the overrides. */
+        assertEquals("from-conf",
+                     flat.get("IcebergVolumeConfig.secret_access_key"));
+    }
+
+    /**
+     * path_style_access deserves its own case: it is a Boolean, so "unset" and
+     * "false" are the same absence once it reaches C, and an explicit false is
+     * what an operator writes to ask for virtual-host addressing.  A section
+     * saying true must not turn that back on.
+     */
+    @Test
+    public void parse_explicitFalsePathStyleSurvivesASiteFileSayingTrue() {
+        Map<String, Object> request = new HashMap<>();
+        Map<String, Object> ic = new HashMap<>();
+        Map<String, Object> volume = new HashMap<>();
+        volume.put("server_name", "s3volume");
+        volume.put("volume_server_type", "s3");
+        volume.put("path_style_access", "false");
+        ic.put("IcebergVolumeConfig", volume);
+        request.put("IcebergConfig", ic);
+
+        VolumeInfo siteResult = new VolumeInfo();
+        siteResult.setPathStyleAccess(Boolean.TRUE);
+        when(siteLoader.loadS3Site(eq("s3volume"), any())).thenReturn(siteResult);
+
+        Map<String, String> flat = parser.parse(request).toFlatPropertiesMap();
+
+        assertEquals("false", flat.get("IcebergVolumeConfig.path_style_access"));
+    }
+
     // ---- gopher.enabled branch -------------------------------------------
 
     @Test

@@ -27,6 +27,13 @@ SET iceberg_default_volume = 'hd_hdfs_vol';
 DROP TABLE IF EXISTS hd_hdfs_smoke;
 CREATE ICEBERG TABLE hd_hdfs_smoke (id INT, name VARCHAR(50), val DECIMAL(10,2));
 
+-- pg_regress recreates the database, but not the warehouse: CREATE above
+-- re-attaches to whatever a previous run left in HDFS, so without this the
+-- counts below climb from run to run.  The DO wrapper hides the row count,
+-- which differs between the first run and later ones; TRUNCATE is not an
+-- option, it is a no-op on this access method.
+DO $$ BEGIN DELETE FROM hd_hdfs_smoke; END $$;
+
 \echo === T1 INSERT seed (5 rows) ===
 INSERT INTO hd_hdfs_smoke
     VALUES (1, 'alpha',   1.50),
@@ -60,4 +67,8 @@ SELECT count(*) AS final_rows,
        sum(val) AS sum_val
 FROM hd_hdfs_smoke;
 
-DROP TABLE hd_hdfs_smoke;
+-- hd_hdfs_smoke is deliberately NOT dropped.  Dropping it purges the metadata
+-- tree, so the next run would write v1.metadata.json again -- a second file at
+-- a path gophermeta already has a length registered for, which it rejects with
+-- a FATAL that takes the agent JVM down with it.  Leaving the table lets the
+-- version counter keep climbing so no path is ever rewritten.

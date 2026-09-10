@@ -28,7 +28,7 @@ installcheck:
 	@echo "=== Cleaning old iceberg_conf_merge minio data ==="
 	@mc alias set local $(MC_ALIAS_URL) $(MC_ALIAS_KEY) $(MC_ALIAS_SECRET) 2>/dev/null || true
 	@mc rm --recursive --force local/warehouse/iceberg_conf_merge/ 2>/dev/null || true
-	@QD_DATADIR="$$(psql -X -t -A -c 'SHOW data_directory' 2>/dev/null | tr -d '[:space:]')"; \
+	@QD_DATADIR="$$(psql -X -t -A -d postgres -c 'SHOW data_directory' 2>/dev/null | tr -d '[:space:]')"; \
 	if [ -z "$$QD_DATADIR" ]; then \
 		echo "ERROR: could not resolve QD data_directory; is the cluster up?" >&2; \
 		exit 1; \

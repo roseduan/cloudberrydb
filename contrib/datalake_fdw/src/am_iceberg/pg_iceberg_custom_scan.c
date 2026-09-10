@@ -77,15 +77,18 @@ stash_modify_fragments_for_iceberg_modifies(PlannedStmt *stmt)
 		return;
 
 	mt = (ModifyTable *) stmt->planTree;
-	if (mt->operation != CMD_UPDATE && mt->operation != CMD_DELETE)
+	if (mt->operation != CMD_INSERT &&
+		mt->operation != CMD_UPDATE && mt->operation != CMD_DELETE)
 		return;
 
 	/*
 	 * fdwPrivLists holds one entry per result relation, in the same order
 	 * as resultRelations.  Standard PlanForeignModify fills it for foreign
 	 * tables; for native iceberg-AM relations the slot is NIL.  We fill
-	 * those slots here with `list_make1(fragments)` so the dispatched plan
-	 * carries the data.
+	 * those slots here so the dispatched plan carries two things: the
+	 * fragment list (UPDATE/DELETE only) and the catalog properties, which
+	 * every operation needs because the segments cannot ask the agent for
+	 * them (issue #410).
 	 */
 	if (mt->fdwPrivLists == NIL)
 	{
@@ -101,6 +104,7 @@ stash_modify_fragments_for_iceberg_modifies(PlannedStmt *stmt)
 		Index	rti = lfirst_int(lc);
 		Oid		relid;
 		char   *fragments_json;
+		char   *catalog_properties;
 		Relation rel;
 
 		if (rti == 0 || rti > list_length(stmt->rtable))
@@ -118,18 +122,29 @@ stash_modify_fragments_for_iceberg_modifies(PlannedStmt *stmt)
 		}
 
 		rel = table_open(relid, NoLock);
-		fragments_json = pg_iceberg_list_data_fragments_json(rel, 0);
+		/* 0 is the current snapshot; a modify never time-travels. */
+		fragments_json = (mt->operation == CMD_INSERT)
+			? NULL
+			: pg_iceberg_list_data_fragments_json(rel, 0);
+		catalog_properties = pg_iceberg_get_catalog_properties_json(rel);
 		table_close(rel, NoLock);
 
-		if (fragments_json != NULL)
+		/* QD-local consumers read it from the cache, same as the QEs will. */
+		if (catalog_properties != NULL)
+			pg_iceberg_stash_modify_catalog_properties(relid, catalog_properties);
+
+		if (fragments_json != NULL || catalog_properties != NULL)
 		{
 			ListCell *prev_cell = list_nth_cell(mt->fdwPrivLists, i);
 			List	 *fragments;
 
-			/* QD-local consumers need the parsed (delete-sharing) form. */
-			fragments = parseIcebergFragmentResponse(fragments_json,
-													 strlen(fragments_json));
-			pg_iceberg_stash_modify_fragments(relid, fragments);
+			if (fragments_json != NULL)
+			{
+				/* QD-local consumers need the parsed (delete-sharing) form. */
+				fragments = parseIcebergFragmentResponse(fragments_json,
+														 strlen(fragments_json));
+				pg_iceberg_stash_modify_fragments(relid, fragments);
+			}
 
 			/*
 			 * Splice the fragments into ModifyTable.fdwPrivLists so they get
@@ -139,11 +154,17 @@ stash_modify_fragments_for_iceberg_modifies(PlannedStmt *stmt)
 			 * referencing it, making the dispatched plan and every QE's
 			 * MessageContext O(data files x delete files) -- observed at
 			 * ~500MB per backend on zipper-style workloads (issue #362).
-			 * The slot is wrapped in list_make1 to keep one slot per relation
-			 * (per ModifyTable contract); the consumer unwraps and parses it
-			 * in restash_iceberg_modify_fragments_from_plan.
+			 * The slot is one list per relation (per ModifyTable contract),
+			 * holding the fragments JSON then the catalog properties; the
+			 * consumer unwraps both in
+			 * restash_iceberg_modify_fragments_from_plan.  Either may be
+			 * absent -- INSERT has no fragments, a builtin catalog vends no
+			 * properties -- and an absent one travels as an empty string so
+			 * the positions stay fixed.
 			 */
-			lfirst(prev_cell) = list_make1(makeString(fragments_json));
+			lfirst(prev_cell) = list_make2(
+				makeString(fragments_json != NULL ? fragments_json : ""),
+				makeString(catalog_properties != NULL ? catalog_properties : ""));
 		}
 
 		i++;
@@ -504,7 +525,8 @@ restash_iceberg_modify_fragments_from_plan(PlannedStmt *stmt)
 		return;
 
 	mt = (ModifyTable *) stmt->planTree;
-	if (mt->operation != CMD_UPDATE && mt->operation != CMD_DELETE)
+	if (mt->operation != CMD_INSERT &&
+		mt->operation != CMD_UPDATE && mt->operation != CMD_DELETE)
 		return;
 	if (mt->fdwPrivLists == NIL)
 		return;
@@ -525,7 +547,22 @@ restash_iceberg_modify_fragments_from_plan(PlannedStmt *stmt)
 		if (!is_iceberg_relation(relid))
 			continue;
 
-		/* Unwrap the list_make1(...) wrapper from the planner_hook. */
+		/*
+		 * Slot 2, when present, is the catalog properties the segments cannot
+		 * ask the agent for themselves (issue #410).  Taken first because the
+		 * fragment handling below continues out of the loop in several cases
+		 * that say nothing about whether the properties arrived.
+		 */
+		if (list_length(priv) >= 2)
+		{
+			Node *props = (Node *) lsecond(priv);
+
+			if (props != NULL && IsA(props, String))
+				pg_iceberg_stash_modify_catalog_properties(relid,
+														   strVal(props));
+		}
+
+		/* Unwrap the fragments carrier from the planner_hook. */
 		carrier = (Node *) linitial(priv);
 		if (carrier == NULL)
 			continue;
@@ -538,6 +575,10 @@ restash_iceberg_modify_fragments_from_plan(PlannedStmt *stmt)
 			 * re-share the delete-file fragments across tasks.
 			 */
 			char	   *json = strVal(carrier);
+
+			/* Empty means this operation has no fragments, e.g. INSERT. */
+			if (json == NULL || json[0] == '\0')
+				continue;
 
 			fragments = parseIcebergFragmentResponse(json, strlen(json));
 		}

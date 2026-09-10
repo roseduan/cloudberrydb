@@ -316,13 +316,25 @@ lt_object_field_start(void *state, char *fname, bool isnull)
 	{
 		s->current_field = LT_PARSE_CONFIG;
 		s->capture_depth = s->depth;
-		s->config_start = s->lex->token_terminator;
+
+		/*
+		 * object_field_start fires once the colon has been consumed, so the
+		 * look-ahead token is the value's first one -- the opening brace here.
+		 * Capture from token_start, not token_terminator: the latter points
+		 * past the brace, and the slice assembled below is spliced in after
+		 * "config": verbatim, so dropping the brace yields {"config":} for an
+		 * empty object and {"config":"k":"v"}} for a populated one.  Both are
+		 * invalid JSON, which is why every consumer of catalog_properties that
+		 * actually parses it has been failing.
+		 */
+		s->config_start = s->lex->token_start;
 	}
 	else if (pg_strcasecmp(fname, "storage-credentials") == 0)
 	{
 		s->current_field = LT_PARSE_STORAGE_CREDENTIALS;
 		s->capture_depth = s->depth;
-		s->credentials_start = s->lex->token_terminator;
+		/* Same reasoning as "config" above; here the token is a bracket. */
+		s->credentials_start = s->lex->token_start;
 	}
 	else if (pg_strcasecmp(fname, DATALAKEFDW_ICEBERG_KEY_METADATA_TIMESTAMP_RESP) == 0)
 		s->current_field = LT_PARSE_METADATA_TIMESTAMP;

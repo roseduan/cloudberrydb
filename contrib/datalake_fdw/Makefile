@@ -29,6 +29,8 @@ OBJS = 	src/datalake_fdw.o \
 		src/common/exttable.o \
 		src/common/datalake_resowner.o \
 		src/common/parser_option.o \
+		src/common/iceberg_site_scalar.o \
+		src/common/iceberg_site_config.o \
 		src/dlproxy/deparse.o \
 		src/dlproxy/filters.o \
 		src/dlproxy/headers.o \
@@ -185,7 +187,7 @@ REGRESS = setup \
         orc_read parquet_read avro_read iresearch_orc_test iresearch_orc_vec_test \
         oss_read_new_text oss_read_text grammar_convert gphdfs_ignore_file gphdfs_custom \
         oss_read_new_text_limit_segment oss_read_orc_limit_segment oss_read_parquet_limit_segment oss_read_text_limit_segment \
-		iceberg_test iceberg_no_extension iceberg_am_misuse
+		iceberg_test iceberg_no_extension iceberg_am_misuse iceberg_site_config
 endif
 REGRESS_OPTS += --init-file=test/init_file
 
@@ -280,5 +282,16 @@ datalake_fdw.so: $(STORAGE_BACKEND_OBJS)
 
 all: $(STORAGE_BACKEND_OBJS)
 
+# This rule replaces PGXS's own, so it has to carry the dependency flags PGXS
+# would have added.  Without them these objects record no header dependencies:
+# a change to src/datalake_def.h does not rebuild them, and a field added
+# mid-struct leaves them reading every later field at a different offset from
+# the rest of the module.  That surfaces as gopher retry-limit failures against
+# object storage, never as a build error, so it costs hours to find.
 $(STORAGE_BACKEND_OBJS): %.o: %.cpp
+ifeq ($(autodepend)$(GCC),yesyes)
+	@if test ! -d $(DEPDIR); then mkdir -p $(DEPDIR); fi
+	$(CXX) $(CXXFLAGS) $(CFLAGS_SL) $(CPPFLAGS) -c -o $@ $< -MMD -MP -MF $(DEPDIR)/$(*F).Po
+else
 	$(CXX) $(CXXFLAGS) $(CFLAGS_SL) $(CPPFLAGS) -c -o $@ $<
+endif

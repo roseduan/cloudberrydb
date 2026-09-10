@@ -532,6 +532,8 @@ GopherFileSystem::buildGopherConfig(void *opts)
 		}
 
 		conf->data_transfer_protocol = options->data_transfer_protocol;
+		conf->dfs_client_use_datanode_hostname =
+			options->dfs_client_use_datanode_hostname;
 		conf->is_ha_supported = options->is_ha_supported;
 
 		if (options->is_ha_supported)

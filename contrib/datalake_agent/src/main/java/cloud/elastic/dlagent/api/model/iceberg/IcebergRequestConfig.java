@@ -130,6 +130,35 @@ public class IcebergRequestConfig {
         putIfNotNull(out, prefix + IcebergConfigConstants.ICEBERG_VOLUME_CONFIG.ENABLE_CACHING,      toStringOrNull(volume.getEnableCaching()));
         putIfNotNull(out, prefix + IcebergConfigConstants.ICEBERG_VOLUME_CONFIG.ALLOW_WRITES,        toStringOrNull(volume.getAllowWrites()));
         putIfNotNull(out, prefix + IcebergConfigConstants.ICEBERG_VOLUME_CONFIG.USERNAME,            volume.getUsername());
+
+        /*
+         * The HDFS half.  Values that arrive as SQL OPTIONS survive anyway --
+         * extractProperties merges the raw request map verbatim -- so leaving
+         * these out was invisible for an inline volume.  A volume that names
+         * only a gphdfs.conf section sends no such option: its settings exist
+         * only on the typed VolumeInfo the parser merged, and dropping them
+         * here is what left the load-table response with no namenode to hand
+         * back to the segments (issue #410).
+         *
+         * hdfs_namenodes is emitted as the bare host, port separately, matching
+         * the split applyHdfsNamenodes performed on the way in and the pair the
+         * C side's setGopherNamenode expects.
+         */
+        putIfNotNull(out, prefix + IcebergConfigConstants.ICEBERG_VOLUME_CONFIG.HDFS_NAMENODES,       volume.getHdfsNamenodeHost());
+        putIfNotNull(out, prefix + IcebergConfigConstants.ICEBERG_VOLUME_CONFIG.HDFS_PORT,            volume.getHdfsNamenodePort());
+        putIfNotNull(out, prefix + IcebergConfigConstants.ICEBERG_VOLUME_CONFIG.HDFS_AUTH_METHOD,     volume.getHdfsAuthMethod());
+        putIfNotNull(out, prefix + IcebergConfigConstants.ICEBERG_VOLUME_CONFIG.KRB_PRINCIPAL,        volume.getKrbPrincipal());
+        putIfNotNull(out, prefix + IcebergConfigConstants.ICEBERG_VOLUME_CONFIG.KRB_PRINCIPAL_KEYTAB, volume.getKrbPrincipalKeytab());
+        putIfNotNull(out, prefix + IcebergConfigConstants.ICEBERG_VOLUME_CONFIG.HADOOP_RPC_PROTECTION, volume.getHadoopRpcProtection());
+        putIfNotNull(out, prefix + IcebergConfigConstants.ICEBERG_VOLUME_CONFIG.DATA_TRANSFER_PROTOCOL, volume.getDataTransferProtocol());
+        putIfNotNull(out, prefix + IcebergConfigConstants.ICEBERG_VOLUME_CONFIG.DATA_TRANSFER_PROTECTION, volume.getDataTransferProtection());
+        putIfNotNull(out, prefix + IcebergConfigConstants.ICEBERG_VOLUME_CONFIG.IS_HA_SUPPORTED,      toStringOrNull(volume.getIsHaSupported()));
+        putIfNotNull(out, prefix + IcebergConfigConstants.ICEBERG_VOLUME_CONFIG.DFS_NAMESERVICES,     volume.getDfsNameservices());
+        putIfNotNull(out, prefix + IcebergConfigConstants.ICEBERG_VOLUME_CONFIG.DFS_HA_NAMENODES,     volume.getDfsHaNamenodes());
+        putIfNotNull(out, prefix + IcebergConfigConstants.ICEBERG_VOLUME_CONFIG.DFS_NAMENODE_RPC_ADDRESS, volume.getDfsNamenodeRpcAddress());
+        putIfNotNull(out, prefix + IcebergConfigConstants.ICEBERG_VOLUME_CONFIG.DFS_CLIENT_FAILOVER_PROXY_PROVIDER, volume.getDfsClientFailoverProxyProvider());
+        putIfNotNull(out, prefix + IcebergConfigConstants.ICEBERG_VOLUME_CONFIG.DFS_CLIENT_USE_DATANODE_HOSTNAME, toStringOrNull(volume.getDfsClientUseDatanodeHostname()));
+
         if (volume.getExtraProperties() != null) {
             out.putAll(volume.getExtraProperties());
         }

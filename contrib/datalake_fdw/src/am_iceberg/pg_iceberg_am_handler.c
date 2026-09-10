@@ -240,6 +240,20 @@ iceberg_modify_init(Relation rel, IcebergDMLState *state, CmdType operation,
 		fdwState->iceTable.location = location;
 	}
 
+	/*
+	 * The catalog properties the QD resolved and dispatched with the plan.
+	 * Without them the segments cannot see anything the agent merged from a
+	 * conf section, which is why a volume naming only a server_name could be
+	 * read but not written (issue #410).
+	 *
+	 * Carried on the state rather than through BeginForeignModify's
+	 * fdw_private: a non-NULL fdw_private means something else entirely to
+	 * datalakefdw_begin_foreign_modify(), which reads FdwModifyFileDir out of
+	 * it as the directory to write into.
+	 */
+	fdwState->iceTable.catalog_properties =
+		pg_iceberg_take_modify_catalog_properties(RelationGetRelid(rel));
+
 	resultRelInfo->ri_FdwState = (void *) fdwState;
 
 	modifyDesc->resultRelInfo = resultRelInfo;

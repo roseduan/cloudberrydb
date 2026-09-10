@@ -274,6 +274,14 @@ typedef struct storageOptions
 	/* SASL QOP for DataNode reads/writes: authentication/integrity/privacy */
 	char*	data_transfer_protection;
 	char*	hdfs_user;
+	/*
+	 * dfs.client.use.datanode.hostname: reach the datanodes by name instead
+	 * of by the address the namenode reports.  Every other carrier of this
+	 * setting already existed -- the conf reader parses it, the agent
+	 * forwards it, the dlproxy emitter has a key for it and the gopher config
+	 * a slot -- so a volume that asked for it was silently ignored.
+	 */
+	bool	dfs_client_use_datanode_hostname;
 
 	/* hdfs ha config  */
 	bool	is_ha_supported;

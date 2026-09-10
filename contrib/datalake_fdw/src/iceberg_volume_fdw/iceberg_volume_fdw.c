@@ -93,7 +93,13 @@ parseVolumeUri(IcebergVolumeOptions* vopt, dataLakeOptions *opt, icebergTableInf
 static void
 parseVolumeOption(dataLakeOptions *opt, IcebergVolumeOptions* vopt);
 static void
-parseCatalogPropertiesOption(dataLakeOptions *opt, const char *catalog_properties);
+parseCatalogPropertiesOption(dataLakeOptions *opt, const char *catalog_properties,
+							 IcebergVolumeOptions *vopt);
+static void
+setGopherEndpoint(dataLakeOptions *opt, const char *endpoint);
+static void
+setGopherNamenode(dataLakeOptions *opt, const char *namenodes,
+				  const char *port_text);
 static const char *
 extractCatalogProperties(List *fdw_private);
 
@@ -337,10 +343,44 @@ static List* iceberg_volume_get_fragment_data(void* context)
 	return GetVolumeExternalFragmentList((char*)vState->iceTable.agentCliRespond);
 }
 
+/*
+ * rejectStandaloneVolumeScan
+ *		Refuse to run when the Iceberg access method has not prepared our state.
+ *
+ * iceberg_volume_fdw is internal to the Iceberg AM: the scan state is built by
+ * iceberg_create_foreign_scan_state() before the AM invokes our callbacks.  A
+ * NULL state therefore means the plain executor reached us, which only happens
+ * when a foreign or external table was bound to an iceberg_volume_fdw server.
+ * That can be a user writing CREATE FOREIGN TABLE ... SERVER <volume server>
+ * directly -- the validator accepts anything -- or, before the wrapper filter
+ * in find_foreign_server(), a gphdfs:// external table whose namenode happened
+ * to match a volume server.
+ *
+ * This has to be an ERROR rather than a quiet return: returning would let the
+ * table be read through the wrong wrapper, turning a crash into wrong results.
+ * (The early return in icebergVolumeReScanForeignScan() is a different case --
+ * there a NULL state legitimately means the QD, or a segment that received no
+ * fragments.)
+ */
+static void
+rejectStandaloneVolumeScan(const void *vState)
+{
+	if (unlikely(vState == NULL))
+		ereport(ERROR,
+				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+				 errmsg("iceberg_volume_fdw cannot back a foreign or external table"),
+				 errdetail("This foreign data wrapper is internal to the Iceberg access "
+						   "method and requires scan state prepared by it."),
+				 errhint("Use a datalake_fdw server for external tables, or an ICEBERG "
+						 "TABLE for Iceberg data.")));
+}
+
 static void
 icebergVolumeBeginForeignScan(ForeignScanState *node, int eflags)
 {
 	icebergVolumeScanState* vState = (icebergVolumeScanState*)node->fdw_state;
+
+	rejectStandaloneVolumeScan(vState);
 
 	/*
 	 * Always try to extract catalog_properties from fdw_private.
@@ -534,7 +574,57 @@ getVolumeOptions(icebergTableInfo info)
 		else
 		{
 			parseVolumeOption(opt, vopt);
+
+			/*
+			 * A volume may carry only `server_name`, leaving endpoint /
+			 * credentials / bucket in the s3.conf section that section names.
+			 * Only the agent reads conf files, so those keys reach us solely
+			 * through the load-table response that the AM stashed in
+			 * fdw_private.  Fill whatever the SQL OPTIONS left NULL from
+			 * there; SQL still wins per key, matching the merge the agent
+			 * performs on the metadata plane.  Before this, the volume branch
+			 * ignored catalog_properties outright and a conf-only volume could
+			 * be created but never read or written (issue #410).
+			 */
+			if (info.catalog_properties != NULL)
+				parseCatalogPropertiesOption(opt, info.catalog_properties, vopt);
+
 			parseVolumeUri(vopt, opt, info);
+
+			/*
+			 * Refuse to hand an incomplete connection to gopher.  A gopher
+			 * config with no address does not merely fail this query: the
+			 * segment's gopher store exits at startup and its socket then
+			 * refuses every later connection until the cluster is restarted.
+			 * Fail here instead, naming the volume.
+			 *
+			 * Which field carries the address depends on the volume type, and
+			 * checking the wrong one rejects a working volume.  An HDFS volume
+			 * puts it in hdfs_namenode_host, derived from `hdfs_namenodes`,
+			 * and leaves gopher->host NULL -- gopher->host is written only
+			 * from the `endpoint` option, which HDFS volumes need not carry.
+			 */
+			if (opt->gopher->gopherType != NULL &&
+				pg_strcasecmp(opt->gopher->gopherType, "hdfs") == 0)
+			{
+				if (opt->gopher->hdfs_namenode_host == NULL ||
+					opt->gopher->hdfs_namenode_host[0] == '\0')
+					ereport(ERROR,
+							(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+							 errmsg("iceberg volume \"%s.%s\" resolved no namenode",
+									info.volumn_server_name, info.volumn_name),
+							 errhint("Set hdfs_namenodes in the volume SERVER OPTIONS, or make sure the \"%s\" section of gphdfs.conf is readable by the datalake agent.",
+									 vopt->volume_server.server_name != NULL
+									 ? vopt->volume_server.server_name : "server_name")));
+			}
+			else if (opt->gopher->host == NULL || opt->gopher->host[0] == '\0')
+				ereport(ERROR,
+						(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+						 errmsg("iceberg volume \"%s.%s\" resolved no endpoint",
+								info.volumn_server_name, info.volumn_name),
+						 errhint("Set the endpoint in the volume SERVER OPTIONS, or make sure the \"%s\" section of s3.conf is readable by the datalake agent.",
+								 vopt->volume_server.server_name != NULL
+								 ? vopt->volume_server.server_name : "server_name")));
 		}
 	}
 	else if (info.catalog_properties != NULL)
@@ -542,7 +632,8 @@ getVolumeOptions(icebergTableInfo info)
 		/* No volume — construct S3 options from catalog_properties */
 		if (info.location == NULL)
 			elog(ERROR, "iceberg_volume_fdw: catalog_properties missing table-location");
-		parseCatalogPropertiesOption(opt, info.catalog_properties);
+		/* No volume behind this call, so no SQL OPTION can be overridden. */
+		parseCatalogPropertiesOption(opt, info.catalog_properties, NULL);
 		parseVolumeUri(NULL, opt, info);
 	}
 	else
@@ -583,6 +674,79 @@ parseHdfsNamenodePort(const char *port_str)
 	return (int) port;
 }
 
+/*
+ * setGopherNamenode
+ *
+ * Split an `hdfs_namenodes` value into the host and port gopher wants.  A
+ * colon means host:port; in HA mode the value is a bare nameservice name and
+ * the port comes from `hdfs_port`, defaulting to the HDFS RPC port.
+ *
+ * Shared by the volume options and the catalog properties so an HDFS volume
+ * resolves the same namenode whichever source described it.
+ */
+static void
+setGopherNamenode(dataLakeOptions *opt, const char *namenodes,
+				  const char *port_text)
+{
+	char *dup;
+	char *colon;
+
+	if (namenodes == NULL || *namenodes == '\0')
+		return;
+
+	dup = pstrdup(namenodes);
+	colon = strrchr(dup, ':');
+
+	if (colon != NULL)
+	{
+		*colon = '\0';
+		opt->gopher->hdfs_namenode_host = pstrdup(dup);
+		opt->gopher->hdfs_namenode_port = parseHdfsNamenodePort(colon + 1);
+	}
+	else
+	{
+		opt->gopher->hdfs_namenode_host = pstrdup(dup);
+		opt->gopher->hdfs_namenode_port = (port_text != NULL)
+			? parseHdfsNamenodePort(port_text) : 8020;
+	}
+
+	pfree(dup);
+}
+
+/*
+ * setGopherEndpoint
+ *
+ * Record an endpoint the way gopher wants it: host with no scheme, TLS use
+ * carried separately in useHttps.  The native S3 backend rebuilds
+ * scheme://host inside createHandle() and the gopher backend strips a scheme
+ * itself, so the bare host suits both.
+ *
+ * Both sources of an endpoint go through here.  While the catalog path stored
+ * its value verbatim, an "http://host:port" coming from the catalog reached
+ * gopher as a hostname, which resolves nowhere -- and being a connection
+ * failure rather than a configuration one, it surfaced as minutes inside the
+ * liboss2 retry loop rather than as an error.
+ */
+static void
+setGopherEndpoint(dataLakeOptions *opt, const char *endpoint)
+{
+	if (endpoint == NULL)
+		return;
+
+	if (pg_strncasecmp(endpoint, "https://", 8) == 0)
+	{
+		opt->gopher->useHttps = true;
+		endpoint += 8;
+	}
+	else if (pg_strncasecmp(endpoint, "http://", 7) == 0)
+	{
+		opt->gopher->useHttps = false;
+		endpoint += 7;
+	}
+
+	opt->gopher->host = pstrdup(endpoint);
+}
+
 static void
 parseVolumeOption(dataLakeOptions *opt, IcebergVolumeOptions* vopt)
 {
@@ -604,39 +768,29 @@ parseVolumeOption(dataLakeOptions *opt, IcebergVolumeOptions* vopt)
 	}
 
 	if (vopt->volume_server.endpoint)
-	{
-		const char *ep = vopt->volume_server.endpoint;
-		/*
-		 * The native S3 backend builds the endpoint as scheme://host inside
-		 * createHandle(), so store host WITHOUT any scheme prefix here and
-		 * record TLS use via useHttps. The Gopher backend strips the scheme
-		 * internally, so this is safe for both build modes.
-		 */
-		if (pg_strncasecmp(ep, "https://", 8) == 0)
-		{
-			opt->gopher->useHttps = true;
-			ep += 8;
-		}
-		else if (pg_strncasecmp(ep, "http://", 7) == 0)
-		{
-			opt->gopher->useHttps = false;
-			ep += 7;
-		}
-		opt->gopher->host = pstrdup(ep);
-	}
+		setGopherEndpoint(opt, vopt->volume_server.endpoint);
 
 	if (vopt->volume_server.bucket_name)
 	{
 		opt->gopher->bucket = pstrdup(vopt->volume_server.bucket_name);
 	}
 
-	if (vopt->volume_server.path_style_access)
+	/*
+	 * An unset path_style_access must not be read as "virtual host": the
+	 * other storage paths in this repo (datalake_option.c isvirtual,
+	 * dfs-tablespace-ext) all leave useVirtualHost false when the user says
+	 * nothing, and the private object stores this FDW targets resolve only
+	 * path-style hosts -- a virtual-host default turns a missing option into
+	 * CURLE_COULDNT_RESOLVE_HOST on "<bucket>.<endpoint-host>".  Only an
+	 * explicit path_style_access 'false' asks for virtual-host addressing.
+	 */
+	if (vopt->volume_server.path_style_access_set)
 	{
-		opt->gopher->useVirtualHost = false;
+		opt->gopher->useVirtualHost = !vopt->volume_server.path_style_access;
 	}
 	else
 	{
-		opt->gopher->useVirtualHost = true;
+		opt->gopher->useVirtualHost = false;
 	}
 
 	if (vopt->volume_user.aws_access_key_id)
@@ -667,28 +821,7 @@ parseVolumeOption(dataLakeOptions *opt, IcebergVolumeOptions* vopt)
 
 		if (namenodes != NULL && *namenodes != '\0')
 		{
-			char	   *dup = pstrdup(namenodes);
-			char	   *colon = strrchr(dup, ':');
-
-			/*
-			 * A colon means host:port.  In HA mode the value is a bare
-			 * nameservice name (no colon): keep it as the host and take the
-			 * port from hdfs_port (default 8020).
-			 */
-			if (colon != NULL)
-			{
-				*colon = '\0';
-				opt->gopher->hdfs_namenode_host = pstrdup(dup);
-				opt->gopher->hdfs_namenode_port = parseHdfsNamenodePort(colon + 1);
-			}
-			else
-			{
-				opt->gopher->hdfs_namenode_host = pstrdup(dup);
-				opt->gopher->hdfs_namenode_port =
-					(vopt->volume_server.hdfs_port != NULL)
-					? parseHdfsNamenodePort(vopt->volume_server.hdfs_port) : 8020;
-			}
-			pfree(dup);
+			setGopherNamenode(opt, namenodes, vopt->volume_server.hdfs_port);
 		}
 		else if (endpoint != NULL && *endpoint != '\0')
 		{
@@ -738,6 +871,17 @@ parseVolumeOption(dataLakeOptions *opt, IcebergVolumeOptions* vopt)
 				(pg_strcasecmp(vopt->volume_server.data_transfer_protocol,
 							   "true") == 0);
 
+		/*
+		 * Reach the datanodes by hostname rather than by the address the
+		 * namenode reports, which is what a containerised or NATed cluster
+		 * needs.  The option was accepted and parsed all along, and then went
+		 * nowhere: gopherOptions had no field for it.
+		 */
+		if (vopt->volume_server.dfs_client_use_datanode_hostname != NULL)
+			opt->gopher->dfs_client_use_datanode_hostname =
+				(pg_strcasecmp(vopt->volume_server.dfs_client_use_datanode_hostname,
+							   "true") == 0);
+
 		/* HA volumes: wire the nameservice / failover config for gopher. */
 		if (vopt->volume_server.is_ha_supported != NULL &&
 			pg_strcasecmp(vopt->volume_server.is_ha_supported, "true") == 0)
@@ -781,19 +925,104 @@ parseVolumeOption(dataLakeOptions *opt, IcebergVolumeOptions* vopt)
  *     }
  *   }]
  * }
+ *
+ * vopt distinguishes the two callers:
+ *
+ *   NULL     -- no volume is configured, so this JSON is the sole source of
+ *               the connection settings.  Every field is written and the
+ *               required ones are validated here.
+ *   non-NULL -- a volume supplied whatever the user wrote in SQL OPTIONS, and
+ *               the remainder is expected to come from the `server_name` conf
+ *               section that only the agent can read.  Fill gaps only, so SQL
+ *               OPTIONS keep winning per key exactly as they do on the agent
+ *               side, and leave validation to the caller, which can name the
+ *               volume in the error.
+ *
+ * The volume is passed rather than a "gap-fill" flag because the flag is not
+ * enough: for the boolean settings, whether SQL wrote anything can only be
+ * answered from the volume's own options, and by the time this runs
+ * opt->gopher holds a bool that cannot say "unset".  See FILL_BOOL_GAP.
  */
 static void
-parseCatalogPropertiesOption(dataLakeOptions *opt, const char *catalog_properties)
+parseCatalogPropertiesOption(dataLakeOptions *opt, const char *catalog_properties,
+							 IcebergVolumeOptions *vopt)
 {
+/*
+ * Fill one gopher field from the catalog's config object, honouring the
+ * gap-fill rule: in gap-fill mode the SQL OPTIONS already spoke for any field
+ * that is set, so only a NULL one may be written.
+ */
+#define FILL_STRING_GAP(json_key, field) \
+	do { \
+		json_t *v_ = json_object_get(config, (json_key)); \
+		if (v_ && json_is_string(v_) && \
+			(!fill_gaps_only || opt->gopher->field == NULL)) \
+			opt->gopher->field = pstrdup(json_string_value(v_)); \
+	} while (0)
+
+/*
+ * The bool counterpart, which cannot decide the question the same way: false
+ * is both the palloc0 default and a legitimate SQL answer, so "is this field
+ * still a gap?" has nothing to read off opt->gopher.  `written` carries the
+ * answer instead -- true when the volume's SQL OPTIONS spelled the option out
+ * -- which restores the same rule the strings follow: SQL wins, the conf
+ * section fills the rest.
+ *
+ * This used to be a plain no-op in gap-fill mode, which dropped the conf
+ * file's value outright.  For is_ha_supported that was worse than losing a
+ * knob: dfs_nameservices and friends arrive through FILL_STRING_GAP either
+ * way, so gopher was handed a nameservice with HA switched off, and dialled
+ * the nameservice name as a hostname on setGopherNamenode's default port --
+ * an address that resolves nowhere.  data_transfer_protocol was silently lost
+ * the same way, which a cluster requiring SASL on the data path refuses.
+ */
+#define FILL_BOOL_GAP(json_key, field, written) \
+	do { \
+		json_t *v_ = json_object_get(config, (json_key)); \
+		if (v_ && json_is_string(v_) && !(fill_gaps_only && (written))) \
+			opt->gopher->field = \
+				(pg_strcasecmp(json_string_value(v_), "true") == 0); \
+	} while (0)
+
 	json_t		   *root;
 	json_error_t	error;
 	json_t		   *config;
 	json_t		   *credentials;
 	json_t		   *val;
+	bool			fill_gaps_only = (vopt != NULL);
+
+	/*
+	 * Which booleans the volume's SQL OPTIONS wrote explicitly.  Recorded
+	 * here because this is the last place that still knows: the volume spells
+	 * them as strings (NULL when absent) plus path_style_access_set, while
+	 * opt->gopher has only the bools parseVolumeOption() already resolved.
+	 */
+	bool			sql_wrote_path_style =
+		(vopt != NULL && vopt->volume_server.path_style_access_set);
+	bool			sql_wrote_is_ha =
+		(vopt != NULL && vopt->volume_server.is_ha_supported != NULL);
+	bool			sql_wrote_transfer_protocol =
+		(vopt != NULL && vopt->volume_server.data_transfer_protocol != NULL);
+	bool			sql_wrote_datanode_hostname =
+		(vopt != NULL &&
+		 vopt->volume_server.dfs_client_use_datanode_hostname != NULL);
 
 	root = json_loads(catalog_properties, 0, &error);
 	if (!root)
+	{
+		/*
+		 * In gap-fill mode this JSON is a secondary source: the volume already
+		 * supplied whatever the user wrote, and a catalog whose properties are
+		 * not in the S3 shape this function reads -- or are absent altogether
+		 * -- is a normal configuration, not an error.  Skip, and let the
+		 * caller's completeness check name the volume if something is really
+		 * missing.  With no volume at all (fill_gaps_only false) this is the
+		 * sole source of the connection settings, so it must still raise.
+		 */
+		if (fill_gaps_only)
+			return;
 		elog(ERROR, "parseCatalogPropertiesOption: failed to parse JSON: %s", error.text);
+	}
 
 	PG_TRY();
 	{
@@ -802,26 +1031,91 @@ parseCatalogPropertiesOption(dataLakeOptions *opt, const char *catalog_propertie
 		 * catalog responses today. Pass "s3" — iceberg-gopher accepts it as
 		 * a first-class UFS type (alongside legacy "s3a").
 		 */
-		opt->gopher->gopherType = pstrdup("s3");
+		if (opt->gopher->gopherType == NULL)
+			opt->gopher->gopherType = pstrdup("s3");
 
 		/* Parse "config" object */
 		config = json_object_get(root, "config");
 		if (config && json_is_object(config))
 		{
+			/*
+			 * HDFS keys keep their SQL OPTION spelling on the wire, so a
+			 * value can be traced from the conf file through the agent's
+			 * response to gopher without a rename in between.  Only the
+			 * namenode is load-bearing -- without it
+			 * datalakeCreateGopherConfig reports "Unrecognized hdfs name
+			 * node" on the first write -- but the auth and HA knobs travel
+			 * with it, because a kerberised or HA cluster is unreachable
+			 * without them and they are equally absent from the SQL OPTIONS
+			 * of a volume that names only a conf section.
+			 */
+			if (opt->gopher->hdfs_namenode_host == NULL ||
+				!fill_gaps_only)
+			{
+				json_t *nn = json_object_get(config, "hdfs_namenodes");
+				json_t *port = json_object_get(config, "hdfs_port");
+
+				if (nn && json_is_string(nn))
+					setGopherNamenode(opt, json_string_value(nn),
+									  (port && json_is_string(port))
+									  ? json_string_value(port) : NULL);
+			}
+
+			FILL_STRING_GAP("hdfs_auth_method", hdfs_auth_method);
+			FILL_STRING_GAP("krb_principal", krb_principal);
+			FILL_STRING_GAP("krb_principal_keytab", krb_principal_keytab);
+			FILL_STRING_GAP("hadoop_rpc_protection", hadoop_rpc_protection);
+			FILL_STRING_GAP("data_transfer_protection", data_transfer_protection);
+			FILL_STRING_GAP("dfs_nameservices", dfs_name_services);
+			FILL_STRING_GAP("dfs_ha_namenodes", dfs_ha_namenodes);
+			FILL_STRING_GAP("dfs_namenode_rpc_address", dfs_ha_namenode_rpc_addr);
+			FILL_STRING_GAP("dfs_client_failover_proxy_provider",
+							dfs_client_failover);
+			FILL_STRING_GAP("username", hdfs_user);
+			FILL_BOOL_GAP("is_ha_supported", is_ha_supported,
+						  sql_wrote_is_ha);
+			FILL_BOOL_GAP("data_transfer_protocol", data_transfer_protocol,
+						  sql_wrote_transfer_protocol);
+			FILL_BOOL_GAP("dfs_client_use_datanode_hostname",
+						  dfs_client_use_datanode_hostname,
+						  sql_wrote_datanode_hostname);
+
 			val = json_object_get(config, "s3.endpoint");
-			if (val && json_is_string(val))
-				opt->gopher->host = pstrdup(json_string_value(val));
+			if (val && json_is_string(val) &&
+				(!fill_gaps_only || opt->gopher->host == NULL))
+				setGopherEndpoint(opt, json_string_value(val));
 
 			val = json_object_get(config, "client.region");
-			if (val && json_is_string(val))
+			if (val && json_is_string(val) &&
+				(!fill_gaps_only || opt->gopher->region == NULL))
 				opt->gopher->region = pstrdup(json_string_value(val));
 
+			/*
+			 * useVirtualHost is a plain bool, so by the time it reaches this
+			 * function an unwritten volume option is indistinguishable from an
+			 * explicit "false" -- parseVolumeOption() writes it either way.  A
+			 * NULL test cannot decide this one, so it is decided by the
+			 * volume's own path_style_access_set flag, like the HDFS booleans
+			 * above.
+			 *
+			 * Gap-fill must not reverse a choice the user actually wrote: a
+			 * volume with path_style_access = true against a path-style-only
+			 * endpoint such as MinIO would start signing virtual-host requests
+			 * the moment the catalog answered "s3.path-style-access": "false",
+			 * and the connection would fail.  So the catalog speaks here only
+			 * when SQL stayed silent.
+			 *
+			 * When the key is absent there is nothing to write: useVirtualHost
+			 * already holds the right default -- false (path style) from the
+			 * palloc0 in authoritative mode, matching parseVolumeOption's
+			 * unset-option default, or whatever parseVolumeOption resolved in
+			 * gap-fill mode.
+			 */
 			val = json_object_get(config, "s3.path-style-access");
-			if (val && json_is_string(val))
+			if (val && json_is_string(val) &&
+				!(fill_gaps_only && sql_wrote_path_style))
 				opt->gopher->useVirtualHost =
 					(pg_strcasecmp(json_string_value(val), "true") != 0);
-			else
-				opt->gopher->useVirtualHost = true;
 		}
 
 		/* Parse "storage-credentials" array */
@@ -832,7 +1126,8 @@ parseCatalogPropertiesOption(dataLakeOptions *opt, const char *catalog_propertie
 
 			/* Extract bucket from prefix URI, e.g. "s3://bucket/..." */
 			val = json_object_get(first_cred, "prefix");
-			if (val && json_is_string(val))
+			if (val && json_is_string(val) &&
+				(!fill_gaps_only || opt->gopher->bucket == NULL))
 			{
 				const char *prefix = json_string_value(val);
 				const char *scheme_end = strstr(prefix, "://");
@@ -852,11 +1147,13 @@ parseCatalogPropertiesOption(dataLakeOptions *opt, const char *catalog_propertie
 			if (cred_config && json_is_object(cred_config))
 			{
 				val = json_object_get(cred_config, "s3.access-key-id");
-				if (val && json_is_string(val))
+				if (val && json_is_string(val) &&
+					(!fill_gaps_only || opt->gopher->accessKey == NULL))
 					opt->gopher->accessKey = pstrdup(json_string_value(val));
 
 				val = json_object_get(cred_config, "s3.secret-access-key");
-				if (val && json_is_string(val))
+				if (val && json_is_string(val) &&
+					(!fill_gaps_only || opt->gopher->secretKey == NULL))
 					opt->gopher->secretKey = pstrdup(json_string_value(val));
 			}
 		}
@@ -881,11 +1178,18 @@ parseCatalogPropertiesOption(dataLakeOptions *opt, const char *catalog_propertie
 			}
 		}
 
-		/* Validate required fields */
-		if (opt->gopher->host == NULL)
-			elog(ERROR, "parseCatalogPropertiesOption: missing s3.endpoint in catalog properties");
-		if (opt->gopher->bucket == NULL)
-			elog(ERROR, "parseCatalogPropertiesOption: could not determine bucket from catalog properties");
+		/*
+		 * Validate required fields.  Skipped in gap-fill mode: there the
+		 * caller knows the volume name and can say something more useful than
+		 * "catalog properties".
+		 */
+		if (!fill_gaps_only)
+		{
+			if (opt->gopher->host == NULL)
+				elog(ERROR, "parseCatalogPropertiesOption: missing s3.endpoint in catalog properties");
+			if (opt->gopher->bucket == NULL)
+				elog(ERROR, "parseCatalogPropertiesOption: could not determine bucket from catalog properties");
+		}
 	}
 	PG_CATCH();
 	{
@@ -895,6 +1199,9 @@ parseCatalogPropertiesOption(dataLakeOptions *opt, const char *catalog_propertie
 	PG_END_TRY();
 
 	json_decref(root);
+
+#undef FILL_STRING_GAP
+#undef FILL_BOOL_GAP
 }
 
 /*
@@ -922,8 +1229,9 @@ extractCatalogProperties(List *fdw_private)
 	len = list_length(fdw_private);
 
 	/*
-	 * Walk backwards: skip trailing Integer nodes (random segments),
-	 * then check the node just before them.
+	 * Walk backwards: skip trailing Integer nodes (random segments), then
+	 * check the node just before them.
+	 *
 	 */
 	for (i = len - 1; i >= 2; i--)
 	{
@@ -1067,12 +1375,21 @@ icebergVolumeBeginForeignModify(ModifyTableState *mtstate,
 {
 	icebergVolumeScanState* vState = (icebergVolumeScanState*)resultRelInfo->ri_FdwState;
 
+	/* Same reasoning as in icebergVolumeBeginForeignScan(). */
+	rejectStandaloneVolumeScan(vState);
+
 	/*
-	 * Always try to extract catalog_properties from fdw_private.
-	 * Even with a volume, we need table-location for the correct data path.
+	 * Take catalog_properties from fdw_private when the planner put them
+	 * there.  Only overwrite on a hit: on the modify path the iceberg AM has
+	 * already placed the dispatched properties on this state, and fdw_private
+	 * carries none, so assigning unconditionally would erase them.
 	 */
-	vState->iceTable.catalog_properties =
-		extractCatalogProperties(fdw_private);
+	{
+		const char *props = extractCatalogProperties(fdw_private);
+
+		if (props != NULL)
+			vState->iceTable.catalog_properties = props;
+	}
 
 	DatalakeFdwBeginScanConfig config = {
 		.get_options_func = iceberg_volume_get_options,

@@ -16,6 +16,9 @@ MC_ALIAS_URL = http://minio:9000
 MC_ALIAS_KEY = admin
 MC_ALIAS_SECRET = admin12345
 
+# The mc steps below are best-effort: mc is not on PATH in every test
+# environment, and their `|| true` hides that.  The tests no longer depend
+# on them -- each clears its own rows after CREATE.
 installcheck:
 	@echo "=== Cleaning old iceberg_am_s3 minio data ==="
 	@mc alias set local $(MC_ALIAS_URL) $(MC_ALIAS_KEY) $(MC_ALIAS_SECRET) 2>/dev/null || true
@@ -23,6 +26,10 @@ installcheck:
 	@mc rm --recursive --force local/warehouse/iceberg_s3_acid_double_update/ 2>/dev/null || true
 	@echo "=== Running pg_regress tests ==="
 	$(pg_regress_installcheck) $(REGRESS)
+
+generate-expected:
+	@if [ -d results ]; then mkdir -p expected; cp results/*.out expected/; \
+		echo "Copied results to expected/"; else echo "Run installcheck first."; fi
 
 clean:
 	rm -rf results/ regression.diffs regression.out tmp_check/ log/

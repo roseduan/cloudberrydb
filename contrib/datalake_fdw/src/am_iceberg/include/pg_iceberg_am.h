@@ -173,6 +173,17 @@ extern void pg_iceberg_stash_modify_fragments(Oid relid, List *fragments);
 extern List *pg_iceberg_take_modify_fragments(Oid relid);
 
 /*
+ * The same three carriers for the catalog properties the modify path needs
+ * on the segments (issue #410).  take() returns a string allocated in the
+ * caller's context and drops the module's own copy, so the caller may keep
+ * it for as long as that context lives and must not pfree it early.
+ */
+extern char *pg_iceberg_get_catalog_properties_json(Relation rel);
+extern void pg_iceberg_stash_modify_catalog_properties(Oid relid,
+														   const char *properties);
+extern char *pg_iceberg_take_modify_catalog_properties(Oid relid);
+
+/*
  * Process-local cache of ANALYZE-time fragment lists, keyed by relid.
  * Filled on the QE by the PgIcebergAnalyzeDispatch ExtensibleNode handler,
  * consumed by pg_iceberg_acquire_sample_rows (issue #352).

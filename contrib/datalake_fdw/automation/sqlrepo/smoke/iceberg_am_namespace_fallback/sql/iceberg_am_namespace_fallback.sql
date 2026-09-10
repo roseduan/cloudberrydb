@@ -61,6 +61,11 @@ SET iceberg_default_catalog = 'nsfb_cat';
 -- ============================================================
 CREATE ICEBERG TABLE nsfb_tier1 (id int, val text)
     OPTIONS (namespace 'nsfb_explicit', table 'nsfb_tier1');
+-- pg_regress recreates the database but not the warehouse, so CREATE above
+-- re-attached to the rows a previous run left and every count below climbs
+-- (2 -> 6 -> 10 ...).  Clear them; the DO wrapper hides the row count, which
+-- is 0 on a first run, and TRUNCATE is a no-op on this access method.
+DO $$ BEGIN DELETE FROM nsfb_tier1; END $$;
 INSERT INTO nsfb_tier1 VALUES (1, 'a'), (2, 'b');
 SELECT count(*) FROM nsfb_tier1;
 
@@ -71,6 +76,7 @@ SELECT count(*) FROM nsfb_tier1;
 SET iceberg_default_catalog = 'nsfb_cat_def';
 CREATE ICEBERG TABLE nsfb_tier2 (id int, val text)
     OPTIONS (table 'nsfb_tier2');
+DO $$ BEGIN DELETE FROM nsfb_tier2; END $$;
 INSERT INTO nsfb_tier2 VALUES (1, 'a'), (2, 'b');
 SELECT count(*) FROM nsfb_tier2;
 SET iceberg_default_catalog = 'nsfb_cat';
@@ -83,6 +89,7 @@ SET iceberg_default_catalog = 'nsfb_cat';
 -- ============================================================
 CREATE ICEBERG TABLE nsfb_tier3 (id int, val text)
     OPTIONS (table 'nsfb_tier3');
+DO $$ BEGIN DELETE FROM nsfb_tier3; END $$;
 INSERT INTO nsfb_tier3 VALUES (1, 'a'), (2, 'b'), (3, 'c');
 SELECT count(*) FROM nsfb_tier3;
 
@@ -110,6 +117,7 @@ SELECT count(*) FROM nsfb_tier3;
 CREATE SCHEMA nsfb_schema;
 CREATE ICEBERG TABLE nsfb_schema.nsfb_tier3 (id int, val text)
     OPTIONS (table 'nsfb_tier3');
+DO $$ BEGIN DELETE FROM nsfb_schema.nsfb_tier3; END $$;
 INSERT INTO nsfb_schema.nsfb_tier3 VALUES (100, 'other schema');
 SELECT count(*) FROM nsfb_schema.nsfb_tier3;
 
