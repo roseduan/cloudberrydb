@@ -62,8 +62,9 @@ makeIcebergReadRecordBatch()
 
 icebergReadRecordBatch::icebergReadRecordBatch()
 	: protocolContext(nullptr), fileScanTasks(nullptr), curTaskIndex(0),
-	  fileOpen(false), deleteIndex(nullptr), curBitmap(nullptr),
-	  curSelRg(0), posInSelRg(0), pool(nullptr), c_batch(new IcebergCBatch())
+	  fileOpen(false), decimalRgCursor(0), decimalRowsInRg(0),
+	  deleteIndex(nullptr), curBitmap(nullptr), curSelRg(0), posInSelRg(0),
+	  pool(nullptr), c_batch(new IcebergCBatch())
 {}
 
 icebergReadRecordBatch::~icebergReadRecordBatch() = default;
@@ -153,8 +154,10 @@ icebergReadRecordBatch::openCurrentTask()
 		 * drop entries from) the compact list.
 		 */
 		List *datafileDesc = protocolContext->file->reader->datafileDesc;
+		TupleDesc sd = scanstate->scan_tupdesc;
 		emitAttr.clear();
 		emitRawPos.clear();
+		decimalCols.clear();
 		std::vector<int> emitPhysical;
 
 		ListCell *lc;
@@ -166,11 +169,36 @@ icebergReadRecordBatch::openCurrentTask()
 			emitPhysical.push_back(matchParquetColumn(schema, fd, hasFieldIds));
 		}
 
-		/* Distinct physical columns, sorted ascending -> deterministic raw
-		 * batch column order regardless of Arrow's own ordering. */
+		/*
+		 * Route numeric(decimal) columns physically stored as FIXED_LEN_BYTE_ARRAY
+		 * to the low-level FLBA path (buildNumeric128FromFLBA -- fast
+		 * precision-branched decode), and exclude them from the Arrow reader so we
+		 * never pay libparquet's always-128-bit FromBigEndian decode.  A decimal
+		 * stored some other way (int32/int64) falls through to the Arrow +
+		 * normalizeParquetVecColumn path.
+		 */
+		std::set<int> decimalPhys;
+		for (size_t k = 0; k < emitPhysical.size(); k++)
+		{
+			int phys = emitPhysical[k];
+			if (phys < 0 || sd->attrs[emitAttr[k]].atttypid != NUMERICOID)
+				continue;
+			const parquet::ColumnDescriptor *cd = schema->Column(phys);
+			auto lt = cd->logical_type();
+			if (cd->physical_type() != parquet::Type::FIXED_LEN_BYTE_ARRAY ||
+				!lt || !lt->is_decimal())
+				continue;
+			const auto &dt = static_cast<const parquet::DecimalLogicalType &>(*lt);
+			decimalCols.push_back({ (int) k, phys, dt.precision(), dt.scale(),
+									cd->type_length() });
+			decimalPhys.insert(phys);
+		}
+
+		/* Distinct physical columns for the Arrow reader (decimals excluded),
+		 * sorted ascending -> deterministic raw batch column order. */
 		std::set<int> physSet;
 		for (int p : emitPhysical)
-			if (p >= 0)
+			if (p >= 0 && decimalPhys.find(p) == decimalPhys.end())
 				physSet.insert(p);
 		std::vector<int> colIndices(physSet.begin(), physSet.end());
 		std::map<int, int> physToRaw;
@@ -179,7 +207,14 @@ icebergReadRecordBatch::openCurrentTask()
 
 		emitRawPos.resize(emitPhysical.size());
 		for (size_t k = 0; k < emitPhysical.size(); k++)
-			emitRawPos[k] = (emitPhysical[k] >= 0) ? physToRaw[emitPhysical[k]] : -1;
+		{
+			if (emitPhysical[k] < 0)
+				emitRawPos[k] = -1;						/* absent -> NULL fill */
+			else if (decimalPhys.find(emitPhysical[k]) != decimalPhys.end())
+				emitRawPos[k] = -2;						/* EMIT_DECIMAL_FLBA (low-level) */
+			else
+				emitRawPos[k] = physToRaw[emitPhysical[k]];
+		}
 
 		/*
 		 * Select row groups by the task byte range (mirrors the row path's
@@ -253,6 +288,16 @@ icebergReadRecordBatch::openCurrentTask()
 						  "get record batch reader");
 		rbr = std::move(reader);
 
+		/* Low-level FLBA decimal columns read the SAME selected row groups in
+		 * lockstep with the Arrow batches (which never cross a row-group
+		 * boundary), tracked by decimalRgCursor/decimalRowsInRg over selRowGroups. */
+		selRowGroups = rowGroups;
+		decimalRgCursor = 0;
+		decimalRowsInRg = 0;
+		decimalReaders.clear();
+		if (!decimalCols.empty())
+			openDecimalReadersForRg(0);
+
 		/* MOR position deletes for this data file (NULL if none). */
 		curBitmap = deleteIndex
 			? icebergDeleteIndexLookup((IcebergDeleteIndex *) deleteIndex, dataFile->filePath)
@@ -269,11 +314,70 @@ icebergReadRecordBatch::openCurrentTask()
 void
 icebergReadRecordBatch::closeCurrentFile()
 {
+	/* Release the low-level FLBA readers before their owning ParquetFileReader. */
+	decimalReaders.clear();
 	rbr.reset();
 	arrowReader.reset();
 	if (fileOpen)
 		fileReader.closeParquetReader();
 	fileOpen = false;
+}
+
+void
+icebergReadRecordBatch::openDecimalReadersForRg(int selRgPos)
+{
+	decimalRgCursor = selRgPos;
+	decimalRowsInRg = 0;
+	decimalReaders.clear();
+	if (selRgPos >= (int) selRowGroups.size())
+		return;
+	std::shared_ptr<::parquet::RowGroupReader> rg =
+		arrowReader->parquet_reader()->RowGroup(selRowGroups[selRgPos]);
+	for (size_t j = 0; j < decimalCols.size(); j++)
+		decimalReaders.push_back(rg->Column(decimalCols[j].physColIdx));
+}
+
+std::vector<std::shared_ptr<::parquet_arrow::Array>>
+icebergReadRecordBatch::readDecimalBatch(int64_t nrows)
+{
+	/* Arrow batches never cross a row-group boundary, so once the current rg is
+	 * drained the next batch belongs to the next selected rg. */
+	if (decimalRowsInRg >= selNumRows[decimalRgCursor])
+		openDecimalReadersForRg(decimalRgCursor + 1);
+
+	std::vector<std::shared_ptr<::parquet_arrow::Array>> arrs(decimalCols.size());
+	std::vector<::parquet::FixedLenByteArray> vals((size_t) nrows);
+	std::vector<int16_t> defs((size_t) nrows);
+	for (size_t j = 0; j < decimalCols.size(); j++)
+	{
+		auto *tr = static_cast<::parquet::FixedLenByteArrayReader *>(decimalReaders[j].get());
+		int16_t maxDef = tr->descr()->max_definition_level();
+		int16_t *defsPtr = (maxDef > 0) ? defs.data() : nullptr;
+		/* ReadBatch stops at a data-page boundary and may return fewer rows than
+		 * requested, so loop until this batch's whole nrows are read.  Dense
+		 * (non-null) values accumulate contiguously in `vals`; def levels fill one
+		 * slot per row in `defs`. */
+		int64_t rowsGot = 0, valsGot = 0;
+		while (rowsGot < nrows)
+		{
+			int64_t vr = 0;
+			int64_t lv = tr->ReadBatch(nrows - rowsGot,
+									   defsPtr ? defsPtr + rowsGot : nullptr, nullptr,
+									   vals.data() + valsGot, &vr);
+			if (lv <= 0)
+				break;
+			rowsGot += lv;
+			valsGot += vr;
+		}
+		if (rowsGot != nrows)
+			elog(ERROR, "datalake parquet vectorized read: decimal FLBA read %ld of %ld "
+				 "rows (row-group misalignment)", (long) rowsGot, (long) nrows);
+		arrs[j] = buildNumeric128FromFLBA(pool, vals.data(), defsPtr, maxDef, nrows,
+										  decimalCols[j].typeLength,
+										  decimalCols[j].precision, decimalCols[j].scale);
+	}
+	decimalRowsInRg += nrows;
+	return arrs;
 }
 
 void
@@ -284,6 +388,18 @@ icebergReadRecordBatch::assembleOut(const std::shared_ptr<::parquet_arrow::Recor
 	out.reset();
 	numericColIndices.clear();
 
+	/* Numeric(decimal) FLBA columns: read this batch's rows low-level and decode
+	 * straight to numeric128, in lockstep with the Arrow batch above. */
+	std::vector<std::shared_ptr<::parquet_arrow::Array>> decArrs;
+	std::vector<int> decForEmit;
+	if (!decimalCols.empty())
+	{
+		decArrs = readDecimalBatch(nrows);
+		decForEmit.assign(emitAttr.size(), -1);
+		for (size_t j = 0; j < decimalCols.size(); j++)
+			decForEmit[decimalCols[j].emitK] = (int) j;
+	}
+
 	for (size_t k = 0; k < emitAttr.size(); k++)
 	{
 		int attr = emitAttr[k];					/* index into sd (== k) */
@@ -292,7 +408,14 @@ icebergReadRecordBatch::assembleOut(const std::shared_ptr<::parquet_arrow::Recor
 		std::string name(sd->attrs[attr].attname.data);
 		int batch_index = (int) k;
 
-		if (rawPos >= 0)
+		if (rawPos == -2)						/* EMIT_DECIMAL_FLBA: low-level numeric128 */
+		{
+			parquetVecAddColOrCreate(out,
+				::parquet_arrow::field(name, ::parquet_arrow::fixed_size_binary(16)),
+				decArrs[decForEmit[k]], nrows, batch_index);
+			numericColIndices.push_back(batch_index);
+		}
+		else if (rawPos >= 0)
 		{
 			std::shared_ptr<::parquet_arrow::Array> normArr;
 			std::shared_ptr<::parquet_arrow::DataType> normType;

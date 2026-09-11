@@ -52,6 +52,7 @@ namespace parquet_arrow {
 	class RecordBatchReader;
 }
 namespace parquet { namespace arrow { class FileReader; } }
+namespace parquet { class ColumnReader; }
 
 namespace Datalake {
 namespace Internal {
@@ -79,6 +80,12 @@ private:
 	/* Assemble one engine-Arrow batch (table-attribute order) from a raw
 	 * parquet-arrow batch and export it into c_batch. */
 	void assembleOut(const std::shared_ptr<::parquet_arrow::RecordBatch> &raw);
+	/* (Re)open the low-level FLBA column readers for selected row group
+	 * `selRgPos` (advances the decimal read cursor). */
+	void openDecimalReadersForRg(int selRgPos);
+	/* Read `nrows` of each low-level decimal column for the current batch and
+	 * return the built numeric128 arrays (parallel to decimalCols). */
+	std::vector<std::shared_ptr<::parquet_arrow::Array>> readDecimalBatch(int64_t nrows);
 
 	DatalakeProtocolContext	   *protocolContext;
 	List					   *fileScanTasks;		/* borrowed from the row reader */
@@ -92,9 +99,27 @@ private:
 
 	/* Emit plan for the current file, in table-attribute (ascending) order:
 	 * emitAttr[k] = PG attnum index of the k-th emitted column;
-	 * emitRawPos[k] = its position in the raw batch, or -1 for absent -> NULL. */
+	 * emitRawPos[k] = its position in the raw batch, or -1 for absent -> NULL,
+	 * or EMIT_DECIMAL_FLBA (-2) for a numeric column read low-level (see below). */
 	std::vector<int>			emitAttr;
 	std::vector<int>			emitRawPos;
+
+	/*
+	 * Numeric(decimal) columns are excluded from the Arrow RecordBatchReader and
+	 * read low-level as raw big-endian FLBA (TypedColumnReader<FLBAType>), then
+	 * decoded straight to engine numeric128 via the fast precision-branched path
+	 * (buildNumeric128FromFLBA) -- this skips libparquet's always-128-bit
+	 * RawBytesToDecimalBytes/FromBigEndian decode and the intermediate
+	 * Decimal128Array.  The low-level readers advance in lockstep with the Arrow
+	 * batches: Arrow batches never cross a row-group boundary, so a per-row-group
+	 * cursor (decimalRgCursor/decimalRowsInRg over selRowGroups) stays aligned.
+	 */
+	struct DecimalFlbaCol { int emitK; int physColIdx; int precision; int scale; int typeLength; };
+	std::vector<DecimalFlbaCol>	decimalCols;
+	std::vector<int>			selRowGroups;		/* file row-group index of each selected rg */
+	std::vector<std::shared_ptr<::parquet::ColumnReader>> decimalReaders; /* for selRowGroups[decimalRgCursor] */
+	int							decimalRgCursor;	/* selected-rg index the low-level readers are on */
+	int64_t						decimalRowsInRg;	/* rows already consumed from that rg */
 
 	/* Output-column indices re-encoded as numeric128 (re-tagged on export). */
 	std::vector<int>			numericColIndices;
