@@ -1661,7 +1661,11 @@ void datalakeCheckValidRecordBatchOpt(dataLakeOptions *options)
 	}
 	else if (FORMAT_IS_ICEBERG(options->format))
 	{
-		/* FDW-iceberg vectorized read: parquet data files, no MOR deletes yet */
+		/*
+		 * FDW-iceberg vectorized read: parquet data files.  MOR position
+		 * deletes are applied (per-scan Roaring index); equality deletes are
+		 * refused with an error and fall back to the row engine.
+		 */
 	}
 	else
 	{
