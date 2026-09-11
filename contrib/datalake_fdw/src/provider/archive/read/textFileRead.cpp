@@ -152,7 +152,8 @@ bool textFileRead::createPolicy() {
     }
 
 	segid = dummy_segid;
-	readPolicy.textFileBuild(dummy_segid, dummy_segnums, CUT_TEXTFILE_BLOCK_SIZE, lists, fileStream, options);
+	readPolicy.textFileBuild(dummy_segid, dummy_segnums,
+							 external_table_text_block_size * 1024, lists, fileStream, options);
 	readPolicy.distBlock();
 	serial = readPolicy.start;
 	lineReader->setSegId(dummy_segid);
@@ -368,7 +369,19 @@ bool textFileRead::readNextFile() {
                 return openTextFile(info);
             } else {
                 updateMetaInfo(info);
-                bool finalBlock = (serial == (int)readPolicy.end) ? true : false;
+                /*
+                 * readPolicy.end is EXCLUSIVE: readNextFile() stops at `serial >=
+                 * end`, so the last block this segment reads is end - 1.  Testing
+                 * `serial == end` is never true, which silently disabled finalBlock
+                 * and with it the `extra_fetch_line_num = 2` completion in
+                 * customNext() -- the record straddling the block boundary was
+                 * handed up truncated while the next block still skipped 2 lines,
+                 * losing a whole row too.  The two 2s are a pair: read two lines
+                 * past this block's end, skip two at the next block's start.
+                 * Broke in 3b84ce1a9e5, which made `end` exclusive and updated the
+                 * loop guard but not these two tests.
+                 */
+                bool finalBlock = (serial == (int)readPolicy.end - 1) ? true : false;
                 lineReader->updateSplit(info, finalBlock);
                 skip_first_line = false;
                 if (lineReader->getPos() >= curMetaInfo.rangeOffsetEnd) {
@@ -420,7 +433,19 @@ bool textFileRead::openTextFile(metaInfo info) {
     lineReader->resetLineRecordReader();
     lineReader->setState(LINE_RECORD_OK);
     lineReader->updateNewReader(reader.get());
-    bool finalBlock = (serial == (int)readPolicy.end) ? true : false;
+    /*
+     * readPolicy.end is EXCLUSIVE: readNextFile() stops at `serial >=
+     * end`, so the last block this segment reads is end - 1.  Testing
+     * `serial == end` is never true, which silently disabled finalBlock
+     * and with it the `extra_fetch_line_num = 2` completion in
+     * customNext() -- the record straddling the block boundary was
+     * handed up truncated while the next block still skipped 2 lines,
+     * losing a whole row too.  The two 2s are a pair: read two lines
+     * past this block's end, skip two at the next block's start.
+     * Broke in 3b84ce1a9e5, which made `end` exclusive and updated the
+     * loop guard but not these two tests.
+     */
+    bool finalBlock = (serial == (int)readPolicy.end - 1) ? true : false;
 	lineReader->updateSplit(info, finalBlock);
     updateMetaInfo(info);
     skipNum = (info.rangeOffset != 0) ? 2 : 0;

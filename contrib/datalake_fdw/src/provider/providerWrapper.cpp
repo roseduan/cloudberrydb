@@ -8,6 +8,15 @@ extern "C" {
 
 bool external_table_debug = false;
 bool external_table_new_text = false;
+/*
+ * Size, in kB, of the blocks the new text reader cuts a large file into.
+ * Overridable so a regression test can reach the multi-block path with a
+ * small fixture: at the 32 MB default, crossing even one block boundary
+ * needs a 32 MB+ file, which is why the boundary handling stayed untested.
+ * The default itself is TEXT_BLOCK_SIZE_DEFAULT_KB (providerWrapper.h),
+ * shared with the GUC's boot value in datalake_fdw.c.
+ */
+int external_table_text_block_size = TEXT_BLOCK_SIZE_DEFAULT_KB;
 bool external_table_ignore_hidden_file = false;
 bool enable_set_hdfs_user = true;
 

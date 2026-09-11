@@ -295,6 +295,19 @@ _PG_init(void)
 							NULL,
 							NULL);
 
+	DefineCustomIntVariable("datalake.external_table_text_block_size",
+							"Size of the blocks the new text reader splits a large file into; must exceed the longest single record.",
+							NULL,
+							&external_table_text_block_size,
+							TEXT_BLOCK_SIZE_DEFAULT_KB,
+							64,
+							1024 * 1024,
+							PGC_USERSET,
+							GUC_UNIT_KB,
+							NULL,
+							NULL,
+							NULL);
+
 	DefineCustomIntVariable("datalake.iceberg_postion_deletes_threshold",
 							"default iceberg position delete file threshold",
 							NULL,

@@ -7,8 +7,6 @@
 #include <string>
 #include "src/provider/provider.h"
 
-#define CUT_TEXTFILE_BLOCK_SIZE (32*1024*1024)
-
 namespace Datalake {
 namespace Internal {
 

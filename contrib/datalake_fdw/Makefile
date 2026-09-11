@@ -187,7 +187,8 @@ REGRESS = setup \
         orc_read parquet_read avro_read iresearch_orc_test iresearch_orc_vec_test \
         oss_read_new_text oss_read_text grammar_convert gphdfs_ignore_file gphdfs_custom \
         oss_read_new_text_limit_segment oss_read_orc_limit_segment oss_read_parquet_limit_segment oss_read_text_limit_segment \
-		iceberg_test iceberg_no_extension iceberg_am_misuse iceberg_site_config
+		iceberg_test iceberg_no_extension iceberg_am_misuse iceberg_site_config \
+		text_block_boundary
 endif
 REGRESS_OPTS += --init-file=test/init_file
 
