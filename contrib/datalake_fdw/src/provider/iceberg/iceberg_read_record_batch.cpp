@@ -244,6 +244,19 @@ icebergReadRecordBatch::openCurrentTask()
 				!lt || !lt->is_decimal())
 				continue;
 			const auto &dt = static_cast<const parquet::DecimalLogicalType &>(*lt);
+			/*
+			 * Same 120-bit budget the Arrow decimal128 path enforces in
+			 * normalizeParquetVecColumn: precision <= 35
+			 * (VEC_NUMERIC_MAX_PRECISION) and 0 <= scale <= precision.  The
+			 * precision here is the FILE schema's, which the planner's
+			 * PG-column guard never sees, so a DECIMAL(38,10) file read
+			 * through a numeric(30,10) table would otherwise reach this fast
+			 * path and have encodeNumeric128 silently drop the top bits of
+			 * any value >= 2^120.  Skip it here and let the Arrow reader
+			 * refuse it with a clear error.
+			 */
+			if (dt.precision() > 35 || dt.scale() < 0 || dt.scale() > dt.precision())
+				continue;
 			decimalCols.push_back({ (int) k, phys, dt.precision(), dt.scale(),
 									cd->type_length() });
 			decimalPhys.insert(phys);
