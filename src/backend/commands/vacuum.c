@@ -1835,8 +1835,19 @@ vac_update_relstats(Relation relation,
 		dirty = true;
 	}
 
-	/* Similarly for relminmxid */
+	/*
+	 * Similarly for relminmxid.
+	 *
+	 * GPDB: as with relfrozenxid above, we check that the stored value is
+	 * valid, because append-optimized and PAX relations keep relminmxid as
+	 * InvalidMultiXactId -- they store no per-tuple transaction information,
+	 * so there is no multixact of theirs for the value to describe.  Without
+	 * this check the AO vacuum path (vacuum_ao.c, which passes a real
+	 * MultiXactCutoff) writes that cutoff over the Invalid value, because
+	 * InvalidMultiXactId precedes every valid one.
+	 */
 	if (MultiXactIdIsValid(minmulti) &&
+		MultiXactIdIsValid(pgcform->relminmxid) &&
 		pgcform->relminmxid != minmulti &&
 		(MultiXactIdPrecedes(pgcform->relminmxid, minmulti) ||
 		 MultiXactIdPrecedes(ReadNextMultiXactId(), pgcform->relminmxid)))

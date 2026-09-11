@@ -96,6 +96,13 @@ install: install-data
 	make -j10 -C build install
 
 .PHONY: pax-test
+#
+# The pax_test database is deliberately left behind: toast.sql ends with a
+# relation whose payload sits in an external toast file, and pg_upgrade's
+# test (src/bin/pg_upgrade/test_gpdb.sh) upgrades whatever databases the ICW
+# left in the cluster.  Dropping the database here would hide the only PAX
+# external-toast relation from the upgrade.  pg_regress drops and recreates
+# the database at the start of each run, so nothing accumulates.
 pax-test: 
 	@echo "Begin running pax tests"
 	@echo "Run pax-test with vector.enable_vectorization off"
@@ -103,14 +110,12 @@ pax-test:
 	$(PG_REGRESS) \
 		--init-file=init_file --schedule=pax_schedule \
 		--load-extension=gp_inject_fault --dbname=pax_test
-	$(bindir)/dropdb --if-exists pax_test
 ifeq ($(enable_vectorization),yes)
 	@echo "Run pax-test with vector.enable_vectorization on"
 	PGOPTIONS="$(PGOPTIONS) -c pax.enable_prefetch=on -c vector.enable_vectorization=on" \
 	$(PG_REGRESS) \
 		--init-file=init_file --schedule=pax_schedule \
 		--load-extension=gp_inject_fault --dbname=pax_test
-	$(bindir)/dropdb --if-exists pax_test
 endif
 
 .PHONY: icw_test

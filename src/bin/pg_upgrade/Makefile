@@ -26,7 +26,9 @@ OBJS = \
 	version.o
 # Source files specific to Cloudberry
 OBJS += greenplum/aotable.o greenplum/version_gp.o \
-		greenplum/check_gp.o greenplum/reporting.o \
+		greenplum/check_gp.o greenplum/check_pax.o \
+		greenplum/pg_upgrade_pax.o \
+		greenplum/reporting.o \
 		greenplum/aomd_filehandler.o greenplum/option_gp.o \
 		greenplum/controldata_gp.o greenplum/util.o \
 		greenplum/frozenxids_gp.o
@@ -67,14 +69,11 @@ greenplum/aomd_filehandler.c: $(top_srcdir)/src/backend/access/appendonly/aomd_f
 # See https://www.gnu.org/software/make/manual/html_node/MAKE-Variable.html#MAKE-Variable
 NOTSUBMAKEMAKE=$(MAKE)
 
-check:
-	# ignore pg_upgarde to make CI happy, issue: https://github.com/apache/cloudberry/issues/262
-
-#check: test_gpdb.sh all
-#	bash $< -C -r -s -o $(top_builddir)/gpAux/gpdemo/datadirs/ -b $(DESTDIR)$(bindir)
+check: test_gpdb.sh all
+	bash $< -C -s -o $(top_builddir)/gpAux/gpdemo/datadirs/ -b $(DESTDIR)$(bindir)
 
 perfcheck: test_gpdb.sh all
-	bash $< -p -r -o $(top_builddir)/gpAux/gpdemo/datadirs/ -b $(DESTDIR)$(bindir)
+	bash $< -p -r -V -o $(top_builddir)/gpAux/gpdemo/datadirs/ -b $(DESTDIR)$(bindir)
 
 # installcheck is not supported because there's no meaningful way to test
 # pg_upgrade against a single already-running server

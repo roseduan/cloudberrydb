@@ -170,6 +170,18 @@ transfer_single_new_db(FileNameMap *maps, int size, char *old_tablespace)
 			{
 				transfer_ao(&maps[mapnum]);
 			}
+			else if (type == PAX)
+			{
+				/*
+				 * PAX physical data is a directory of micro-partition
+				 * files (and visimap files) rooted at
+				 * <relfilenode>_pax/, not a numbered series of segment
+				 * files.  Delegate to a PAX-specific transfer routine
+				 * that walks the directory and link/copy/clone each
+				 * file individually.
+				 */
+				transfer_pax_relfilenode_dir(&maps[mapnum]);
+			}
 			else
 			{
 				/* transfer primary file */

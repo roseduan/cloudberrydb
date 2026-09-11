@@ -235,6 +235,7 @@ int main() {
       'n', /* prodataaccess */
       'a' /* proexeclocation: all */);
 
+  printf("\n");
   printf(
       "INSERT INTO pg_type "
       "VALUES(%u,'%s',%u,%u,%d,'%c','%c','%c','%c','%c','%c',"
@@ -271,6 +272,8 @@ int main() {
       0,                       /* pg_type.ndims */
       InvalidOid               /* pg_type.typcollation */
   );
+  printf("CREATE CAST (pg_ext_aux.paxauxstats AS pg_catalog.bytea) WITHOUT FUNCTION;\n");
+  printf("CREATE CAST (pg_catalog.bytea AS pg_ext_aux.paxauxstats) WITHOUT FUNCTION;\n");
 
   printf("\n");
   /* create pax auxiliary fast sequence table. */

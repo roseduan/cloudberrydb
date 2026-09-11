@@ -1,6 +1,8 @@
 set default_table_access_method = pax;
 set pax.enable_toast to true;
 CREATE TABLE pax_toasttest_t1(v1 text);
+NOTICE:  Table doesn't have 'DISTRIBUTED BY' clause -- Using column named 'v1' as the Apache Cloudberry data distribution key for this table.
+HINT:  The 'DISTRIBUTED BY' clause determines the distribution of data. Make sure column(s) chosen are the optimal data distribution key to minimize skew.
 alter TABLE pax_toasttest_t1 alter column v1 set storage plain;
 insert into pax_toasttest_t1 values(repeat('0', 100000000));
 alter TABLE pax_toasttest_t1 alter column v1 set storage extended;
@@ -20,6 +22,8 @@ select length(v1) from pax_toasttest_t1;
 
 drop table pax_toasttest_t1;
 CREATE TABLE pax_toasttest_t2(v1 text, v2 text, v3 text, v4 text, v5 text, v6 text);
+NOTICE:  Table doesn't have 'DISTRIBUTED BY' clause -- Using column named 'v1' as the Apache Cloudberry data distribution key for this table.
+HINT:  The 'DISTRIBUTED BY' clause determines the distribution of data. Make sure column(s) chosen are the optimal data distribution key to minimize skew.
 alter TABLE pax_toasttest_t2 alter column v1 set storage plain;
 alter TABLE pax_toasttest_t2 alter column v2 set storage extended;
 alter TABLE pax_toasttest_t2 alter column v3 set storage external;
@@ -135,6 +139,8 @@ drop table pax_toasttest_t2;
 -----------------------------------------------------------------------
 set pax.enable_toast to false;
 CREATE TABLE pax_toasttest_t1(v1 text);
+NOTICE:  Table doesn't have 'DISTRIBUTED BY' clause -- Using column named 'v1' as the Apache Cloudberry data distribution key for this table.
+HINT:  The 'DISTRIBUTED BY' clause determines the distribution of data. Make sure column(s) chosen are the optimal data distribution key to minimize skew.
 alter TABLE pax_toasttest_t1 alter column v1 set storage plain;
 insert into pax_toasttest_t1 values(repeat('0', 100000000));
 alter TABLE pax_toasttest_t1 alter column v1 set storage extended;
@@ -154,6 +160,8 @@ select length(v1) from pax_toasttest_t1;
 
 drop table pax_toasttest_t1;
 CREATE TABLE pax_toasttest_t2(v1 text, v2 text, v3 text, v4 text, v5 text, v6 text);
+NOTICE:  Table doesn't have 'DISTRIBUTED BY' clause -- Using column named 'v1' as the Apache Cloudberry data distribution key for this table.
+HINT:  The 'DISTRIBUTED BY' clause determines the distribution of data. Make sure column(s) chosen are the optimal data distribution key to minimize skew.
 alter TABLE pax_toasttest_t2 alter column v1 set storage plain;
 alter TABLE pax_toasttest_t2 alter column v2 set storage extended;
 alter TABLE pax_toasttest_t2 alter column v3 set storage external;
@@ -272,6 +280,8 @@ set enable_indexonlyscan = off;
 set enable_bitmapscan = on;
 set work_mem="64kB";
 create table pax_toasttest_t3(a int, b text);
+NOTICE:  Table doesn't have 'DISTRIBUTED BY' clause -- Using column named 'a' as the Apache Cloudberry data distribution key for this table.
+HINT:  The 'DISTRIBUTED BY' clause determines the distribution of data. Make sure column(s) chosen are the optimal data distribution key to minimize skew.
 insert into pax_toasttest_t3 select i, repeat('b_', 5000) from generate_series(1, 506841)i;
 create index on pax_toasttest_t3(a);
 create index on pax_toasttest_t3(a);
@@ -296,14 +306,14 @@ select count(*), count(a), count(b) from pax_toasttest_t3 where a >= 0;
 
 delete from pax_toasttest_t3 where a % 1000 = 0;
 explain select count(*), count(a), count(b) from pax_toasttest_t3 where a >= 0;
-                                                 QUERY PLAN                                                  
--------------------------------------------------------------------------------------------------------------
- Finalize Aggregate  (cost=511.19..511.20 rows=1 width=24)
-   ->  Gather Motion 3:1  (slice1; segments: 3)  (cost=511.12..511.17 rows=3 width=24)
-         ->  Partial Aggregate  (cost=511.12..511.13 rows=1 width=24)
-               ->  Bitmap Heap Scan on pax_toasttest_t3  (cost=261.54..469.79 rows=5511 width=36)
+                                                   QUERY PLAN                                                   
+----------------------------------------------------------------------------------------------------------------
+ Finalize Aggregate  (cost=8652.15..8652.16 rows=1 width=24)
+   ->  Gather Motion 3:1  (slice1; segments: 3)  (cost=8652.08..8652.13 rows=3 width=24)
+         ->  Partial Aggregate  (cost=8652.08..8652.09 rows=1 width=24)
+               ->  Bitmap Heap Scan on pax_toasttest_t3  (cost=5247.33..7385.10 rows=168930 width=10008)
                      Recheck Cond: (a >= 0)
-                     ->  Bitmap Index Scan on pax_toasttest_t3_a_idx1  (cost=0.00..260.16 rows=5511 width=0)
+                     ->  Bitmap Index Scan on pax_toasttest_t3_a_idx1  (cost=0.00..5205.10 rows=168930 width=0)
                            Index Cond: (a >= 0)
  Optimizer: Postgres query optimizer
 (8 rows)
@@ -316,14 +326,14 @@ select count(*), count(a), count(b) from pax_toasttest_t3 where a >= 0;
 
 update pax_toasttest_t3 set b = null where a % 1010 = 0;
 explain select count(*), count(a), count(b) from pax_toasttest_t3 where a >= 0;
-                                                 QUERY PLAN                                                  
--------------------------------------------------------------------------------------------------------------
- Finalize Aggregate  (cost=511.19..511.20 rows=1 width=24)
-   ->  Gather Motion 3:1  (slice1; segments: 3)  (cost=511.12..511.17 rows=3 width=24)
-         ->  Partial Aggregate  (cost=511.12..511.13 rows=1 width=24)
-               ->  Bitmap Heap Scan on pax_toasttest_t3  (cost=261.54..469.79 rows=5511 width=36)
+                                                   QUERY PLAN                                                   
+----------------------------------------------------------------------------------------------------------------
+ Finalize Aggregate  (cost=8652.15..8652.16 rows=1 width=24)
+   ->  Gather Motion 3:1  (slice1; segments: 3)  (cost=8652.08..8652.13 rows=3 width=24)
+         ->  Partial Aggregate  (cost=8652.08..8652.09 rows=1 width=24)
+               ->  Bitmap Heap Scan on pax_toasttest_t3  (cost=5247.33..7385.10 rows=168930 width=10008)
                      Recheck Cond: (a >= 0)
-                     ->  Bitmap Index Scan on pax_toasttest_t3_a_idx1  (cost=0.00..260.16 rows=5511 width=0)
+                     ->  Bitmap Index Scan on pax_toasttest_t3_a_idx1  (cost=0.00..5205.10 rows=168930 width=0)
                            Index Cond: (a >= 0)
  Optimizer: Postgres query optimizer
 (8 rows)
@@ -334,3 +344,97 @@ select count(*), count(a), count(b) from pax_toasttest_t3 where a >= 0;
  506335 | 506335 | 505839
 (1 row)
 
+-- pax_toasttest_t3 holds ~5 GB of logical data in 10 kB values -- far below
+-- the external-toast threshold, so it adds nothing to the upgrade coverage
+-- below, while pg_dumpall would have to write it out twice (before and
+-- after) for test_gpdb.sh to diff.  Drop it; only the external-toast
+-- relation is meant to survive this file.
+drop table pax_toasttest_t3;
+-----------------------------------------------------------------------
+-- External toast, and the two artifacts pg_upgrade has to carry over.
+--
+-- A value above pax.min_size_of_external_toast (10 MB, which is also the
+-- GUC's lower bound, so this fixture cannot be made smaller) is not stored
+-- in the micro-partition file.  PAX writes it to "<block>.toast"
+-- (TOAST_FILE_SUFFIX) inside base/<dboid>/<relfilenode>_pax/ and flags the
+-- block with ptexistexttoast.
+--
+-- pg_upgrade moves a PAX relation by walking that directory and
+-- transferring every regular file it finds (transfer_pax_relfilenode_dir(),
+-- src/bin/pg_upgrade/greenplum/check_pax.c); the toast file survives only
+-- because the walk has no name filter, and the flag survives only because
+-- restore_pax_aux_table() replays it.  The tests above prove such a value
+-- can be written and read, but not how it is laid out, so pin that here.
+--
+-- pax_toasttest_ext is intentionally NOT dropped, and the pax_test database
+-- is intentionally kept by the Makefile: test_gpdb.sh upgrades whatever the
+-- ICW left in the cluster and compares a pg_dumpall taken before and after,
+-- so leaving this relation behind is what gives PAX external toast its
+-- binary-upgrade coverage.
+-----------------------------------------------------------------------
+set pax.enable_toast = on;
+reset optimizer;
+reset enable_seqscan;
+reset enable_indexscan;
+reset enable_indexonlyscan;
+reset enable_bitmapscan;
+reset work_mem;
+-- Per-segment listing of a PAX relation's data directory.  relfilenode is
+-- resolved on the segment itself; pg_ls_dir(..., missing_ok => true) keeps
+-- the segments holding no data quiet.
+create function pax_seg_dir_files(rel regclass)
+returns table(content int, fname text)
+execute on all segments
+as $$
+	select current_setting('gp_contentid')::int, f
+	from pg_catalog.pg_ls_dir(pg_catalog.pg_relation_filepath($1) || '_pax',
+							  true, false) f
+$$ language sql;
+create table pax_toasttest_ext(id int, payload text) distributed by (id);
+insert into pax_toasttest_ext select 1, repeat('pax-toast-', 1200000);  -- 12 MB
+select id, length(payload) from pax_toasttest_ext;
+ id |  length  
+----+----------
+  1 | 12000000
+(1 row)
+
+-- one block, flagged as carrying external toast ...
+select count(*) as blocks,
+       count(*) filter (where ptexistexttoast) as blocks_with_ext_toast
+from get_pax_aux_table('pax_toasttest_ext');
+ blocks | blocks_with_ext_toast 
+--------+-----------------------
+      1 |                     1
+(1 row)
+
+-- ... with one companion .toast file beside its data file on disk.
+select count(*) filter (where fname like '%.toast') as toast_files,
+       count(*) filter (where fname not like '%.toast'
+                          and fname not like '%.meta'
+                          and fname not like '%.visimap') as data_files
+from pax_seg_dir_files('pax_toasttest_ext');
+ toast_files | data_files 
+-------------+------------
+           1 |          1
+(1 row)
+
+-- Negative control: below the threshold neither must appear, otherwise the
+-- assertions above could pass for an unrelated reason.
+create table pax_toasttest_inline(id int, payload text) distributed by (id);
+insert into pax_toasttest_inline select 1, repeat('pax-toast-', 20000);  -- 200 kB
+select count(*) filter (where ptexistexttoast) as blocks_with_ext_toast
+from get_pax_aux_table('pax_toasttest_inline');
+ blocks_with_ext_toast 
+-----------------------
+                     0
+(1 row)
+
+select count(*) filter (where fname like '%.toast') as toast_files
+from pax_seg_dir_files('pax_toasttest_inline');
+ toast_files 
+-------------
+           0
+(1 row)
+
+drop table pax_toasttest_inline;
+drop function pax_seg_dir_files(regclass);

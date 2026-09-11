@@ -97,7 +97,40 @@ freeze_master_data(void)
 		txid_before = str2uint(PQgetvalue(txid_res, 0, PQfnumber(txid_res, "txid_current")));
 		PQclear(txid_res);
 
-		PQclear(executeQueryOrDie(conn, "VACUUM FREEZE"));
+		/*
+		 * DISABLE_PAGE_SKIPPING forces VACUUM to visit every page and
+		 * freeze every freezable tuple.  Without it, VACUUM FREEZE skips
+		 * pages already marked all-visible in the visibility map -
+		 * including pages whose tuples were written by
+		 * create_new_objects() and update_db_xids() after the freeze in
+		 * prepare_new_cluster().  Such tuples keep the coordinator's
+		 * xmin, which lands above the segment's NextXID once the data
+		 * directory is copied to the segments and copy_xact_xlog_xid()
+		 * pulls NextXID down to the source segment's value.  MVCC then
+		 * treats those rows as coming from the future and hides them.
+		 */
+		PQclear(executeQueryOrDie(conn,
+		                          "VACUUM (FREEZE, DISABLE_PAGE_SKIPPING)"));
+
+		/*
+		 * Re-freeze pg_class to catch the tuples written by the pass
+		 * above.  For AO, AOCO and PAX relations vacuum_rel() recurses
+		 * into three sub-phases (PRE_CLEANUP, COMPACT, POST_CLEANUP),
+		 * each running in its own transaction; POST_CLEANUP updates the
+		 * relation's pg_class row via heap_update, so the new tuple's
+		 * xmin equals that phase's own snapshot xmin, which is also its
+		 * FreezeLimit.  heap_prepare_freeze_tuple() requires xmin to
+		 * precede FreezeLimit strictly, so the tuple cannot be frozen by
+		 * the same VACUUM call that wrote it.
+		 *
+		 * pg_class itself has heap storage, so this pass takes no such
+		 * detour: vac_update_relstats() uses heap_inplace_update() and
+		 * writes no new tuple version, and the fresh snapshot's xmin sits
+		 * above every XID written by the first pass.
+		 */
+		PQclear(executeQueryOrDie(conn,
+		                          "VACUUM (FREEZE, DISABLE_PAGE_SKIPPING) "
+		                          "pg_catalog.pg_class"));
 
 		/*
 		 * Obtain txid_current and age after vacuum freeze.

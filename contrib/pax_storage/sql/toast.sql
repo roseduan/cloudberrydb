@@ -121,3 +121,83 @@ update pax_toasttest_t3 set b = null where a % 1010 = 0;
 explain select count(*), count(a), count(b) from pax_toasttest_t3 where a >= 0;
 select count(*), count(a), count(b) from pax_toasttest_t3 where a >= 0;
 
+
+-- pax_toasttest_t3 holds ~5 GB of logical data in 10 kB values -- far below
+-- the external-toast threshold, so it adds nothing to the upgrade coverage
+-- below, while pg_dumpall would have to write it out twice (before and
+-- after) for test_gpdb.sh to diff.  Drop it; only the external-toast
+-- relation is meant to survive this file.
+drop table pax_toasttest_t3;
+
+-----------------------------------------------------------------------
+-- External toast, and the two artifacts pg_upgrade has to carry over.
+--
+-- A value above pax.min_size_of_external_toast (10 MB, which is also the
+-- GUC's lower bound, so this fixture cannot be made smaller) is not stored
+-- in the micro-partition file.  PAX writes it to "<block>.toast"
+-- (TOAST_FILE_SUFFIX) inside base/<dboid>/<relfilenode>_pax/ and flags the
+-- block with ptexistexttoast.
+--
+-- pg_upgrade moves a PAX relation by walking that directory and
+-- transferring every regular file it finds (transfer_pax_relfilenode_dir(),
+-- src/bin/pg_upgrade/greenplum/check_pax.c); the toast file survives only
+-- because the walk has no name filter, and the flag survives only because
+-- restore_pax_aux_table() replays it.  The tests above prove such a value
+-- can be written and read, but not how it is laid out, so pin that here.
+--
+-- pax_toasttest_ext is intentionally NOT dropped, and the pax_test database
+-- is intentionally kept by the Makefile: test_gpdb.sh upgrades whatever the
+-- ICW left in the cluster and compares a pg_dumpall taken before and after,
+-- so leaving this relation behind is what gives PAX external toast its
+-- binary-upgrade coverage.
+-----------------------------------------------------------------------
+set pax.enable_toast = on;
+reset optimizer;
+reset enable_seqscan;
+reset enable_indexscan;
+reset enable_indexonlyscan;
+reset enable_bitmapscan;
+reset work_mem;
+
+-- Per-segment listing of a PAX relation's data directory.  relfilenode is
+-- resolved on the segment itself; pg_ls_dir(..., missing_ok => true) keeps
+-- the segments holding no data quiet.
+create function pax_seg_dir_files(rel regclass)
+returns table(content int, fname text)
+execute on all segments
+as $$
+	select current_setting('gp_contentid')::int, f
+	from pg_catalog.pg_ls_dir(pg_catalog.pg_relation_filepath($1) || '_pax',
+							  true, false) f
+$$ language sql;
+
+create table pax_toasttest_ext(id int, payload text) distributed by (id);
+insert into pax_toasttest_ext select 1, repeat('pax-toast-', 1200000);  -- 12 MB
+
+select id, length(payload) from pax_toasttest_ext;
+
+-- one block, flagged as carrying external toast ...
+select count(*) as blocks,
+       count(*) filter (where ptexistexttoast) as blocks_with_ext_toast
+from get_pax_aux_table('pax_toasttest_ext');
+
+-- ... with one companion .toast file beside its data file on disk.
+select count(*) filter (where fname like '%.toast') as toast_files,
+       count(*) filter (where fname not like '%.toast'
+                          and fname not like '%.meta'
+                          and fname not like '%.visimap') as data_files
+from pax_seg_dir_files('pax_toasttest_ext');
+
+-- Negative control: below the threshold neither must appear, otherwise the
+-- assertions above could pass for an unrelated reason.
+create table pax_toasttest_inline(id int, payload text) distributed by (id);
+insert into pax_toasttest_inline select 1, repeat('pax-toast-', 20000);  -- 200 kB
+
+select count(*) filter (where ptexistexttoast) as blocks_with_ext_toast
+from get_pax_aux_table('pax_toasttest_inline');
+
+select count(*) filter (where fname like '%.toast') as toast_files
+from pax_seg_dir_files('pax_toasttest_inline');
+
+drop table pax_toasttest_inline;
+drop function pax_seg_dir_files(regclass);

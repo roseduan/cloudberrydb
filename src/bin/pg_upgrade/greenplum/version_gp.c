@@ -258,8 +258,19 @@ old_GPDB6_check_for_unsupported_sha256_password_hashes(void)
 /*
  * new_gpdb_invalidate_bitmap_indexes()
  *
- * GPDB_UPGRADE_FIXME: We are currently missing the support to migrate over bitmap indexes.
- * Hence, mark all bitmap indexes as invalid.
+ * pg_upgrade does not migrate the contents of a bitmap index: the index
+ * relfilenode is transferred, but the bitmap data lives in the auxiliary
+ * pg_bitmapindex.pg_bm_<oid> heap, which is recreated empty by the schema
+ * restore.  Mark every bitmap index invalid so nothing can plan against an
+ * empty index, then new_reindex_bitmap_indexes() rebuilds them and makes
+ * them valid again.  Running in this order means an interrupted upgrade
+ * leaves the indexes unusable rather than silently wrong.
+ *
+ * Note the access method is looked up by name.  It used to be a hardcoded
+ * relam = 3013, which is the bitmap AM's OID in Greenplum but not in
+ * Cloudberry (7013), so the UPDATE silently matched no rows and left every
+ * bitmap index marked valid with an empty auxiliary heap — index scans then
+ * returned no rows at all.
  */
 void
 new_gpdb_invalidate_bitmap_indexes(void)
@@ -291,7 +302,8 @@ new_gpdb_invalidate_bitmap_indexes(void)
 									  "  FROM pg_class c "
 									  " WHERE c.oid = indexrelid AND "
 									  "       indexrelid >= %u AND "
-									  "       relam = 3013;",
+									  "       c.relam = (SELECT oid FROM pg_am "
+									  "                   WHERE amname = 'bitmap');",
 									  FirstNormalObjectId));
 		}
 		PQfinish(conn);
@@ -301,24 +313,57 @@ new_gpdb_invalidate_bitmap_indexes(void)
 }
 
 /*
- * new_invalidate_ao_brin_indexes()
+ * BRIN_AOCO_NEW_FORMAT_CATVER is defined in pg_upgrade_greenplum.h.
+ * It marks the catalog version at which the on-disk format of BRIN indexes
+ * on AO/CO tables changed from pre-allocated UPPER pages to singly-linked
+ * revmap chains with AOChainInfo in the metapage.  See commit 0447cca1a73
+ * ("Reimplement BRIN internals for AO/CO tables"), which bumped
+ * CATALOG_VERSION_NO from 302502071 to 302502091.  Both pg_upgrade.c and
+ * this file use the same threshold, so it lives in the shared header.
+ */
+
+/*
+ * new_reindex_ao_brin_indexes()
  *
  * The on-disk format of BRIN indexes on AO/CO tables changed: the old format
  * used pre-allocated UPPER pages, while the new format uses singly-linked
  * revmap chains with AOChainInfo in the metapage.  Since pg_upgrade transfers
  * index files by copying relfilenodes, the old-format BRIN files are
- * incompatible with the new code.  Mark these indexes as invalid so that the
- * planner will not use them and users can REINDEX after upgrade.
+ * incompatible with the new code.
+ *
+ * Rebuild these indexes inline so they work immediately after pg_upgrade
+ * returns.  Historically pg_upgrade only marked them indisvalid=false and
+ * relied on the operator to REINDEX afterwards, but that left a window
+ * during which queries silently bypassed the indexes (and risked silent
+ * incorrect results if anyone forced indisvalid=true without rebuilding).
+ * Doing the REINDEX here makes the AO/CO BRIN upgrade transparent to the
+ * user.
  *
  * Only AO/CO table BRIN indexes are affected; heap table BRIN indexes have
  * not changed format.
+ *
+ * Gate on the source cluster's catalog version: if the source already has
+ * the new format, the index files are still valid and there is nothing to
+ * do — same-version / minor-version upgrades skip this step entirely.
  */
 void
-new_invalidate_ao_brin_indexes(void)
+new_reindex_ao_brin_indexes(void)
 {
 	int			dbnum;
 
-	prep_status("Invalidating BRIN indexes on AO/CO tables in new cluster");
+	prep_status("Rebuilding BRIN indexes on AO/CO tables in new cluster");
+
+	if (old_cluster.controldata.cat_ver >= BRIN_AOCO_NEW_FORMAT_CATVER)
+	{
+		report_status(PG_REPORT, "skipped (source already in new BRIN-on-AO/CO format)");
+		return;
+	}
+
+	if (user_opts.check)
+	{
+		check_ok();
+		return;
+	}
 
 	for (dbnum = 0; dbnum < new_cluster.dbarr.ndbs; dbnum++)
 	{
@@ -326,25 +371,99 @@ new_invalidate_ao_brin_indexes(void)
 		PGconn	   *conn = connectToServer(&new_cluster, newdb->db_name);
 
 		/*
-		 * GPDB doesn't allow hacking the catalogs without setting
-		 * allow_system_table_mods first.
+		 * REINDEX every AO/CO BRIN index.  Doing this through a DO block
+		 * lets us format() per-index commands using the catalog query
+		 * results, which keeps the SELECT and the REINDEX visibility
+		 * consistent within one statement.
 		 */
-		PQclear(executeQueryOrDie(conn, "set allow_system_table_mods=true"));
+		PQclear(executeQueryOrDie(conn,
+								  "DO $reindexbrin$ "
+								  "DECLARE r record; "
+								  "BEGIN "
+								  "  FOR r IN "
+								  "    SELECT n.nspname, idx.relname "
+								  "    FROM   pg_class      idx "
+								  "    JOIN   pg_index      i      ON idx.oid = i.indexrelid "
+								  "    JOIN   pg_class      tbl    ON tbl.oid = i.indrelid "
+								  "    JOIN   pg_namespace  n      ON n.oid = idx.relnamespace "
+								  "    JOIN   pg_am         idxam  ON idxam.oid = idx.relam "
+								  "    JOIN   pg_am         tblam  ON tblam.oid = tbl.relam "
+								  "    WHERE  idxam.amname = 'brin' "
+								  "      AND  tblam.amname IN ('ao_row','ao_column') "
+								  "      AND  idx.oid >= %u "
+								  "  LOOP "
+								  "    EXECUTE format('REINDEX INDEX %%I.%%I', r.nspname, r.relname); "
+								  "  END LOOP; "
+								  "END $reindexbrin$",
+								  FirstNormalObjectId));
+		PQfinish(conn);
+	}
 
-		if (!user_opts.check)
-		{
-			PQclear(executeQueryOrDie(conn,
-									  "UPDATE pg_index SET indisvalid = false "
-									  "  FROM pg_class idx, pg_class tbl, pg_am tam "
-									  " WHERE idx.oid = pg_index.indexrelid AND "
-									  "       tbl.oid = pg_index.indrelid AND "
-									  "       tam.oid = tbl.relam AND "
-									  "       pg_index.indexrelid >= %u AND "
-									  "       idx.relam = (SELECT oid FROM pg_am "
-									  "                     WHERE amname = 'brin') AND "
-									  "       tam.amname IN ('ao_row', 'ao_column')",
-									  FirstNormalObjectId));
-		}
+	check_ok();
+}
+
+/*
+ * new_reindex_bitmap_indexes()
+ *
+ * Rebuild every bitmap index from the data now present in the new cluster,
+ * the same way new_reindex_ao_brin_indexes() rebuilds AO/CO BRIN indexes.
+ *
+ * A bitmap index cannot survive relfilenode transfer: its payload lives in
+ * the auxiliary pg_bitmapindex.pg_bm_<oid> heap and its index, which the
+ * schema restore recreates empty.  Historically pg_upgrade only marked the
+ * indexes indisvalid=false and left the REINDEX to the operator; that both
+ * degraded query plans until someone noticed and — when the invalidation
+ * itself did not take effect — produced silently wrong results.
+ *
+ * Only relkind 'i' is rebuilt.  Partitioned bitmap indexes (relkind 'I')
+ * have no storage of their own; they become valid again once their leaves
+ * have been rebuilt.
+ *
+ * Runs unconditionally: unlike the BRIN format change there is no source
+ * catalog version at which bitmap contents survive the transfer.  On the
+ * coordinator this rebuilds the (empty) coordinator-local indexes; each
+ * segment rebuilds its own from local data.
+ */
+void
+new_reindex_bitmap_indexes(void)
+{
+	int			dbnum;
+
+	prep_status("Rebuilding bitmap indexes in new cluster");
+
+	if (user_opts.check)
+	{
+		check_ok();
+		return;
+	}
+
+	for (dbnum = 0; dbnum < new_cluster.dbarr.ndbs; dbnum++)
+	{
+		DbInfo	   *newdb = &new_cluster.dbarr.dbs[dbnum];
+		PGconn	   *conn = connectToServer(&new_cluster, newdb->db_name);
+
+		/*
+		 * One DO block per database so the catalog scan and the REINDEXes it
+		 * drives see the same snapshot, as in new_reindex_ao_brin_indexes().
+		 */
+		PQclear(executeQueryOrDie(conn,
+								  "DO $reindexbitmap$ "
+								  "DECLARE r record; "
+								  "BEGIN "
+								  "  FOR r IN "
+								  "    SELECT n.nspname, idx.relname "
+								  "    FROM   pg_class      idx "
+								  "    JOIN   pg_index      i     ON idx.oid = i.indexrelid "
+								  "    JOIN   pg_namespace  n     ON n.oid = idx.relnamespace "
+								  "    JOIN   pg_am         idxam ON idxam.oid = idx.relam "
+								  "    WHERE  idxam.amname = 'bitmap' "
+								  "      AND  idx.relkind = 'i' "
+								  "      AND  idx.oid >= %u "
+								  "  LOOP "
+								  "    EXECUTE format('REINDEX INDEX %%I.%%I', r.nspname, r.relname); "
+								  "  END LOOP; "
+								  "END $reindexbitmap$",
+								  FirstNormalObjectId));
 		PQfinish(conn);
 	}
 

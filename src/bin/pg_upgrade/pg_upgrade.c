@@ -272,6 +272,16 @@ main(int argc, char **argv)
 	 */
 	restore_aosegment_tables();
 
+	/*
+	 * Same story for PAX auxiliary tables: the per-relation
+	 * pg_ext_aux.pg_pax_blocks_<oid> contents (block_id → micro-partition
+	 * file mapping, statistics protobuf, visimap filename) and
+	 * pg_ext_aux.pg_pax_fastsequence are per-segment state that must be
+	 * replayed from the captured RelInfo on each node.  On QD this is a
+	 * near-no-op (no block rows; fastsequence reset to 0).
+	 */
+	restore_pax_aux_tables();
+
 	stop_postmaster(false);
 
 	/*
@@ -302,9 +312,13 @@ main(int argc, char **argv)
 		 * indisvalid=false state is rsynced to segments, causing get_rel_infos()
 		 * to skip those indexes on the new cluster while the old cluster still
 		 * has them, leading to a relation mismatch error during segment upgrade.
+		 *
+		 * The bitmap indexes are then rebuilt, so they are valid and populated
+		 * when the upgrade returns instead of left for the operator to REINDEX.
 		 */
 		new_gpdb_invalidate_bitmap_indexes();
-		new_invalidate_ao_brin_indexes();
+		new_reindex_ao_brin_indexes();
+		new_reindex_bitmap_indexes();
 
 		update_db_xids();
 		freeze_master_data();
@@ -312,6 +326,37 @@ main(int argc, char **argv)
 		stop_postmaster(false);
 	}
 
+	/*
+	 * Segment: rebuild AO/CO BRIN and bitmap indexes from local segment data
+	 * after relfilenode transfer.
+	 *
+	 * new_reindex_ao_brin_indexes() / new_reindex_bitmap_indexes() on the
+	 * coordinator run in utility mode without dispatch, so they only rebuild
+	 * the empty coordinator-local indexes (distributed tables have no rows
+	 * there).  Each segment must rebuild its own from local data.
+	 *
+	 * The BRIN rebuild is gated inside the function on the source catalog
+	 * version (only the old on-disk format needs it); the bitmap rebuild is
+	 * unconditional because bitmap contents never survive the transfer.
+	 *
+	 * We start a short-lived utility-mode postmaster here — the same pattern
+	 * used earlier for restore_aosegment_tables() — because REINDEX requires
+	 * a running server.  The segment port is free at this point: the source
+	 * cluster was shut down before upgrade_primaries began, and the target
+	 * segment has not yet been opened to connections.
+	 *
+	 * Running after transfer_all_new_tablespaces() ensures the old-format BRIN
+	 * relfiles are already in the new data directory; REINDEX scans the table
+	 * and writes a fresh new-format file, replacing the transferred one.
+	 */
+	if (!is_greenplum_dispatcher_mode())
+	{
+		start_postmaster(&new_cluster, true);
+		new_gpdb_invalidate_bitmap_indexes();
+		new_reindex_ao_brin_indexes();
+		new_reindex_bitmap_indexes();
+		stop_postmaster(false);
+	}
 
 	/* For non-master segments, uniquify the system identifier. */
 	if (!is_greenplum_dispatcher_mode())
@@ -721,7 +766,7 @@ prepare_new_cluster(void)
 	{
 		prep_status("Freezing all rows in the new cluster");
 		exec_prog(UTILITY_LOG_FILE, NULL, true, true,
-				  "%s \"%s/vacuumdb\" %s --all --freeze %s",
+				  "%s \"%s/vacuumdb\" %s --all --freeze --disable-page-skipping %s",
 				  PG_OPTIONS_UTILITY_MODE_VERSION(new_cluster.major_version),
 				  new_cluster.bindir, cluster_conn_opts(&new_cluster),
 				  log_opts.verbose ? "--verbose" : "");
@@ -1145,16 +1190,24 @@ set_frozenxids(bool minmxid_only)
 								  old_cluster.controldata.chkpnt_nxtmulti));
 
 		/*
-		 * Freeze template0 after lowering relfrozenxid above.
-		 * prepare_new_cluster() may have pushed relfrozenxid high via
-		 * vacuumdb --freeze, and copy_xact_xlog_xid() then resets the
-		 * xid counter to the old cluster's value.  Any UPDATE executed
-		 * after the reset (e.g. UPDATE pg_database SET datfrozenxid
-		 * above) produces tuples whose xmin is below the stale
-		 * relfrozenxid, so we must lower relfrozenxid first.
+		 * For databases that had connections disabled (e.g. template0),
+		 * vacuumdb --all skipped them, so we freeze them now.  Run VACUUM
+		 * FREEZE *after* updating pg_class.relfrozenxid above: pg_resetwal
+		 * moved nextXID backwards to the source cluster's value, so any
+		 * catalog writes since then have xmin values just above that reset
+		 * point.  If we ran VACUUM FREEZE first, it would see those unfrozen
+		 * tuples with xmin < the old relfrozenxid (set during
+		 * prepare_new_cluster) and raise "found xmin from before relfrozenxid".
+		 * By updating relfrozenxid first we lower the freeze boundary to the
+		 * source nextXID, so the new tuples' xmin values are above it and the
+		 * sanity check passes cleanly.
 		 */
 		if (!minmxid_only && strcmp(datallowconn, "f") == 0)
 		{
+			PQclear(executeQueryOrDie(conn, "SET vacuum_freeze_min_age = 0"));
+			PQclear(executeQueryOrDie(conn, "SET vacuum_freeze_table_age = 0"));
+			PQclear(executeQueryOrDie(conn, "SET vacuum_multixact_freeze_min_age = 0"));
+			PQclear(executeQueryOrDie(conn, "SET vacuum_multixact_freeze_table_age = 0"));
 			PQclear(executeQueryOrDie(conn, "VACUUM FREEZE"));
 		}
 		PQfinish(conn);

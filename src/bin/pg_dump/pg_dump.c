@@ -2168,6 +2168,21 @@ selectDumpableCast(CastInfo *cast, Archive *fout)
 		return;					/* extension membership overrides all else */
 
 	/*
+	 * In binary-upgrade mode, skip WITHOUT FUNCTION casts whose source and
+	 * target are both pre-defined types.  Such casts are created by initdb
+	 * and already exist in the new cluster; pg_restore would otherwise fail
+	 * with "cast already exists" because cast OIDs are not preserved in
+	 * binary-upgrade mode.
+	 */
+	if (fout->dopt->binary_upgrade && cast->castfunc == InvalidOid &&
+		cast->castsource < (Oid) FirstNormalObjectId &&
+		cast->casttarget < (Oid) FirstNormalObjectId)
+	{
+		cast->dobj.dump = DUMP_COMPONENT_NONE;
+		return;
+	}
+
+	/*
 	 * This would be DUMP_COMPONENT_ACL for from-initdb casts, but they do not
 	 * support ACLs currently.
 	 */

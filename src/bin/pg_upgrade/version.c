@@ -14,82 +14,6 @@
 #include "pg_upgrade.h"
 
 
-static PQExpBuffer
-create_recursive_oids(PGconn *conn, int major_version, const char *base_query)
-{
-	PQExpBuffer querybuf;
-	PQExpBufferData template;
-	PGresult   *res;
-	int iter_no;
-	int n;
-
-	querybuf = createPQExpBuffer();
-	appendPQExpBuffer(querybuf,
-			"WITH oids_0 AS ( %s ) ", base_query);
-	initPQExpBuffer(&template);
-	appendPQExpBufferStr(&template,
-			", oids_%d AS ( "
-			"WITH x AS ( "
-			"	SELECT oid FROM oids_%d"
-			") "
-/* domains on any type selected so far */
-			"	SELECT t.oid FROM pg_catalog.pg_type t, x WHERE typbasetype = x.oid AND typtype = 'd' "
-			"	UNION ALL "
-/* arrays over any type selected so far */
-			"	SELECT t.oid FROM pg_catalog.pg_type t, x WHERE typelem = x.oid AND typtype = 'b' "
-			"	UNION ALL "
-/* composite types containing any type selected so far */
-			"	SELECT t.oid FROM pg_catalog.pg_type t, pg_catalog.pg_class c, pg_catalog.pg_attribute a, x "
-			"	WHERE t.typtype = 'c' AND "
-			"		  t.oid = c.reltype AND "
-			"		  c.oid = a.attrelid AND "
-			"		  NOT a.attisdropped AND "
-			"		  a.atttypid = x.oid "
-			);
-	if (GET_MAJOR_VERSION(major_version) >= 902)
-		appendPQExpBufferStr(&template,
-							 "		UNION ALL "
-		/* ranges containing any type selected so far */
-							 "		SELECT t.oid FROM pg_catalog.pg_type t, pg_catalog.pg_range r, x "
-							 "		WHERE t.typtype = 'r' AND r.rngtypid = t.oid AND r.rngsubtype = x.oid");
-	appendPQExpBufferStr(&template, ") ");
-
-	iter_no = 0;
-	res = executeQueryOrDie(conn,
-					"%s SELECT count(1) FROM oids_%d; ",
-					querybuf->data, iter_no);
-	Assert(PQntuples(res) == 1);
-	Assert(PQnfields(res) == 1);
-	n = strtoul(PQgetvalue(res, 0, 0), NULL, 10);
-
-	while (n > 0)
-	{
-		iter_no++;
-		appendPQExpBuffer(querybuf, template.data, iter_no, iter_no - 1);
-		res = executeQueryOrDie(conn,
-					"%s SELECT count(1) FROM oids_%d; ",
-					querybuf->data, iter_no);
-		Assert(PQntuples(res) == 1);
-		Assert(PQnfields(res) == 1);
-		n = strtoul(PQgetvalue(res, 0, 0), NULL, 10);
-	}
-
-	/* Add footer, merge all oids_<d> into one CTE table */
-	appendPQExpBufferStr(querybuf,
-				" , oids(oid) AS ( "
-				"SELECT oid FROM oids_0 ");
-	for (n = 1; n <= iter_no; n++)
-	{
-		appendPQExpBuffer(querybuf,
-				"UNION ALL "
-				"SELECT oid FROM oids_%d ",
-				n);
-	}
-	appendPQExpBufferStr(querybuf, ") ");
-	termPQExpBuffer(&template);
-
-	return querybuf;
-}
 /*
  * check_for_data_types_usage()
  *	Detect whether there are any stored columns depending on given type(s)
@@ -112,15 +36,8 @@ check_for_data_types_usage(ClusterInfo *cluster,
 	FILE	   *script = NULL;
 	int			dbnum;
 
-	if (cluster->version.type == Cloudberry && cluster->version.version <= 2)
-	{
-		pg_log(PG_REPORT, "Skip checking for data type, current version CBDB do not support recursive query");
-		return false;
-	}
-
 	for (dbnum = 0; dbnum < cluster->dbarr.ndbs; dbnum++)
 	{
-		PQExpBuffer cte_oids;
 		DbInfo	   *active_db = &cluster->dbarr.dbs[dbnum];
 		PGconn	   *conn = connectToServer(cluster, active_db->db_name);
 		PQExpBufferData querybuf;
@@ -132,81 +49,81 @@ check_for_data_types_usage(ClusterInfo *cluster,
 					i_relname,
 					i_attname;
 
-		cte_oids = create_recursive_oids(conn, cluster->major_version, base_query);
 		/*
-		 * The type(s) of interest might be wrapped in a domain, array,
-		 * composite, or range, and these container types can be nested (to
-		 * varying extents depending on server version, but that's not of
-		 * concern here).  To handle all these cases we need a recursive CTE.
+		 * Compute the transitive closure of all pg_type OIDs that wrap or are
+		 * derived from the types returned by base_query (domains, arrays,
+		 * composites, ranges).
+		 *
+		 * The recursive term joins against the CTE name exactly once so that
+		 * the self-reference sits in a plain FROM-clause JOIN rather than
+		 * inside a subquery.  The correlated EXISTS subqueries reference the
+		 * JOIN alias (o.oid), not the CTE name, keeping the self-reference
+		 * count at one and avoiding the subquery restriction present in older
+		 * GPDB versions.
+		 *
+		 * Termination is guaranteed because PostgreSQL's type system is
+		 * acyclic: circular type dependencies are rejected at DDL time.
 		 */
 		initPQExpBuffer(&querybuf);
-		if (GET_MAJOR_VERSION(cluster->major_version) <= 904)
-		{
-			/*
-			 * GPDB: Recursive CTE with self-reference in a subquery is not
-			 * supported by GPDB6. Instead, we use a plpgsql function to perform
-			 * the check.
-			 */
-			appendPQExpBuffer(&querybuf,
-							  "SELECT * FROM __gpupgrade_tmp.data_type_checks( "
-							  "	$$SELECT ARRAY(%s)$$ "
-							  ")",
-							  base_query);
-		}
-		else
-		{
-			appendPQExpBuffer(&querybuf,
-							  "WITH RECURSIVE oids AS ( "
-			/* start with the type(s) returned by base_query */
-							  "	%s "
-							  "	UNION ALL "
-							  "	SELECT * FROM ( "
-			/* inner WITH because we can only reference the CTE once */
-							  "		WITH x AS (SELECT oid FROM oids) "
-			/* domains on any type selected so far */
-							  "			SELECT t.oid FROM pg_catalog.pg_type t, x WHERE typbasetype = x.oid AND typtype = 'd' "
-							  "			UNION ALL "
-			/* arrays over any type selected so far */
-							  "			SELECT t.oid FROM pg_catalog.pg_type t, x WHERE typelem = x.oid AND typtype = 'b' "
-							  "			UNION ALL "
-			/* composite types containing any type selected so far */
-							  "			SELECT t.oid FROM pg_catalog.pg_type t, pg_catalog.pg_class c, pg_catalog.pg_attribute a, x "
-							  "			WHERE t.typtype = 'c' AND "
-							  "				  t.oid = c.reltype AND "
-							  "				  c.oid = a.attrelid AND "
-							  "				  NOT a.attisdropped AND "
-							  "				  a.atttypid = x.oid ",
-							  base_query);
+		appendPQExpBuffer(&querybuf,
+						  "WITH RECURSIVE oids(oid) AS ( "
+		/* non-recursive seed: the caller-supplied type(s) */
+						  "    %s "
+						  "    UNION ALL "
+		/* recursive term: one JOIN, self-reference in top-level FROM only */
+						  "    SELECT t.oid "
+						  "    FROM   pg_catalog.pg_type t "
+						  "    JOIN   oids o ON ("
+		/* domains */
+						  "        (t.typbasetype = o.oid AND t.typtype = 'd') "
+						  "        OR "
+		/* arrays */
+						  "        (t.typelem = o.oid AND t.typtype = 'b') "
+						  "        OR "
+		/* composites: EXISTS uses o.oid as a correlated variable, not oids */
+						  "        (t.typtype = 'c' AND EXISTS ("
+						  "            SELECT 1 "
+						  "            FROM   pg_catalog.pg_class c "
+						  "            JOIN   pg_catalog.pg_attribute a "
+						  "                   ON c.oid = a.attrelid "
+						  "            WHERE  t.oid = c.reltype "
+						  "              AND  NOT a.attisdropped "
+						  "              AND  a.atttypid = o.oid"
+						  "        ))",
+						  base_query);
 
-				appendPQExpBuffer(&querybuf,
-						  "			UNION ALL "
-			/* ranges containing any type selected so far */
-						  "			SELECT t.oid FROM pg_catalog.pg_type t, pg_catalog.pg_range r, x "
-						  "			WHERE t.typtype = 'r' AND r.rngtypid = t.oid AND r.rngsubtype = x.oid"
-						  "	) foo "
-						  ") "
-			/* now look for stored columns of any such type */
-							  "SELECT n.nspname, c.relname, a.attname "
-							  "FROM	pg_catalog.pg_class c, "
-							  "		pg_catalog.pg_namespace n, "
-							  "		pg_catalog.pg_attribute a "
-							  "WHERE	c.oid = a.attrelid AND "
-							  "		NOT a.attisdropped AND "
-							  "		a.atttypid IN (SELECT oid FROM oids) AND "
-							  "		c.relkind IN ("
-							  CppAsString2(RELKIND_RELATION) ", "
-							  CppAsString2(RELKIND_MATVIEW) ", "
-							  CppAsString2(RELKIND_INDEX) ") AND "
-							  "		c.relnamespace = n.oid AND "
-			/* exclude possible orphaned temp tables */
-							  "		n.nspname !~ '^pg_temp_' AND "
-							  "		n.nspname !~ '^pg_toast_temp_' AND "
-			/* exclude system catalogs, too */
-							  "		n.nspname NOT IN ('pg_catalog', 'information_schema')");
-		}
+		if (GET_MAJOR_VERSION(cluster->major_version) >= 902)
+			appendPQExpBufferStr(&querybuf,
+								 "        OR "
+			/* ranges: EXISTS uses o.oid as a correlated variable */
+								 "        (t.typtype = 'r' AND EXISTS ("
+								 "            SELECT 1 FROM pg_catalog.pg_range r "
+								 "            WHERE  r.rngtypid = t.oid "
+								 "              AND  r.rngsubtype = o.oid"
+								 "        ))");
+
+		appendPQExpBufferStr(&querybuf,
+							 "    ) "
+							 ") "
+		/* find stored columns of any type in the closure */
+							 "SELECT n.nspname, c.relname, a.attname "
+							 "FROM   pg_catalog.pg_class c, "
+							 "       pg_catalog.pg_namespace n, "
+							 "       pg_catalog.pg_attribute a "
+							 "WHERE  c.oid = a.attrelid AND "
+							 "       NOT a.attisdropped AND "
+							 "       a.atttypid IN (SELECT oid FROM oids) AND "
+							 "       c.relkind IN ("
+							 CppAsString2(RELKIND_RELATION) ", "
+							 CppAsString2(RELKIND_MATVIEW) ", "
+							 CppAsString2(RELKIND_INDEX) ") AND "
+							 "       c.relnamespace = n.oid AND "
+							 "       n.nspname !~ '^pg_temp_' AND "
+							 "       n.nspname !~ '^pg_toast_temp_' AND "
+							 "       n.nspname NOT IN ('pg_catalog', 'information_schema')");
 
 		res = executeQueryOrDie(conn, "%s", querybuf.data);
-		destroyPQExpBuffer(cte_oids);
+		termPQExpBuffer(&querybuf);
 
 		ntups = PQntuples(res);
 		i_nspname = PQfnumber(res, "nspname");
@@ -230,8 +147,6 @@ check_for_data_types_usage(ClusterInfo *cluster,
 		}
 
 		PQclear(res);
-
-		termPQExpBuffer(&querybuf);
 
 		PQfinish(conn);
 	}

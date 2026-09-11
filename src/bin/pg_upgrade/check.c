@@ -254,6 +254,13 @@ check_new_cluster(void)
 	check_for_prepared_transactions(&new_cluster);
 
 	check_for_new_tablespace_dir(&new_cluster);
+
+	/*
+	 * Both clusters' catalog information has been collected by now, so the
+	 * PAX metadata backend the old cluster's aux rows were captured from can
+	 * be compared against the backend this cluster was built with.
+	 */
+	check_pax_backend_compatibility();
 }
 
 

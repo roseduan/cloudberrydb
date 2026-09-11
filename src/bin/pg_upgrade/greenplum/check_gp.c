@@ -33,6 +33,7 @@ static void check_views_with_removed_types(void);
 static void check_for_disallowed_pg_operator(void);
 static void check_for_ao_matview_with_relfrozenxid(ClusterInfo *cluster);
 static void check_views_with_changed_function_signatures(void);
+/* check_for_pax_tables() lives in check_pax.c */
 
 /*
  *	check_greenplum
@@ -59,6 +60,7 @@ check_greenplum(void)
 	check_for_disallowed_pg_operator();
 	check_views_with_changed_function_signatures();
 	check_for_ao_matview_with_relfrozenxid(&old_cluster);
+	check_for_pax_tables(&old_cluster);
 }
 
 /*

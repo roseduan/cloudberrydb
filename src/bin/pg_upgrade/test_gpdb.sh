@@ -408,7 +408,7 @@ main() {
 		${NEW_BINDIR}/pg_dumpall ${DUMP_OPTS} -f "$temp_root/dump1.sql"
 		echo done
 	fi
-	
+
 	${OLD_BINDIR}/gpstop -a -E ${COORDINATOR_DATA_DIRECTORY}/config/etcd_host
 	
 	COORDINATOR_DATA_DIRECTORY=""; unset COORDINATOR_DATA_DIRECTORY
@@ -493,7 +493,7 @@ main() {
 	print_delta_seconds $epoch_for_perf_start 'number_of_seconds_for_upgrade'
 	
 	. ${NEW_BINDIR}/../cloudberry-env.sh
-	
+
 	if (( !$perf_test )) ; then
 		diff_and_exit
 	fi

@@ -56,6 +56,7 @@
 #include "catalog/pg_am.h"
 #include "catalog/pg_foreign_server.h"
 #include "catalog/pg_trigger.h"
+#include "miscadmin.h"
 #include "catalog/pg_directory_table.h"
 #include "commands/defrem.h"
 #include "commands/trigger.h"
@@ -9217,7 +9218,7 @@ TriggerForSpec:
 			| /* EMPTY */
 				{
 					/* let creation of triggers go through for pg_restore when upgrading from GP6 to GP7 */
-					if (!gp_enable_statement_trigger)
+					if (!gp_enable_statement_trigger && !IsBinaryUpgrade)
 					{
 						ereport(ERROR,
 								(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
@@ -9237,7 +9238,7 @@ TriggerForType:
 			| STATEMENT
 			{
 				/* let creation of triggers go through for pg_restore when upgrading from GP6 to GP7 */
-				if (!gp_enable_statement_trigger)
+				if (!gp_enable_statement_trigger && !IsBinaryUpgrade)
 				{
 					ereport(ERROR,
 							(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),

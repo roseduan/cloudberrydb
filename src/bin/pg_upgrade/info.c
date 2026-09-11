@@ -13,6 +13,7 @@
 #include "catalog/pg_class_d.h"
 #include "pg_upgrade.h"
 #include "greenplum/pg_upgrade_greenplum.h"
+#include "greenplum/pg_upgrade_pax.h"
 
 static void create_rel_filename_map(const char *old_data, const char *new_data,
 									const DbInfo *old_db, const DbInfo *new_db,
@@ -156,6 +157,8 @@ gen_db_file_maps(DbInfo *old_db, DbInfo *new_db,
 			old_rel->reltype = AO;
 		else if (old_rel->aocssegments != NULL)
 			old_rel->reltype = AOCS;
+		else if (pax_rel_has_state(old_rel))
+			old_rel->reltype = PAX;
 		else
 			old_rel->reltype = HEAP;
 
@@ -350,6 +353,7 @@ get_db_and_rel_infos(ClusterInfo *cluster)
 
 	get_db_infos(cluster);
 
+	/* dbs[0..ndbs-1] are all connectable; non-connectable dbs have no rels */
 	for (dbnum = 0; dbnum < cluster->dbarr.ndbs; dbnum++)
 		get_rel_infos(cluster, &cluster->dbarr.dbs[dbnum]);
 
@@ -386,14 +390,24 @@ get_db_infos(ClusterInfo *cluster)
 	char		query[QUERY_ALLOC];
 	int			i_datfrozenxid;
 	int			i_datminmxid = 0;
+	int			i_datallowconn;
 
+	/*
+	 * GPDB: do NOT filter out datallowconn = false databases (e.g. template0).
+	 * They must appear in dbarr so update_db_xids() can clamp their
+	 * datfrozenxid/datminmxid to this node's local XID space; otherwise the
+	 * coordinator's frozenxid value (rsync'd to segments) is left "in the
+	 * future" on segments and trips vac_truncate_clog().  Callers that connect
+	 * per database must consult DbInfo.datallowconn and either skip the
+	 * database or temporarily enable connections.
+	 */
 	snprintf(query, sizeof(query),
 			 "SELECT d.oid, d.datname, d.encoding, d.datcollate, d.datctype, d.datfrozenxid, d.datminmxid, "
+			 "d.datallowconn, "
 			 "pg_catalog.pg_tablespace_location(t.oid) AS spclocation "
 			 "FROM pg_catalog.pg_database d "
 			 " LEFT OUTER JOIN pg_catalog.pg_tablespace t "
 			 " ON d.dattablespace = t.oid "
-			 "WHERE d.datallowconn = true "
 	/* we don't preserve pg_database.oid so we sort by name */
 			 "ORDER BY 2");
 
@@ -407,9 +421,10 @@ get_db_infos(ClusterInfo *cluster)
 	i_spclocation = PQfnumber(res, "spclocation");
 	i_datfrozenxid = PQfnumber(res, "datfrozenxid");
 	i_datminmxid = PQfnumber(res, "datminmxid");
+	i_datallowconn = PQfnumber(res, "datallowconn");
 
 	ntups = PQntuples(res);
-	dbinfos = (DbInfo *) pg_malloc(sizeof(DbInfo) * ntups);
+	dbinfos = (DbInfo *) pg_malloc0(sizeof(DbInfo) * ntups);
 
 	for (tupnum = 0; tupnum < ntups; tupnum++)
 	{
@@ -420,6 +435,7 @@ get_db_infos(ClusterInfo *cluster)
 		dbinfos[tupnum].db_ctype = pg_strdup(PQgetvalue(res, tupnum, i_datctype));
 		dbinfos[tupnum].datfrozenxid = strtoul(PQgetvalue(res, tupnum, i_datfrozenxid), NULL, 10);
 		dbinfos[tupnum].datminmxid = strtoul(PQgetvalue(res, tupnum, i_datminmxid), NULL, 10);
+		dbinfos[tupnum].datallowconn = (strcmp(PQgetvalue(res, tupnum, i_datallowconn), "t") == 0);
 		snprintf(dbinfos[tupnum].db_tablespace, sizeof(dbinfos[tupnum].db_tablespace), "%s",
 				 PQgetvalue(res, tupnum, i_spclocation));
 	}
@@ -427,8 +443,37 @@ get_db_infos(ClusterInfo *cluster)
 
 	PQfinish(conn);
 
-	cluster->dbarr.dbs = dbinfos;
-	cluster->dbarr.ndbs = ntups;
+	/*
+	 * Partition dbinfos[]: connectable databases first (0..ndbs-1),
+	 * non-connectable last (ndbs..total_ndbs-1).  This lets every caller
+	 * that iterates 0..ndbs-1 skip non-connectable databases implicitly,
+	 * without any per-site datallowconn guard.
+	 */
+	{
+		DbInfo	   *partitioned = (DbInfo *) pg_malloc0(sizeof(DbInfo) * ntups);
+		int			ci = 0,
+					bi;
+		int			nconnectable = 0;
+
+		for (tupnum = 0; tupnum < ntups; tupnum++)
+			if (dbinfos[tupnum].datallowconn)
+				nconnectable++;
+
+		bi = nconnectable;
+		for (tupnum = 0; tupnum < ntups; tupnum++)
+		{
+			if (dbinfos[tupnum].datallowconn)
+				partitioned[ci++] = dbinfos[tupnum];
+			else
+				partitioned[bi++] = dbinfos[tupnum];
+		}
+		pg_free(dbinfos);
+		dbinfos = partitioned;
+
+		cluster->dbarr.dbs = dbinfos;
+		cluster->dbarr.ndbs = nconnectable;
+		cluster->dbarr.total_ndbs = ntups;
+	}
 }
 
 
@@ -472,8 +517,17 @@ get_rel_infos(ClusterInfo *cluster, DbInfo *dbinfo)
 	int			i_relstorage = -1;
 	int			i_relkind = -1;
 	int			i_relpersistence = -1;
+	int			i_amname = -1;
+	PaxBackendKind	cluster_pax_kind;
 
 	query[0] = '\0';			/* initialize query string to empty */
+
+	/*
+	 * Cluster-wide PAX backend detect.  All PAX-specific logic lives in
+	 * greenplum/pg_upgrade_pax.{h,c}; this is the single call into it
+	 * from get_rel_infos().
+	 */
+	cluster_pax_kind = pax_detect_cluster_backend(conn);
 
 	/*
 	 * Create a CTE that collects OIDs of regular user tables, including
@@ -501,7 +555,22 @@ get_rel_infos(ClusterInfo *cluster, DbInfo *dbinfo)
 			 "      n.nspname NOT IN ('pg_catalog', 'information_schema', "
 			 "                        'gp_toolkit', 'pg_bitmapindex', 'pg_aoseg', "
 			 "                        'binary_upgrade', 'pg_toast') AND "
-			 "      c.oid >= %u::pg_catalog.oid) OR "
+			 "      c.oid >= %u::pg_catalog.oid AND "
+	/*
+	 * PAX aux tables in pg_ext_aux (pg_pax_blocks_<oid> and
+	 * pg_manifest_<oid>) are always excluded from the file map.  Their
+	 * content is restored by restore_pax_aux_tables() via TRUNCATE +
+	 * INSERT, so there is no need to hard-link their relfiles.
+	 * Unconditionally excluding them prevents OID mismatches when the
+	 * old cluster uses catalog-mode PAX and the new cluster uses
+	 * manifest-mode PAX: the aux table names differ between modes, so
+	 * OIDs cannot match and gen_db_file_maps() would otherwise fail.
+	 *
+	 * Non-PAX entries in pg_ext_aux (e.g. pg_pax_fastsequence,
+	 * pg_pax_tables) and all other namespaces are unaffected.
+	 */
+			 "      (n.nspname <> 'pg_ext_aux' OR "
+			 "       c.relname !~ '^(pg_pax_blocks_|pg_manifest_)[0-9]+$')) OR "
 			 "     (n.nspname = 'pg_catalog' AND "
 			 "      relname IN ('pg_largeobject', "
 			 "					'gp_fastsequence', 'gp_fastsequence_objid_objmod_index') ))), ",
@@ -559,6 +628,7 @@ get_rel_infos(ClusterInfo *cluster, DbInfo *dbinfo)
 			 "SELECT all_rels.*, n.nspname, c.relname, "
 			 "  %s as relstorage, c.relkind, "
 			 "  c.relpersistence, "
+			 "  %s as amname, "
 			 "  c.relfilenode, c.reltablespace, "
 			 "  pg_catalog.pg_tablespace_location(t.oid) AS spclocation "
 			 "FROM (SELECT * FROM regular_heap "
@@ -586,6 +656,14 @@ get_rel_infos(ClusterInfo *cluster, DbInfo *dbinfo)
 			 " WHEN c.relkind = 'f' THEN 'x'"
 			 " ELSE '' END)",
 
+	/*
+	 * We need the full AM name (not just the single-char relstorage code)
+	 * to identify PAX tables, since PAX is not represented in relstorage
+	 * — it falls into the "ELSE ''" branch above.
+	 */
+			 (GET_MAJOR_VERSION(cluster->major_version) <= 1000) ?
+			 "NULL::text" : "am.amname",
+
 			(GET_MAJOR_VERSION(cluster->major_version) <= 1000) ?
 			 "" : "LEFT OUTER JOIN pg_catalog.pg_am am ON c.relam = am.oid");
 
@@ -603,6 +681,7 @@ get_rel_infos(ClusterInfo *cluster, DbInfo *dbinfo)
 	i_relstorage = PQfnumber(res, "relstorage");
 	i_relkind = PQfnumber(res, "relkind");
 	i_relpersistence = PQfnumber(res, "relpersistence");
+	i_amname = PQfnumber(res, "amname");
 	i_relfilenode = PQfnumber(res, "relfilenode");
 	i_reltablespace = PQfnumber(res, "reltablespace");
 	i_spclocation = PQfnumber(res, "spclocation");
@@ -737,6 +816,7 @@ get_rel_infos(ClusterInfo *cluster, DbInfo *dbinfo)
 
 				curr->naosegments = PQntuples(aores);
 				curr->aosegments = (AOSegInfo *) pg_malloc(sizeof(AOSegInfo) * curr->naosegments);
+				curr->aocssegments = NULL;
 
 				for (j = 0; j < curr->naosegments; j++)
 				{
@@ -764,6 +844,7 @@ get_rel_infos(ClusterInfo *cluster, DbInfo *dbinfo)
 
 				curr->naosegments = PQntuples(aores);
 				curr->aocssegments = (AOCSSegInfo *) pg_malloc(sizeof(AOCSSegInfo) * curr->naosegments);
+				curr->aosegments = NULL;
 
 				for (j = 0; j < curr->naosegments; j++)
 				{
@@ -847,6 +928,14 @@ get_rel_infos(ClusterInfo *cluster, DbInfo *dbinfo)
 			curr->naoblkdirs = 0;
 			curr->aoblkdirs = NULL;
 		}
+
+		/*
+		 * Capture PAX-specific state via greenplum/pg_upgrade_pax.c.
+		 * No-op for non-PAX relations and partition roots.
+		 */
+		pax_init_rel_state(curr);
+		pax_capture_rel_state(curr, conn, cluster_pax_kind,
+							  res, relnum, i_amname, relkind);
 	}
 	PQclear(res);
 
@@ -862,7 +951,7 @@ free_db_and_rel_infos(DbInfoArr *db_arr)
 {
 	int			dbnum;
 
-	for (dbnum = 0; dbnum < db_arr->ndbs; dbnum++)
+	for (dbnum = 0; dbnum < db_arr->total_ndbs; dbnum++)
 	{
 		free_rel_infos(&db_arr->dbs[dbnum].rel_arr);
 		pg_free(db_arr->dbs[dbnum].db_name);
@@ -870,6 +959,7 @@ free_db_and_rel_infos(DbInfoArr *db_arr)
 	pg_free(db_arr->dbs);
 	db_arr->dbs = NULL;
 	db_arr->ndbs = 0;
+	db_arr->total_ndbs = 0;
 }
 
 
@@ -877,6 +967,7 @@ static void
 free_rel_infos(RelInfoArr *rel_arr)
 {
 	int			relnum;
+	int			segnum;
 
 	for (relnum = 0; relnum < rel_arr->nrels; relnum++)
 	{
@@ -885,6 +976,47 @@ free_rel_infos(RelInfoArr *rel_arr)
 		pg_free(rel_arr->rels[relnum].relname);
 		if (rel_arr->rels[relnum].tblsp_alloc)
 			pg_free(rel_arr->rels[relnum].tablespace);
+
+		/*
+		 * Append-only auxiliary state.  naosegments counts whichever of
+		 * aosegments / aocssegments is populated -- row and column
+		 * orientation are mutually exclusive -- so the column array has to
+		 * be released under its own test.  Every one of these pointers is
+		 * NULL on a non-AO relation, and pg_free() tolerates NULL.
+		 */
+		if (rel_arr->rels[relnum].aocssegments)
+		{
+			for (segnum = 0; segnum < rel_arr->rels[relnum].naosegments; segnum++)
+				pg_free(rel_arr->rels[relnum].aocssegments[segnum].vpinfo);
+			pg_free(rel_arr->rels[relnum].aocssegments);
+			rel_arr->rels[relnum].aocssegments = NULL;
+		}
+		pg_free(rel_arr->rels[relnum].aosegments);
+		rel_arr->rels[relnum].aosegments = NULL;
+		rel_arr->rels[relnum].naosegments = 0;
+
+		for (segnum = 0; segnum < rel_arr->rels[relnum].naovisimaps; segnum++)
+			pg_free(rel_arr->rels[relnum].aovisimaps[segnum].visimap);
+		pg_free(rel_arr->rels[relnum].aovisimaps);
+		rel_arr->rels[relnum].aovisimaps = NULL;
+		rel_arr->rels[relnum].naovisimaps = 0;
+
+		for (segnum = 0; segnum < rel_arr->rels[relnum].naoblkdirs; segnum++)
+			pg_free(rel_arr->rels[relnum].aoblkdirs[segnum].minipage);
+		pg_free(rel_arr->rels[relnum].aoblkdirs);
+		rel_arr->rels[relnum].aoblkdirs = NULL;
+		rel_arr->rels[relnum].naoblkdirs = 0;
+
+		/*
+		 * PAX state is a separate allocation owning further allocations
+		 * (the block array, each block's statistics and visimap name, the
+		 * manifest path), so it needs its own destructor.  Reached whenever
+		 * a cluster's relation info is gathered a second time -- the new
+		 * cluster is scanned both in check_new_cluster() and after the
+		 * schema restore.
+		 */
+		pax_free_rel_state(rel_arr->rels[relnum].pax);
+		rel_arr->rels[relnum].pax = NULL;
 	}
 	pg_free(rel_arr->rels);
 	rel_arr->nrels = 0;

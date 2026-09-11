@@ -139,6 +139,31 @@ static void paxc_validate_rel_options_compress_type(const char *value) {
 
 static void paxc_validate_rel_option(PaxOptions *options) {
   Assert(options);
+
+  /*
+   * A binary upgrade has to be able to recreate whatever the old cluster
+   * legitimately contained, so this validator must not reject options that
+   * an older PAX accepted.
+   *
+   * Concretely: before the table-level entry point started validating (see
+   * paxc_default_rel_options below), CREATE TABLE ... WITH (compresslevel=N)
+   * was accepted without a real compresstype, and PAX expanded those
+   * table-level options into per-column pg_attribute_encoding rows.  pg_dump
+   * emits those rows back as explicit COLUMN ... ENCODING (compresslevel=N)
+   * clauses, which do reach this validator, so rejecting them here makes such
+   * a relation impossible to restore -- the relation, and with it the whole
+   * cluster, becomes permanently un-upgradable:
+   *
+   *   pg_restore: error: could not execute query: ERROR:
+   *     compresslevel=5 should setting is not work for current encoding.
+   *
+   * Accept the combination while restoring and leave it to the operator to
+   * correct the relation on the new cluster (ALTER TABLE ... SET
+   * (compresstype=...), or clear compresslevel).  Regular DDL keeps being
+   * validated, so no new relation can be created this way.
+   */
+  if (IsBinaryUpgrade) return;
+
   if (strcmp(ColumnEncoding_Kind_NO_ENCODED_STR, options->compress_type) == 0 ||
       strcmp(ColumnEncoding_Kind_RLE_V2_STR, options->compress_type) == 0 ||
       strcmp(ColumnEncoding_Kind_DIRECT_DELTA_STR, options->compress_type) ==

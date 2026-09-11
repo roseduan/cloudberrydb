@@ -171,6 +171,16 @@ typedef struct
 	int16		version;
 } AOCSSegInfo;
 
+/*
+ * Forward-declare PaxRelState — full definition lives in
+ * greenplum/pg_upgrade_pax.h so this core header stays PAX-agnostic.
+ * Files that actually inspect PAX state (greenplum/check_pax.c,
+ * greenplum/pg_upgrade_pax.c, info.c when capturing) include that
+ * header directly.  All other core .c files only need the opaque
+ * pointer field on RelInfo below.
+ */
+struct PaxRelState;
+
 typedef struct
 {
 	int16		attlen;
@@ -183,6 +193,7 @@ typedef enum
 	HEAP,
 	AO,
 	AOCS,
+	PAX,
 	FSM
 } RelType;
 
@@ -202,7 +213,7 @@ typedef enum
 /*
  * Each relation is represented by a relinfo structure.
  */
-typedef struct
+typedef struct relinfo
 {
 	/* Can't use NAMEDATALEN; not guaranteed to be same on client */
 	char	   *nspname;		/* namespace name */
@@ -227,6 +238,13 @@ typedef struct
 	int			naovisimaps;
 	AOBlkDir   *aoblkdirs;
 	int			naoblkdirs;
+
+	/*
+	 * PAX per-relation state — opaque to this header.  NULL for non-PAX
+	 * relations.  See greenplum/pg_upgrade_pax.h for the struct layout
+	 * and pax_capture_rel_state() for how it's populated.
+	 */
+	struct PaxRelState *pax;
 
 	/* Extra information for heap tables */
 	bool		gpdb4_heap_conversion_needed;
@@ -290,12 +308,25 @@ typedef struct
 
 	uint32 		datfrozenxid;	/* GPDB */
 	uint32 		datminmxid;		/* GPDB */
+	bool		datallowconn;	/* GPDB: false for template0 etc.; such
+								 * databases reject connections, so callers
+								 * that iterate dbarr must skip them or
+								 * temporarily ALTER DATABASE ALLOW_CONNECTIONS */
 } DbInfo;
 
 typedef struct
 {
-	DbInfo	   *dbs;			/* array of db infos */
-	int			ndbs;			/* number of db infos */
+	/*
+	 * dbs[0..ndbs-1]        connectable databases (datallowconn = true)
+	 * dbs[ndbs..total_ndbs-1] non-connectable databases (e.g. template0)
+	 *
+	 * Most callers iterate only 0..ndbs-1 and never see template0.
+	 * Callers that must process every database (e.g. update_db_xids)
+	 * iterate 0..total_ndbs-1.
+	 */
+	DbInfo	   *dbs;
+	int			ndbs;			/* connectable databases */
+	int			total_ndbs;		/* all databases including non-connectable */
 } DbInfoArr;
 
 /*

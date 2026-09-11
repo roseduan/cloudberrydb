@@ -83,18 +83,33 @@ void update_db_xids(void);
 
 /* version_gp.c */
 
+/*
+ * Catalog version at which the on-disk format of BRIN indexes on AO/CO
+ * tables changed.  Declared here so pg_upgrade.c can gate the segment-side
+ * REINDEX step with the same threshold used in new_reindex_ao_brin_indexes().
+ */
+#define BRIN_AOCO_NEW_FORMAT_CATVER	302502091
+
 void check_hash_partition_usage(void);
 void old_GPDB5_check_for_unsupported_distribution_key_data_types(void);
 void old_GPDB6_check_for_unsupported_sha256_password_hashes(void);
 void new_gpdb_invalidate_bitmap_indexes(void);
-void new_invalidate_ao_brin_indexes(void);
 void cleanup_segment_event_trigger_deps(void);
+void new_reindex_ao_brin_indexes(void);
+void new_reindex_bitmap_indexes(void);
 
 /* check_gp.c */
 
 void check_greenplum(void);
 void setup_GPDB6_data_type_checks(ClusterInfo *cluster);
 void teardown_GPDB6_data_type_checks(ClusterInfo *cluster);
+
+/* check_pax.c */
+
+void check_for_pax_tables(ClusterInfo *cluster);
+void check_pax_backend_compatibility(void);
+void transfer_pax_relfilenode_dir(FileNameMap *map);
+void restore_pax_aux_tables(void);
 
 /* reporting.c */
 
