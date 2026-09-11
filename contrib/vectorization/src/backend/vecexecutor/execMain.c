@@ -2719,9 +2719,46 @@ BuildSequencePlan(PlanBuildContext *pcontext, VecExecuteState *estate)
 	garrow_list_free_ptr(&sources);
 }
 
+/*
+ * Drop this estate's time collector from Arrow's process-wide registry.
+ *
+ * The span exporter thread may still hold a reference to the collector, in
+ * which case the object stays alive until that export finishes; it simply
+ * stops receiving spans.
+ */
+static void
+ReleaseVecTimeCollector(VecExecuteState *estate)
+{
+	if (estate->time_collector == NULL)
+		return;
+
+	garrow_time_collector_table_erase(estate->time_collector_plan_id);
+	g_object_unref(estate->time_collector);
+	estate->time_collector = NULL;
+	estate->time_collector_plan_id = -1;
+}
+
+/*
+ * Create the time collector of an Arrow plan and publish it under plan_id.
+ *
+ * PostBuildVecPlan() builds a second, merged plan for the same estate, so a
+ * collector published earlier has to be released here rather than leaked.
+ */
+static void
+SetVecTimeCollector(VecExecuteState *estate, int plan_id, int node_num)
+{
+	ReleaseVecTimeCollector(estate);
+
+	estate->time_collector = garrow_time_collector_new(node_num);
+	estate->time_collector_plan_id = plan_id;
+	garrow_time_collector_table_put(estate->time_collector, plan_id);
+}
+
 void
 FreeVecExecuteState(VecExecuteState *estate)
 {
+	ReleaseVecTimeCollector(estate);
+
 	if (estate->plan)
 	{
 		glib_autoptr_cleanup_GArrowExecutePlan(&estate->plan);
@@ -6794,14 +6831,12 @@ PostBuildVecPlan(PlanState *ps, VecExecuteState *estate)
 	BuildVecPlan(ps, estate);
 
 	plan_id = garrow_execute_plan_get_id(estate->plan);
-	Assert(plan_id == plan_num - 1);
 	info = (TraceNodeInfo*)palloc(sizeof(TraceNodeInfo));
 	info->ps = ps;
 	info->node_num = garrow_execute_plan_node_num(estate->plan);
 
-	estate->time_collector = garrow_time_collector_new(info->node_num);
 	estate->arrow_node_num = info->node_num;
-	garrow_time_collector_table_push_back(estate->time_collector);
+	SetVecTimeCollector(estate, plan_id, info->node_num);
 	estate->arrow_node_to_planstate = lappend(estate->arrow_node_to_planstate, info);
 
 	target_state = GetVecExecuteState(ps);
@@ -7092,8 +7127,8 @@ PostBuildVecPlan(PlanState *ps, VecExecuteState *estate)
 		list_free(estate->arrow_node_to_planstate);
 	estate->arrow_node_to_planstate = arrow_node_to_planstate;
 	garrow_execute_plan_set_plan_id(result, plan_num++);
-	estate->time_collector = garrow_time_collector_new(estate->arrow_node_num);
-	garrow_time_collector_table_push_back(estate->time_collector);
+	SetVecTimeCollector(estate, garrow_execute_plan_get_id(result),
+						estate->arrow_node_num);
 	SetArrowPlan(ps, result);
 
 	if (Debug_print_plan)

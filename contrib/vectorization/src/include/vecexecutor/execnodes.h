@@ -37,6 +37,12 @@ typedef struct VecExecuteState
 	List* arrow_node_to_planstate;
 	int arrow_node_num;
 	GArrowTimeCollector *time_collector;
+	/*
+	 * Key under which time_collector is published in Arrow's process-wide
+	 * collector registry.  Only meaningful while time_collector is non-NULL;
+	 * needed at teardown, when estate->plan has already been released.
+	 */
+	int time_collector_plan_id;
 	bool started; /* plan execution has been started */
 	TupleTableSlot *slot; /* slot for plan result*/
 	bool pipeline;

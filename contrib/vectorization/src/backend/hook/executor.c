@@ -216,7 +216,14 @@ CollectTime(VecExecuteState* estate, int plan_id)
 			i++;
 		}
 	}
-	pre->instrument->ntuples = garrow_time_collector_rows(estate->time_collector, i - 1);
+
+	/*
+	 * The inner loop body runs only if some TraceNodeInfo carries a positive
+	 * node_num.  Without one there is no last node to attribute rows to, and
+	 * i - 1 would index the collector with -1.
+	 */
+	if (pre != NULL)
+		pre->instrument->ntuples = garrow_time_collector_rows(estate->time_collector, i - 1);
 }
 
 
