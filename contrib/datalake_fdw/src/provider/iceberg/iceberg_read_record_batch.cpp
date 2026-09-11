@@ -354,28 +354,33 @@ icebergReadRecordBatch::readDecimalBatch(int64_t nrows)
 		auto *tr = static_cast<::parquet::FixedLenByteArrayReader *>(decimalReaders[j].get());
 		int16_t maxDef = tr->descr()->max_definition_level();
 		int16_t *defsPtr = (maxDef > 0) ? defs.data() : nullptr;
-		/* ReadBatch stops at a data-page boundary and may return fewer rows than
-		 * requested, so loop until this batch's whole nrows are read.  Dense
-		 * (non-null) values accumulate contiguously in `vals`; def levels fill one
-		 * slot per row in `defs`. */
-		int64_t rowsGot = 0, valsGot = 0;
+		/*
+		 * ReadBatch stops at a data-page boundary and may return fewer rows than
+		 * requested, so loop until this batch's whole nrows are read.  Each chunk
+		 * MUST be decoded before the next ReadBatch: a FixedLenByteArray's ptr
+		 * points into the reader's current data page buffer, which is freed once
+		 * the reader advances, so collecting the FLBAs and decoding them at the
+		 * end reads freed memory.
+		 */
+		::parquet_arrow::FixedSizeBinaryBuilder b(::parquet_arrow::fixed_size_binary(16), pool);
+		PARQUET_VEC_CHECK(b.Reserve(nrows), "numeric flba reserve");
+		int64_t rowsGot = 0;
 		while (rowsGot < nrows)
 		{
 			int64_t vr = 0;
-			int64_t lv = tr->ReadBatch(nrows - rowsGot,
-									   defsPtr ? defsPtr + rowsGot : nullptr, nullptr,
-									   vals.data() + valsGot, &vr);
+			int64_t lv = tr->ReadBatch(nrows - rowsGot, defsPtr, nullptr,
+									   vals.data(), &vr);
 			if (lv <= 0)
 				break;
+			appendNumeric128FromFLBA(b, vals.data(), defsPtr, maxDef, lv,
+									 decimalCols[j].typeLength,
+									 decimalCols[j].precision, decimalCols[j].scale);
 			rowsGot += lv;
-			valsGot += vr;
 		}
 		if (rowsGot != nrows)
 			elog(ERROR, "datalake parquet vectorized read: decimal FLBA read %ld of %ld "
 				 "rows (row-group misalignment)", (long) rowsGot, (long) nrows);
-		arrs[j] = buildNumeric128FromFLBA(pool, vals.data(), defsPtr, maxDef, nrows,
-										  decimalCols[j].typeLength,
-										  decimalCols[j].precision, decimalCols[j].scale);
+		PARQUET_VEC_CHECK(b.Finish(&arrs[j]), "numeric flba finish");
 	}
 	decimalRowsInRg += nrows;
 	return arrs;
