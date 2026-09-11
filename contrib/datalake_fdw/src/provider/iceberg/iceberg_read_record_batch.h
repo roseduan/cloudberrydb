@@ -133,6 +133,7 @@ private:
 	 * so the bitmap can be probed (selected row groups need not be contiguous).
 	 */
 	void					   *deleteIndex;	/* IcebergDeleteIndex * */
+	void					   *deleteIndexOwner;	/* IcebergDeleteIndexOwner *, cleanup hook state */
 	void					   *curBitmap;		/* Roaring bitmap for current file */
 	std::vector<int64_t>		selAbsStart;	/* abs file start pos of each selected row group */
 	std::vector<int64_t>		selNumRows;		/* rows in each selected row group */

@@ -38,6 +38,7 @@
 extern "C" {
 #include "miscadmin.h"
 #include "utils/builtins.h"
+#include "utils/memutils.h"						/* MemoryContextRegisterResetCallback */
 #include "src/dlproxy/datalake.h"					/* FileScanTask, FileFragment */
 #include "src/provider/common/utils.h"
 #include "src/provider/iceberg/iceberg_delete_index.h"	/* position-delete Roaring index */
@@ -63,11 +64,47 @@ makeIcebergReadRecordBatch()
 icebergReadRecordBatch::icebergReadRecordBatch()
 	: protocolContext(nullptr), fileScanTasks(nullptr), curTaskIndex(0),
 	  fileOpen(false), decimalRgCursor(0), decimalRowsInRg(0),
-	  deleteIndex(nullptr), curBitmap(nullptr), curSelRg(0), posInSelRg(0),
+	  deleteIndex(nullptr), deleteIndexOwner(nullptr),
+	  curBitmap(nullptr), curSelRg(0), posInSelRg(0),
 	  pool(nullptr), c_batch(new IcebergCBatch())
 {}
 
 icebergReadRecordBatch::~icebergReadRecordBatch() = default;
+
+/*
+ * Cleanup hook for the MOR position-delete index.
+ *
+ * The index's palloc'd memory lives in a child of the scan's initcontext, but
+ * the Roaring bitmaps it owns are C++ objects allocated outside any PostgreSQL
+ * memory context, so letting the context go away is not enough -- they have to
+ * be destroyed explicitly.  destroyHandler does that on the normal path, but an
+ * elog(ERROR) while scanning (a decimal decode failure, a gopher read error, a
+ * query cancel) unwinds without ever reaching it, and the bitmaps would then
+ * leak for the life of the session.  Registering this callback on initcontext
+ * makes the destruction happen however the scan ends.
+ *
+ * initcontext is created per scan in fdwFunction.c and is never reset while the
+ * scan runs (only destroyed with its parent query context), so the callback
+ * cannot fire while the index is still in use.  destroyHandler clears
+ * owner->index first, so the normal path releases the bitmaps promptly and this
+ * hook becomes a no-op rather than a double free.
+ */
+typedef struct IcebergDeleteIndexOwner
+{
+	IcebergDeleteIndex *index;		/* NULL once destroyHandler has released it */
+} IcebergDeleteIndexOwner;
+
+static void
+icebergDeleteIndexResetCallback(void *arg)
+{
+	IcebergDeleteIndexOwner *owner = (IcebergDeleteIndexOwner *) arg;
+
+	if (owner != NULL && owner->index != NULL)
+	{
+		icebergDeleteIndexDestroy(owner->index);
+		owner->index = NULL;
+	}
+}
 
 void
 icebergReadRecordBatch::createHandler(void *sstate)
@@ -85,9 +122,27 @@ icebergReadRecordBatch::createHandler(void *sstate)
 	 * bitmap of deleted positions); NULL when the scan has no position delete
 	 * files.  Equality deletes are handled separately (not yet).
 	 */
-	deleteIndex = icebergBuildDeleteIndex(TopMemoryContext,
+	deleteIndex = icebergBuildDeleteIndex(scanstate->initcontext,
 										  protocolContext->file->fileStream,
 										  fileScanTasks);
+	if (deleteIndex != nullptr)
+	{
+		IcebergDeleteIndexOwner *owner;
+		MemoryContextCallback   *cb;
+
+		owner = (IcebergDeleteIndexOwner *)
+			MemoryContextAllocZero(scanstate->initcontext,
+								   sizeof(IcebergDeleteIndexOwner));
+		owner->index = (IcebergDeleteIndex *) deleteIndex;
+		deleteIndexOwner = owner;
+
+		cb = (MemoryContextCallback *)
+			MemoryContextAllocZero(scanstate->initcontext,
+								   sizeof(MemoryContextCallback));
+		cb->func = icebergDeleteIndexResetCallback;
+		cb->arg = owner;
+		MemoryContextRegisterResetCallback(scanstate->initcontext, cb);
+	}
 }
 
 /* Mirrors ParquetReader::invalidFileOffset (parquet_reader.cpp). */
@@ -515,6 +570,9 @@ icebergReadRecordBatch::destroyHandler()
 	if (deleteIndex)
 	{
 		icebergDeleteIndexDestroy((IcebergDeleteIndex *) deleteIndex);
+		/* disarm the initcontext hook so it cannot double free */
+		if (deleteIndexOwner)
+			((IcebergDeleteIndexOwner *) deleteIndexOwner)->index = NULL;
 		deleteIndex = NULL;
 		curBitmap = NULL;
 	}
