@@ -86,8 +86,9 @@ std::shared_ptr<Provider> getProvider(DLTblFmt type, DLCmdType cmd, bool vectori
 			{
 				if (vectorization)
 				{
-					/* FDW-iceberg vectorized read (parquet data files, no MOR
-					 * deletes yet); iceberg-vec plan/option gates open this. */
+					/* FDW-iceberg vectorized read (parquet data files; MOR
+					 * position deletes applied, equality deletes refused);
+					 * iceberg-vec plan/option gates open this. */
 					return makeIcebergReadRecordBatch();
 				}
 				else

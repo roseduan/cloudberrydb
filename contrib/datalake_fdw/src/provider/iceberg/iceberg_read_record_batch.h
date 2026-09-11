@@ -10,8 +10,9 @@
  *    (matchParquetColumn, #401) and Arrow batch helpers
  *    (parquet_vec_batch_util) with the generic parquet vectorized reader (#424).
  *
- *    v1 scope: read-only, parquet data files only, no MOR deletes (append-only
- *    tables; delete handling is a later package).  Columns are emitted in table
+ *    Scope: read-only, parquet data files only.  MOR position deletes are
+ *    applied from a per-scan Roaring index; equality deletes are refused with
+ *    an error so the query falls back to the row engine.  Columns are emitted in table
  *    attribute order (matching BuildDescForScanExtract) so the engine's
  *    columnmap aligns regardless of physical file column order / schema
  *    evolution.
