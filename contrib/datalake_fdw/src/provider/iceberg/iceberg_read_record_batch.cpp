@@ -271,6 +271,7 @@ icebergReadRecordBatch::openCurrentTask()
 		arrowProps.set_use_threads(false);
 		arrowProps.set_pre_buffer(false);
 		arrowProps.set_arrow_extensions_enabled(false);
+		arrowProps.set_batch_size(PARQUET_VEC_BATCH_ROWS);	/* see parquet_vec_batch_util.h */
 
 		::parquet::arrow::FileReaderBuilder builder;
 		PARQUET_VEC_CHECK(builder.Open(fileReader.getFileStream(),
