@@ -1655,11 +1655,15 @@ void datalakeCheckValidRecordBatchOpt(dataLakeOptions *options)
 						errmsg("vectorization not support orc transactional table.")));
 		}
 	}
+	else if (FORMAT_IS_PARQUET(options->format))
+	{
+		/* generic parquet vectorized read (issue #424) */
+	}
 	else
 	{
 		ereport(ERROR,
 					(errcode(ERRCODE_FDW_INVALID_OPTION_NAME),
-						errmsg("vectorization only support format orc.")));
+						errmsg("vectorization only support format orc or parquet.")));
 	}
 }
 

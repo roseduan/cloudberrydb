@@ -193,6 +193,35 @@ is_aggsplit_vectorable(Aggref *aggref)
  * don't support the scan of this types. So we work around.
  * Remove this after all scanning type supported.
  */
+/*
+ * issue #424: the generic parquet vectorized path handles only these column
+ * types; everything else (timestamp, ...) must fall back.  NUMERIC is included
+ * here but the precision <= VEC_NUMERIC_MAX_PRECISION guard is enforced by
+ * is_scan_type_vectorable(), which every caller runs first.
+ */
+static bool
+is_parquet_t1_type(Oid typeOid)
+{
+	switch (typeOid)
+	{
+		case INT2OID:
+		case INT4OID:
+		case INT8OID:
+		case FLOAT4OID:
+		case FLOAT8OID:
+		case DATEOID:
+		case NUMERICOID:
+		case TEXTOID:
+		case VARCHAROID:
+		case BPCHAROID:
+		case BOOLOID:
+		case TIMESTAMPOID:
+			return true;
+		default:
+			return false;
+	}
+}
+
 static bool
 is_scan_type_vectorable(Form_pg_attribute attr)
 {
@@ -1495,6 +1524,7 @@ is_relation_vectorable(Scan* seqscan, List *rtable, bool isForeign)
 	unsupport = false;
 	Plan *plan = (Plan *) seqscan;
 	int *columnmap;
+	bool isParquet = false;
 	RangeTblEntry *rte;
 	Relation rel;
 	TupleDesc reldesc;
@@ -1522,12 +1552,20 @@ is_relation_vectorable(Scan* seqscan, List *rtable, bool isForeign)
 			if (strcmp(def->defname, "transactional") == 0 && defGetBoolean(def))
 			{
 				FALLBACK_LOG("foreign table relation is transactional.");
+				relation_close(rel, AccessShareLock);
 				return false;
 			}
-			if (strcmp(def->defname, "format") == 0 && strcmp(defGetString(def), "orc") != 0)
+			if (strcmp(def->defname, "format") == 0)
 			{
-				FALLBACK_LOG("foreign table relation is not orc.");
-				return false;
+				const char *fmt = defGetString(def);
+				if (strcmp(fmt, "orc") != 0 && strcmp(fmt, "parquet") != 0)
+				{
+					FALLBACK_LOG("foreign table relation is not orc/parquet.");
+					relation_close(rel, AccessShareLock);
+					return false;
+				}
+				if (strcmp(fmt, "parquet") == 0)
+					isParquet = true;
 			}
 		}
 	}
@@ -1583,6 +1621,11 @@ is_relation_vectorable(Scan* seqscan, List *rtable, bool isForeign)
 			Form_pg_attribute attr = TupleDescAttr(tupdesc, attnum - 1);
 			if (!is_scan_type_vectorable(attr))
 				return false;
+			if (isParquet && !is_parquet_t1_type(attr->atttypid))
+			{
+				FALLBACK_LOG("parquet vec: column type %u not supported in T1", attr->atttypid);
+				return false;
+			}
 		}
 	}
 

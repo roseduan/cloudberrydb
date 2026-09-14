@@ -189,7 +189,20 @@ BuildDescForScanExtract(TupleDesc tupdesc, List *targetlist, List *qual, int *ma
 	/* initialized */
 	desc->tdtypeid = tupdesc->tdtypeid;
 	desc->tdtypmod = tupdesc->tdtypmod;
-	desc->tdrefcount = tupdesc->tdrefcount;
+	/*
+	 * Deliberately do NOT copy tdrefcount from the source descriptor.  This
+	 * descriptor is freshly palloc'd in the per-query context, so it must
+	 * stay non-reference-counted (-1), exactly as CreateTemplateTupleDesc
+	 * left it.  Copying the relcache descriptor's tdrefcount (1) used to make
+	 * PinTupleDesc() register this transient descriptor with the current
+	 * ResourceOwner: the scan slots built from it in
+	 * ExecInitScanTupleSlotVec() then left entries in owner->tupdescarr.  On
+	 * a normal end-of-query ExecResetTupleTable() unpinned them again, but on
+	 * an abort AtAbort_Portals() destroys the portal's child contexts (and
+	 * with them this descriptor) *before* ResourceOwnerRelease() walks
+	 * tupdescarr, so DecrTupleDescRefCount() dereferenced freed memory and
+	 * the backend crashed while cancelling a vectorized query.
+	 */
 	desc->constr = tupdesc->constr;
 	for (AttrNumber i = 0; i < natts; i++)
 	{

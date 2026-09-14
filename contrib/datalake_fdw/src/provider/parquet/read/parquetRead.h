@@ -20,7 +20,7 @@ public:
 
 	virtual void destroyHandler();
 
-private:
+protected:
 	virtual bool createPolicy();
 
 	virtual bool getNextGroup();

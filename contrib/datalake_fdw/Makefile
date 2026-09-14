@@ -48,6 +48,8 @@ OBJS = 	src/datalake_fdw.o \
 		src/provider/parquet/read/parquetRead.o \
 		src/provider/parquet/read/parquetInputStream.o \
 		src/provider/parquet/read/parquetFileReader.o \
+		src/provider/parquet/read/parquetReadRecordBatch.o \
+		src/provider/parquet/read/parquet_vec_batch_util.o \
 		src/provider/parquet/write/parquetWrite.o \
 		src/provider/parquet/write/parquetOutputStream.o \
 		src/provider/parquet/write/parquetFileWriter.o \

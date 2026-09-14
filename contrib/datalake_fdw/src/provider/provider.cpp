@@ -3,6 +3,7 @@
 #include <uuid/uuid.h>
 #include "src/provider/orc/read/orcReadRecordBatch.h"
 #include "src/provider/parquet/read/parquetRead.h"
+#include "src/provider/parquet/read/parquetReadRecordBatch.h"
 #include "src/provider/parquet/write/parquetWrite.h"
 #include "src/provider/orc/read/orcRead.h"
 #include "src/provider/orc/write/orcWriter.h"
@@ -33,6 +34,7 @@ using Datalake::Internal::avroRead;
 using Datalake::Internal::archiveRead;
 using Datalake::Internal::archiveWrite;
 using Datalake::Internal::orcReadRecordBatch;
+using Datalake::Internal::makeParquetReadRecordBatch;
 using Datalake::Internal::icebergRead;
 using Datalake::Internal::icebergWrite;
 using Datalake::Internal::icebergPosDeleteWrite;
@@ -65,7 +67,14 @@ std::shared_ptr<Provider> getProvider(DLTblFmt type, DLCmdType cmd, bool vectori
 			}
 			else if (FORMAT_IS_PARQUET(type))
 			{
-				return std::make_shared<parquetRead>();
+				if (vectorization)
+				{
+					return makeParquetReadRecordBatch();
+				}
+				else
+				{
+					return std::make_shared<parquetRead>();
+				}
 			}
 			else if (FORMAT_IS_AVRO(type))
 			{

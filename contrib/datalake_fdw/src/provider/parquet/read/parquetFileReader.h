@@ -60,6 +60,14 @@ public:
         return file_metadata;
     }
 
+    /* issue #424: expose the per-file gopher stream so the vectorized reader
+     * can build a parquet::arrow::FileReader on it without moving
+     * parquet_reader (keeps resetParquetReader's Close path valid). */
+    const std::shared_ptr<gopherReadFileSystem> &getFileStream()
+    {
+        return fileStream;
+    }
+
 private:
     readOption options;
     int num_row_groups;
