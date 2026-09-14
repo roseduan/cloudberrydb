@@ -6,6 +6,7 @@
 #include "orc/Type.hh"
 #include "orc/Vector.hh"
 #include "src/common/fileSystemWrapper.h"
+#include "src/common/fileMetaRangeCache.h"
 #include <iostream>
 
 namespace Datalake {
@@ -36,12 +37,19 @@ public:
 
 	bool checkORCFile();
 
+	bool isMetaOk() const { return metaOk; }
+	void fillAndPushTail(int64_t off, int32_t len);
+
 private:
 	ossFileStream stream;
 	std::string filename;
 	uint64_t length;
 	bool enableCache;
 	char* allocBuffer;
+
+	FileMetaRangeCache metaCache;
+	/* metaOk = hit AND it is an ORC tail AND the shape checks out; distinct from metaCache.hit() */
+	bool metaOk;
 };
 
 }

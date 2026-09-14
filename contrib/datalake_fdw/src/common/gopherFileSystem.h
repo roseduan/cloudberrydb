@@ -37,6 +37,10 @@ public:
 	datalakeFileInfo* getFileInfo(const char *path) override;
 	int destroyHandle() override;
 	int deleteFile(const char *path) override;
+	int getFileMeta(uint32_t *producerId, int32_t *type,
+					int64_t *offset, const void **data, int32_t *length) override;
+	int putFileMeta(uint32_t producerId, int32_t type,
+					int64_t offset, const void *data, int32_t length) override;
 
 	/* Expose UFS type for fileSystemWrapper compatibility */
 	int getUfsType() const { return ufsType; }

@@ -83,6 +83,16 @@ public:
 	 */
 	void *storageOptions = NULL;
 
+	/*
+	 * Logical file cursor, maintained by the datalakeOpenFile /
+	 * datalakeSeekFile / datalakeReadFile / datalakeWriteFile wrappers
+	 * below and read back by datalakeTellFile(). Kept here rather than in
+	 * each FileSystem implementation so there is exactly one copy of the
+	 * bookkeeping: the wrappers are the only way datalake_fdw moves a
+	 * cursor, and no caller reaches past them into gopherSeek/gopherRead.
+	 */
+	int64_t pos = 0;
+
 private:
 	FileSystem *context;
 };
@@ -202,6 +212,8 @@ int datalakeOpenFile(ossFileStream file, const char *path, int flag)
 	try
 	{
 		ret = file->getContext().openFile(path, flag);
+		if (ret != -1)
+			file->pos = 0;   /* no backend opens for append, so a fresh handle starts at 0 */
 	}
 	catch (std::exception &e)
 	{
@@ -223,6 +235,8 @@ int datalakeWriteFile(ossFileStream file, void *buff, int64_t size)
 	try
 	{
 		ret = file->getContext().write(buff, size);
+		if (ret > 0)
+			file->pos += ret;
 	}
 	catch (std::exception &e)
 	{
@@ -244,6 +258,8 @@ int datalakeReadFile(ossFileStream file, void *buff, int64_t size)
 	try
 	{
 		ret = file->getContext().read(buff, size);
+		if (ret > 0)
+			file->pos += ret;   /* short reads are normal, so advance by what was actually read */
 	}
 	catch (std::exception &e)
 	{
@@ -265,6 +281,8 @@ int datalakeSeekFile(ossFileStream file, int64_t position)
 	try
 	{
 		ret = file->getContext().seek(position);
+		if (ret != -1)
+			file->pos = position;
 	}
 	catch (std::exception &e)
 	{
@@ -285,6 +303,14 @@ int datalakeSeekFile(ossFileStream file, int64_t position)
 		return -1;
 	}
 	return ret;
+}
+
+int64_t datalakeTellFile(ossFileStream file)
+{
+	if (file == NULL)
+		return -1;
+
+	return file->pos;
 }
 
 int datalakeCloseFile(ossFileStream file)
@@ -479,6 +505,70 @@ int datalakeDeleteFileByOptions(void *storageOpt, const char *path)
 	if (fs)
 		datalakeDestroyFileSystem(fs);
 	return rc;
+}
+
+int datalakeGetFileMeta(ossFileStream file, uint32_t *producerId, int32_t *type,
+						int64_t *offset, const void **data, int32_t *length)
+{
+	PARAMETER_ASSERT(file != NULL, EINVAL);
+	try
+	{
+		return file->getContext().getFileMeta(producerId, type, offset, data, length);
+	}
+	catch (std::exception &e)
+	{
+		/*
+		 * Deliberately does NOT elog(ERROR): the metadata cache is a
+		 * pure performance optimization, and any failure must silently
+		 * degrade to "miss". This differs from datalakeOpenFile (:209
+		 * elog ERRORs), and matches datalakeSeekFile (:271-273 returns
+		 * -1 and lets the caller decide). A cache failure must never
+		 * turn into a query failure.
+		 */
+		setLastError(e.what());
+		return -1;
+	}
+	catch (...)
+	{
+		/*
+		 * Last-resort guard: this function is an extern "C" exported
+		 * symbol, and letting an exception cross a C boundary is
+		 * undefined behavior -- in practice std::terminate() fires and
+		 * cores the whole backend process, which is far worse than
+		 * elog(ERROR) merely aborting the current query. The only
+		 * current implementation, GopherFileSystem, just forwards to a
+		 * plain C function and never throws, but these two virtual
+		 * functions are AN OPTIONAL CAPABILITY RESERVED FOR FUTURE
+		 * BACKENDS, and once one exists, a third-party library throwing
+		 * something that does not derive from std::exception would
+		 * light up this gap. Every one of the other eight wrappers in
+		 * this file carries this same guard; omitting it here would
+		 * break that existing convention.
+		 */
+		setLastError("internal error");
+		return -1;
+	}
+}
+
+int datalakePutFileMeta(ossFileStream file, uint32_t producerId, int32_t type,
+						int64_t offset, const void *data, int32_t length)
+{
+	PARAMETER_ASSERT(file != NULL, EINVAL);
+	try
+	{
+		return file->getContext().putFileMeta(producerId, type, offset, data, length);
+	}
+	catch (std::exception &e)
+	{
+		setLastError(e.what());
+		return -1;
+	}
+	catch (...)
+	{
+		/* Same as above: never let an exception escape across the extern "C" boundary */
+		setLastError("internal error");
+		return -1;
+	}
 }
 
 #ifdef __cplusplus

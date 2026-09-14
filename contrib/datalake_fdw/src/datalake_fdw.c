@@ -219,6 +219,27 @@ typedef struct DataLakeAnalyzeState
 
 static bool disableFilterPushdown;
 bool disableCacheFile;
+/*
+ * Host variable for the GUC datalake.enable_file_meta_cache.
+ * Registered via the DefineCustomBoolVariable call in _PG_init().
+ * Defaults to FALSE -- see the boot value in _PG_init() for why.
+ */
+bool datalake_enable_file_meta_cache = false;
+
+/*
+ * Host variable for the GUC datalake.file_meta_max_size, in KILOBYTES
+ * (GUC_UNIT_KB). One knob for every format rather than one per format:
+ * the formats' needs differ by about 2x, which is not worth a second
+ * operator-facing name.
+ *
+ * In practice this bounds ORC, not Parquet. A Parquet footer is typically
+ * 2-8 KB, but the cached range has to be the last 64 KB regardless (see
+ * FileMetaRangeCache's header for why arrow forces that), so this limit
+ * is never what stops a Parquet file from being cached. What it does stop
+ * is a wide-table ORC tail: tail size grows as stripes x columns x ~50
+ * bytes, so 200 columns over 50 stripes lands around 550 KB.
+ */
+int datalake_file_meta_max_size = 512;
 int icebergPostionDeletesThreshold;
 int hudiLogMergerThreshold;
 double hudiLogSizeScaleFactor;
@@ -269,6 +290,125 @@ _PG_init(void)
 								false,
 								PGC_USERSET,
 								0,
+								NULL,
+								NULL,
+								NULL);
+
+	/*
+	 * Two operational boundaries that operators must know about (issue
+	 * #432):
+	 *
+	 * 1. THE ONLY INVALIDATION KEYS ARE PATH + FILE LENGTH -- the blob
+	 *    carries no fileId and no mtime. So "same path, same length,
+	 *    different content" will hit stale metadata, and the stripe
+	 *    offsets read back will point at the wrong bytes. Iceberg / Hudi /
+	 *    Delta data files are immutable and uniquely named, so they are
+	 *    naturally unaffected; what this actually exposes is the
+	 *    combination of A BARE-DIRECTORY-STYLE FOREIGN TABLE PLUS
+	 *    IN-PLACE OVERWRITE. Note this is a pre-existing consistency
+	 *    assumption of the Gopher cache (the block cache uses the same
+	 *    keys for the same path), not something this feature introduces.
+	 *
+	 * 2. UPGRADE ORDER: gopher_store FIRST, THEN datalake_fdw -- a new
+	 *    client sending a backfill request to an old gopher_store will
+	 *    hang that backend forever (the old server does not recognize
+	 *    this message type and never replies; the client's receive is a
+	 *    blocking read with no timeout).
+	 *    See the comment on putFileMeta in
+	 *    Gopher/src/client/GopherStoreClient.cpp for details.
+	 *
+	 * To disable this feature, DO IT HERE -- do not disable the
+	 * Gopher-side gopher.filemeta.cache.enabled instead, because that
+	 * makes the server reject requests while the client still sends a
+	 * full RPC round trip on every open, and without writing a
+	 * tombstone, paying the cost forever with no way to stop it.
+	 */
+	DefineCustomBoolVariable("datalake.enable_file_meta_cache",
+								"If true, cache file tail metadata (ORC tail and Parquet footer) in Gopher "
+								"to avoid re-reading it on every file open. "
+								"Invalidation keys on path and file length only: "
+								"replacing a file in place with different content of "
+								"the same length will serve stale metadata. Requires "
+								"gopher_store to be upgraded first. Applies to bare "
+								"external tables only: Iceberg and Hudi reach Parquet "
+								"through a separate reader stack that is not wired "
+								"into this cache, so turning this on will not speed "
+								"them up.",
+								NULL,
+								&datalake_enable_file_meta_cache,
+								/*
+								 * OFF by default, for two independent reasons.
+								 *
+								 * The upgrade-order hazard above is the hard
+								 * one: on by default, a datalake_fdw upgraded
+								 * ahead of gopher_store hangs a backend
+								 * permanently on the first file open, and
+								 * nothing in the build or the packaging
+								 * enforces that order.  Off by default, not a
+								 * single backfill request leaves the client
+								 * until someone opts in, so the hazard cannot
+								 * fire by accident.
+								 *
+								 * The second is that the saving has not been
+								 * demonstrated.  The cache provably engages
+								 * (DEBUG1 reports hits on every segment, for
+								 * both formats), but a blob's lifetime is
+								 * tied to its File and eviction walks Files,
+								 * so a blob dies with the File whose metadata
+								 * it holds -- and no measurement so far shows
+								 * fewer object-storage requests with it on.
+								 * A feature that costs an RPC per cold open
+								 * and has yet to show a win does not belong
+								 * in everyone's default path.
+								 */
+								false,
+								PGC_USERSET,
+								0,
+								NULL,
+								NULL,
+								NULL);
+
+	/*
+	 * The client-side size limit is a POLICY, deciding whether a backfill
+	 * is worth sending at all; the server-side gopher.filemeta.max.size
+	 * (default 1 MB) is a BACKSTOP that can only reject after the request
+	 * has already been paid for. Keeping this below the server's value is
+	 * what makes the distinction hold: raise it above and an oversized
+	 * blob costs a full RPC round trip and gets tombstoned anyway.
+	 *
+	 * The 64 KB floor is NOT a matter of taste. arrow always issues its
+	 * first footer read as the last min(fileSize, 64 KB) of the file --
+	 * it cannot know metadata_len before reading it -- and the range cache
+	 * only serves a request that falls entirely inside the cached range.
+	 * Set this below 64 KB and every Parquet file silently stops being
+	 * cacheable: no error, no log, just a hit rate pinned at zero. The
+	 * minimum below makes that unreachable rather than merely documented.
+	 *
+	 * The maximum is the wire ceiling, not a policy: the blob length is an
+	 * int32 both on the protocol and in FileMetaRangeCache::push(), so
+	 * anything past PG_INT32_MAX bytes cannot be expressed at all. Values
+	 * anywhere near it are nonsense; the useful range is bounded from
+	 * above by the server's limit, which is why that is spelled out in the
+	 * long description rather than enforced here (the server's value is
+	 * itself configurable, so hard-coding it would be a lie).
+	 */
+	DefineCustomIntVariable("datalake.file_meta_max_size",
+								"Largest file metadata blob datalake_fdw will "
+								"try to cache in Gopher, in kilobytes.",
+								"Blobs above this are not sent at all, so an "
+								"oversized file costs nothing. Must be at least "
+								"64kB: arrow reads a Parquet footer as the last "
+								"64kB of the file, and a smaller limit silently "
+								"disables Parquet metadata caching entirely. "
+								"Keep it below the server's "
+								"gopher.filemeta.max.size (default 1MB), or "
+								"oversized blobs pay an RPC and get rejected.",
+								&datalake_file_meta_max_size,
+								512,
+								64,
+								PG_INT32_MAX / 1024,
+								PGC_USERSET,
+								GUC_UNIT_KB,
 								NULL,
 								NULL,
 								NULL);

@@ -88,6 +88,20 @@ public:
 	virtual int deleteFile(const char *path) { return -1; }
 
 	/*
+	 * File-metadata blob cache (an optional capability).
+	 * The default implementation signals "not supported by this
+	 * backend", and callers fall back completely to the original read
+	 * path based on that. S3FileSystem does not need to override this.
+	 */
+	virtual int getFileMeta(uint32_t *producerId, int32_t *type,
+							int64_t *offset, const void **data, int32_t *length)
+	{ return -1; }
+
+	virtual int putFileMeta(uint32_t producerId, int32_t type,
+							int64_t offset, const void *data, int32_t length)
+	{ return -1; }
+
+	/*
 	 * getName - return a short, human-readable backend name used in
 	 * diagnostic messages (e.g. "S3: connection timeout" vs bare
 	 * "connection timeout"). Default "Unknown" keeps the commercial

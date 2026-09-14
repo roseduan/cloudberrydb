@@ -102,6 +102,26 @@ bool parquetFileReader::createInternalReader(ossFileStream ossFile, std::string 
     }
     parquet_reader = parquet::ParquetFileReader::Open(fileStream);
     file_metadata = parquet_reader->metadata();
+
+    /*
+     * Cold-path backfill, placed here for the same two reasons as the ORC
+     * one: only now is the metadata length known, and by now the trailing
+     * block has already been materialized by Gopher, so reading the
+     * footer back is a local pread that generates no remote traffic.
+     *
+     * An encrypted footer is deliberately never cached. Its layout
+     * differs (it ends in "PARE", which file_reader.cc checks for), and
+     * stashing plaintext metadata for an encrypted file in a shared cache
+     * is a security decision nobody asked us to make.
+     */
+    if (!fileStream->isMetaOk())
+    {
+        if (file_metadata->is_encryption_algorithm_set())
+            elog(DEBUG1, "datalake file-meta-cache: %s has an encrypted footer, "
+                         "not caching", fileName.c_str());
+        else
+            fileStream->backfillFooter(file_metadata->size());
+    }
     num_row_groups = file_metadata->num_row_groups();
     num_columns = file_metadata->num_columns();
     name = fileName;

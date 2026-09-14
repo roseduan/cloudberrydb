@@ -2,7 +2,12 @@
 #include "orcReadDeltaFile.h"
 #include <list>
 #include <cassert>
+#include <cstdint>
 #include <sstream>
+
+extern "C" {
+#include "utils/elog.h"
+}
 
 
 namespace Datalake {
@@ -19,6 +24,61 @@ bool orcReadInterface::createORCReader(ossFileStream fileStream, std::string fil
         return false;
     }
     reader = orc::createReader(std::move(istream), options);
+
+    /*
+     * Cold-path backfill. Placed AFTER createReader for two reasons:
+     * 1) only once the PostScript has been parsed do we know the tail's
+     *    total length T;
+     * 2) by this point the last block holding the PostScript / Footer /
+     *    Metadata(StripeStatistics) has already been materialized by
+     *    Gopher, so this tail read is a local pread and generates no
+     *    remote traffic.
+     *
+     * isMetaOk() being true means the cache is already usable, so we
+     * skip a wasted backfill read; FileMetaRangeCache::push() also
+     * guards itself with hit()/tombstone() internally, as a second line
+     * of defense.
+     *
+     * All four lengths come from liborc's public interface
+     * (orc/Reader.hh:509-533); getStripeStatisticsLength() corresponds
+     * to metadata_length in the PostScript.
+     */
+    if (!stream->isMetaOk())
+    {
+        uint64_t postscriptLen = reader->getFilePostscriptLength();
+        uint64_t footerLen = reader->getFileFooterLength();
+        uint64_t metadataLen = reader->getStripeStatisticsLength();
+        uint64_t fileLen = reader->getFileLength();
+        uint64_t tailLen = 1 + postscriptLen + footerLen + metadataLen;
+
+        /*
+         * This guard is about the CAST, not about the configured size
+         * limit -- datalake.file_meta_max_size is enforced inside
+         * FileMetaRangeCache::push(), where every format goes through it.
+         *
+         * tailLen is a uint64_t, but fillAndPushTail's len parameter is
+         * only an int32_t. Without an explicit guard, a tail exceeding
+         * INT32_MAX would get truncated into a negative number, and then
+         * silently dropped by FileMetaRangeCache::push()'s len <= 0
+         * check -- so this file would NEVER GET CACHED, WITH NO LOG
+         * ANYWHERE TO EXPLAIN WHY. A real ORC footer + metadata
+         * basically never gets anywhere near 2GB, but silent failure is
+         * exactly the hardest failure mode of this feature to debug, so
+         * it is worth leaving a clue.
+         */
+        if (tailLen > (uint64_t) INT32_MAX)
+        {
+            elog(DEBUG1,
+                 "datalake: ORC tail %lu bytes cannot be expressed as an "
+                 "int32 blob length, skipping backfill",
+                 (unsigned long) tailLen);
+        }
+        else if (tailLen > 0 && tailLen <= fileLen)
+        {
+            stream->fillAndPushTail((int64_t) (fileLen - tailLen), (int32_t) tailLen);
+        }
+    }
+
     return true;
 }
 

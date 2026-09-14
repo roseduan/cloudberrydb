@@ -13,6 +13,17 @@ extern "C" {
 #include "src/common/partition_selector.h"
 }
 
+/*
+ * Host variable for the GUC datalake.enable_file_meta_cache (defined in
+ * datalake_fdw.c). Registration (DefineCustomBoolVariable) happens in
+ * Task 15; this declaration alone is only here so that consumers (such
+ * as FileMetaRangeCache) can link successfully.
+ */
+extern bool datalake_enable_file_meta_cache;
+
+/* Companion size limit, in kilobytes -- see datalake_fdw.c. */
+extern int datalake_file_meta_max_size;
+
 namespace Datalake {
 namespace Internal {
 

@@ -328,6 +328,37 @@ int GopherFileSystem::deleteFile(const char *path) {
 	return gopherDelete(fs, path);
 }
 
+/*
+ * getFileMeta - zero-RPC read of the blob piggy-backed on the openFile
+ * reply. Returns 0 on hit (a tombstone counts as a hit, with *length == 0),
+ * non-zero on miss / unsupported. Never throws: gopherGetFileMeta() is a
+ * plain return-code C call, so there is nothing for the caller to catch.
+ */
+int GopherFileSystem::getFileMeta(uint32_t *producerId, int32_t *type,
+								   int64_t *offset, const void **data, int32_t *length) {
+	gopherFileMeta meta;
+	int ret = gopherGetFileMeta(fs, file, &meta);
+	if (ret != 0)
+		return ret;
+
+	*producerId = meta.producerId;
+	*type = meta.type;
+	*offset = meta.offset;
+	*data = meta.data;
+	*length = meta.length;
+	return 0;
+}
+
+/*
+ * putFileMeta - best-effort backfill. Returns 0 if the server accepted it,
+ * non-zero otherwise (over-limit rejection, evicted file, feature off).
+ * A failure here must never affect the read that triggered it.
+ */
+int GopherFileSystem::putFileMeta(uint32_t producerId, int32_t type,
+								   int64_t offset, const void *data, int32_t length) {
+	return gopherPutFileMeta(fs, file, producerId, type, offset, data, length);
+}
+
 /* ----------------------------------------------------------------
  * convertFileInfo - convert gopherFileInfo[] to datalakeFileInfo[]
  *
