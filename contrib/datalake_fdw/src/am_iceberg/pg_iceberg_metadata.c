@@ -506,8 +506,29 @@ pg_iceberg_get_metadata_info_internal(Oid relid, bool missing_ok)
 	if (!isnull)
 		info->default_spec_id = DatumGetInt32(datum);
 
-	/* metadata_cached_at (issue #393); NULL -> treated as never refreshed */
-	datum = heap_getattr(tuple, 6, metadata_rel->rd_att, &isnull);
+	/*
+	 * metadata_cached_at (issue #393); NULL -> treated as never refreshed.
+	 *
+	 * Guarded on natts.  This column was added to the initdb-time cdbinit
+	 * script, so a cluster created before it whose binaries were swapped in
+	 * place still carries a 5-column catalog.  heap_getattr() would then take
+	 * its attnum > natts path into getmissingattr(), which reads
+	 * TupleDescAttr(desc, 5) past the end of the attribute array -- an
+	 * out-of-bounds read that faults on whatever follows it in memory and
+	 * takes the whole cluster into recovery (issues #439, #443).  The
+	 * CATALOG_VERSION_NO bump that goes with this change makes such a cluster
+	 * refuse to start in the first place; the guard keeps the read in bounds
+	 * regardless, and an absent column is exactly the "never refreshed" case
+	 * the NULL branch below already handles.
+	 */
+	if (RelationGetDescr(metadata_rel)->natts >= 6)
+		datum = heap_getattr(tuple, 6, metadata_rel->rd_att, &isnull);
+	else
+	{
+		datum = (Datum) 0;
+		isnull = true;
+	}
+
 	if (isnull)
 	{
 		info->metadata_cached_at = 0;
