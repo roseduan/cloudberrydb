@@ -160,6 +160,24 @@ void icebergWrite::computePartition(TupleTableSlot *slot, std::string &pathOut,
 
 			pv.value = out;
 			pfree(out);
+
+			/*
+			 * CHAR(N) is blank-padded in storage and bpcharout() returns that
+			 * padding verbatim, while the data column itself is written with
+			 * trailing spaces stripped (see the BPCHAROID case in
+			 * parquetFileWriter.cpp).  Emitting the padded form as the
+			 * partition value makes the manifest disagree with both the file
+			 * contents and any pushed-down predicate, so partition pruning
+			 * discards every file and the query silently returns no rows
+			 * (issue #441).  bpchar only: a trailing space in text/varchar is
+			 * real data and is part of the partition key.
+			 */
+			if (pc.typid == BPCHAROID)
+			{
+				size_t		end = pv.value.find_last_not_of(' ');
+
+				pv.value.erase(end == std::string::npos ? 0 : end + 1);
+			}
 		}
 		valuesOut.push_back(pv);
 

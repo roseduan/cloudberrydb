@@ -171,8 +171,63 @@ CREATE HUDI TABLE dt_pb_hudi (id bigint, region text) PARTITION BY (region);
 SELECT count(*) AS leftover FROM pg_class WHERE relname = 'dt_pb_hudi';
 
 -- ============================================================
+-- Test 10: CHAR(N) partition column survives partition pruning (issue #441)
+--
+-- Tests 1-9 above only cover DDL: that the declaration lands in ltoptions.
+-- That is exactly how #441 slipped through -- the table was created with the
+-- right spec, but every equality filter silently returned zero rows.
+--
+-- bpchar storage is blank-padded and bpcharout() returns that padding
+-- verbatim, while the data column is written trimmed.  If computePartition()
+-- emits the padded form, the manifest partition value disagrees with the
+-- pushed-down predicate, pruning discards every data file, and the query
+-- returns an empty result with no error.  Assert the end-to-end read path.
+-- ============================================================
+SELECT test_log('Test 10: CHAR(N) partition column equality filter');
+
+CREATE ICEBERG TABLE dt_pb_char (id int, category character(20))
+PARTITION BY (category);
+
+INSERT INTO dt_pb_char VALUES (1,'Books'),(2,'Books'),(3,'Electronics'),(4,'Music');
+
+-- The regression itself: 2 before #441 was introduced, 0 while it was open.
+SELECT count(*) AS books FROM dt_pb_char WHERE category = 'Books';
+
+-- Pruning must not change the answer.  Asserting only the value above would
+-- still pass if someone "fixed" this by disabling pruning altogether, so pin
+-- both sides of the switch and require them to agree.
+SET datalake.iceberg_enable_predicate_pushdown = off;
+SELECT count(*) AS books_pushdown_off FROM dt_pb_char WHERE category = 'Books';
+SET datalake.iceberg_enable_predicate_pushdown = on;
+
+-- A second partition value, to catch a fix that special-cases one string.
+SELECT count(*) AS electronics FROM dt_pb_char WHERE category = 'Electronics';
+
+-- Full scan must be unaffected (it never prunes).
+SELECT count(*) AS total FROM dt_pb_char;
+
+-- ============================================================
+-- Test 11: text partition keys keep their trailing spaces (guards the #441 fix)
+--
+-- The #441 fix trims trailing blanks from bpchar partition values.  A trailing
+-- space in text/varchar is real data and a distinct partition key, so that
+-- trim must not leak into these types -- otherwise 'a ' and 'a' collapse into
+-- one partition and we trade a wrong-results bug for a subtler one.
+-- ============================================================
+SELECT test_log('Test 11: text partition key keeps trailing space');
+
+CREATE ICEBERG TABLE dt_pb_txtsp (id int, s text) PARTITION BY (s);
+
+INSERT INTO dt_pb_txtsp VALUES (1,'a '),(2,'a');
+
+SELECT count(*) AS text_with_space FROM dt_pb_txtsp WHERE s = 'a ';
+SELECT count(*) AS text_no_space FROM dt_pb_txtsp WHERE s = 'a';
+
+-- ============================================================
 -- Cleanup
 -- ============================================================
+DROP TABLE dt_pb_char;
+DROP TABLE dt_pb_txtsp;
 DROP TABLE dt_pb_single;
 DROP TABLE dt_pb_multi;
 DROP TABLE dt_pb_ine;
