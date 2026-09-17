@@ -650,6 +650,16 @@ Read ${WORK_DIR}/review-context.md and review the code."
       continue
     fi
 
+    # Validate the review payload *inside* the envelope, not just the envelope
+    # itself. The CLI envelope is always well-formed JSON, so stopping at the
+    # check above would let a malformed review payload fail the job outright
+    # without ever spending a retry — even though re-running usually fixes it.
+    if ! try_parse_review_json; then
+      echo "WARNING: Claude Code returned output that is not valid review JSON (attempt ${attempt}/${MAX_RETRIES})."
+      printf '%s' "$CLAUDE_OUTPUT" > "${WORK_DIR}/claude_raw_output_attempt${attempt}.json"
+      continue
+    fi
+
     # Success
     echo "==> Claude Code completed (attempt ${attempt})."
     MODEL_USED=$(echo "$CLAUDE_OUTPUT" | jq -r '(.modelUsage // {}) | keys | join(", ")' 2>/dev/null || true)
@@ -666,28 +676,52 @@ Read ${WORK_DIR}/review-context.md and review the code."
 # ---------------------------------------------------------------------------
 REVIEW_JSON=""
 
-parse_review_json() {
-  if [[ -z "$CLAUDE_OUTPUT" ]]; then
-    echo "ERROR: Claude Code returned empty output."
-    if [[ -s "${WORK_DIR}/claude_stderr.log" ]]; then
-      echo "Claude stderr:"
-      head -20 "${WORK_DIR}/claude_stderr.log"
-    fi
-    exit 1
-  fi
+# Extracts the largest complete JSON object carrying a "summary" key from the
+# file given as $1 and prints it on stdout. Unlike the jq/sed paths below, this
+# tolerates arbitrary text on BOTH sides of the object — Claude occasionally
+# appends a closing remark after the JSON, which leaves the payload
+# unrecoverable by the "first '{' through EOF" heuristic. The largest match
+# wins because a prompt echo or an illustrative snippet can also carry a
+# "summary" key, while the real review is the substantial one. Returns non-zero
+# when python3 is unavailable (dev mode does not require it) or when the text
+# holds no such object.
+extract_json_object() {
+  command -v python3 >/dev/null 2>&1 || return 1
 
-  # Save raw Claude output for debugging
-  printf '%s' "$CLAUDE_OUTPUT" > "${WORK_DIR}/claude_raw_output.json"
+  python3 - "$1" <<'PYEOF'
+import json
+import sys
 
-  # Check if Claude itself reported an error (auth failure, rate limit, etc.)
-  local is_error
-  is_error=$(echo "$CLAUDE_OUTPUT" | jq -r '.is_error // false' 2>/dev/null || echo "false")
-  if [[ "$is_error" == "true" ]]; then
-    local error_msg
-    error_msg=$(echo "$CLAUDE_OUTPUT" | jq -r '.result // "unknown error"' 2>/dev/null)
-    echo "ERROR: Claude Code failed: ${error_msg}"
-    exit 1
-  fi
+text = open(sys.argv[1], encoding="utf-8", errors="replace").read()
+decoder = json.JSONDecoder()
+
+best = None
+best_len = 0
+start = text.find("{")
+while start >= 0:
+    try:
+        obj, end = decoder.raw_decode(text, start)
+    except ValueError:
+        # Not an object boundary (e.g. a brace inside prose) — keep scanning.
+        start = text.find("{", start + 1)
+        continue
+    if isinstance(obj, dict) and "summary" in obj and end - start > best_len:
+        best, best_len = obj, end - start
+    # Skip the object just decoded; its nested braces cannot be the payload.
+    start = text.find("{", end)
+
+if best is None:
+    sys.exit(1)
+json.dump(best, sys.stdout)
+PYEOF
+}
+
+# Extracts the review payload out of Claude's output envelope into REVIEW_JSON.
+# Returns non-zero instead of exiting so that call_claude can spend a retry on
+# a malformed payload; parse_review_json reports the final failure.
+try_parse_review_json() {
+  REVIEW_JSON=""
+  [[ -n "$CLAUDE_OUTPUT" ]] || return 1
 
   # Extract the result text from Claude's JSON envelope
   local result_text
@@ -710,8 +744,7 @@ parse_review_json() {
   # Try parsing as-is first
   if echo "$result_text" | jq -e '.summary' >/dev/null 2>&1; then
     REVIEW_JSON="$result_text"
-    echo "==> Review JSON parsed successfully."
-    return
+    return 0
   fi
 
   # Claude sometimes returns prose before the JSON, optionally fenced.
@@ -736,13 +769,63 @@ parse_review_json() {
 
   if [[ -n "$json_substring" ]] && echo "$json_substring" | jq -e '.summary' >/dev/null 2>&1; then
     REVIEW_JSON="$json_substring"
+    return 0
+  fi
+
+  # Case 3: anything the line-oriented cases above cannot reach, most notably
+  # JSON followed by trailing prose. Scan the text for a complete object.
+  local text_file="${WORK_DIR}/claude_result_text.txt"
+  printf '%s' "$result_text" > "$text_file"
+  local extracted
+  if extracted=$(extract_json_object "$text_file"); then
+    REVIEW_JSON="$extracted"
+    return 0
+  fi
+
+  return 1
+}
+
+parse_review_json() {
+  if [[ -z "$CLAUDE_OUTPUT" ]]; then
+    echo "ERROR: Claude Code returned empty output."
+    if [[ -s "${WORK_DIR}/claude_stderr.log" ]]; then
+      echo "Claude stderr:"
+      head -20 "${WORK_DIR}/claude_stderr.log"
+    fi
+    exit 1
+  fi
+
+  # Save raw Claude output for debugging
+  printf '%s' "$CLAUDE_OUTPUT" > "${WORK_DIR}/claude_raw_output.json"
+
+  # Check if Claude itself reported an error (auth failure, rate limit, etc.)
+  local is_error
+  is_error=$(echo "$CLAUDE_OUTPUT" | jq -r '.is_error // false' 2>/dev/null || echo "false")
+  if [[ "$is_error" == "true" ]]; then
+    local error_msg
+    error_msg=$(echo "$CLAUDE_OUTPUT" | jq -r '.result // "unknown error"' 2>/dev/null)
+    echo "ERROR: Claude Code failed: ${error_msg}"
+    exit 1
+  fi
+
+  # call_claude already parsed the payload of a successful attempt; re-parse
+  # only when every attempt failed, so the error below is reported once.
+  if [[ -n "$REVIEW_JSON" ]] || try_parse_review_json; then
     echo "==> Review JSON parsed successfully."
     return
   fi
 
   echo "ERROR: Claude output is not valid review JSON."
+  echo "Full raw output saved to ${WORK_DIR}/claude_raw_output.json"
   echo "Raw output (first 2000 chars):"
   echo "${CLAUDE_OUTPUT:0:2000}"
+  # The tail is where a truncated payload shows itself, and it is the part the
+  # head above cuts off. Skip it when the whole output already printed.
+  local out_len=${#CLAUDE_OUTPUT}
+  if (( out_len > 2000 )); then
+    echo "Raw output (last 500 chars):"
+    echo "${CLAUDE_OUTPUT:out_len-500}"
+  fi
   exit 1
 }
 
@@ -1128,3 +1211,4 @@ main() {
 }
 
 main "$@"
+
