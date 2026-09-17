@@ -111,3 +111,24 @@ LANGUAGE C;
 
 REVOKE ALL ON FUNCTION pg_catalog.pg_iceberg_site_config(text, text, text)
     FROM PUBLIC;
+
+-- ------------------------------------------------------------------
+-- RENAME COLUMN on an Iceberg partition column (issue #444)
+--
+-- The PARTITION BY declaration lives in pg_lake_table.ltoptions as a
+-- comma-separated list of column names.  pg_attribute.attname is dispatched
+-- to the segments by the standard ALTER, but pg_lake_table is not, so the QD
+-- rewrites the option and dispatches this function to keep every segment's
+-- copy in step.  Internal helper, called only from C.
+--
+-- EXECUTE is deliberately NOT revoked from PUBLIC, for the same reason spelled
+-- out over pg_iceberg_alter_column_type_local and followed by the sibling
+-- pg_iceberg_upsert_location_option_local: the QD dispatches this to every
+-- segment in the invoking user's own session, so a non-superuser table owner
+-- running ALTER TABLE ... RENAME COLUMN has to be able to call it.  The gate
+-- is the ownership check in the C body instead.
+-- ------------------------------------------------------------------
+CREATE FUNCTION pg_catalog.pg_iceberg_upsert_partition_by_option_local(oid, text)
+RETURNS void
+AS 'MODULE_PATHNAME', 'pg_iceberg_upsert_partition_by_option_local'
+LANGUAGE C STRICT;

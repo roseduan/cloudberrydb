@@ -3,7 +3,7 @@
 PGXS := $(shell pg_config --pgxs)
 include $(PGXS)
 
-REGRESS = 01_create_table 02_table_options 03_compression 03_table_name_validation 04_partition_by
+REGRESS = 01_create_table 02_table_options 03_compression 03_table_name_validation 04_partition_by 05_partition_rename
 
 installcheck:
 	$(pg_regress_installcheck) $(REGRESS)

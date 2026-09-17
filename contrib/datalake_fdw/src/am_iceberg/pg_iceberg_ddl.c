@@ -27,10 +27,14 @@
 #include "cdb/cdbdisp_query.h"
 
 #include "../iceberg_catalog_fdw/iceberg_catalog_fdw.h"
+#include "../iceberg_catalog_fdw/iceberg_catalog_option.h"
 #include "include/pg_iceberg_ddl.h"
 #include "include/pg_iceberg_am_handler.h"
 #include "include/pg_iceberg_catalog.h"
 #include "include/pg_iceberg_metadata_tracker.h"
+#include "include/pg_iceberg_options.h"
+#include "src/common/iceberg_constants.h"
+#include "lib/stringinfo.h"
 #include "include/pg_iceberg_deletion_queue.h"
 
 static object_access_hook_type old_objectaccess_hook = NULL;
@@ -759,6 +763,152 @@ pg_iceberg_alter_apply(Oid relid, List *ops)
 }
 
 /*
+ * Keep the PARTITION BY declaration in step with a RENAME COLUMN (issue #444).
+ *
+ * The declaration lives in pg_lake_table.ltoptions as
+ * "iceberg_partition_by=col1,col2" -- by column *name* -- so renaming a
+ * partition column leaves it pointing at a name that no longer resolves.  This
+ * rewrites the entry and dispatches the new value through
+ * pg_iceberg_upsert_partition_by_option() so no segment is left on the stale
+ * list.  Renaming a column the table is not partitioned on is a no-op.
+ *
+ * QD-only and builtin-only; see the gates at the top of the body for why.
+ */
+static void
+pg_iceberg_rename_partition_column_option(Oid relid,
+										  const char *oldname,
+										  const char *newname)
+{
+	IcebergTableInfo	   *table_info;
+	IcebergTableOptions *opts;
+	Oid				catalog_oid;
+	Oid				volume_oid;
+	StringInfoData	buf;
+	char		   *copy;
+	char		   *tok;
+	char		   *saveptr = NULL;
+	bool			found = false;
+	bool			first = true;
+	bool			is_builtin;
+
+	/*
+	 * Clear the same two gates pg_iceberg_alter_apply() clears below before it
+	 * touches anything.
+	 *
+	 * QD-only: this function writes pg_lake_table and dispatches that write to
+	 * every segment, and the ALTER itself is dispatched too, so the hook also
+	 * fires on each QE.  Letting it run there would have every segment write
+	 * its own copy and then receive the QD's dispatched write of the same
+	 * value -- idempotent, but a redundant round of catalog writes.
+	 *
+	 * Builtin-only: schema evolution is rejected for external catalogs in
+	 * createUpdateSchemaRequestJson(), which runs *after* this function.
+	 * Without this gate an external-catalog table would take a dispatched
+	 * catalog write that the abort a moment later has to roll back.
+	 *
+	 * The builtin test is checkIsBuiltinCatalog() -- the same predicate the
+	 * rejection downstream is derived from -- and not the similar-looking
+	 * pg_iceberg_is_builtin_catalog(), which additionally requires the catalog
+	 * server to carry no options at all.  The two disagree for a server with
+	 * no type option but some other option, and the disagreement is not
+	 * symmetric here: skipping a table that really is builtin leaves the
+	 * declaration stale and silently reintroduces #444, while running on a
+	 * table that turns out not to be builtin only costs a write that the
+	 * rejection a moment later rolls back.  Match the gate whose rejection
+	 * this one exists to preempt, and let the harmless direction be the
+	 * default (checkIsBuiltinCatalog also answers "builtin" when the catalog
+	 * cannot be identified at all).
+	 */
+	if (Gp_role != GP_ROLE_DISPATCH)
+		return;
+
+	table_info = pg_iceberg_get_table_info(relid);
+	is_builtin = (table_info == NULL ||
+				  checkIsBuiltinCatalog(table_info->catalog_server_name,
+										table_info->catalog_name));
+	pg_iceberg_free_table_info(table_info);
+
+	if (!is_builtin)
+		return;
+
+	opts = get_iceberg_options(relid, &catalog_oid, &volume_oid);
+
+	/*
+	 * No PARTITION BY declaration: nothing refers to the column by name, so
+	 * the plain rename is already complete.  This is the common case -- a
+	 * table without PARTITION BY carries no such option at all.
+	 */
+	if (opts == NULL || opts->partition_by == NULL ||
+		opts->partition_by[0] == '\0')
+	{
+		free_iceberg_table_options(opts);
+		return;
+	}
+
+	initStringInfo(&buf);
+	copy = pstrdup(opts->partition_by);
+
+	for (tok = strtok_r(copy, ",", &saveptr);
+		 tok != NULL;
+		 tok = strtok_r(NULL, ",", &saveptr))
+	{
+		char   *end;
+
+		/* Mirror the tolerant trimming icebergWrite::computePartition() does. */
+		while (*tok == ' ' || *tok == '\t')
+			tok++;
+		end = tok + strlen(tok);
+		while (end > tok && (end[-1] == ' ' || end[-1] == '\t'))
+			*(--end) = '\0';
+
+		if (*tok == '\0')
+			continue;
+
+		if (!first)
+			appendStringInfoChar(&buf, ',');
+		first = false;
+
+		if (strcmp(tok, oldname) == 0)
+		{
+			appendStringInfoString(&buf, newname);
+			found = true;
+		}
+		else
+			appendStringInfoString(&buf, tok);
+	}
+
+	if (found)
+	{
+		/*
+		 * The list is comma-separated with no quoting, so a new name holding a
+		 * comma would silently turn one partition column into two and every
+		 * later read and write would look for columns that do not exist.
+		 * CREATE TABLE rejects such a name for exactly this reason (see
+		 * laketablecmds.c); this is the same gate on the RENAME path, which
+		 * #444 showed was missing.
+		 *
+		 * The standard rename has already run and been dispatched to the
+		 * segments by the time we get here, so erroring out is the only way to
+		 * undo it: the abort rolls back pg_attribute on the QD and on every
+		 * segment together.
+		 */
+		if (strchr(newname, ',') != NULL)
+			ereport(ERROR,
+					(errcode(ERRCODE_INVALID_OBJECT_DEFINITION),
+					 errmsg("partition column name \"%s\" contains a comma",
+							newname),
+					 errhint("Column \"%s\" is an Iceberg partition column; its name cannot contain a comma.",
+							 oldname)));
+
+		pg_iceberg_upsert_partition_by_option(relid, buf.data);
+	}
+
+	pfree(copy);
+	pfree(buf.data);
+	free_iceberg_table_options(opts);
+}
+
+/*
  * RENAME COLUMN on a builtin iceberg table (issue #401).  RENAME is a pure
  * catalog change (pg_attribute.attname), so the standard rename has already run
  * and dispatched the new name to every segment when this is called.  Here we
@@ -772,6 +922,24 @@ void
 pg_iceberg_rename_column(Oid relid, const char *oldname, const char *newname)
 {
 	IcebergSchemaOp *op;
+
+	/*
+	 * Keep the PARTITION BY declaration in pg_lake_table.ltoptions in step
+	 * with the rename (issue #444).  ltoptions records partition columns by
+	 * *name*, and both consumers resolve those names against the live schema
+	 * -- createPartitionSpecFromRequest() against the Iceberg schema on the
+	 * QD, icebergWrite::computePartition() against the TupleDesc on the QE.
+	 * Left stale, every later read and write of the table fails with
+	 * "partition column ... not found in iceberg table schema", even though
+	 * the ALTER itself reported success.
+	 *
+	 * The Iceberg partition *field* keeps its original name on purpose:
+	 * Iceberg's own UpdateSchema.renameColumn() leaves partition field names
+	 * alone (a partition field is bound to its source column by source-id,
+	 * not by name), so doing the same keeps our metadata.json consistent with
+	 * what any other engine would have written.
+	 */
+	pg_iceberg_rename_partition_column_option(relid, oldname, newname);
 
 	op = (IcebergSchemaOp *) palloc0(sizeof(IcebergSchemaOp));
 	op->op = "renameColumn";

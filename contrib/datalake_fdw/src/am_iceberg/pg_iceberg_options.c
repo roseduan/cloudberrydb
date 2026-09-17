@@ -25,6 +25,8 @@
 #include "lib/stringinfo.h"
 #include "cdb/cdbdisp_query.h"
 #include "cdb/cdbvars.h"
+#include "miscadmin.h"
+#include "utils/acl.h"
 #include "utils/array.h"
 #include "utils/builtins.h"
 #include "utils/lsyscache.h"
@@ -43,17 +45,18 @@ static const OptionDef icebergTableOptionDefs[] = {
 	OPTION_STRING("catalog", IcebergTableOptions, catalog, NULL),
 	OPTION_STRING("namespace", IcebergTableOptions, namespace, NULL),
 	OPTION_STRING("table", IcebergTableOptions, table, NULL),
-	OPTION_STRING("location", IcebergTableOptions, location, NULL),
+	OPTION_STRING(DATALAKEFDW_ICEBERG_OPTION_LOCATION, IcebergTableOptions, location, NULL),
 	OPTION_BOOL("autovacuum_enabled", IcebergTableOptions, autovacuum_enabled, true),
 	OPTION_STRING("compression", IcebergTableOptions, compression, "zstd"),
 	OPTION_INT("compression_level", IcebergTableOptions, compression_level, -1),
-	OPTION_STRING("iceberg_partition_by", IcebergTableOptions, partition_by, NULL),
+	OPTION_STRING(DATALAKEFDW_ICEBERG_OPTION_PARTITION_BY, IcebergTableOptions, partition_by, NULL),
 	OPTION_INT("metadata_cache", IcebergTableOptions, metadata_cache, 0),
 	/* Add new Iceberg table options here */
 };
 
-static void pg_iceberg_upsert_location_option_local_internal(Oid relid,
-															  const char *location);
+static void pg_iceberg_upsert_option_local_internal(Oid relid,
+												   const char *key,
+												   const char *value);
 
 PG_FUNCTION_INFO_V1(pg_iceberg_upsert_location_option_local);
 Datum
@@ -70,7 +73,52 @@ pg_iceberg_upsert_location_option_local(PG_FUNCTION_ARGS)
 	relid = PG_GETARG_OID(0);
 	location = text_to_cstring(PG_GETARG_TEXT_PP(1));
 
-	pg_iceberg_upsert_location_option_local_internal(relid, location);
+	pg_iceberg_upsert_option_local_internal(relid,
+											DATALAKEFDW_ICEBERG_OPTION_LOCATION,
+											location);
+
+	PG_RETURN_VOID();
+}
+
+/*
+ * Segment-local half of pg_iceberg_upsert_partition_by_option() (issue #444).
+ *
+ * The PARTITION BY declaration is stored in ltoptions by *column name*, so a
+ * RENAME COLUMN that touches a partition column leaves it dangling: both
+ * consumers (createPartitionSpecFromRequest() on the QD and
+ * icebergWrite::computePartition() on the QE) resolve those names against the
+ * live schema and ereport when they no longer resolve.  The QD rewrites the
+ * option and dispatches this function so every segment's pg_lake_table agrees.
+ *
+ * This writes pg_lake_table directly, bypassing the relation ACL path ordinary
+ * DDL goes through, so it does its own privilege check.  EXECUTE cannot be
+ * revoked from PUBLIC instead -- the QD dispatches this to every segment in
+ * the invoking user's own session, so a non-superuser table owner running
+ * ALTER TABLE ... RENAME COLUMN has to be able to call it.  The ownership
+ * check is the right gate: the legitimate dispatch path always runs as the
+ * user who issued the ALTER TABLE, who therefore already owns the relation.
+ */
+PG_FUNCTION_INFO_V1(pg_iceberg_upsert_partition_by_option_local);
+Datum
+pg_iceberg_upsert_partition_by_option_local(PG_FUNCTION_ARGS)
+{
+	Oid		relid;
+	char   *partition_by;
+
+	if (PG_ARGISNULL(0) || PG_ARGISNULL(1))
+		ereport(ERROR,
+				(errcode(ERRCODE_NULL_VALUE_NOT_ALLOWED),
+				 errmsg("relation OID and partition column list must not be NULL")));
+
+	relid = PG_GETARG_OID(0);
+	partition_by = text_to_cstring(PG_GETARG_TEXT_PP(1));
+
+	if (!pg_class_ownercheck(relid, GetUserId()))
+		aclcheck_error(ACLCHECK_NOT_OWNER, OBJECT_TABLE, get_rel_name(relid));
+
+	pg_iceberg_upsert_option_local_internal(relid,
+											DATALAKEFDW_ICEBERG_OPTION_PARTITION_BY,
+											partition_by);
 
 	PG_RETURN_VOID();
 }
@@ -260,12 +308,53 @@ pg_iceberg_upsert_location_option(Oid relid, const char *location)
 		pfree(sql_command.data);
 	}
 
-	pg_iceberg_upsert_location_option_local_internal(relid, location);
+	pg_iceberg_upsert_option_local_internal(relid,
+											DATALAKEFDW_ICEBERG_OPTION_LOCATION,
+											location);
 }
 
+/*
+ * Rewrite "iceberg_partition_by=<cols>" in ltoptions on the QD and on every
+ * segment.  Unlike pg_attribute, pg_lake_table is not touched by the standard
+ * ALTER dispatch, so the update has to be dispatched explicitly -- a segment
+ * left on the stale list would fail its next INSERT with "iceberg partition
+ * column ... not found in table".
+ */
+void
+pg_iceberg_upsert_partition_by_option(Oid relid, const char *partition_by)
+{
+	Assert(partition_by != NULL && partition_by[0] != '\0');
+
+	if (Gp_role == GP_ROLE_DISPATCH)
+	{
+		StringInfoData	sql_command;
+		char		   *quoted_value;
+
+		quoted_value = quote_literal_cstr(partition_by);
+		initStringInfo(&sql_command);
+		appendStringInfo(&sql_command,
+						 "SELECT pg_catalog.pg_iceberg_upsert_partition_by_option_local(%u, %s)",
+						 relid,
+						 quoted_value);
+
+		CdbDispatchCommand(sql_command.data, DF_CANCEL_ON_ERROR, NULL);
+		pfree(quoted_value);
+		pfree(sql_command.data);
+	}
+
+	pg_iceberg_upsert_option_local_internal(relid,
+											DATALAKEFDW_ICEBERG_OPTION_PARTITION_BY,
+											partition_by);
+}
+
+/*
+ * Upsert "<key>=<value>" into pg_lake_table.ltoptions for one relation, on the
+ * local node.  Every other "key=value" entry is copied through untouched.
+ */
 static void
-pg_iceberg_upsert_location_option_local_internal(Oid relid,
-												 const char *location)
+pg_iceberg_upsert_option_local_internal(Oid relid,
+										const char *key,
+										const char *value)
 {
 	Relation		lake_rel;
 	ScanKeyData		skey;
@@ -282,7 +371,8 @@ pg_iceberg_upsert_location_option_local_internal(Oid relid,
 	bool			replaces[Natts_pg_lake_table];
 	HeapTuple		new_tuple;
 
-	Assert(location != NULL && location[0] != '\0');
+	Assert(key != NULL && key[0] != '\0');
+	Assert(value != NULL);
 
 	lake_rel = table_open(LakeTableRelationId, RowExclusiveLock);
 
@@ -308,8 +398,7 @@ pg_iceberg_upsert_location_option_local_internal(Oid relid,
 		new_option_count = 1;
 		new_option_datums = (Datum *) palloc(sizeof(Datum));
 		new_option_datums[0] = CStringGetTextDatum(psprintf("%s=%s",
-														 DATALAKEFDW_ICEBERG_OPTION_LOCATION,
-														 location));
+															key, value));
 	}
 	else
 	{
@@ -338,15 +427,11 @@ pg_iceberg_upsert_location_option_local_internal(Oid relid,
 			if (eq_pos != NULL)
 			{
 				key_len = eq_pos - option_str;
-				if (strlen(DATALAKEFDW_ICEBERG_OPTION_LOCATION) == (Size) key_len &&
-					pg_strncasecmp(option_str,
-								   DATALAKEFDW_ICEBERG_OPTION_LOCATION,
-								   key_len) == 0)
+				if (strlen(key) == (Size) key_len &&
+					pg_strncasecmp(option_str, key, key_len) == 0)
 				{
 					new_option_datums[new_option_count++] =
-						CStringGetTextDatum(psprintf("%s=%s",
-												 DATALAKEFDW_ICEBERG_OPTION_LOCATION,
-												 location));
+						CStringGetTextDatum(psprintf("%s=%s", key, value));
 					updated = true;
 					continue;
 				}
@@ -357,9 +442,7 @@ pg_iceberg_upsert_location_option_local_internal(Oid relid,
 
 		if (!updated)
 			new_option_datums[new_option_count++] =
-				CStringGetTextDatum(psprintf("%s=%s",
-										 DATALAKEFDW_ICEBERG_OPTION_LOCATION,
-										 location));
+				CStringGetTextDatum(psprintf("%s=%s", key, value));
 
 		pfree(options_datums);
 		pfree(options_nulls);

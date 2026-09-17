@@ -27,6 +27,13 @@
 #define DATALAKEFDW_ICEBERG_KEY_ACCESS_KEY_ID            "access_key_id"
 #define DATALAKEFDW_ICEBERG_KEY_SECRET_ACCESS_KEY        "secret_access_key"
 #define DATALAKEFDW_ICEBERG_OPTION_LOCATION              "location"
+/*
+ * Iceberg PARTITION BY declaration, stored in pg_lake_table.ltoptions as a
+ * comma-separated list of column names (see laketablecmds.c).  Column names
+ * containing a comma are rejected at CREATE time because that encoding cannot
+ * represent them.
+ */
+#define DATALAKEFDW_ICEBERG_OPTION_PARTITION_BY          "iceberg_partition_by"
 
 /* HDFS volume keys; the wire keys equal the SQL OPTION names */
 #define DATALAKEFDW_ICEBERG_KEY_HDFS_NAMENODES           "hdfs_namenodes"

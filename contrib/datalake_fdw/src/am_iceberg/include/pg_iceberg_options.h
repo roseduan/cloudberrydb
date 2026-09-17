@@ -142,4 +142,11 @@ extern void free_iceberg_table_options(IcebergTableOptions *opts);
  */
 extern void pg_iceberg_upsert_location_option(Oid relid, const char *location);
 
+/*
+ * Upsert "iceberg_partition_by=<cols>" in pg_lake_table.ltoptions for a
+ * relation, on the QD and on every segment (issue #444).
+ */
+extern void pg_iceberg_upsert_partition_by_option(Oid relid,
+												  const char *partition_by);
+
 #endif /* __PG_ICEBERG_OPTIONS_H__ */
