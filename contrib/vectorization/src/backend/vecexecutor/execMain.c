@@ -6207,101 +6207,39 @@ CleanupArrowSpillFiles(int code, Datum arg)
 }
 
 /*
- * Sonic-join type gating.  These sets MUST stay a subset of what
- * compute/exec/sonic_join_node.cc accepts (allowed_equal_key_types /
- * allowed_types / allowed_join_types) -- a join routed to sonic that sonic
- * cannot handle is rejected at plan build (Status::NotImplemented -> GError ->
- * elog(ERROR)) rather than falling back, so keep these in sync when extending
- * sonic.
+ * Sonic-join type gating.  Rather than mirror sonic_join_node.cc's type sets by
+ * hand (which drifts, and where drift turns a routed-but-unsupported join into
+ * a hard Status::NotImplemented -> GError -> elog(ERROR) instead of a
+ * fallback), these predicates delegate to the Sonic engine itself via the
+ * c_glib capability queries (garrow_sonic_join_supports_*), which read the one
+ * authoritative copy of allowed_equal_key_types / allowed_types /
+ * allowed_join_types.  Extending Sonic's type support in sonic_join_node.cc is
+ * automatically reflected here, with no second list to keep in sync.
  *
- * The hard ERROR (rather than silently falling back to the normal Arrow hash
- * join) is deliberate: it makes a mirror that has drifted out of sync with
- * sonic_join_node.cc fail loudly instead of silently degrading, and it keeps
- * the intentional per-type exclusions below (e.g. LASJ_NOTIN's NULL-aware
- * semantics, which sonic does not model) as explicit, documented decisions.
- * The trade-off is that this C-side whitelist must be maintained by hand in
- * lockstep with the C++ side; that drift is a known maintenance cost, not a
- * live bug.  A "try sonic, fall back on NotImplemented" design would remove the
- * duplication but would mask real sonic build failures and drop the documented
- * gating, so it is intentionally NOT done here.
+ * Routing stays a strict pre-check (not a try-then-fallback): the planner only
+ * sends a join to Sonic when these queries all say yes, so a plan-build
+ * NotImplemented -- which would abort the query rather than degrade -- cannot
+ * arise from a type/join-type mismatch.  LASJ_NOTIN stays excluded because
+ * sonic_join_node.cc leaves it out of allowed_join_types: its SQL NOT IN
+ * NULL-propagation semantics (a NULL build key suppresses all probe output)
+ * are not modelled by Sonic's LEFT_ANTI, so it falls back to hash_join.cc.
  */
 static bool
 sonic_join_supports_equal_key_type(GArrowType id)
 {
-	/* sonic_join_node.cc allowed_equal_key_types: bool + 8..64-bit ints */
-	switch (id)
-	{
-		case GARROW_TYPE_BOOLEAN:
-		case GARROW_TYPE_INT8:
-		case GARROW_TYPE_INT16:
-		case GARROW_TYPE_INT32:
-		case GARROW_TYPE_INT64:
-		case GARROW_TYPE_UINT8:
-		case GARROW_TYPE_UINT16:
-		case GARROW_TYPE_UINT32:
-		case GARROW_TYPE_UINT64:
-			return true;
-		default:
-			return false;
-	}
+	return garrow_sonic_join_supports_key_type(id);
 }
 
 static bool
 sonic_join_supports_payload_type(GArrowType id)
 {
-	/*
-	 * sonic_join_node.cc allowed_types (build/probe column types) is a
-	 * superset of the equal-key set, so delegate for the shared cases and
-	 * only list the payload-only additions here.  Keeping the two predicates
-	 * in a subset relationship means an integer key type can never be
-	 * accepted as a payload but rejected as an equi-key (or vice versa).
-	 */
-	if (sonic_join_supports_equal_key_type(id))
-		return true;
-	switch (id)
-	{
-		case GARROW_TYPE_FLOAT:
-		case GARROW_TYPE_DOUBLE:
-		case GARROW_TYPE_NUMERIC128:
-		case GARROW_TYPE_DATE32:
-		case GARROW_TYPE_TIMESTAMP:
-		case GARROW_TYPE_STRING:
-			return true;
-		default:
-			return false;
-	}
+	return garrow_sonic_join_supports_payload_type(id);
 }
 
 static bool
 sonic_join_supports_jointype(GArrowJoinType type)
 {
-	/* sonic_join_node.cc allowed_join_types */
-	switch (type)
-	{
-		case GARROW_INNER_JOIN:
-		case GARROW_LEFT_OUTER_JOIN:
-		case GARROW_RIGHT_OUTER_JOIN:
-		case GARROW_FULL_OUTER_JOIN:
-		case GARROW_LEFT_SEMI_JOIN:
-		case GARROW_LEFT_ANTI_JOIN:
-		case GARROW_RIGHT_SEMI_JOIN:
-		case GARROW_RIGHT_ANTI_JOIN:
-			return true;
-		default:
-			/*
-			 * FULL_SEMI, FULL_ANTI: not implemented in sonic_join_node.cc.
-			 *
-			 * LASJ_NOTIN: intentionally excluded.  This join type implements
-			 * the SQL NOT IN semantics when the subquery column is nullable:
-			 * if any build-side row has a NULL key, the entire probe output
-			 * must be suppressed.  Sonic's LEFT_ANTI_JOIN does not model that
-			 * NULL-propagation rule, so LASJ_NOTIN falls back to the normal
-			 * Arrow hash join (hash_join_node.cc), which in turn disables
-			 * swiss_join for LASJ_NOTIN and falls back to hash_join.cc where
-			 * the full NULL semantics are implemented.
-			 */
-			return false;
-	}
+	return garrow_sonic_join_supports_join_type(type);
 }
 
 /* true iff every GArrowField in `fields` has a type accepted by `pred` */
