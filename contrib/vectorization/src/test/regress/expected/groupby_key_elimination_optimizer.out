@@ -1,0 +1,383 @@
+--
+-- Tests for GROUP BY key elimination optimization
+-- (remove_derived_groupby_exprs in planner.c)
+--
+-- Controlled by enable_expr_groupby_reduction GUC (default off).
+-- This optimization removes GROUP BY expressions that are derived from
+-- other simple-Var GROUP BY columns via immutable functions.
+--
+CREATE TABLE groupby_elim_t (
+    x integer,
+    y integer
+) DISTRIBUTED BY (x);
+INSERT INTO groupby_elim_t VALUES
+    (1, 10), (2, 20), (3, 30),
+    (1, 10), (2, 20), (NULL, NULL);
+ANALYZE groupby_elim_t;
+-- ============================================================
+-- Positive cases: should eliminate derived GROUP BY keys
+-- ============================================================
+SET enable_expr_groupby_reduction = on;
+-- Case 1: GROUP BY x, x+1 -> GROUP BY x
+EXPLAIN (COSTS OFF) SELECT x, x+1, count(*) FROM groupby_elim_t GROUP BY x, x+1;
+                     QUERY PLAN                     
+----------------------------------------------------
+ Result
+   ->  Gather Motion 3:1  (slice1; segments: 3)
+         ->  GroupAggregate
+               Group Key: x
+               ->  Sort
+                     Sort Key: x
+                     ->  Seq Scan on groupby_elim_t
+ Optimizer: GPORCA
+(8 rows)
+
+SELECT x, x+1, count(*) FROM groupby_elim_t GROUP BY x, x+1 ORDER BY x;
+ x | ?column? | count 
+---+----------+-------
+ 1 |        2 |     2
+ 2 |        3 |     2
+ 3 |        4 |     1
+   |          |     1
+(4 rows)
+
+-- Case 2: GROUP BY x, x-1, x-2, x-3 -> GROUP BY x (multiple derived keys)
+EXPLAIN (COSTS OFF) SELECT x, x-1, x-2, x-3, count(*) FROM groupby_elim_t GROUP BY x, x-1, x-2, x-3;
+                     QUERY PLAN                     
+----------------------------------------------------
+ Result
+   ->  Gather Motion 3:1  (slice1; segments: 3)
+         ->  GroupAggregate
+               Group Key: x
+               ->  Sort
+                     Sort Key: x
+                     ->  Seq Scan on groupby_elim_t
+ Optimizer: GPORCA
+(8 rows)
+
+SELECT x, x-1, x-2, x-3, count(*) FROM groupby_elim_t GROUP BY x, x-1, x-2, x-3 ORDER BY x;
+ x | ?column? | ?column? | ?column? | count 
+---+----------+----------+----------+-------
+ 1 |        0 |       -1 |       -2 |     2
+ 2 |        1 |        0 |       -1 |     2
+ 3 |        2 |        1 |        0 |     1
+   |          |          |          |     1
+(4 rows)
+
+-- Case 3: GROUP BY x, abs(x) -> GROUP BY x (immutable function)
+EXPLAIN (COSTS OFF) SELECT x, abs(x), count(*) FROM groupby_elim_t GROUP BY x, abs(x);
+                  QUERY PLAN                  
+----------------------------------------------
+ Gather Motion 3:1  (slice1; segments: 3)
+   ->  GroupAggregate
+         Group Key: x
+         ->  Sort
+               Sort Key: x
+               ->  Seq Scan on groupby_elim_t
+ Optimizer: GPORCA
+(7 rows)
+
+SELECT x, abs(x), count(*) FROM groupby_elim_t GROUP BY x, abs(x) ORDER BY x;
+ x | abs | count 
+---+-----+-------
+ 1 |   1 |     2
+ 2 |   2 |     2
+ 3 |   3 |     1
+   |     |     1
+(4 rows)
+
+-- Case 4: GROUP BY x, abs(x+1) -> GROUP BY x (nested immutable)
+EXPLAIN (COSTS OFF) SELECT x, abs(x+1), count(*) FROM groupby_elim_t GROUP BY x, abs(x+1);
+                  QUERY PLAN                  
+----------------------------------------------
+ Gather Motion 3:1  (slice1; segments: 3)
+   ->  GroupAggregate
+         Group Key: x
+         ->  Sort
+               Sort Key: x
+               ->  Seq Scan on groupby_elim_t
+ Optimizer: GPORCA
+(7 rows)
+
+SELECT x, abs(x+1), count(*) FROM groupby_elim_t GROUP BY x, abs(x+1) ORDER BY x;
+ x | abs | count 
+---+-----+-------
+ 1 |   2 |     2
+ 2 |   3 |     2
+ 3 |   4 |     1
+   |     |     1
+(4 rows)
+
+-- Case 5: GROUP BY a, b, a+b -> GROUP BY a, b (multi-column expression)
+EXPLAIN (COSTS OFF) SELECT x, y, x+y, count(*) FROM groupby_elim_t GROUP BY x, y, x+y;
+                     QUERY PLAN                     
+----------------------------------------------------
+ Result
+   ->  Gather Motion 3:1  (slice1; segments: 3)
+         ->  GroupAggregate
+               Group Key: x, y
+               ->  Sort
+                     Sort Key: x, y
+                     ->  Seq Scan on groupby_elim_t
+ Optimizer: GPORCA
+(8 rows)
+
+SELECT x, y, x+y, count(*) FROM groupby_elim_t GROUP BY x, y, x+y ORDER BY x, y;
+ x | y  | ?column? | count 
+---+----+----------+-------
+ 1 | 10 |       11 |     2
+ 2 | 20 |       22 |     2
+ 3 | 30 |       33 |     1
+   |    |          |     1
+(4 rows)
+
+-- Case 6: GROUP BY x, x::bigint -> GROUP BY x (immutable cast)
+EXPLAIN (COSTS OFF) SELECT x, x::bigint AS x_big, count(*) FROM groupby_elim_t GROUP BY x, x::bigint;
+                     QUERY PLAN                     
+----------------------------------------------------
+ Result
+   ->  Gather Motion 3:1  (slice1; segments: 3)
+         ->  GroupAggregate
+               Group Key: x
+               ->  Sort
+                     Sort Key: x
+                     ->  Seq Scan on groupby_elim_t
+ Optimizer: GPORCA
+(8 rows)
+
+SELECT x, x::bigint AS x_big, count(*) FROM groupby_elim_t GROUP BY x, x::bigint ORDER BY x;
+ x | x_big | count 
+---+-------+-------
+ 1 |     1 |     2
+ 2 |     2 |     2
+ 3 |     3 |     1
+   |       |     1
+(4 rows)
+
+-- Case 7: GROUP BY x, 1+2 -> GROUP BY x (constant expression)
+EXPLAIN (COSTS OFF) SELECT x, 1+2, count(*) FROM groupby_elim_t GROUP BY x, 1+2;
+                     QUERY PLAN                     
+----------------------------------------------------
+ Result
+   ->  Gather Motion 3:1  (slice1; segments: 3)
+         ->  GroupAggregate
+               Group Key: x
+               ->  Sort
+                     Sort Key: x
+                     ->  Seq Scan on groupby_elim_t
+ Optimizer: GPORCA
+(8 rows)
+
+SELECT x, 1+2, count(*) FROM groupby_elim_t GROUP BY x, 1+2 ORDER BY x;
+ x | ?column? | count 
+---+----------+-------
+ 1 |        3 |     2
+ 2 |        3 |     2
+ 3 |        3 |     1
+   |        3 |     1
+(4 rows)
+
+-- Case 8: GROUP BY x, x+1, y, y*2 -> GROUP BY x, y (mixed columns)
+EXPLAIN (COSTS OFF) SELECT x, x+1, y, y*2, count(*) FROM groupby_elim_t GROUP BY x, x+1, y, y*2;
+                     QUERY PLAN                     
+----------------------------------------------------
+ Result
+   ->  Gather Motion 3:1  (slice1; segments: 3)
+         ->  GroupAggregate
+               Group Key: x, y
+               ->  Sort
+                     Sort Key: x, y
+                     ->  Seq Scan on groupby_elim_t
+ Optimizer: GPORCA
+(8 rows)
+
+SELECT x, x+1, y, y*2, count(*) FROM groupby_elim_t GROUP BY x, x+1, y, y*2 ORDER BY x, y;
+ x | ?column? | y  | ?column? | count 
+---+----------+----+----------+-------
+ 1 |        2 | 10 |       20 |     2
+ 2 |        3 | 20 |       40 |     2
+ 3 |        4 | 30 |       60 |     1
+   |          |    |          |     1
+(4 rows)
+
+-- ============================================================
+-- Negative cases: should NOT eliminate
+-- ============================================================
+-- Case 9: VOLATILE function -- must not eliminate random()
+EXPLAIN (COSTS OFF) SELECT x, count(*) FROM groupby_elim_t GROUP BY x, random();
+                  QUERY PLAN                  
+----------------------------------------------
+ Gather Motion 3:1  (slice1; segments: 3)
+   ->  GroupAggregate
+         Group Key: x, (random())
+         ->  Sort
+               Sort Key: x, (random())
+               ->  Seq Scan on groupby_elim_t
+ Optimizer: GPORCA
+(7 rows)
+
+-- Case 10: y not in GROUP BY -- must not eliminate x*y
+EXPLAIN (COSTS OFF) SELECT x, x*y, count(*) FROM groupby_elim_t GROUP BY x, x*y;
+                  QUERY PLAN                  
+----------------------------------------------
+ Gather Motion 3:1  (slice1; segments: 3)
+   ->  GroupAggregate
+         Group Key: x, ((x * y))
+         ->  Sort
+               Sort Key: x, ((x * y))
+               ->  Seq Scan on groupby_elim_t
+ Optimizer: GPORCA
+(7 rows)
+
+-- Case 11: no bare Var for x -- must not eliminate x+1
+EXPLAIN (COSTS OFF) SELECT abs(x), x+1, count(*) FROM groupby_elim_t GROUP BY abs(x), x+1;
+                            QUERY PLAN                            
+------------------------------------------------------------------
+ Gather Motion 3:1  (slice1; segments: 3)
+   ->  GroupAggregate
+         Group Key: (abs(x)), ((x + 1))
+         ->  Sort
+               Sort Key: (abs(x)), ((x + 1))
+               ->  Redistribute Motion 3:3  (slice2; segments: 3)
+                     Hash Key: (abs(x)), ((x + 1))
+                     ->  Seq Scan on groupby_elim_t
+ Optimizer: GPORCA
+(9 rows)
+
+-- Case 12: no bare Var at all -- must not eliminate anything
+EXPLAIN (COSTS OFF) SELECT x+1, x+2, count(*) FROM groupby_elim_t GROUP BY x+1, x+2;
+                            QUERY PLAN                            
+------------------------------------------------------------------
+ Gather Motion 3:1  (slice1; segments: 3)
+   ->  GroupAggregate
+         Group Key: ((x + 1)), ((x + 2))
+         ->  Sort
+               Sort Key: ((x + 1)), ((x + 2))
+               ->  Redistribute Motion 3:3  (slice2; segments: 3)
+                     Hash Key: ((x + 1)), ((x + 2))
+                     ->  Seq Scan on groupby_elim_t
+ Optimizer: GPORCA
+(9 rows)
+
+-- Case 13: ROLLUP -- skip optimization entirely
+EXPLAIN (COSTS OFF) SELECT x, x+1, count(*) FROM groupby_elim_t GROUP BY ROLLUP(x, x+1);
+                                    QUERY PLAN                                    
+----------------------------------------------------------------------------------
+ Gather Motion 3:1  (slice1; segments: 3)
+   ->  Sequence
+         ->  Shared Scan (share slice:id 1:0)
+               ->  Seq Scan on groupby_elim_t
+         ->  Append
+               ->  GroupAggregate
+                     Group Key: share0_ref2.x, share0_ref2."?column?"
+                     ->  Sort
+                           Sort Key: share0_ref2.x, share0_ref2."?column?"
+                           ->  Shared Scan (share slice:id 1:0)
+               ->  GroupAggregate
+                     Group Key: share0_ref3.x
+                     ->  Sort
+                           Sort Key: share0_ref3.x
+                           ->  Shared Scan (share slice:id 1:0)
+               ->  Result
+                     ->  Redistribute Motion 1:3  (slice2)
+                           ->  Aggregate
+                                 ->  Gather Motion 3:1  (slice3; segments: 3)
+                                       ->  Result
+                                             ->  Shared Scan (share slice:id 3:0)
+ Optimizer: GPORCA
+(22 rows)
+
+-- Case 14: single key -- nothing to eliminate
+EXPLAIN (COSTS OFF) SELECT x, count(*) FROM groupby_elim_t GROUP BY x;
+                  QUERY PLAN                  
+----------------------------------------------
+ Gather Motion 3:1  (slice1; segments: 3)
+   ->  GroupAggregate
+         Group Key: x
+         ->  Sort
+               Sort Key: x
+               ->  Seq Scan on groupby_elim_t
+ Optimizer: GPORCA
+(7 rows)
+
+-- Case 15: pure SubLink -- must not be eliminated.
+-- pull_var_clause() does not recurse into SubLink subselects, so without the
+-- contain_sublinks() guard the expression would be misclassified as a
+-- constant (empty Var list) and dropped from GROUP BY.
+EXPLAIN (COSTS OFF) SELECT x, (SELECT 1), count(*) FROM groupby_elim_t GROUP BY x, (SELECT 1);
+                     QUERY PLAN                     
+----------------------------------------------------
+ Gather Motion 3:1  (slice1; segments: 3)
+   ->  GroupAggregate
+         Group Key: x, (1)
+         ->  Sort
+               Sort Key: x, (1)
+               ->  Nested Loop Left Join
+                     Join Filter: true
+                     ->  Seq Scan on groupby_elim_t
+                     ->  Materialize
+                           ->  Result
+ Optimizer: GPORCA
+(11 rows)
+
+-- Case 16: SubLink with correlated reference to a non-group-by column --
+-- must not be eliminated.  The correlated Var (t1.y) is invisible to
+-- pull_var_clause; without the guard the expression would be wrongly
+-- removed and rows differing in y would be incorrectly merged.
+EXPLAIN (COSTS OFF) SELECT x, count(*) FROM groupby_elim_t t1 GROUP BY x, (SELECT t1.y);
+                   QUERY PLAN                    
+-------------------------------------------------
+ Gather Motion 3:1  (slice1; segments: 3)
+   ->  GroupAggregate
+         Group Key: x, ((SubPlan 1))
+         ->  Sort
+               Sort Key: x, ((SubPlan 1))
+               ->  Seq Scan on groupby_elim_t t1
+                     SubPlan 1
+                       ->  Result
+                             ->  Result
+ Optimizer: GPORCA
+(10 rows)
+
+-- ============================================================
+-- Correctness: results must be identical with GUC on vs off
+-- ============================================================
+SET enable_expr_groupby_reduction = on;
+SELECT x, x-1, x-2, count(*) AS c FROM groupby_elim_t GROUP BY x, x-1, x-2 ORDER BY x;
+ x | ?column? | ?column? | c 
+---+----------+----------+---
+ 1 |        0 |       -1 | 2
+ 2 |        1 |        0 | 2
+ 3 |        2 |        1 | 1
+   |          |          | 1
+(4 rows)
+
+SET enable_expr_groupby_reduction = off;
+SELECT x, x-1, x-2, count(*) AS c FROM groupby_elim_t GROUP BY x, x-1, x-2 ORDER BY x;
+ x | ?column? | ?column? | c 
+---+----------+----------+---
+ 1 |        0 |       -1 | 2
+ 2 |        1 |        0 | 2
+ 3 |        2 |        1 | 1
+   |          |          | 1
+(4 rows)
+
+-- ============================================================
+-- GUC off: optimization must not trigger
+-- ============================================================
+SET enable_expr_groupby_reduction = off;
+EXPLAIN (COSTS OFF) SELECT x, x+1, count(*) FROM groupby_elim_t GROUP BY x, x+1;
+                  QUERY PLAN                  
+----------------------------------------------
+ Gather Motion 3:1  (slice1; segments: 3)
+   ->  GroupAggregate
+         Group Key: x, ((x + 1))
+         ->  Sort
+               Sort Key: x, ((x + 1))
+               ->  Seq Scan on groupby_elim_t
+ Optimizer: GPORCA
+(7 rows)
+
+-- Cleanup
+RESET enable_expr_groupby_reduction;
+DROP TABLE groupby_elim_t;

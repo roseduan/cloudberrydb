@@ -968,7 +968,7 @@ ts_set_compress_config(PG_FUNCTION_ARGS)
 	int			j;
 
 	/* Only the table owner may change compression settings. */
-	if (!pg_class_ownercheck(relid, GetUserId()))
+	if (!object_ownercheck(RelationRelationId, relid, GetUserId()))
 		aclcheck_error(ACLCHECK_NOT_OWNER, OBJECT_TABLE,
 					   get_rel_name(relid));
 
@@ -1583,8 +1583,7 @@ do_compress_one_chunk(Oid relid, int32 chunk_number,
 	compress_ensure_pax_directories(relid);
 
 	rel = table_open(relid, AccessShareLock);
-	RelationOpenSmgr(rel);
-	reln = rel->rd_smgr;
+	reln = RelationGetSmgr(rel);
 	if (!smgrexists(reln, forknum))
 	{
 		elog(LOG, "compress chunk: skip (no heap fork) seg=%d rel=%u chunk=%d",
@@ -1829,7 +1828,7 @@ ts_compress_write_chunks(PG_FUNCTION_ARGS)
 		 * context is propagated to segments so we can (and should) still
 		 * verify the caller owns the table before touching PAX files.
 		 */
-		if (!pg_class_ownercheck(relid, GetUserId()))
+		if (!object_ownercheck(RelationRelationId, relid, GetUserId()))
 			aclcheck_error(ACLCHECK_NOT_OWNER, OBJECT_TABLE,
 						   get_rel_name(relid));
 
@@ -2025,7 +2024,7 @@ ts_compress_chunks(PG_FUNCTION_ARGS)
 	Interval	   *older_than = has_older_than ? PG_GETARG_INTERVAL_P(1) : NULL;
 
 	/* Only the table owner may trigger compression. */
-	if (!pg_class_ownercheck(relid, GetUserId()))
+	if (!object_ownercheck(RelationRelationId, relid, GetUserId()))
 		aclcheck_error(ACLCHECK_NOT_OWNER, OBJECT_TABLE,
 					   get_rel_name(relid));
 
@@ -2176,7 +2175,7 @@ ts_compress_chunk(PG_FUNCTION_ARGS)
 	bool			row_exists = false;
 
 	/* Only the table owner may trigger compression. */
-	if (!pg_class_ownercheck(relid, GetUserId()))
+	if (!object_ownercheck(RelationRelationId, relid, GetUserId()))
 		aclcheck_error(ACLCHECK_NOT_OWNER, OBJECT_TABLE,
 					   get_rel_name(relid));
 
@@ -2358,7 +2357,7 @@ ts_reclaim_chunk_heaps(PG_FUNCTION_ARGS)
 	int				rc;
 
 	/* Only the table owner may reclaim heap forks. */
-	if (!pg_class_ownercheck(relid, GetUserId()))
+	if (!object_ownercheck(RelationRelationId, relid, GetUserId()))
 		aclcheck_error(ACLCHECK_NOT_OWNER, OBJECT_TABLE,
 					   get_rel_name(relid));
 
@@ -2505,7 +2504,7 @@ ts_reclaim_chunk_heaps_segment(PG_FUNCTION_ARGS)
 		 * a compromised segment-side session can't truncate arbitrary heap
 		 * forks.
 		 */
-		if (!pg_class_ownercheck(relid, GetUserId()))
+		if (!object_ownercheck(RelationRelationId, relid, GetUserId()))
 			aclcheck_error(ACLCHECK_NOT_OWNER, OBJECT_TABLE,
 						   get_rel_name(relid));
 
@@ -2568,8 +2567,7 @@ ts_reclaim_chunk_heaps_segment(PG_FUNCTION_ARGS)
 				ForkNumber		forks[1] = {forknum};
 				BlockNumber		blocks[1] = {0};
 
-				RelationOpenSmgr(rel);
-				smgr = rel->rd_smgr;
+				smgr = RelationGetSmgr(rel);
 				if (smgrexists(smgr, forknum))
 				{
 					BlockNumber nblocks = smgrnblocks(smgr, forknum);
@@ -2652,14 +2650,13 @@ ts_truncate_chunk_fork(PG_FUNCTION_ARGS)
 		 * to the table owner; the SQL wrapper is also REVOKEd from PUBLIC
 		 * because callers must know the (rel, chunk_num) pair.
 		 */
-		if (!pg_class_ownercheck(relid, GetUserId()))
+		if (!object_ownercheck(RelationRelationId, relid, GetUserId()))
 			aclcheck_error(ACLCHECK_NOT_OWNER, OBJECT_TABLE,
 						   get_rel_name(relid));
 
 		/* Truncate the chunk fork */
 		rel = table_open(relid, AccessExclusiveLock);
-		RelationOpenSmgr(rel);
-		smgr = rel->rd_smgr;
+		smgr = RelationGetSmgr(rel);
 		if (smgrexists(smgr, forknum))
 		{
 			ForkNumber	forks[1] = { forknum };
@@ -2725,7 +2722,7 @@ ts_compressed_chunk_info(PG_FUNCTION_ARGS)
 		 * data but it does reveal a table's storage layout.  Restrict to
 		 * table owner to match ts_chunk_info's behaviour.
 		 */
-		if (!pg_class_ownercheck(relid, GetUserId()))
+		if (!object_ownercheck(RelationRelationId, relid, GetUserId()))
 			aclcheck_error(ACLCHECK_NOT_OWNER, OBJECT_TABLE,
 						   get_rel_name(relid));
 

@@ -113,7 +113,7 @@ PaxIndexScanDesc::PaxIndexScanDesc(Relation rel,
   filter_[0] = std::move(filter);
   filter_[1] = filter_recheck ? std::move(filter_recheck) : filter_[0];
   rel_path_ = cbdb::BuildPaxDirectoryPath(
-      rel->rd_node, rel->rd_backend);
+      rel->rd_locator, rel->rd_backend);
 }
 
 PaxIndexScanDesc::~PaxIndexScanDesc() {}
@@ -179,8 +179,8 @@ bool PaxIndexScanDesc::OpenMicroPartition(BlockNumber block,
     auto fs = Singleton<LocalFileSystem>::GetInstance();
     {
       auto tde_opts = std::make_shared<LocalFileSystemOptions>();
-      tde_opts->spc_oid = (unsigned int) base_.rel->rd_node.spcNode;
-      tde_opts->db_node = (unsigned int) base_.rel->rd_node.dbNode;
+      tde_opts->spc_oid = (unsigned int) base_.rel->rd_locator.spcOid;
+      tde_opts->db_node = (unsigned int) base_.rel->rd_locator.dbOid;
       data_file = fs->Open(file_name, fs::kReadMode, tde_opts);
       if (metadata.GetExistToast()) {
         auto toast_file_name = metadata.GetFileName() + TOAST_FILE_SUFFIX;
@@ -327,7 +327,7 @@ TableScanDesc PaxScanDesc::BeginScan(Relation relation, Snapshot snapshot,
   /* build reader */
   reader_options.reused_buffer = desc->reused_buffer_;
   reader_options.table_space_id = relation->rd_rel->reltablespace;
-  reader_options.db_node = relation->rd_node.dbNode;
+  reader_options.db_node = relation->rd_locator.dbOid;
   reader_options.filter = filter;
   reader_options.use_prefetch = use_prefetch;
 

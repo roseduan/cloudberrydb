@@ -4103,18 +4103,20 @@ find_relid_aliasname(PlannerInfo *root, char *aliasname, List *initial_rels,
  * Return join hint which matches given joinrelids.
  */
 static JoinMethodHint *
-find_join_hint(Relids joinrelids)
+find_join_hint(PlannerInfo *root, Relids joinrelids)
 {
 	List	   *join_hint;
 	ListCell   *l;
+	Bitmapset  *baseRelSet;
 
-	join_hint = current_hint_state->join_hint_level[bms_num_members(joinrelids)];
+	baseRelSet = bms_intersect(joinrelids, root->all_baserels);
+	join_hint = current_hint_state->join_hint_level[bms_num_members(baseRelSet)];
 
 	foreach(l, join_hint)
 	{
 		JoinMethodHint *hint = (JoinMethodHint *) lfirst(l);
 
-		if (bms_equal(joinrelids, hint->joinrelids))
+		if (bms_equal(baseRelSet, hint->joinrelids))
 			return hint;
 	}
 
@@ -4165,7 +4167,7 @@ OuterInnerJoinCreate(OuterInnerRels *outer_inner, LeadingHint *leading_hint,
 	 * If we don't have join method hint, create new one for the
 	 * join combination with all join methods are enabled.
 	 */
-	hint = find_join_hint(join_relids);
+	hint = find_join_hint(root, join_relids);
 	if (hint == NULL)
 	{
 		/*
@@ -4390,7 +4392,7 @@ transform_join_hints(HintState *hstate, PlannerInfo *root, int nbaserel,
 			 * If we don't have join method hint, create new one for the
 			 * join combination with all join methods are enabled.
 			 */
-			hint = find_join_hint(joinrelids);
+			hint = find_join_hint(root, joinrelids);
 			if (hint == NULL)
 			{
 				/*
@@ -4736,7 +4738,7 @@ pg_hint_plan_make_join_rel(PlannerInfo *root, RelOptInfo *rel1, RelOptInfo *rel2
 	}
 
 	joinrelids = bms_union(rel1->relids, rel2->relids);
-	hint = find_join_hint(joinrelids);
+	hint = find_join_hint(root, joinrelids);
 	bms_free(joinrelids);
 
 	if (!hint)
@@ -4789,7 +4791,7 @@ pg_hint_plan_add_paths_to_joinrel(PlannerInfo *root,
 	}
 
 	joinrelids = bms_union(outerrel->relids, innerrel->relids);
-	join_hint = find_join_hint(joinrelids);
+	join_hint = find_join_hint(root, joinrelids);
 	bms_free(joinrelids);
 
 	if (join_hint && join_hint->inner_nrels != 0)

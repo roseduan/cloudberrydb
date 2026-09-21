@@ -231,8 +231,6 @@ open_ds_read(Relation rel, DatumStreamRead **ds, TupleDesc relationTupleDesc,
 						 attno + 1,
 						 NameStr(attr->attname));
 
-		RelationOpenSmgr(rel);
-		
 		ds[attno] = create_datumstreamread(ct,
 										   clvl,
 										   checksum,
@@ -241,8 +239,8 @@ open_ds_read(Relation rel, DatumStreamRead **ds, TupleDesc relationTupleDesc,
 										   RelationGetRelationName(rel),
 										   RelationGetRelid(rel),
 										    /* title */ titleBuf.data,
-										   &rel->rd_node,
-										   rel->rd_smgr->smgr_ao);
+										   &rel->rd_locator,
+										   RelationGetSmgr(rel)->smgr_ao);
 	}
 }
 
@@ -261,7 +259,6 @@ open_datumstreamread_segfile(
 	char		fn[MAXPGPATH];
 	int32		fileSegNo;
 
-	RelFileNode node = rel->rd_node;
 	Oid         relid = RelationGetRelid(rel);
 
 	/* Filenum for the column */
@@ -273,8 +270,7 @@ open_datumstreamread_segfile(
 	Assert(strlen(fn) + 1 <= MAXPGPATH);
 
 	Assert(ds);
-	datumstreamread_open_file(ds, fn, e->eof, e->eof_uncompressed, node,
-							  fileSegNo, segInfo->formatversion);
+	datumstreamread_open_file(ds, fn, e->eof, e->eof_uncompressed, segInfo->formatversion);
 }
 
 /*
@@ -294,14 +290,13 @@ open_all_datumstreamread_segfiles(Relation rel,
 								  AttrNumber num_proj_atts,
 								  AppendOnlyBlockDirectory *blockDirectory)
 {
-	char	   *basepath = relpathbackend(rel->rd_node, rel->rd_backend, MAIN_FORKNUM);
+	char	   *basepath = relpathbackend(rel->rd_locator, rel->rd_backend, MAIN_FORKNUM);
 
 	Assert(proj_atts);
 	for (AttrNumber i = 0; i < num_proj_atts; i++)
 	{
 		AttrNumber	attno = proj_atts[i];
 
-		RelationOpenSmgr(rel);
 		open_datumstreamread_segfile(basepath, rel, segInfo, ds[attno], attno);
 		datumstreamread_block(ds[attno], blockDirectory, attno);
 		
@@ -753,10 +748,22 @@ aoco_beginscan_vec(Relation rel, Snapshot snapshot,
 	bool			found = false;
 	bool			ctid = false;
 
-	cols = palloc0(natts * sizeof(*cols));
+	/*
+	 * aocs_beginscan_internal_vec() reads a doubled-size array: the lower
+	 * half (indices [0, natts)) says which columns are needed at all
+	 * (targetlist or qual), the upper half (indices [natts, 2*natts))
+	 * says which of those are needed specifically by the qual, so it can
+	 * tell projection-only columns apart and defer their materialization
+	 * (see its "late materialize" proj[i + natts] check). Size for both
+	 * halves and populate the upper half from qual alone -- a caller that
+	 * only sized/populated the lower half left proj[i + natts] reading
+	 * past the end of the allocation.
+	 */
+	cols = palloc0(2 * natts * sizeof(*cols));
 
 	found |= extractcolumns_from_node((Node *)targetlist, cols, natts);
 	found |= extractcolumns_from_node((Node *)qual, cols, natts);
+	extractcolumns_from_node((Node *)qual, cols + natts, natts);
 
 	/*
 	 * In some cases (for example, count(*)), targetlist and qual may be null,

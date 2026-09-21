@@ -10,6 +10,7 @@ include $(top_builddir)/src/Makefile.global
 #
 # targets built via top_builddir/GNUmakefile
 #
+
 recurse_targets = ""
 
 ifeq "$(enable_debug_extensions)" "yes"
@@ -20,14 +21,17 @@ ifeq "$(enable_debug_extensions)" "yes"
                gp_inject_fault \
                gp_exttable_fdw \
                gp_legacy_string_agg \
+               gp_relsizes_stats \
                gp_replica_check \
                gp_toolkit \
-               pg_hint_plan
+               pg_hint_plan \
+               reject_partition_fullscan
 else
 	recurse_targets = gp_sparse_vector \
 	       gp_distribution_policy \
                gp_internal_tools \
                gp_legacy_string_agg \
+               gp_relsizes_stats \
                gp_exttable_fdw \
                gp_toolkit \
                pg_hint_plan
@@ -104,4 +108,5 @@ installcheck:
 	$(MAKE) -C gp_sparse_vector installcheck
 	$(MAKE) -C gp_toolkit installcheck
 	$(MAKE) -C gp_exttable_fdw installcheck
+	$(MAKE) -C pg_hint_plan installcheck
 	if [ "$(with_diskquota)" = "yes" ]; then $(MAKE) -C diskquota installcheck; fi

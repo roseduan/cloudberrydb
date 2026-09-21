@@ -632,7 +632,7 @@ iceberg_tuple_delete(Relation rel, ItemPointer tid, CommandId cid, Snapshot snap
 static TM_Result
 iceberg_tuple_update(Relation rel, ItemPointer otid, TupleTableSlot *slot, CommandId cid,
 					 Snapshot snapshot, Snapshot crosscheck, bool wait, TM_FailureData *tmfd,
-					 LockTupleMode *lockmode, bool *update_indexes)
+					 LockTupleMode *lockmode, TU_UpdateIndexes *update_indexes)
 {
 	IcebergModifyDesc *updateDesc = get_or_create_modify_descriptor(rel, CMD_UPDATE);
 	return pg_iceberg_tuple_update(updateDesc, otid, slot, cid, snapshot, crosscheck, wait, tmfd, lockmode, update_indexes);
@@ -728,7 +728,7 @@ iceberg_tuple_lock(Relation rel, ItemPointer tid, Snapshot snapshot, TupleTableS
 }
 
 static void
-iceberg_relation_set_new_filenode(Relation rel, const RelFileNode *newrnode, char persistence, TransactionId *freezeXid, MultiXactId *minmulti)
+iceberg_relation_set_new_filenode(Relation rel, const RelFileLocator *newrnode, char persistence, TransactionId *freezeXid, MultiXactId *minmulti)
 {
 	/*
 	 * Issue #337: this callback is the earliest AM-level hook reached by
@@ -749,7 +749,7 @@ iceberg_relation_nontransactional_truncate(Relation rel)
 }
 
 static void
-iceberg_relation_copy_data(Relation rel, const RelFileNode *newrnode)
+iceberg_relation_copy_data(Relation rel, const RelFileLocator *newrnode)
 {
 }
 
@@ -891,7 +891,7 @@ static const TableAmRoutine iceberg_am_methods = {
 	.tuple_update = iceberg_tuple_update,
 	.tuple_lock = iceberg_tuple_lock,
 
-	.relation_set_new_filenode = iceberg_relation_set_new_filenode,
+	.relation_set_new_filelocator = iceberg_relation_set_new_filenode,
 	.relation_nontransactional_truncate = iceberg_relation_nontransactional_truncate,
 	.relation_copy_data = iceberg_relation_copy_data,
 	.relation_copy_for_cluster = iceberg_relation_copy_for_cluster,

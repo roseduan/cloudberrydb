@@ -286,9 +286,9 @@ make_iceberg_custom_scan(SeqScan *seq)
 	 * directDispatch, parallel flags, …) then fix up node tag and CustomScan-
 	 * specific fields.
 	 */
-	cscan->scan.plan = seq->plan;
+	cscan->scan.plan = seq->scan.plan;
 	cscan->scan.plan.type = T_CustomScan;
-	cscan->scan.scanrelid = seq->scanrelid;
+	cscan->scan.scanrelid = seq->scan.scanrelid;
 
 	cscan->flags			= 0;
 	cscan->custom_plans		= NIL;
@@ -302,7 +302,7 @@ make_iceberg_custom_scan(SeqScan *seq)
 	 */
 	cscan->custom_private	= NIL;
 	cscan->custom_scan_tlist = NIL;		/* scan tuple = relation tupdesc */
-	cscan->custom_relids	= bms_make_singleton(seq->scanrelid);
+	cscan->custom_relids	= bms_make_singleton(seq->scan.scanrelid);
 	cscan->methods			= &IcebergCustomScanMethods;
 
 	return (Plan *) cscan;
@@ -319,10 +319,10 @@ replace_iceberg_seqscan(Plan *plan, List *rtable)
 		SeqScan		   *seq = (SeqScan *) plan;
 		RangeTblEntry  *rte;
 
-		if (seq->scanrelid > 0 &&
-			seq->scanrelid <= list_length(rtable))
+		if (seq->scan.scanrelid > 0 &&
+			seq->scan.scanrelid <= list_length(rtable))
 		{
-			rte = rt_fetch(seq->scanrelid, rtable);
+			rte = rt_fetch(seq->scan.scanrelid, rtable);
 			if (rte->rtekind == RTE_RELATION &&
 				is_iceberg_relation(rte->relid))
 				return make_iceberg_custom_scan(seq);

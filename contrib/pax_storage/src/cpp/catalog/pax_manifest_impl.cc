@@ -137,7 +137,7 @@ ManifestDesc manifest_init() {
 }
 
 static bool manifest_new_filenode(Relation rel,
-                                               RelFileNode newrnode,
+                                               RelFileLocator newrnode,
                                                char persistence) {
   Relation pax_tables_rel;
   ScanKeyData scan_key[1];
@@ -160,7 +160,7 @@ static bool manifest_new_filenode(Relation rel,
 
     // set new filenode, not create new table
     //
-    // 1. truncate aux table by new relfilenode
+    // 1. truncate aux table by new RelFileLocator
     aux_relid = ::paxc::GetPaxAuxRelid(pax_relid);
     Assert(OidIsValid(aux_relid));
     paxc::PaxAuxRelationSetNewFilenode(aux_relid);
@@ -185,8 +185,8 @@ static bool manifest_new_filenode(Relation rel,
   return true;
 }
 
-static void manifest_create_data_dir(Relation rel, const RelFileNode &newrnode) {
-  // create relfilenode file for pax table
+static void manifest_create_data_dir(Relation rel, const RelFileLocator &newrnode) {
+  // create RelFileLocator file for pax table
   auto srel = paxc::PaxRelationCreateStorage(newrnode, rel);
   smgrclose(srel);
 
@@ -207,7 +207,7 @@ static void manifest_create_data_dir(Relation rel, const RelFileNode &newrnode) 
                 newrnode.dbNode, newrnode.spcNode, newrnode.relNode);
 }
 
-void manifest_create(Relation rel, RelFileNode relnode) {
+void manifest_create(Relation rel, RelFileLocator relnode) {
   auto should_create_dir = manifest_new_filenode(rel, relnode, rel->rd_rel->relpersistence);
   if (should_create_dir) {
     manifest_create_data_dir(rel, relnode);

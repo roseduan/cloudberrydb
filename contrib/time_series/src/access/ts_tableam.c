@@ -33,6 +33,7 @@
 #include "access/valid.h"
 #include "access/xact.h"
 #include "catalog/pg_am_d.h"
+#include "catalog/pg_class.h"
 #include "catalog/storage.h"
 #include "storage/proc.h"
 #include "commands/progress.h"
@@ -277,8 +278,7 @@ ts_chunk_get_insert_buffer(Relation rel, ForkNumber forknum, Size tuplen,
 		SMgrRelation	smgr;
 		BlockNumber		nblocks;
 
-		RelationOpenSmgr(rel);
-		smgr = rel->rd_smgr;
+		smgr = RelationGetSmgr(rel);
 		nblocks = smgrnblocks(smgr, forknum);
 
 		if (nblocks == 0)
@@ -421,8 +421,7 @@ ts_heap_fork_cleanup_toast(Relation rel, ForkNumber forknum)
 	BlockNumber		nblocks;
 	BlockNumber		blkno;
 
-	RelationOpenSmgr(rel);
-	smgr = rel->rd_smgr;
+	smgr = RelationGetSmgr(rel);
 	if (!smgrexists(smgr, forknum))
 		return;
 
@@ -649,8 +648,7 @@ ts_chunk_prepare_for_insert(Relation rel, ForkNumber forknum,
 	 */
 	ts_chunk_lock(relid, (int32) forknum, ShareLock);
 
-	RelationOpenSmgr(rel);
-	smgr = rel->rd_smgr;
+	smgr = RelationGetSmgr(rel);
 	if (!smgrexists(smgr, forknum))
 	{
 		int64	range_start;
@@ -1506,9 +1504,7 @@ ts_heap_scan_getnextslot(TableScanDesc sscan, ScanDirection direction, TupleTabl
 	pagemode = (sscan->rs_flags & SO_ALLOW_PAGEMODE) != 0;
 	tableoid = RelationGetRelid(scan->rel);
 
-	RelationOpenSmgr(scan->rel);
-	smgr = scan->rel->rd_smgr;
-
+	smgr = RelationGetSmgr(scan->rel);
 	while (scan->cur_chunk_idx < scan->n_chunks)
 	{
 		ForkNumber	forknum = scan->chunks[scan->cur_chunk_idx];
@@ -1588,8 +1584,8 @@ ts_heap_scan_getnextslot(TableScanDesc sscan, ScanDirection direction, TupleTabl
 					{
 						bool	valid;
 
-						HeapKeyTest(&scan->rs_ctup, RelationGetDescr(scan->rel),
-									sscan->rs_nkeys, sscan->rs_key, valid);
+						valid = HeapKeyTest(&scan->rs_ctup, RelationGetDescr(scan->rel),
+									sscan->rs_nkeys, sscan->rs_key);
 						if (!valid)
 							continue;
 					}
@@ -1664,8 +1660,8 @@ ts_heap_scan_getnextslot(TableScanDesc sscan, ScanDirection direction, TupleTabl
 
 					if (sscan->rs_nkeys > 0 && sscan->rs_key != NULL)
 					{
-						HeapKeyTest(&scan->rs_ctup, RelationGetDescr(scan->rel),
-									sscan->rs_nkeys, sscan->rs_key, valid);
+						valid = HeapKeyTest(&scan->rs_ctup, RelationGetDescr(scan->rel),
+									sscan->rs_nkeys, sscan->rs_key);
 						if (!valid)
 							continue;
 					}
@@ -1727,7 +1723,7 @@ sample_consider_live_tuple(HeapTuple tup, HeapTuple *rows, int targrows,
 		*rowstoskip = reservoir_get_next_S(rstate, *liverows - 1, targrows);
 	if (*rowstoskip <= 0)
 	{
-		int		k = (int) (targrows * sampler_random_fract(rstate->randstate));
+		int		k = (int) (targrows * sampler_random_fract(&rstate->randstate));
 
 		Assert(k >= 0 && k < targrows);
 		heap_freetuple(rows[k]);
@@ -1870,8 +1866,7 @@ ts_heap_acquire_sample_rows(Relation onerel, int elevel,
 		return 0;
 	}
 
-	RelationOpenSmgr(onerel);
-	smgr = onerel->rd_smgr;
+	smgr = RelationGetSmgr(onerel);
 	/* Virtual slot we feed to PAX; rows are heap_form_tuple'd before sampling. */
 	pax_out_slot = MakeSingleTupleTableSlot(RelationGetDescr(onerel),
 											&TTSOpsVirtual);
@@ -2154,8 +2149,7 @@ ts_heap_estimate_rel_size(Relation rel, int32 *attr_widths,
 	chunks = ts_chunk_catalog_get_chunks(RelationGetRelid(rel));
 	if (chunks != NIL)
 	{
-		RelationOpenSmgr(rel);
-		smgr = rel->rd_smgr;
+		smgr = RelationGetSmgr(rel);
 		foreach(lc, chunks)
 		{
 			ForkNumber f = (ForkNumber) lfirst_int(lc);
@@ -2237,8 +2231,7 @@ ts_heap_relation_nontransactional_truncate(Relation rel)
 
 	if (chunks != NIL)
 	{
-		RelationOpenSmgr(rel);
-		smgr = rel->rd_smgr;
+		smgr = RelationGetSmgr(rel);
 
 		/*
 		 * Mirror RelationTruncate's (storage.c) pending-sync handling
@@ -2301,7 +2294,7 @@ ts_heap_relation_nontransactional_truncate(Relation rel)
  */
 static void
 ts_heap_relation_set_new_filenode(Relation rel,
-								 const RelFileNode *newrnode,
+								 const RelFileLocator *newrnode,
 								 char persistence,
 								 TransactionId *freezeXid,
 								 MultiXactId *minmulti)
@@ -2316,7 +2309,7 @@ ts_heap_relation_set_new_filenode(Relation rel,
 	old_relid = RelationGetRelid(rel);
 
 	/* Delegate to heap for the actual filenode creation */
-	heap_am->relation_set_new_filenode(rel, newrnode, persistence,
+	heap_am->relation_set_new_filelocator(rel, newrnode, persistence,
 									   freezeXid, minmulti);
 
 	/*
@@ -2396,7 +2389,7 @@ static TM_Result
 ts_heap_tuple_update(Relation rel, ItemPointer otid, TupleTableSlot *slot,
 					 CommandId cid, Snapshot snapshot, Snapshot crosscheck,
 					 bool wait, TM_FailureData *tmfd,
-					 LockTupleMode *lockmode, bool *update_indexes)
+					 LockTupleMode *lockmode, TU_UpdateIndexes *update_indexes)
 {
 	if (RelationIsTimeSeries(rel))
 		ereport(ERROR,
@@ -2470,8 +2463,7 @@ ts_heap_fetch_row_version(Relation rel, ItemPointer tid,
 	if (chunks == NIL)
 		return false;
 
-	RelationOpenSmgr(rel);
-	smgr = rel->rd_smgr;
+	smgr = RelationGetSmgr(rel);
 
 	foreach(lc, chunks)
 	{
@@ -2566,7 +2558,7 @@ ts_heap_fetch_row_version(Relation rel, ItemPointer tid,
  *		would silently discard all chunk data.
  */
 static void
-ts_heap_relation_copy_data(Relation rel, const RelFileNode *newrnode)
+ts_heap_relation_copy_data(Relation rel, const RelFileLocator *newrnode)
 {
 	if (RelationIsTimeSeries(rel))
 		ereport(ERROR,
@@ -2751,8 +2743,7 @@ ts_heap_relation_size(Relation rel, ForkNumber forkNumber)
 	/* For non-MAIN forks, delegate to heap if the fork file exists */
 	if (forkNumber != MAIN_FORKNUM)
 	{
-		RelationOpenSmgr(rel);
-		if (!smgrexists(rel->rd_smgr, forkNumber))
+		if (!smgrexists(RelationGetSmgr(rel), forkNumber))
 			return 0;
 		return heap_am->relation_size(rel, forkNumber);
 	}
@@ -2765,8 +2756,7 @@ ts_heap_relation_size(Relation rel, ForkNumber forkNumber)
 		List	   *chunks = ts_chunk_catalog_get_chunks(RelationGetRelid(rel));
 		ListCell   *lc;
 
-		RelationOpenSmgr(rel);
-		smgr = rel->rd_smgr;
+		smgr = RelationGetSmgr(rel);
 
 		foreach(lc, chunks)
 		{
@@ -2820,7 +2810,7 @@ ts_chunk_info(PG_FUNCTION_ARGS)
 		 * Chunk metadata (time ranges, row counts, status) reveals a
 		 * table's storage layout.  Restrict to table owner.
 		 */
-		if (!pg_class_ownercheck(relid, GetUserId()))
+		if (!object_ownercheck(RelationRelationId, relid, GetUserId()))
 			aclcheck_error(ACLCHECK_NOT_OWNER, OBJECT_TABLE,
 						   get_rel_name(relid));
 
@@ -2860,8 +2850,7 @@ ts_chunk_info(PG_FUNCTION_ARGS)
 		HeapTuple		tuple;
 		TSConfig		config;
 
-		RelationOpenSmgr(ctx->rel);
-		smgr = ctx->rel->rd_smgr;
+		smgr = RelationGetSmgr(ctx->rel);
 		if (smgrexists(smgr, forknum))
 			nblocks = smgrnblocks(smgr, forknum);
 
@@ -2935,7 +2924,7 @@ ts_heap_methods_init(void)
 
 	/* Custom TRUNCATE: truncate all chunk forks and catalog entries */
 	ts_heap_methods.relation_nontransactional_truncate = ts_heap_relation_nontransactional_truncate;
-	ts_heap_methods.relation_set_new_filenode = ts_heap_relation_set_new_filenode;
+	ts_heap_methods.relation_set_new_filelocator = ts_heap_relation_set_new_filenode;
 
 	/* DML guards: reject DELETE/UPDATE/LOCK on time_series tables */
 	ts_heap_methods.tuple_delete = ts_heap_tuple_delete;

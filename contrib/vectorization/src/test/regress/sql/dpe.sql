@@ -280,6 +280,8 @@ explain (costs off, timing off, summary off, analyze) select * from pt, pt1 wher
 
 select * from pt, pt1 where pt.ptid = pt1.ptid and pt.pt1 = 'hello0' order by pt1.dist;
 
+explain (costs off, timing off, summary off, analyze) select count(*) from pt, pt1 where pt.ptid = pt1.ptid and pt.pt1 = 'hello0';
+
 select count(*) from pt, pt1 where pt.ptid = pt1.ptid and pt.pt1 = 'hello0';
 
 --
@@ -646,3 +648,70 @@ set enable_seqscan=off;
 -- force_explain
 explain (analyze, timing off, summary off)
 select * from pt, t where t.dist = pt.dist and t.tid = pt.ptid order by t.tid, t.sk;
+
+-- Test: DPE must NOT be applied on anti-semi-joins (NOT EXISTS / NOT IN).
+--
+-- Anti-join semantics: return outer rows where NO inner match exists.
+-- If DPE prunes outer partitions whose range has no inner match, those
+-- partitions' rows (which should ALL appear in the result) are lost.
+
+reset enable_mergejoin;
+reset enable_seqscan;
+reset search_path;
+
+drop schema if exists dpe_anti cascade;
+create schema dpe_anti;
+set search_path='dpe_anti';
+set optimizer_segments=2;
+
+create table pt_anti(a int, b int)
+distributed by (a)
+partition by range(a)
+(start (1) end (1001) every (250));
+
+create table inner_anti(a int, b int) distributed by (a);
+
+-- Partition layout:
+--   pt_anti_1_prt_1: a = 1..250
+--   pt_anti_1_prt_2: a = 251..500
+--   pt_anti_1_prt_3: a = 501..750
+--   pt_anti_1_prt_4: a = 751..1000
+-- Inner table after b > 500 filter only has a = 1..250
+insert into pt_anti select i, i from generate_series(1, 1000) i;
+insert into inner_anti select i, 600 from generate_series(1, 250) i;
+insert into inner_anti select i, 400 from generate_series(251, 500) i;
+
+analyze pt_anti;
+analyze inner_anti;
+
+-- NOT EXISTS: partitions 2-4 have no inner match after filter,
+-- so all their rows (750) must appear in the result.
+explain (costs off)
+select count(*) from pt_anti p
+where not exists (select 1 from inner_anti o where o.a = p.a and o.b > 500);
+
+select count(*) from pt_anti p
+where not exists (select 1 from inner_anti o where o.a = p.a and o.b > 500);
+
+-- NOT IN: same semantics, different plan path.
+explain (costs off)
+select count(*) from pt_anti p
+where p.a not in (select o.a from inner_anti o where o.b > 500);
+
+select count(*) from pt_anti p
+where p.a not in (select o.a from inner_anti o where o.b > 500);
+
+-- Verify result matches PG planner.
+set optimizer = off;
+
+select count(*) from pt_anti p
+where not exists (select 1 from inner_anti o where o.a = p.a and o.b > 500);
+
+select count(*) from pt_anti p
+where p.a not in (select o.a from inner_anti o where o.b > 500);
+
+reset optimizer;
+
+drop schema dpe_anti cascade;
+reset search_path;
+reset optimizer_segments;

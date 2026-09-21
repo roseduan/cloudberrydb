@@ -1,20 +1,20 @@
 
-# Copyright (c) 2021, PostgreSQL Global Development Group
+# Copyright (c) 2021-2023, PostgreSQL Global Development Group
 
 use strict;
 use warnings;
 
-use PostgresNode;
-use TestLib;
+use PostgreSQL::Test::Cluster;
+use PostgreSQL::Test::Utils;
 
-use Test::More tests => 80;
+use Test::More;
 
 my ($node, $result);
 
 #
 # Test set-up
 #
-$node = get_new_node('test');
+$node = PostgreSQL::Test::Cluster->new('test');
 $node->init;
 $node->append_conf('postgresql.conf', 'autovacuum=off');
 $node->start;
@@ -31,18 +31,18 @@ check_all_options_uncorrupted('test', 'plain');
 #
 fresh_test_table('test');
 corrupt_first_page('test');
-detects_heap_corruption("verify_heapam('test')", "plain corrupted table");
+detects_heap_corruption("verify_heapam_internal('test')", "plain corrupted table");
 detects_heap_corruption(
-	"verify_heapam('test', skip := 'all-visible')",
+	"verify_heapam_internal('test', skip := 'all-visible')",
 	"plain corrupted table skipping all-visible");
 detects_heap_corruption(
-	"verify_heapam('test', skip := 'all-frozen')",
+	"verify_heapam_internal('test', skip := 'all-frozen')",
 	"plain corrupted table skipping all-frozen");
 detects_heap_corruption(
-	"verify_heapam('test', check_toast := false)",
+	"verify_heapam_internal('test', check_toast := false)",
 	"plain corrupted table skipping toast");
 detects_heap_corruption(
-	"verify_heapam('test', startblock := 0, endblock := 0)",
+	"verify_heapam_internal('test', startblock := 0, endblock := 0)",
 	"plain corrupted table checking only block zero");
 
 #
@@ -50,14 +50,30 @@ detects_heap_corruption(
 #
 fresh_test_table('test');
 $node->safe_psql('postgres', q(VACUUM (FREEZE, DISABLE_PAGE_SKIPPING) test));
-detects_no_corruption("verify_heapam('test')",
+detects_no_corruption("verify_heapam_internal('test')",
 	"all-frozen not corrupted table");
 corrupt_first_page('test');
-detects_heap_corruption("verify_heapam('test')",
+detects_heap_corruption("verify_heapam_internal('test')",
 	"all-frozen corrupted table");
 detects_no_corruption(
-	"verify_heapam('test', skip := 'all-frozen')",
+	"verify_heapam_internal('test', skip := 'all-frozen')",
 	"all-frozen corrupted table skipping all-frozen");
+
+#
+# Check a sequence with no corruption.  The current implementation of sequences
+# doesn't require its own test setup, since sequences are really just heap
+# tables under-the-hood.  To guard against future implementation changes made
+# without remembering to update verify_heapam, we create and exercise a
+# sequence, checking along the way that it passes corruption checks.
+#
+fresh_test_sequence('test_seq');
+check_all_options_uncorrupted('test_seq', 'plain');
+advance_test_sequence('test_seq');
+check_all_options_uncorrupted('test_seq', 'plain');
+set_test_sequence('test_seq');
+check_all_options_uncorrupted('test_seq', 'plain');
+reset_test_sequence('test_seq');
+check_all_options_uncorrupted('test_seq', 'plain');
 
 # Returns the filesystem path for the named relation.
 sub relation_filepath
@@ -65,7 +81,7 @@ sub relation_filepath
 	my ($relname) = @_;
 
 	my $pgdata = $node->data_dir;
-	my $rel    = $node->safe_psql('postgres',
+	my $rel = $node->safe_psql('postgres',
 		qq(SELECT pg_relation_filepath('$relname')));
 	die "path not found for relation $relname" unless defined $rel;
 	return "$pgdata/$rel";
@@ -106,6 +122,56 @@ sub fresh_test_table
 		SELECT 1 FROM $relname WHERE a = 42 FOR UPDATE;
 		UPDATE $relname SET b = b WHERE a = 42;
 		COMMIT;
+	));
+}
+
+# Create a test sequence of the given name.
+sub fresh_test_sequence
+{
+	my ($seqname) = @_;
+
+	return $node->safe_psql(
+		'postgres', qq(
+		DROP SEQUENCE IF EXISTS $seqname CASCADE;
+		CREATE SEQUENCE $seqname
+			INCREMENT BY 13
+			MINVALUE 17
+			START WITH 23;
+		SELECT nextval('$seqname');
+		SELECT setval('$seqname', currval('$seqname') + nextval('$seqname'));
+	));
+}
+
+# Call SQL functions to increment the sequence
+sub advance_test_sequence
+{
+	my ($seqname) = @_;
+
+	return $node->safe_psql(
+		'postgres', qq(
+		SELECT nextval('$seqname');
+	));
+}
+
+# Call SQL functions to set the sequence
+sub set_test_sequence
+{
+	my ($seqname) = @_;
+
+	return $node->safe_psql(
+		'postgres', qq(
+		SELECT setval('$seqname', 102);
+	));
+}
+
+# Call SQL functions to reset the sequence
+sub reset_test_sequence
+{
+	my ($seqname) = @_;
+
+	return $node->safe_psql(
+		'postgres', qq(
+		ALTER SEQUENCE $seqname RESTART WITH 51
 	));
 }
 
@@ -201,14 +267,14 @@ sub check_all_options_uncorrupted
 					for my $endblock (qw(NULL 0))
 					{
 						my $opts =
-						    "on_error_stop := $stop, "
+							"on_error_stop := $stop, "
 						  . "check_toast := $check_toast, "
 						  . "skip := $skip, "
 						  . "startblock := $startblock, "
 						  . "endblock := $endblock";
 
 						detects_no_corruption(
-							"verify_heapam('$relname', $opts)",
+							"verify_heapam_internal('$relname', $opts)",
 							"$prefix: $opts");
 					}
 				}
@@ -216,3 +282,5 @@ sub check_all_options_uncorrupted
 		}
 	}
 }
+
+done_testing();

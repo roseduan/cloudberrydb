@@ -4037,7 +4037,7 @@ explain (costs off) update listp1 set a = 1 where a = 2;
          ->  Result
                ->  Redistribute Motion 3:3  (slice1; segments: 3)
                      Hash Key: a
-                     ->  Split
+                     ->  Split Update
                            ->  Seq Scan on listp1
                                  Filter: (a = 2)
  Optimizer: GPORCA
@@ -4063,7 +4063,7 @@ explain (costs off) update listp1 set a = 1 where a = 2;
          ->  Result
                ->  Redistribute Motion 3:3  (slice1; segments: 3)
                      Hash Key: a
-                     ->  Split
+                     ->  Split Update
                            ->  Seq Scan on listp1
                                  Filter: (a = 2)
  Optimizer: GPORCA

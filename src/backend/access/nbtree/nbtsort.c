@@ -34,7 +34,7 @@
  * This code isn't concerned about the FSM at all. The caller is responsible
  * for initializing that.
  *
- * Portions Copyright (c) 1996-2021, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2023, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * IDENTIFICATION
@@ -91,6 +91,7 @@ typedef struct BTSpool
 	Relation	heap;
 	Relation	index;
 	bool		isunique;
+	bool		nulls_not_distinct;
 } BTSpool;
 
 /*
@@ -108,6 +109,7 @@ typedef struct BTShared
 	Oid			heaprelid;
 	Oid			indexrelid;
 	bool		isunique;
+	bool		nulls_not_distinct;
 	bool		isconcurrent;
 	int			scantuplesortstates;
 
@@ -208,6 +210,7 @@ typedef struct BTLeader
 typedef struct BTBuildState
 {
 	bool		isunique;
+	bool		nulls_not_distinct;
 	bool		havedead;
 	Relation	heap;
 	BTSpool    *spool;
@@ -309,6 +312,7 @@ btbuild(Relation heap, Relation index, IndexInfo *indexInfo)
 #endif							/* BTREE_BUILD_STATS */
 
 	buildstate.isunique = indexInfo->ii_Unique;
+	buildstate.nulls_not_distinct = indexInfo->ii_NullsNotDistinct;
 	buildstate.havedead = false;
 	buildstate.heap = heap;
 	buildstate.spool = NULL;
@@ -382,6 +386,7 @@ _bt_spools_heapscan(Relation heap, Relation index, BTBuildState *buildstate,
 	btspool->heap = heap;
 	btspool->index = index;
 	btspool->isunique = indexInfo->ii_Unique;
+	btspool->nulls_not_distinct = indexInfo->ii_NullsNotDistinct;
 
 	/* Save as primary spool */
 	buildstate->spool = btspool;
@@ -431,8 +436,9 @@ _bt_spools_heapscan(Relation heap, Relation index, BTBuildState *buildstate,
 	 */
 	buildstate->spool->sortstate =
 		tuplesort_begin_index_btree(heap, index, buildstate->isunique,
+									buildstate->nulls_not_distinct,
 									maintenance_work_mem, coordinate,
-									false);
+									TUPLESORT_NONE);
 
 	/*
 	 * If building a unique index, put dead tuples in a second spool to keep
@@ -470,8 +476,8 @@ _bt_spools_heapscan(Relation heap, Relation index, BTBuildState *buildstate,
 		 * full, so we give it only work_mem
 		 */
 		buildstate->spool2->sortstate =
-			tuplesort_begin_index_btree(heap, index, false, work_mem,
-										coordinate2, false);
+			tuplesort_begin_index_btree(heap, index, false, false, work_mem,
+										coordinate2, TUPLESORT_NONE);
 	}
 
 	/* Fill spool using either serial or parallel heap scan */
@@ -615,13 +621,13 @@ _bt_blnewpage(uint32 level)
 	Page		page;
 	BTPageOpaque opaque;
 
-	page = (Page) palloc(BLCKSZ);
+	page = (Page) palloc_aligned(BLCKSZ, PG_IO_ALIGN_SIZE, 0);
 
 	/* Zero the page and set up standard page header info */
 	_bt_pageinit(page, BLCKSZ);
 
 	/* Initialize BT opaque state */
-	opaque = (BTPageOpaque) PageGetSpecialPointer(page);
+	opaque = BTPageGetOpaque(page);
 	opaque->btpo_prev = opaque->btpo_next = P_NONE;
 	opaque->btpo_level = level;
 	opaque->btpo_flags = (level > 0) ? 0 : BTP_LEAF;
@@ -639,14 +645,11 @@ _bt_blnewpage(uint32 level)
 static void
 _bt_blwritepage(BTWriteState *wstate, Page page, BlockNumber blkno)
 {
-	/* Ensure rd_smgr is open (could have been closed by relcache flush!) */
-	RelationOpenSmgr(wstate->index);
-
 	/* XLOG stuff */
 	if (wstate->btws_use_wal)
 	{
 		/* We use the XLOG_FPI record type for this */
-		log_newpage(&wstate->index->rd_node, MAIN_FORKNUM, blkno, page, true);
+		log_newpage(&wstate->index->rd_locator, MAIN_FORKNUM, blkno, page, true);
 	}
 
 	/*
@@ -659,16 +662,18 @@ _bt_blwritepage(BTWriteState *wstate, Page page, BlockNumber blkno)
 	while (blkno > wstate->btws_pages_written)
 	{
 		if (!wstate->btws_zeropage)
-			wstate->btws_zeropage = (Page) palloc0(BLCKSZ);
-		/* don't set checksum or encryption for all-zero page */
-		smgrextend(wstate->index->rd_smgr, MAIN_FORKNUM,
+			wstate->btws_zeropage = (Page) palloc_aligned(BLCKSZ,
+														  PG_IO_ALIGN_SIZE,
+														  MCXT_ALLOC_ZERO);
+		/* don't set checksum for all-zero page */
+		smgrextend(RelationGetSmgr(wstate->index), MAIN_FORKNUM,
 				   wstate->btws_pages_written++,
-				   (char *) wstate->btws_zeropage,
+				   wstate->btws_zeropage,
 				   true);
 	}
 
 	{
-		Oid spcOid = wstate->index->rd_node.spcNode;
+		Oid spcOid = wstate->index->rd_locator.spcOid;
 
 		if (TblspcEncryptionEnabled(spcOid))
 			EncryptPageForSpc(page, spcOid, MAIN_FORKNUM, blkno);
@@ -684,15 +689,15 @@ _bt_blwritepage(BTWriteState *wstate, Page page, BlockNumber blkno)
 	if (blkno == wstate->btws_pages_written)
 	{
 		/* extending the file... */
-		smgrextend(wstate->index->rd_smgr, MAIN_FORKNUM, blkno,
-				   (char *) page, true);
+		smgrextend(RelationGetSmgr(wstate->index), MAIN_FORKNUM, blkno,
+				   page, true);
 		wstate->btws_pages_written++;
 	}
 	else
 	{
 		/* overwriting a block we zero-filled before */
-		smgrwrite(wstate->index->rd_smgr, MAIN_FORKNUM, blkno,
-				  (char *) page, true);
+		smgrwrite(RelationGetSmgr(wstate->index), MAIN_FORKNUM, blkno,
+				  page, true);
 	}
 
 	pfree(page);
@@ -1007,9 +1012,9 @@ _bt_buildadd(BTWriteState *wstate, BTPageState *state, IndexTuple itup,
 		Assert((BTreeTupleGetNAtts(state->btps_lowkey, wstate->index) <=
 				IndexRelationGetNumberOfKeyAttributes(wstate->index) &&
 				BTreeTupleGetNAtts(state->btps_lowkey, wstate->index) > 0) ||
-			   P_LEFTMOST((BTPageOpaque) PageGetSpecialPointer(opage)));
+			   P_LEFTMOST(BTPageGetOpaque(opage)));
 		Assert(BTreeTupleGetNAtts(state->btps_lowkey, wstate->index) == 0 ||
-			   !P_LEFTMOST((BTPageOpaque) PageGetSpecialPointer(opage)));
+			   !P_LEFTMOST(BTPageGetOpaque(opage)));
 		BTreeTupleSetDownLink(state->btps_lowkey, oblkno);
 		_bt_buildadd(wstate, state->btps_next, state->btps_lowkey, 0);
 		pfree(state->btps_lowkey);
@@ -1024,8 +1029,8 @@ _bt_buildadd(BTWriteState *wstate, BTPageState *state, IndexTuple itup,
 		 * Set the sibling links for both pages.
 		 */
 		{
-			BTPageOpaque oopaque = (BTPageOpaque) PageGetSpecialPointer(opage);
-			BTPageOpaque nopaque = (BTPageOpaque) PageGetSpecialPointer(npage);
+			BTPageOpaque oopaque = BTPageGetOpaque(opage);
+			BTPageOpaque nopaque = BTPageGetOpaque(npage);
 
 			oopaque->btpo_next = nblkno;
 			nopaque->btpo_prev = oblkno;
@@ -1132,7 +1137,7 @@ _bt_uppershutdown(BTWriteState *wstate, BTPageState *state)
 		BTPageOpaque opaque;
 
 		blkno = s->btps_blkno;
-		opaque = (BTPageOpaque) PageGetSpecialPointer(s->btps_page);
+		opaque = BTPageGetOpaque(s->btps_page);
 
 		/*
 		 * We have to link the last page on this level to somewhere.
@@ -1177,7 +1182,7 @@ _bt_uppershutdown(BTWriteState *wstate, BTPageState *state)
 	 * set to point to "P_NONE").  This changes the index to the "valid" state
 	 * by filling in a valid magic number in the metapage.
 	 */
-	metapage = (Page) palloc(BLCKSZ);
+	metapage = (Page) palloc_aligned(BLCKSZ, PG_IO_ALIGN_SIZE, 0);
 	_bt_initmetapage(metapage, rootblkno, rootlevel,
 					 wstate->inskey->allequalimage);
 	_bt_blwritepage(wstate, metapage, BTREE_METAPAGE);
@@ -1233,7 +1238,7 @@ _bt_load(BTWriteState *wstate, BTSpool *btspool, BTSpool *btspool2)
 			/* Abbreviation is not supported here */
 			sortKey->abbreviate = false;
 
-			AssertState(sortKey->ssup_attno != 0);
+			Assert(sortKey->ssup_attno != 0);
 
 			strategy = (scanKey->sk_flags & SK_BT_DESC) != 0 ?
 				BTGreaterStrategyNumber : BTLessStrategyNumber;
@@ -1438,10 +1443,7 @@ _bt_load(BTWriteState *wstate, BTSpool *btspool, BTSpool *btspool2)
 	 * still not be on disk when the crash occurs.
 	 */
 	if (wstate->btws_use_wal)
-	{
-		RelationOpenSmgr(wstate->index);
-		smgrimmedsync(wstate->index->rd_smgr, MAIN_FORKNUM);
-	}
+		smgrimmedsync(RelationGetSmgr(wstate->index), MAIN_FORKNUM);
 }
 
 /*
@@ -1570,6 +1572,7 @@ _bt_begin_parallel(BTBuildState *buildstate, bool isconcurrent, int request)
 	btshared->heaprelid = RelationGetRelid(btspool->heap);
 	btshared->indexrelid = RelationGetRelid(btspool->index);
 	btshared->isunique = btspool->isunique;
+	btshared->nulls_not_distinct = btspool->nulls_not_distinct;
 	btshared->isconcurrent = isconcurrent;
 	btshared->scantuplesortstates = scantuplesortstates;
 	ConditionVariableInit(&btshared->workersdonecv);
@@ -1763,6 +1766,7 @@ _bt_leader_participate_as_worker(BTBuildState *buildstate)
 	leaderworker->heap = buildstate->spool->heap;
 	leaderworker->index = buildstate->spool->index;
 	leaderworker->isunique = buildstate->spool->isunique;
+	leaderworker->nulls_not_distinct = buildstate->spool->nulls_not_distinct;
 
 	/* Initialize second spool, if required */
 	if (!btleader->btshared->isunique)
@@ -1862,6 +1866,7 @@ _bt_parallel_build_main(dsm_segment *seg, shm_toc *toc)
 	btspool->heap = heapRel;
 	btspool->index = indexRel;
 	btspool->isunique = btshared->isunique;
+	btspool->nulls_not_distinct = btshared->nulls_not_distinct;
 
 	/* Look up shared state private to tuplesort.c */
 	sharedsort = shm_toc_lookup(toc, PARALLEL_KEY_TUPLESORT, false);
@@ -1944,8 +1949,9 @@ _bt_parallel_scan_and_sort(BTSpool *btspool, BTSpool *btspool2,
 	btspool->sortstate = tuplesort_begin_index_btree(btspool->heap,
 													 btspool->index,
 													 btspool->isunique,
+													 btspool->nulls_not_distinct,
 													 sortmem, coordinate,
-													 false);
+													 TUPLESORT_NONE);
 
 	/*
 	 * Just as with serial case, there may be a second spool.  If so, a
@@ -1966,13 +1972,14 @@ _bt_parallel_scan_and_sort(BTSpool *btspool, BTSpool *btspool2,
 		coordinate2->nParticipants = -1;
 		coordinate2->sharedsort = sharedsort2;
 		btspool2->sortstate =
-			tuplesort_begin_index_btree(btspool->heap, btspool->index, false,
+			tuplesort_begin_index_btree(btspool->heap, btspool->index, false, false,
 										Min(sortmem, work_mem), coordinate2,
 										false);
 	}
 
 	/* Fill in buildstate for _bt_build_callback() */
 	buildstate.isunique = btshared->isunique;
+	buildstate.nulls_not_distinct = btshared->nulls_not_distinct;
 	buildstate.havedead = false;
 	buildstate.heap = btspool->heap;
 	buildstate.spool = btspool;

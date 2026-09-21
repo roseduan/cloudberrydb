@@ -38,6 +38,12 @@ private:
 	// output columns, same as cte columns but in CColRefSet
 	CColRefSet *m_pcrsOutput;
 
+	// can be pruned
+	BOOL m_cbp;
+
+	// used mask
+	BOOL *m_umask;
+
 public:
 	CLogicalCTEProducer(const CLogicalCTEProducer &) = delete;
 
@@ -45,7 +51,8 @@ public:
 	explicit CLogicalCTEProducer(CMemoryPool *mp);
 
 	// ctor
-	CLogicalCTEProducer(CMemoryPool *mp, ULONG id, CColRefArray *colref_array);
+	CLogicalCTEProducer(CMemoryPool *mp, ULONG id, CColRefArray *colref_array,
+		BOOL canbepruned = false);
 
 	// dtor
 	~CLogicalCTEProducer() override;
@@ -77,6 +84,20 @@ public:
 			CColRef *col_ref = (*m_pdrgpcr)[index];
 			col_ref->MarkAsUsed();
 		}
+		m_cbp = false;
+	}
+
+
+	BOOL
+	CanBePruned() const
+	{
+		return m_cbp;
+	}
+
+	BOOL *
+	UsedMask() const
+	{
+		return m_umask;
 	}
 
 	// cte columns

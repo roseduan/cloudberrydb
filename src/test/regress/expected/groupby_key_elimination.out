@@ -270,7 +270,7 @@ EXPLAIN (COSTS OFF) SELECT x, (SELECT 1), count(*) FROM groupby_elim_t GROUP BY 
    InitPlan 1 (returns $0)  (slice2)
      ->  Result
    ->  HashAggregate
-         Group Key: groupby_elim_t.x, $0
+         Group Key: groupby_elim_t.x
          ->  Seq Scan on groupby_elim_t
  Optimizer: Postgres query optimizer
 (7 rows)

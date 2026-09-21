@@ -21,18 +21,18 @@ Create table delta_all(
     a6 timestamp with time zone ENCODING (compresstype=rle_type, compresslevel=1),
     a7 text ENCODING (compresstype=rle_type,compresslevel=4)
     ) with(appendonly=true, orientation=column);
-NOTICE:  Table doesn't have 'DISTRIBUTED BY' clause -- Using column named 'a1' as the Cloudberry Database data distribution key for this table.
+NOTICE:  Table doesn't have 'DISTRIBUTED BY' clause -- Using column named 'a1' as the Apache Cloudberry data distribution key for this table.
 HINT:  The 'DISTRIBUTED BY' clause determines the distribution of data. Make sure column(s) chosen are the optimal data distribution key to minimize skew.
-select attrelid::regclass as relname, attnum, attoptions from pg_class c, pg_attribute_encoding e  where c.relname = 'delta_all'  and c.oid=e.attrelid  order by relname, attnum;
-  relname  | attnum |                       attoptions                        
------------+--------+---------------------------------------------------------
- delta_all |      1 | {compresstype=rle_type,compresslevel=1,blocksize=32768}
- delta_all |      2 | {compresstype=rle_type,compresslevel=2,blocksize=32768}
- delta_all |      3 | {compresstype=rle_type,compresslevel=3,blocksize=32768}
- delta_all |      4 | {compresstype=rle_type,compresslevel=4,blocksize=32768}
- delta_all |      5 | {compresstype=rle_type,compresslevel=1,blocksize=32768}
- delta_all |      6 | {compresstype=rle_type,compresslevel=1,blocksize=32768}
- delta_all |      7 | {compresstype=rle_type,compresslevel=4,blocksize=32768}
+select attrelid::regclass as relname, attnum, filenum, attoptions from pg_class c, pg_attribute_encoding e  where c.relname = 'delta_all'  and c.oid=e.attrelid  order by relname, attnum;
+  relname  | attnum | filenum |                       attoptions                        
+-----------+--------+---------+---------------------------------------------------------
+ delta_all |      1 |       1 | {compresstype=rle_type,compresslevel=1,blocksize=32768}
+ delta_all |      2 |       2 | {compresstype=rle_type,compresslevel=2,blocksize=32768}
+ delta_all |      3 |       3 | {compresstype=rle_type,compresslevel=3,blocksize=32768}
+ delta_all |      4 |       4 | {compresstype=rle_type,compresslevel=4,blocksize=32768}
+ delta_all |      5 |       5 | {compresstype=rle_type,compresslevel=1,blocksize=32768}
+ delta_all |      6 |       6 | {compresstype=rle_type,compresslevel=1,blocksize=32768}
+ delta_all |      7 |       7 | {compresstype=rle_type,compresslevel=4,blocksize=32768}
 (7 rows)
 
 \d+ delta_all
@@ -126,19 +126,19 @@ Create table delta_alter(
     a6 timestamp with time zone ENCODING (compresstype=rle_type, compresslevel=1),
     a7 text ENCODING (compresstype=rle_type,compresslevel=4)
     ) with(appendonly=true, orientation=column);
-NOTICE:  Table doesn't have 'DISTRIBUTED BY' clause -- Using column named 'id' as the Cloudberry Database data distribution key for this table.
+NOTICE:  Table doesn't have 'DISTRIBUTED BY' clause -- Using column named 'id' as the Apache Cloudberry data distribution key for this table.
 HINT:  The 'DISTRIBUTED BY' clause determines the distribution of data. Make sure column(s) chosen are the optimal data distribution key to minimize skew.
-select attrelid::regclass as relname, attnum, attoptions from pg_class c, pg_attribute_encoding e  where c.relname = 'delta_alter'  and c.oid=e.attrelid  order by relname, attnum;
-   relname   | attnum |                       attoptions                        
--------------+--------+---------------------------------------------------------
- delta_alter |      1 | {compresstype=none,blocksize=32768,compresslevel=0}
- delta_alter |      2 | {compresstype=rle_type,compresslevel=1,blocksize=32768}
- delta_alter |      3 | {compresstype=rle_type,compresslevel=2,blocksize=32768}
- delta_alter |      4 | {compresstype=rle_type,compresslevel=3,blocksize=32768}
- delta_alter |      5 | {compresstype=rle_type,compresslevel=4,blocksize=32768}
- delta_alter |      6 | {compresstype=rle_type,compresslevel=1,blocksize=32768}
- delta_alter |      7 | {compresstype=rle_type,compresslevel=1,blocksize=32768}
- delta_alter |      8 | {compresstype=rle_type,compresslevel=4,blocksize=32768}
+select attrelid::regclass as relname, attnum, filenum, attoptions from pg_class c, pg_attribute_encoding e  where c.relname = 'delta_alter'  and c.oid=e.attrelid  order by relname, attnum;
+   relname   | attnum | filenum |                       attoptions                        
+-------------+--------+---------+---------------------------------------------------------
+ delta_alter |      1 |       1 | {compresstype=none,compresslevel=0,blocksize=32768}
+ delta_alter |      2 |       2 | {compresstype=rle_type,compresslevel=1,blocksize=32768}
+ delta_alter |      3 |       3 | {compresstype=rle_type,compresslevel=2,blocksize=32768}
+ delta_alter |      4 |       4 | {compresstype=rle_type,compresslevel=3,blocksize=32768}
+ delta_alter |      5 |       5 | {compresstype=rle_type,compresslevel=4,blocksize=32768}
+ delta_alter |      6 |       6 | {compresstype=rle_type,compresslevel=1,blocksize=32768}
+ delta_alter |      7 |       7 | {compresstype=rle_type,compresslevel=1,blocksize=32768}
+ delta_alter |      8 |       8 | {compresstype=rle_type,compresslevel=4,blocksize=32768}
 (8 rows)
 
 \d+ delta_alter
@@ -282,19 +282,19 @@ Create table delta_bitmap_ins(
     a6 timestamp with time zone ENCODING (compresstype=rle_type, compresslevel=1),
     a7 text ENCODING (compresstype=rle_type,compresslevel=4)
     ) with(appendonly=true, orientation=column);
-NOTICE:  Table doesn't have 'DISTRIBUTED BY' clause -- Using column named 'a1' as the Cloudberry Database data distribution key for this table.
+NOTICE:  Table doesn't have 'DISTRIBUTED BY' clause -- Using column named 'a1' as the Apache Cloudberry data distribution key for this table.
 HINT:  The 'DISTRIBUTED BY' clause determines the distribution of data. Make sure column(s) chosen are the optimal data distribution key to minimize skew.
 Create index dl_ix_bt on  delta_bitmap_ins using bitmap(a1);
-select attrelid::regclass as relname, attnum, attoptions from pg_class c, pg_attribute_encoding e  where c.relname = 'delta_bitmap_ins'  and c.oid=e.attrelid  order by relname, attnum;
-     relname      | attnum |                       attoptions                        
-------------------+--------+---------------------------------------------------------
- delta_bitmap_ins |      1 | {compresstype=rle_type,compresslevel=1,blocksize=32768}
- delta_bitmap_ins |      2 | {compresstype=rle_type,compresslevel=2,blocksize=32768}
- delta_bitmap_ins |      3 | {compresstype=rle_type,compresslevel=3,blocksize=32768}
- delta_bitmap_ins |      4 | {compresstype=rle_type,compresslevel=4,blocksize=32768}
- delta_bitmap_ins |      5 | {compresstype=rle_type,compresslevel=1,blocksize=32768}
- delta_bitmap_ins |      6 | {compresstype=rle_type,compresslevel=1,blocksize=32768}
- delta_bitmap_ins |      7 | {compresstype=rle_type,compresslevel=4,blocksize=32768}
+select attrelid::regclass as relname, attnum, filenum, attoptions from pg_class c, pg_attribute_encoding e  where c.relname = 'delta_bitmap_ins'  and c.oid=e.attrelid  order by relname, attnum;
+     relname      | attnum | filenum |                       attoptions                        
+------------------+--------+---------+---------------------------------------------------------
+ delta_bitmap_ins |      1 |       1 | {compresstype=rle_type,compresslevel=1,blocksize=32768}
+ delta_bitmap_ins |      2 |       2 | {compresstype=rle_type,compresslevel=2,blocksize=32768}
+ delta_bitmap_ins |      3 |       3 | {compresstype=rle_type,compresslevel=3,blocksize=32768}
+ delta_bitmap_ins |      4 |       4 | {compresstype=rle_type,compresslevel=4,blocksize=32768}
+ delta_bitmap_ins |      5 |       5 | {compresstype=rle_type,compresslevel=1,blocksize=32768}
+ delta_bitmap_ins |      6 |       6 | {compresstype=rle_type,compresslevel=1,blocksize=32768}
+ delta_bitmap_ins |      7 |       7 | {compresstype=rle_type,compresslevel=4,blocksize=32768}
 (7 rows)
 
 \d+ delta_bitmap_ins
@@ -363,19 +363,19 @@ Create table delta_btree_ins(
     a6 timestamp with time zone ENCODING (compresstype=rle_type, compresslevel=1),
     a7 text ENCODING (compresstype=rle_type,compresslevel=4)
     ) with(appendonly=true, orientation=column);
-NOTICE:  Table doesn't have 'DISTRIBUTED BY' clause -- Using column named 'a1' as the Cloudberry Database data distribution key for this table.
+NOTICE:  Table doesn't have 'DISTRIBUTED BY' clause -- Using column named 'a1' as the Apache Cloudberry data distribution key for this table.
 HINT:  The 'DISTRIBUTED BY' clause determines the distribution of data. Make sure column(s) chosen are the optimal data distribution key to minimize skew.
 Create index dl_ix_br on  delta_btree_ins(a1);
-select attrelid::regclass as relname, attnum, attoptions from pg_class c, pg_attribute_encoding e  where c.relname = 'delta_btree_ins'  and c.oid=e.attrelid  order by relname, attnum;
-     relname     | attnum |                       attoptions                        
------------------+--------+---------------------------------------------------------
- delta_btree_ins |      1 | {compresstype=rle_type,compresslevel=1,blocksize=32768}
- delta_btree_ins |      2 | {compresstype=rle_type,compresslevel=2,blocksize=32768}
- delta_btree_ins |      3 | {compresstype=rle_type,compresslevel=3,blocksize=32768}
- delta_btree_ins |      4 | {compresstype=rle_type,compresslevel=4,blocksize=32768}
- delta_btree_ins |      5 | {compresstype=rle_type,compresslevel=1,blocksize=32768}
- delta_btree_ins |      6 | {compresstype=rle_type,compresslevel=1,blocksize=32768}
- delta_btree_ins |      7 | {compresstype=rle_type,compresslevel=4,blocksize=32768}
+select attrelid::regclass as relname, attnum, filenum, attoptions from pg_class c, pg_attribute_encoding e  where c.relname = 'delta_btree_ins'  and c.oid=e.attrelid  order by relname, attnum;
+     relname     | attnum | filenum |                       attoptions                        
+-----------------+--------+---------+---------------------------------------------------------
+ delta_btree_ins |      1 |       1 | {compresstype=rle_type,compresslevel=1,blocksize=32768}
+ delta_btree_ins |      2 |       2 | {compresstype=rle_type,compresslevel=2,blocksize=32768}
+ delta_btree_ins |      3 |       3 | {compresstype=rle_type,compresslevel=3,blocksize=32768}
+ delta_btree_ins |      4 |       4 | {compresstype=rle_type,compresslevel=4,blocksize=32768}
+ delta_btree_ins |      5 |       5 | {compresstype=rle_type,compresslevel=1,blocksize=32768}
+ delta_btree_ins |      6 |       6 | {compresstype=rle_type,compresslevel=1,blocksize=32768}
+ delta_btree_ins |      7 |       7 | {compresstype=rle_type,compresslevel=4,blocksize=32768}
 (7 rows)
 
 \d+ delta_btree_ins
@@ -444,18 +444,18 @@ Create table delta_ins_bitmap(
     a6 timestamp with time zone ENCODING (compresstype=rle_type, compresslevel=1),
     a7 text ENCODING (compresstype=rle_type,compresslevel=4)
     ) with(appendonly=true, orientation=column);
-NOTICE:  Table doesn't have 'DISTRIBUTED BY' clause -- Using column named 'a1' as the Cloudberry Database data distribution key for this table.
+NOTICE:  Table doesn't have 'DISTRIBUTED BY' clause -- Using column named 'a1' as the Apache Cloudberry data distribution key for this table.
 HINT:  The 'DISTRIBUTED BY' clause determines the distribution of data. Make sure column(s) chosen are the optimal data distribution key to minimize skew.
-select attrelid::regclass as relname, attnum, attoptions from pg_class c, pg_attribute_encoding e  where c.relname = 'delta_ins_bitmap'  and c.oid=e.attrelid  order by relname, attnum;
-     relname      | attnum |                       attoptions                        
-------------------+--------+---------------------------------------------------------
- delta_ins_bitmap |      1 | {compresstype=rle_type,compresslevel=1,blocksize=32768}
- delta_ins_bitmap |      2 | {compresstype=rle_type,compresslevel=2,blocksize=32768}
- delta_ins_bitmap |      3 | {compresstype=rle_type,compresslevel=3,blocksize=32768}
- delta_ins_bitmap |      4 | {compresstype=rle_type,compresslevel=4,blocksize=32768}
- delta_ins_bitmap |      5 | {compresstype=rle_type,compresslevel=1,blocksize=32768}
- delta_ins_bitmap |      6 | {compresstype=rle_type,compresslevel=1,blocksize=32768}
- delta_ins_bitmap |      7 | {compresstype=rle_type,compresslevel=4,blocksize=32768}
+select attrelid::regclass as relname, attnum, filenum, attoptions from pg_class c, pg_attribute_encoding e  where c.relname = 'delta_ins_bitmap'  and c.oid=e.attrelid  order by relname, attnum;
+     relname      | attnum | filenum |                       attoptions                        
+------------------+--------+---------+---------------------------------------------------------
+ delta_ins_bitmap |      1 |       1 | {compresstype=rle_type,compresslevel=1,blocksize=32768}
+ delta_ins_bitmap |      2 |       2 | {compresstype=rle_type,compresslevel=2,blocksize=32768}
+ delta_ins_bitmap |      3 |       3 | {compresstype=rle_type,compresslevel=3,blocksize=32768}
+ delta_ins_bitmap |      4 |       4 | {compresstype=rle_type,compresslevel=4,blocksize=32768}
+ delta_ins_bitmap |      5 |       5 | {compresstype=rle_type,compresslevel=1,blocksize=32768}
+ delta_ins_bitmap |      6 |       6 | {compresstype=rle_type,compresslevel=1,blocksize=32768}
+ delta_ins_bitmap |      7 |       7 | {compresstype=rle_type,compresslevel=4,blocksize=32768}
 (7 rows)
 
 \d+ delta_ins_bitmap
@@ -541,18 +541,18 @@ Create table delta_ins_btree(
     a6 timestamp with time zone ENCODING (compresstype=rle_type, compresslevel=1),
     a7 text ENCODING (compresstype=rle_type,compresslevel=4)
     ) with(appendonly=true, orientation=column);
-NOTICE:  Table doesn't have 'DISTRIBUTED BY' clause -- Using column named 'a1' as the Cloudberry Database data distribution key for this table.
+NOTICE:  Table doesn't have 'DISTRIBUTED BY' clause -- Using column named 'a1' as the Apache Cloudberry data distribution key for this table.
 HINT:  The 'DISTRIBUTED BY' clause determines the distribution of data. Make sure column(s) chosen are the optimal data distribution key to minimize skew.
-select attrelid::regclass as relname, attnum, attoptions from pg_class c, pg_attribute_encoding e  where c.relname = 'delta_ins_btree'  and c.oid=e.attrelid  order by relname, attnum;
-     relname     | attnum |                       attoptions                        
------------------+--------+---------------------------------------------------------
- delta_ins_btree |      1 | {compresstype=rle_type,compresslevel=1,blocksize=32768}
- delta_ins_btree |      2 | {compresstype=rle_type,compresslevel=2,blocksize=32768}
- delta_ins_btree |      3 | {compresstype=rle_type,compresslevel=3,blocksize=32768}
- delta_ins_btree |      4 | {compresstype=rle_type,compresslevel=4,blocksize=32768}
- delta_ins_btree |      5 | {compresstype=rle_type,compresslevel=1,blocksize=32768}
- delta_ins_btree |      6 | {compresstype=rle_type,compresslevel=1,blocksize=32768}
- delta_ins_btree |      7 | {compresstype=rle_type,compresslevel=4,blocksize=32768}
+select attrelid::regclass as relname, attnum, filenum, attoptions from pg_class c, pg_attribute_encoding e  where c.relname = 'delta_ins_btree'  and c.oid=e.attrelid  order by relname, attnum;
+     relname     | attnum | filenum |                       attoptions                        
+-----------------+--------+---------+---------------------------------------------------------
+ delta_ins_btree |      1 |       1 | {compresstype=rle_type,compresslevel=1,blocksize=32768}
+ delta_ins_btree |      2 |       2 | {compresstype=rle_type,compresslevel=2,blocksize=32768}
+ delta_ins_btree |      3 |       3 | {compresstype=rle_type,compresslevel=3,blocksize=32768}
+ delta_ins_btree |      4 |       4 | {compresstype=rle_type,compresslevel=4,blocksize=32768}
+ delta_ins_btree |      5 |       5 | {compresstype=rle_type,compresslevel=1,blocksize=32768}
+ delta_ins_btree |      6 |       6 | {compresstype=rle_type,compresslevel=1,blocksize=32768}
+ delta_ins_btree |      7 |       7 | {compresstype=rle_type,compresslevel=4,blocksize=32768}
 (7 rows)
 
 \d+ delta_ins_btree
@@ -637,7 +637,7 @@ Create table delta_blocks(
     a5 timestamp,
     a6 timestamp with time zone
     ) with(appendonly=true, orientation=column, compresstype=rle_type, compresslevel=1,blocksize=8192);
-NOTICE:  Table doesn't have 'DISTRIBUTED BY' clause -- Using column named 'a1' as the Cloudberry Database data distribution key for this table.
+NOTICE:  Table doesn't have 'DISTRIBUTED BY' clause -- Using column named 'a1' as the Apache Cloudberry data distribution key for this table.
 HINT:  The 'DISTRIBUTED BY' clause determines the distribution of data. Make sure column(s) chosen are the optimal data distribution key to minimize skew.
 Create index dl_bt_ix on delta_blocks using bitmap(a1);
 Create index dl_ix on delta_blocks(a3);
@@ -712,20 +712,20 @@ Create table delta_none(
     a8 bigint,
     a9 text ENCODING (compresstype=rle_type,compresslevel=2)
     ) with(appendonly=true, orientation=column);
-NOTICE:  Table doesn't have 'DISTRIBUTED BY' clause -- Using column named 'a1' as the Cloudberry Database data distribution key for this table.
+NOTICE:  Table doesn't have 'DISTRIBUTED BY' clause -- Using column named 'a1' as the Apache Cloudberry data distribution key for this table.
 HINT:  The 'DISTRIBUTED BY' clause determines the distribution of data. Make sure column(s) chosen are the optimal data distribution key to minimize skew.
-select attrelid::regclass as relname, attnum, attoptions from pg_class c, pg_attribute_encoding e  where c.relname = 'delta_none'  and c.oid=e.attrelid  order by relname, attnum;
-  relname   | attnum |                       attoptions                        
-------------+--------+---------------------------------------------------------
- delta_none |      1 | {compresstype=rle_type,compresslevel=1,blocksize=32768}
- delta_none |      2 | {compresstype=none,compresslevel=0,blocksize=32768}
- delta_none |      3 | {compresstype=rle_type,compresslevel=2,blocksize=32768}
- delta_none |      4 | {compresstype=rle_type,compresslevel=3,blocksize=32768}
- delta_none |      5 | {compresstype=none,blocksize=32768,compresslevel=0}
- delta_none |      6 | {compresstype=none,compresslevel=0,blocksize=32768}
- delta_none |      7 | {compresstype=rle_type,compresslevel=4,blocksize=32768}
- delta_none |      8 | {compresstype=none,blocksize=32768,compresslevel=0}
- delta_none |      9 | {compresstype=rle_type,compresslevel=2,blocksize=32768}
+select attrelid::regclass as relname, attnum, filenum, attoptions from pg_class c, pg_attribute_encoding e  where c.relname = 'delta_none'  and c.oid=e.attrelid  order by relname, attnum;
+  relname   | attnum | filenum |                       attoptions                        
+------------+--------+---------+---------------------------------------------------------
+ delta_none |      1 |       1 | {compresstype=rle_type,compresslevel=1,blocksize=32768}
+ delta_none |      2 |       2 | {compresstype=none,compresslevel=0,blocksize=32768}
+ delta_none |      3 |       3 | {compresstype=rle_type,compresslevel=2,blocksize=32768}
+ delta_none |      4 |       4 | {compresstype=rle_type,compresslevel=3,blocksize=32768}
+ delta_none |      5 |       5 | {compresstype=none,compresslevel=0,blocksize=32768}
+ delta_none |      6 |       6 | {compresstype=none,compresslevel=0,blocksize=32768}
+ delta_none |      7 |       7 | {compresstype=rle_type,compresslevel=4,blocksize=32768}
+ delta_none |      8 |       8 | {compresstype=none,compresslevel=0,blocksize=32768}
+ delta_none |      9 |       9 | {compresstype=rle_type,compresslevel=2,blocksize=32768}
 (9 rows)
 
 \d+ delta_none
@@ -894,7 +894,7 @@ Create table delta_update_t1(
     a5 timestamp,
     a6 timestamp with time zone
     ) with(appendonly=true, orientation=column, compresstype=rle_type, compresslevel=1);
-NOTICE:  Table doesn't have 'DISTRIBUTED BY' clause -- Using column named 'a1' as the Cloudberry Database data distribution key for this table.
+NOTICE:  Table doesn't have 'DISTRIBUTED BY' clause -- Using column named 'a1' as the Apache Cloudberry data distribution key for this table.
 HINT:  The 'DISTRIBUTED BY' clause determines the distribution of data. Make sure column(s) chosen are the optimal data distribution key to minimize skew.
 Insert into delta_update_t1 values
     (1, 2147483648, '2014-07-29', '14:22:23.776890', '2014-07-30 14:22:58.356229', '2014-07-30 14:22:23.776892-07'),
@@ -923,7 +923,7 @@ Create table delta_update_t2(
     a5 timestamp,
     a6 timestamp with time zone
     ) with(appendonly=true, orientation=column, compresstype=rle_type, compresslevel=1);
-NOTICE:  Table doesn't have 'DISTRIBUTED BY' clause -- Using column named 'a1' as the Cloudberry Database data distribution key for this table.
+NOTICE:  Table doesn't have 'DISTRIBUTED BY' clause -- Using column named 'a1' as the Apache Cloudberry data distribution key for this table.
 HINT:  The 'DISTRIBUTED BY' clause determines the distribution of data. Make sure column(s) chosen are the optimal data distribution key to minimize skew.
 Insert into delta_update_t2 values
     (1, 2147483648, '2014-07-29', '14:22:23.776890', '2014-07-30 14:22:58.356229', '2014-07-30 14:22:23.776892-07'),
@@ -1077,20 +1077,20 @@ Create table delta_zlib(
     a8 bigint ENCODING (compresstype=zlib,compresslevel=7),
     a9 text ENCODING (compresstype=rle_type,compresslevel=2)
     ) with(appendonly=true, orientation=column);
-NOTICE:  Table doesn't have 'DISTRIBUTED BY' clause -- Using column named 'a1' as the Cloudberry Database data distribution key for this table.
+NOTICE:  Table doesn't have 'DISTRIBUTED BY' clause -- Using column named 'a1' as the Apache Cloudberry data distribution key for this table.
 HINT:  The 'DISTRIBUTED BY' clause determines the distribution of data. Make sure column(s) chosen are the optimal data distribution key to minimize skew.
-select attrelid::regclass as relname, attnum, attoptions from pg_class c, pg_attribute_encoding e  where c.relname = 'delta_zlib'  and c.oid=e.attrelid  order by relname, attnum;
-  relname   | attnum |                       attoptions                        
-------------+--------+---------------------------------------------------------
- delta_zlib |      1 | {compresstype=rle_type,compresslevel=1,blocksize=32768}
- delta_zlib |      2 | {compresstype=zlib,compresslevel=1,blocksize=32768}
- delta_zlib |      3 | {compresstype=zlib,compresslevel=2,blocksize=32768}
- delta_zlib |      4 | {compresstype=zlib,compresslevel=3,blocksize=32768}
- delta_zlib |      5 | {compresstype=zlib,compresslevel=4,blocksize=32768}
- delta_zlib |      6 | {compresstype=zlib,compresslevel=5,blocksize=32768}
- delta_zlib |      7 | {compresstype=zlib,compresslevel=6,blocksize=32768}
- delta_zlib |      8 | {compresstype=zlib,compresslevel=7,blocksize=32768}
- delta_zlib |      9 | {compresstype=rle_type,compresslevel=2,blocksize=32768}
+select attrelid::regclass as relname, attnum, filenum, attoptions from pg_class c, pg_attribute_encoding e  where c.relname = 'delta_zlib'  and c.oid=e.attrelid  order by relname, attnum;
+  relname   | attnum | filenum |                       attoptions                        
+------------+--------+---------+---------------------------------------------------------
+ delta_zlib |      1 |       1 | {compresstype=rle_type,compresslevel=1,blocksize=32768}
+ delta_zlib |      2 |       2 | {compresstype=zlib,compresslevel=1,blocksize=32768}
+ delta_zlib |      3 |       3 | {compresstype=zlib,compresslevel=2,blocksize=32768}
+ delta_zlib |      4 |       4 | {compresstype=zlib,compresslevel=3,blocksize=32768}
+ delta_zlib |      5 |       5 | {compresstype=zlib,compresslevel=4,blocksize=32768}
+ delta_zlib |      6 |       6 | {compresstype=zlib,compresslevel=5,blocksize=32768}
+ delta_zlib |      7 |       7 | {compresstype=zlib,compresslevel=6,blocksize=32768}
+ delta_zlib |      8 |       8 | {compresstype=zlib,compresslevel=7,blocksize=32768}
+ delta_zlib |      9 |       9 | {compresstype=rle_type,compresslevel=2,blocksize=32768}
 (9 rows)
 
 \d+ delta_zlib
@@ -1181,17 +1181,17 @@ Create table rle_type_1_delta_null(
     a5 timestamp,
     a6 timestamp with time zone
     ) with(appendonly=true, orientation=column, compresstype=rle_type, compresslevel=1);
-NOTICE:  Table doesn't have 'DISTRIBUTED BY' clause -- Using column named 'a1' as the Cloudberry Database data distribution key for this table.
+NOTICE:  Table doesn't have 'DISTRIBUTED BY' clause -- Using column named 'a1' as the Apache Cloudberry data distribution key for this table.
 HINT:  The 'DISTRIBUTED BY' clause determines the distribution of data. Make sure column(s) chosen are the optimal data distribution key to minimize skew.
-select attrelid::regclass as relname, attnum, attoptions from pg_class c, pg_attribute_encoding e  where c.relname = 'rle_type_1_delta_null'  and c.oid=e.attrelid  order by relname, attnum;
-        relname        | attnum |                       attoptions                        
------------------------+--------+---------------------------------------------------------
- rle_type_1_delta_null |      1 | {compresstype=rle_type,compresslevel=1,blocksize=32768}
- rle_type_1_delta_null |      2 | {compresstype=rle_type,compresslevel=1,blocksize=32768}
- rle_type_1_delta_null |      3 | {compresstype=rle_type,compresslevel=1,blocksize=32768}
- rle_type_1_delta_null |      4 | {compresstype=rle_type,compresslevel=1,blocksize=32768}
- rle_type_1_delta_null |      5 | {compresstype=rle_type,compresslevel=1,blocksize=32768}
- rle_type_1_delta_null |      6 | {compresstype=rle_type,compresslevel=1,blocksize=32768}
+select attrelid::regclass as relname, attnum, filenum, attoptions from pg_class c, pg_attribute_encoding e  where c.relname = 'rle_type_1_delta_null'  and c.oid=e.attrelid  order by relname, attnum;
+        relname        | attnum | filenum |                       attoptions                        
+-----------------------+--------+---------+---------------------------------------------------------
+ rle_type_1_delta_null |      1 |       1 | {compresstype=rle_type,compresslevel=1,blocksize=32768}
+ rle_type_1_delta_null |      2 |       2 | {compresstype=rle_type,compresslevel=1,blocksize=32768}
+ rle_type_1_delta_null |      3 |       3 | {compresstype=rle_type,compresslevel=1,blocksize=32768}
+ rle_type_1_delta_null |      4 |       4 | {compresstype=rle_type,compresslevel=1,blocksize=32768}
+ rle_type_1_delta_null |      5 |       5 | {compresstype=rle_type,compresslevel=1,blocksize=32768}
+ rle_type_1_delta_null |      6 |       6 | {compresstype=rle_type,compresslevel=1,blocksize=32768}
 (6 rows)
 
 \d+ rle_type_1_delta_null
@@ -1280,17 +1280,17 @@ Create table rle_type_2_delta_chkt(
     a5 timestamp,
     a6 timestamp with time zone
     ) with(appendonly=true, orientation=column, compresstype=rle_type, compresslevel=2, checksum=true);
-NOTICE:  Table doesn't have 'DISTRIBUTED BY' clause -- Using column named 'a1' as the Cloudberry Database data distribution key for this table.
+NOTICE:  Table doesn't have 'DISTRIBUTED BY' clause -- Using column named 'a1' as the Apache Cloudberry data distribution key for this table.
 HINT:  The 'DISTRIBUTED BY' clause determines the distribution of data. Make sure column(s) chosen are the optimal data distribution key to minimize skew.
-select attrelid::regclass as relname, attnum, attoptions from pg_class c, pg_attribute_encoding e  where c.relname = 'rle_type_2_delta_chkt'  and c.oid=e.attrelid  order by relname, attnum;
-        relname        | attnum |                       attoptions                        
------------------------+--------+---------------------------------------------------------
- rle_type_2_delta_chkt |      1 | {compresstype=rle_type,compresslevel=2,blocksize=32768}
- rle_type_2_delta_chkt |      2 | {compresstype=rle_type,compresslevel=2,blocksize=32768}
- rle_type_2_delta_chkt |      3 | {compresstype=rle_type,compresslevel=2,blocksize=32768}
- rle_type_2_delta_chkt |      4 | {compresstype=rle_type,compresslevel=2,blocksize=32768}
- rle_type_2_delta_chkt |      5 | {compresstype=rle_type,compresslevel=2,blocksize=32768}
- rle_type_2_delta_chkt |      6 | {compresstype=rle_type,compresslevel=2,blocksize=32768}
+select attrelid::regclass as relname, attnum, filenum, attoptions from pg_class c, pg_attribute_encoding e  where c.relname = 'rle_type_2_delta_chkt'  and c.oid=e.attrelid  order by relname, attnum;
+        relname        | attnum | filenum |                       attoptions                        
+-----------------------+--------+---------+---------------------------------------------------------
+ rle_type_2_delta_chkt |      1 |       1 | {compresstype=rle_type,compresslevel=2,blocksize=32768}
+ rle_type_2_delta_chkt |      2 |       2 | {compresstype=rle_type,compresslevel=2,blocksize=32768}
+ rle_type_2_delta_chkt |      3 |       3 | {compresstype=rle_type,compresslevel=2,blocksize=32768}
+ rle_type_2_delta_chkt |      4 |       4 | {compresstype=rle_type,compresslevel=2,blocksize=32768}
+ rle_type_2_delta_chkt |      5 |       5 | {compresstype=rle_type,compresslevel=2,blocksize=32768}
+ rle_type_2_delta_chkt |      6 |       6 | {compresstype=rle_type,compresslevel=2,blocksize=32768}
 (6 rows)
 
 \d+ rle_type_2_delta_chkt
@@ -1346,17 +1346,17 @@ Create table rle_type_2_delta_chkf(
     a5 timestamp,
     a6 timestamp with time zone
     ) with(appendonly=true, orientation=column, compresstype=rle_type, compresslevel=2, checksum=false);
-NOTICE:  Table doesn't have 'DISTRIBUTED BY' clause -- Using column named 'a1' as the Cloudberry Database data distribution key for this table.
+NOTICE:  Table doesn't have 'DISTRIBUTED BY' clause -- Using column named 'a1' as the Apache Cloudberry data distribution key for this table.
 HINT:  The 'DISTRIBUTED BY' clause determines the distribution of data. Make sure column(s) chosen are the optimal data distribution key to minimize skew.
-select attrelid::regclass as relname, attnum, attoptions from pg_class c, pg_attribute_encoding e  where c.relname = 'rle_type_2_delta_chkf'  and c.oid=e.attrelid  order by relname, attnum;
-        relname        | attnum |                       attoptions                        
------------------------+--------+---------------------------------------------------------
- rle_type_2_delta_chkf |      1 | {compresstype=rle_type,compresslevel=2,blocksize=32768}
- rle_type_2_delta_chkf |      2 | {compresstype=rle_type,compresslevel=2,blocksize=32768}
- rle_type_2_delta_chkf |      3 | {compresstype=rle_type,compresslevel=2,blocksize=32768}
- rle_type_2_delta_chkf |      4 | {compresstype=rle_type,compresslevel=2,blocksize=32768}
- rle_type_2_delta_chkf |      5 | {compresstype=rle_type,compresslevel=2,blocksize=32768}
- rle_type_2_delta_chkf |      6 | {compresstype=rle_type,compresslevel=2,blocksize=32768}
+select attrelid::regclass as relname, attnum, filenum, attoptions from pg_class c, pg_attribute_encoding e  where c.relname = 'rle_type_2_delta_chkf'  and c.oid=e.attrelid  order by relname, attnum;
+        relname        | attnum | filenum |                       attoptions                        
+-----------------------+--------+---------+---------------------------------------------------------
+ rle_type_2_delta_chkf |      1 |       1 | {compresstype=rle_type,compresslevel=2,blocksize=32768}
+ rle_type_2_delta_chkf |      2 |       2 | {compresstype=rle_type,compresslevel=2,blocksize=32768}
+ rle_type_2_delta_chkf |      3 |       3 | {compresstype=rle_type,compresslevel=2,blocksize=32768}
+ rle_type_2_delta_chkf |      4 |       4 | {compresstype=rle_type,compresslevel=2,blocksize=32768}
+ rle_type_2_delta_chkf |      5 |       5 | {compresstype=rle_type,compresslevel=2,blocksize=32768}
+ rle_type_2_delta_chkf |      6 |       6 | {compresstype=rle_type,compresslevel=2,blocksize=32768}
 (6 rows)
 
 \d+ rle_type_2_delta_chkf
@@ -1415,17 +1415,17 @@ Create table rle_type_2_delta_null(
     a5 timestamp,
     a6 timestamp with time zone
     ) with(appendonly=true, orientation=column, compresstype=rle_type, compresslevel=2);
-NOTICE:  Table doesn't have 'DISTRIBUTED BY' clause -- Using column named 'a1' as the Cloudberry Database data distribution key for this table.
+NOTICE:  Table doesn't have 'DISTRIBUTED BY' clause -- Using column named 'a1' as the Apache Cloudberry data distribution key for this table.
 HINT:  The 'DISTRIBUTED BY' clause determines the distribution of data. Make sure column(s) chosen are the optimal data distribution key to minimize skew.
-select attrelid::regclass as relname, attnum, attoptions from pg_class c, pg_attribute_encoding e  where c.relname = 'rle_type_2_delta_null'  and c.oid=e.attrelid  order by relname, attnum;
-        relname        | attnum |                       attoptions                        
------------------------+--------+---------------------------------------------------------
- rle_type_2_delta_null |      1 | {compresstype=rle_type,compresslevel=2,blocksize=32768}
- rle_type_2_delta_null |      2 | {compresstype=rle_type,compresslevel=2,blocksize=32768}
- rle_type_2_delta_null |      3 | {compresstype=rle_type,compresslevel=2,blocksize=32768}
- rle_type_2_delta_null |      4 | {compresstype=rle_type,compresslevel=2,blocksize=32768}
- rle_type_2_delta_null |      5 | {compresstype=rle_type,compresslevel=2,blocksize=32768}
- rle_type_2_delta_null |      6 | {compresstype=rle_type,compresslevel=2,blocksize=32768}
+select attrelid::regclass as relname, attnum, filenum, attoptions from pg_class c, pg_attribute_encoding e  where c.relname = 'rle_type_2_delta_null'  and c.oid=e.attrelid  order by relname, attnum;
+        relname        | attnum | filenum |                       attoptions                        
+-----------------------+--------+---------+---------------------------------------------------------
+ rle_type_2_delta_null |      1 |       1 | {compresstype=rle_type,compresslevel=2,blocksize=32768}
+ rle_type_2_delta_null |      2 |       2 | {compresstype=rle_type,compresslevel=2,blocksize=32768}
+ rle_type_2_delta_null |      3 |       3 | {compresstype=rle_type,compresslevel=2,blocksize=32768}
+ rle_type_2_delta_null |      4 |       4 | {compresstype=rle_type,compresslevel=2,blocksize=32768}
+ rle_type_2_delta_null |      5 |       5 | {compresstype=rle_type,compresslevel=2,blocksize=32768}
+ rle_type_2_delta_null |      6 |       6 | {compresstype=rle_type,compresslevel=2,blocksize=32768}
 (6 rows)
 
 \d+ rle_type_2_delta_null
@@ -1538,17 +1538,17 @@ Create table rle_type_3_delta_null(
     a5 timestamp,
     a6 timestamp with time zone
     ) with(appendonly=true, orientation=column, compresstype=rle_type, compresslevel=3);
-NOTICE:  Table doesn't have 'DISTRIBUTED BY' clause -- Using column named 'a1' as the Cloudberry Database data distribution key for this table.
+NOTICE:  Table doesn't have 'DISTRIBUTED BY' clause -- Using column named 'a1' as the Apache Cloudberry data distribution key for this table.
 HINT:  The 'DISTRIBUTED BY' clause determines the distribution of data. Make sure column(s) chosen are the optimal data distribution key to minimize skew.
-select attrelid::regclass as relname, attnum, attoptions from pg_class c, pg_attribute_encoding e  where c.relname = 'rle_type_3_delta_null'  and c.oid=e.attrelid  order by relname, attnum;
-        relname        | attnum |                       attoptions                        
------------------------+--------+---------------------------------------------------------
- rle_type_3_delta_null |      1 | {compresstype=rle_type,compresslevel=3,blocksize=32768}
- rle_type_3_delta_null |      2 | {compresstype=rle_type,compresslevel=3,blocksize=32768}
- rle_type_3_delta_null |      3 | {compresstype=rle_type,compresslevel=3,blocksize=32768}
- rle_type_3_delta_null |      4 | {compresstype=rle_type,compresslevel=3,blocksize=32768}
- rle_type_3_delta_null |      5 | {compresstype=rle_type,compresslevel=3,blocksize=32768}
- rle_type_3_delta_null |      6 | {compresstype=rle_type,compresslevel=3,blocksize=32768}
+select attrelid::regclass as relname, attnum, filenum, attoptions from pg_class c, pg_attribute_encoding e  where c.relname = 'rle_type_3_delta_null'  and c.oid=e.attrelid  order by relname, attnum;
+        relname        | attnum | filenum |                       attoptions                        
+-----------------------+--------+---------+---------------------------------------------------------
+ rle_type_3_delta_null |      1 |       1 | {compresstype=rle_type,compresslevel=3,blocksize=32768}
+ rle_type_3_delta_null |      2 |       2 | {compresstype=rle_type,compresslevel=3,blocksize=32768}
+ rle_type_3_delta_null |      3 |       3 | {compresstype=rle_type,compresslevel=3,blocksize=32768}
+ rle_type_3_delta_null |      4 |       4 | {compresstype=rle_type,compresslevel=3,blocksize=32768}
+ rle_type_3_delta_null |      5 |       5 | {compresstype=rle_type,compresslevel=3,blocksize=32768}
+ rle_type_3_delta_null |      6 |       6 | {compresstype=rle_type,compresslevel=3,blocksize=32768}
 (6 rows)
 
 \d+ rle_type_3_delta_null
@@ -1637,17 +1637,17 @@ Create table rle_type_4_delta_null(
     a5 timestamp,
     a6 timestamp with time zone
     ) with(appendonly=true, orientation=column, compresstype=rle_type, compresslevel=4);
-NOTICE:  Table doesn't have 'DISTRIBUTED BY' clause -- Using column named 'a1' as the Cloudberry Database data distribution key for this table.
+NOTICE:  Table doesn't have 'DISTRIBUTED BY' clause -- Using column named 'a1' as the Apache Cloudberry data distribution key for this table.
 HINT:  The 'DISTRIBUTED BY' clause determines the distribution of data. Make sure column(s) chosen are the optimal data distribution key to minimize skew.
-select attrelid::regclass as relname, attnum, attoptions from pg_class c, pg_attribute_encoding e  where c.relname = 'rle_type_4_delta_null'  and c.oid=e.attrelid  order by relname, attnum;
-        relname        | attnum |                       attoptions                        
------------------------+--------+---------------------------------------------------------
- rle_type_4_delta_null |      1 | {compresstype=rle_type,compresslevel=4,blocksize=32768}
- rle_type_4_delta_null |      2 | {compresstype=rle_type,compresslevel=4,blocksize=32768}
- rle_type_4_delta_null |      3 | {compresstype=rle_type,compresslevel=4,blocksize=32768}
- rle_type_4_delta_null |      4 | {compresstype=rle_type,compresslevel=4,blocksize=32768}
- rle_type_4_delta_null |      5 | {compresstype=rle_type,compresslevel=4,blocksize=32768}
- rle_type_4_delta_null |      6 | {compresstype=rle_type,compresslevel=4,blocksize=32768}
+select attrelid::regclass as relname, attnum, filenum, attoptions from pg_class c, pg_attribute_encoding e  where c.relname = 'rle_type_4_delta_null'  and c.oid=e.attrelid  order by relname, attnum;
+        relname        | attnum | filenum |                       attoptions                        
+-----------------------+--------+---------+---------------------------------------------------------
+ rle_type_4_delta_null |      1 |       1 | {compresstype=rle_type,compresslevel=4,blocksize=32768}
+ rle_type_4_delta_null |      2 |       2 | {compresstype=rle_type,compresslevel=4,blocksize=32768}
+ rle_type_4_delta_null |      3 |       3 | {compresstype=rle_type,compresslevel=4,blocksize=32768}
+ rle_type_4_delta_null |      4 |       4 | {compresstype=rle_type,compresslevel=4,blocksize=32768}
+ rle_type_4_delta_null |      5 |       5 | {compresstype=rle_type,compresslevel=4,blocksize=32768}
+ rle_type_4_delta_null |      6 |       6 | {compresstype=rle_type,compresslevel=4,blocksize=32768}
 (6 rows)
 
 \d+ rle_type_4_delta_null

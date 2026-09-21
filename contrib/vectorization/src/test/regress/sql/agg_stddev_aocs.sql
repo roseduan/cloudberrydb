@@ -14,6 +14,7 @@ explain SELECT stddev_samp(i) FROM test_agg_stddev;
 explain SELECT stddev_samp(a.i) FROM test_agg_stddev a , test_agg_stddev b WHERE a.i = b.i ;
 explain SELECT stddev_samp(a.i) FROM test_agg_stddev a , test_agg_stddev b WHERE a.i = b.i GROUP BY a.x;
 
+-- MREGE3X_FIXME: This sql record a error
 SELECT stddev_samp(i) FROM test_agg_stddev;
 SELECT stddev_samp(a.i) FROM test_agg_stddev a , test_agg_stddev b WHERE a.i = b.i ;
 

@@ -116,9 +116,15 @@ cleanup_directory(const char *relative_path,
 
 	if (dir == NULL)
 	{
-		ereport(WARNING,
-				(errmsg("Cannot open cleanup directory %s",
-				relative_path)));
+		/*
+		 * A missing temp directory is the normal case (no temp files were
+		 * ever created, e.g. right after initdb); only a real error is worth
+		 * a warning.
+		 */
+		if (errno != ENOENT)
+			ereport(WARNING,
+					(errmsg("Cannot open cleanup directory %s",
+					relative_path)));
 		return false;
 	}
 
@@ -200,8 +206,8 @@ CollectTime(VecExecuteState* estate, int plan_id)
 			instr_time instr_duration;
 			instr_time instr_start_time;
 
-			INSTR_FROM_NANOSEC(instr_duration, duration);
-			INSTR_FROM_NANOSEC(instr_start_time, start_time);
+			instr_duration.ticks = duration;
+			instr_start_time.ticks = start_time;
 
 			INSTR_TIME_ADD(instr->counter, instr_duration);
 			if (!instr->running || INSTR_TIME_GET_MICROSEC(instr->firststart) * 1000 > start_time)
@@ -743,7 +749,7 @@ VecExecutorStart(QueryDesc *queryDesc, int eflags)
 	 *
 	 * TODO: eliminate aliens even on master, if not EXPLAIN ANALYZE
 	 */
-	estate->eliminateAliens = execute_pruned_plan && estate->es_sliceTable && estate->es_sliceTable->hasMotions && !IS_QUERY_DISPATCHER();
+	estate->eliminateAliens = execute_pruned_plan && estate->es_sliceTable && estate->es_sliceTable->hasMotions && (Gp_role == GP_ROLE_EXECUTE);
 
 	/*
 	 * Set up an AFTER-trigger statement context, unless told not to, or
@@ -1083,13 +1089,13 @@ InitPlan(QueryDesc *queryDesc, int eflags)
 	 */
 	if (operation != CMD_SELECT || Gp_role != GP_ROLE_EXECUTE)
 	{
-		ExecCheckRTPerms(rangeTable, true);
+		ExecCheckPermissions(rangeTable, plannedstmt->permInfos, true);
 	}
 
 	/*
 	 * initialize the node's execution state
 	 */
-	ExecInitRangeTable(estate, rangeTable);
+	ExecInitRangeTable(estate, rangeTable, plannedstmt->permInfos);
 
 	estate->es_plannedstmt = plannedstmt;
 
@@ -2152,26 +2158,26 @@ ExecCheckXactReadOnly(PlannedStmt *plannedstmt)
 	 * Fail if write permissions are requested in parallel mode for table
 	 * (temp or non-temp), otherwise fail for any non-temp table.
 	 */
-	foreach(l, plannedstmt->rtable)
+	foreach(l, plannedstmt->permInfos)
 	{
-		RangeTblEntry *rte = (RangeTblEntry *) lfirst(l);
+		RTEPermissionInfo *perminfo = lfirst_node(RTEPermissionInfo, l);
 
 		rti++;
 
-		if (rte->rtekind != RTE_RELATION)
+		if (get_rel_relkind(perminfo->relid) != RTE_RELATION)
 			continue;
 
-		if ((rte->requiredPerms & (~ACL_SELECT)) == 0)
+		if ((perminfo->requiredPerms & (~ACL_SELECT)) == 0)
 			continue;
 
 		/*
 		 * External and foreign tables don't need two phase commit which is for
 		 * local mpp tables
 		 */
-		if (get_rel_relkind(rte->relid) == RELKIND_FOREIGN_TABLE)
+		if (get_rel_relkind(perminfo->relid) == RELKIND_FOREIGN_TABLE)
 			continue;
 
-		if (isTempNamespace(get_rel_namespace(rte->relid)))
+		if (isTempNamespace(get_rel_namespace(perminfo->relid)))
 		{
 			ExecutorMarkTransactionDoesWrites();
 			continue;
@@ -2180,7 +2186,7 @@ ExecCheckXactReadOnly(PlannedStmt *plannedstmt)
         /* CDB: Allow SELECT FOR SHARE/UPDATE *
          *
          */
-        if ((rte->requiredPerms & ~(ACL_SELECT | ACL_SELECT_FOR_UPDATE)) == 0)
+        if ((perminfo->requiredPerms & ~(ACL_SELECT | ACL_SELECT_FOR_UPDATE)) == 0)
         {
         	ListCell   *cell;
         	bool foundRTI = false;

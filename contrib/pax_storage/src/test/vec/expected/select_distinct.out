@@ -138,19 +138,24 @@ SELECT count(*) FROM
          Output: (PARTIAL count(*))
          ->  Vec Partial Vec Aggregate
                Output: PARTIAL count(*)
+               Vec Plan Merge:  1 child
                ->  Vec HashAggregate
                      Output: tenk1.two, tenk1.four, tenk1.two
                      Group Key: tenk1.two, tenk1.four, tenk1.two
+                     Vec HashAgg Method:  Sonic
                      ->  Vec Redistribute Motion 3:3  (slice2; segments: 3)
                            Output: tenk1.two, tenk1.four, tenk1.two
                            Hash Key: tenk1.two, tenk1.four, tenk1.two
                            ->  Vec Streaming Vec HashAggregate
                                  Output: tenk1.two, tenk1.four, tenk1.two
                                  Group Key: tenk1.two, tenk1.four, tenk1.two
+                                 Vec HashAgg Method:  Sonic
+                                 Vec Plan Merge:  1 child
                                  ->  Vec Seq Scan on public.tenk1
                                        Output: tenk1.two, tenk1.four, tenk1.two
+ Settings: optimizer = 'off'
  Optimizer: Postgres query optimizer
-(19 rows)
+(23 rows)
 
 SELECT count(*) FROM
   (SELECT DISTINCT two, four, two FROM tenk1) ss;
@@ -182,9 +187,13 @@ SELECT DISTINCT g%1000 FROM generate_series(0,9999) g;
 
 CREATE TABLE distinct_group_1 AS
 SELECT DISTINCT g%1000 FROM generate_series(0,9999) g;
+NOTICE:  Table doesn't have 'DISTRIBUTED BY' clause -- Using column(s) named '?column?' as the Apache Cloudberry data distribution key for this table.
+HINT:  The 'DISTRIBUTED BY' clause determines the distribution of data. Make sure column(s) chosen are the optimal data distribution key to minimize skew.
 SET jit_above_cost TO DEFAULT;
 CREATE TABLE distinct_group_2 AS
 SELECT DISTINCT (g%1000)::text FROM generate_series(0,9999) g;
+NOTICE:  Table doesn't have 'DISTRIBUTED BY' clause -- Using column(s) named 'text' as the Apache Cloudberry data distribution key for this table.
+HINT:  The 'DISTRIBUTED BY' clause determines the distribution of data. Make sure column(s) chosen are the optimal data distribution key to minimize skew.
 SET enable_hashagg=TRUE;
 SET optimizer_enable_hashagg=TRUE;
 -- Produce results with hash aggregation.
@@ -202,9 +211,13 @@ SELECT DISTINCT g%1000 FROM generate_series(0,9999) g;
 
 CREATE TABLE distinct_hash_1 AS
 SELECT DISTINCT g%1000 FROM generate_series(0,9999) g;
+NOTICE:  Table doesn't have 'DISTRIBUTED BY' clause -- Using column(s) named '?column?' as the Apache Cloudberry data distribution key for this table.
+HINT:  The 'DISTRIBUTED BY' clause determines the distribution of data. Make sure column(s) chosen are the optimal data distribution key to minimize skew.
 SET jit_above_cost TO DEFAULT;
 CREATE TABLE distinct_hash_2 AS
 SELECT DISTINCT (g%1000)::text FROM generate_series(0,9999) g;
+NOTICE:  Table doesn't have 'DISTRIBUTED BY' clause -- Using column(s) named 'text' as the Apache Cloudberry data distribution key for this table.
+HINT:  The 'DISTRIBUTED BY' clause determines the distribution of data. Make sure column(s) chosen are the optimal data distribution key to minimize skew.
 SET enable_sort=TRUE;
 SET work_mem TO DEFAULT;
 -- Compare results
@@ -231,6 +244,8 @@ DROP TABLE distinct_group_2;
 -- very own regression file.
 --
 CREATE TEMP TABLE disttable (f1 integer);
+NOTICE:  Table doesn't have 'DISTRIBUTED BY' clause -- Using column named 'f1' as the Apache Cloudberry data distribution key for this table.
+HINT:  The 'DISTRIBUTED BY' clause determines the distribution of data. Make sure column(s) chosen are the optimal data distribution key to minimize skew.
 INSERT INTO DISTTABLE VALUES(1);
 INSERT INTO DISTTABLE VALUES(2);
 INSERT INTO DISTTABLE VALUES(3);
@@ -257,19 +272,19 @@ SELECT f1, f1 IS DISTINCT FROM NULL as "not null" FROM disttable;
 SELECT f1, f1 IS DISTINCT FROM f1 as "false" FROM disttable;
  f1 | false 
 ----+-------
+  1 | f
   2 | f
   3 | f
     | f
-  1 | f
 (4 rows)
 
 SELECT f1, f1 IS DISTINCT FROM f1+1 as "not null" FROM disttable;
  f1 | not null 
 ----+----------
+  1 | t
   2 | t
   3 | t
     | f
-  1 | t
 (4 rows)
 
 -- check that optimizer constant-folds it properly
@@ -328,10 +343,10 @@ SELECT null IS NOT DISTINCT FROM null as "yes";
 -- DISABLE ORCA. Please fix me later if ORCA resolve the problem.
 SET optimizer TO off;
 CREATE TABLE distinct_1(a int);
-NOTICE:  Table doesn't have 'DISTRIBUTED BY' clause -- Using column named 'a' as the Cloudberry Database data distribution key for this table.
+NOTICE:  Table doesn't have 'DISTRIBUTED BY' clause -- Using column named 'a' as the Apache Cloudberry data distribution key for this table.
 HINT:  The 'DISTRIBUTED BY' clause determines the distribution of data. Make sure column(s) chosen are the optimal data distribution key to minimize skew.
 CREATE TABLE distinct_2(a int);
-NOTICE:  Table doesn't have 'DISTRIBUTED BY' clause -- Using column named 'a' as the Cloudberry Database data distribution key for this table.
+NOTICE:  Table doesn't have 'DISTRIBUTED BY' clause -- Using column named 'a' as the Apache Cloudberry data distribution key for this table.
 HINT:  The 'DISTRIBUTED BY' clause determines the distribution of data. Make sure column(s) chosen are the optimal data distribution key to minimize skew.
 INSERT INTO distinct_1 VALUES(1),(2),(NULL);
 INSERT INTO distinct_2 VALUES(1),(NULL);
@@ -371,8 +386,8 @@ SELECT * FROM distinct_1, distinct_2 WHERE distinct_1.a IS DISTINCT FROM distinc
 SELECT * FROM distinct_1, distinct_2 WHERE distinct_1.a IS NOT DISTINCT FROM distinct_2.a;
  a | a 
 ---+---
-   |  
  1 | 1
+   |  
 (2 rows)
 
 DROP TABLE distinct_1;
@@ -429,7 +444,7 @@ CREATE TABLE cities (
     population      float,
     altitude        int
 ); 
-NOTICE:  Table doesn't have 'DISTRIBUTED BY' clause -- Using column named 'name' as the Cloudberry Database data distribution key for this table.
+NOTICE:  Table doesn't have 'DISTRIBUTED BY' clause -- Using column named 'name' as the Apache Cloudberry data distribution key for this table.
 HINT:  The 'DISTRIBUTED BY' clause determines the distribution of data. Make sure column(s) chosen are the optimal data distribution key to minimize skew.
 CREATE TABLE capitals (
     state           char(2)

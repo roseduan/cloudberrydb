@@ -37,8 +37,8 @@ group by
 	cntrycode
 order by
 	cntrycode;	
-                                                                QUERY PLAN                                                                 
--------------------------------------------------------------------------------------------------------------------------------------------
+                                                                   QUERY PLAN                                                                    
+-------------------------------------------------------------------------------------------------------------------------------------------------
  Vec Gather Motion 3:1  (slice1; segments: 3)
    Merge Key: (SUBSTRING(customer.c_phone FROM 1 FOR 2))
    InitPlan 1 (returns $0)  (slice4)
@@ -53,14 +53,14 @@ order by
                Sort Key: (SUBSTRING(customer.c_phone FROM 1 FOR 2))
                ->  Vec Redistribute Motion 3:3  (slice2; segments: 3)
                      Hash Key: (SUBSTRING(customer.c_phone FROM 1 FOR 2))
-                     ->  Vec Hash Anti Join
-                           Hash Cond: (customer.c_custkey = orders.o_custkey)
-                           ->  Vec Seq Scan on customer
-                                 Filter: ((c_acctbal > $0) AND (SUBSTRING(c_phone FROM 1 FOR 2) = ANY ('{13,31,23,29,30,18,17}'::text[])))
+                     ->  Vec Hash Right Anti Join
+                           Hash Cond: (orders.o_custkey = customer.c_custkey)
+                           ->  Vec Redistribute Motion 3:3  (slice3; segments: 3)
+                                 Hash Key: orders.o_custkey
+                                 ->  Vec Seq Scan on orders
                            ->  Vec Hash
-                                 ->  Vec Redistribute Motion 3:3  (slice3; segments: 3)
-                                       Hash Key: orders.o_custkey
-                                       ->  Vec Seq Scan on orders
+                                 ->  Vec Seq Scan on customer
+                                       Filter: ((c_acctbal > $0) AND (SUBSTRING(c_phone FROM 1 FOR 2) = ANY ('{13,31,23,29,30,18,17}'::text[])))
  Optimizer: Postgres query optimizer
 (23 rows)
 

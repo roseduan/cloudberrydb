@@ -35,6 +35,7 @@
 #include "postgres.h"
 #include "nodes/pg_list.h"
 #include "storage/relfilenode.h"
+#include "storage/relfilelocator.h"
 
 #include "comm/pax_rel.h"
 #include "manifest.h"
@@ -556,7 +557,7 @@ Oid create_manifest_auxiliary_heap(Relation parentrel) {
  * function will create a auxiliary manifest table to store the manifest top
  * entrance path, also create a depend entry with relid
  */
-void manifest_create(Relation rel, RelFileNode relnode) {
+void manifest_create(Relation rel, RelFileLocator relnode) {
   char aux_relname[NAMEDATALEN];
   Relation aux_rel;
   Oid aux_oid;
@@ -572,7 +573,7 @@ void manifest_create(Relation rel, RelFileNode relnode) {
   if (exists) {
     // table exists, do truncate, needs rollback.
     aux_rel = table_open(aux_oid, AccessExclusiveLock);
-    RelationSetNewRelfilenode(aux_rel, aux_rel->rd_rel->relpersistence);
+    RelationSetNewRelfilenumber(aux_rel, aux_rel->rd_rel->relpersistence);
   } else {
     // create table
     aux_oid = create_manifest_auxiliary_heap(rel);
@@ -629,7 +630,7 @@ void manifest_truncate(Relation rel) {
   CommandCounterIncrement();
 
   if (paxc_need_wal(rel))
-    paxc_wal_truncate_directory(rel->rd_node);
+    paxc_wal_truncate_directory(rel->rd_locator);
 }
 
 struct manifest_read_context {
@@ -714,7 +715,7 @@ ManifestRelation manifest_open(Relation rel) {
     mrel->desc = manifest_descriptors;
     mrel->heap = NULL;
     mrel->dirty = false;
-    mrel->paxdir = paxc_get_pax_dir(rel->rd_node, rel->rd_backend);
+      mrel->paxdir = paxc_get_pax_dir(rel->rd_locator, rel->rd_backend);
   }
   MemoryContextSwitchTo(oldctx);
   return mrel;

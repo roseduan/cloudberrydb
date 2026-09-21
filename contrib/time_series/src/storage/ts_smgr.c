@@ -114,7 +114,7 @@ static HTAB *TsSmgrPrivateHash = NULL;
 	( \
 		memset(&(a), 0, sizeof(FileTag)), \
 		(a).handler = SYNC_HANDLER_MD, \
-		(a).rnode = (xx_rnode), \
+		(a).rlocator = (xx_rnode), \
 		(a).forknum = (xx_forknum), \
 		(a).segno = (xx_segno) \
 	)
@@ -126,11 +126,11 @@ static file_unlink_hook_type	prev_file_unlink_hook = NULL;
 
 /* Forward declarations of chunk-fork helpers. */
 static TsSmgrPrivate *smgr_private_get(SMgrRelation reln);
-static TsSmgrPrivate *smgr_private_lookup(RelFileNodeBackend rnode);
+static TsSmgrPrivate *smgr_private_lookup(RelFileLocatorBackend rnode);
 static void smgr_private_ensure_capacity(SMgrRelation reln, TsSmgrPrivate *e,
 									 ForkNumber forknum);
 static void smgr_private_note_used(TsSmgrPrivate *e, ForkNumber forknum);
-static void ts_file_close(RelFileNodeBackend rnode);
+static void ts_file_close(RelFileLocatorBackend rnode);
 
 static void _ts_fdvec_resize(TsSmgrPrivate *e, ForkNumber forknum, int nseg);
 static char *_ts_mdfd_segpath(SMgrRelation reln, ForkNumber forknum,
@@ -178,7 +178,7 @@ smgr_private_hash_init(void)
  *		invalidation, the smgr_close callback itself).
  */
 static TsSmgrPrivate *
-smgr_private_lookup(RelFileNodeBackend rnode)
+smgr_private_lookup(RelFileLocatorBackend rnode)
 {
 	TsSmgrHashEntry *entry;
 
@@ -210,7 +210,7 @@ smgr_private_get(SMgrRelation reln)
 		smgr_private_hash_init();
 
 	entry = (TsSmgrHashEntry *) hash_search(TsSmgrPrivateHash,
-											(void *) &reln->smgr_rnode,
+											(void *) &reln->smgr_rlocator,
 											HASH_ENTER, &found);
 	e = &entry->priv;
 
@@ -263,7 +263,7 @@ smgr_private_ensure_capacity(SMgrRelation reln, TsSmgrPrivate *e, ForkNumber for
 						(int) forknum,
 						(int) TS_FIRST_CHUNKNUM,
 						(int) TS_MAX_CHUNK_FORKNUM,
-						reln->smgr_rnode.node.relNode)));
+						reln->smgr_rlocator.locator.relNumber)));
 
 	if (needed <= oldsize)
 		return;
@@ -322,7 +322,7 @@ smgr_private_note_used(TsSmgrPrivate *e, ForkNumber forknum)
  *		kernel hash.
  */
 static void
-ts_file_close(RelFileNodeBackend rnode)
+ts_file_close(RelFileLocatorBackend rnode)
 {
 	TsSmgrPrivate *e;
 
@@ -404,7 +404,7 @@ _ts_mdfd_segpath(SMgrRelation reln, ForkNumber forknum, BlockNumber segno)
 	char	   *path;
 	char	   *fullpath;
 
-	path = relpath(reln->smgr_rnode, forknum);
+	path = relpath(reln->smgr_rlocator, forknum);
 
 	if (segno > 0)
 	{
@@ -489,7 +489,7 @@ smgr_private_openfork(SMgrRelation reln, ForkNumber forknum, int behavior)
 	if (e->num_open_segs[forknum] > 0)
 		return &e->seg_fds[forknum][0];
 
-	path = relpath(reln->smgr_rnode, forknum);
+	path = relpath(reln->smgr_rlocator, forknum);
 	fd = PathNameOpenFile(path, O_RDWR | PG_BINARY);
 
 	if (fd < 0)
@@ -617,7 +617,7 @@ smgr_private_register_dirty(SMgrRelation reln, ForkNumber forknum, TsMdfdVec *se
 {
 	FileTag		tag;
 
-	TS_INIT_MD_FILETAG(tag, reln->smgr_rnode.node, forknum, seg->mdfd_segno);
+	TS_INIT_MD_FILETAG(tag, reln->smgr_rlocator.locator, forknum, seg->mdfd_segno);
 
 	Assert(!SmgrIsTemp(reln));
 
@@ -654,11 +654,11 @@ smgr_private_create(SMgrRelation reln, ForkNumber forknum, bool isRedo)
 
 	Assert(e->num_open_segs[forknum] == 0);
 
-	TablespaceCreateDbspace(reln->smgr_rnode.node.spcNode,
-							reln->smgr_rnode.node.dbNode,
+	TablespaceCreateDbspace(reln->smgr_rlocator.locator.spcOid,
+							reln->smgr_rlocator.locator.dbOid,
 							isRedo);
 
-	path = relpath(reln->smgr_rnode, forknum);
+	path = relpath(reln->smgr_rlocator, forknum);
 	fd = PathNameOpenFile(path, O_RDWR | O_CREAT | O_EXCL | PG_BINARY);
 	if (fd < 0)
 	{
@@ -711,7 +711,7 @@ smgr_private_exists(SMgrRelation reln, ForkNumber forknum)
 static void
 smgr_private_close(SMgrRelation reln, ForkNumber forknum)
 {
-	TsSmgrPrivate *e = smgr_private_lookup(reln->smgr_rnode);
+	TsSmgrPrivate *e = smgr_private_lookup(reln->smgr_rlocator);
 	int			nopensegs;
 
 	if (e == NULL || forknum >= e->alloc_forks)
@@ -733,7 +733,7 @@ smgr_private_close(SMgrRelation reln, ForkNumber forknum)
 
 static void
 smgr_private_extend(SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum,
-				char *buffer, bool skipFsync)
+				const void *buffer, bool skipFsync)
 {
 	TsSmgrPrivate *e = smgr_private_get(reln);
 	off_t		seekpos;
@@ -744,7 +744,7 @@ smgr_private_extend(SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum,
 		ereport(ERROR,
 				(errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED),
 				 errmsg("cannot extend file \"%s\" beyond %u blocks",
-						relpath(reln->smgr_rnode, forknum),
+						relpath(reln->smgr_rlocator, forknum),
 						InvalidBlockNumber)));
 
 	v = _ts_mdfd_getseg(reln, forknum, blocknum, skipFsync, TS_EXT_CREATE);
@@ -782,6 +782,26 @@ smgr_private_extend(SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum,
 	Assert(_ts_mdnblocks(v->mdfd_vfd) <= ((BlockNumber) RELSEG_SIZE));
 }
 
+/*
+ * smgr_private_zeroextend
+ *		Chunk-fork counterpart of mdzeroextend(): add nblocks new
+ *		zero-filled blocks starting at blocknum.  Unlike md.c's version
+ *		(which can fall back to a single ftruncate/fallocate when the
+ *		whole range lands in one segment), just extend one block at a
+ *		time through the already-segment-aware smgr_private_extend --
+ *		correctness over the syscall-count optimization here.
+ */
+static void
+smgr_private_zeroextend(SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum,
+				int nblocks, bool skipFsync)
+{
+	static const PGAlignedBlock zerobuf = {0};
+	int			i;
+
+	for (i = 0; i < nblocks; i++)
+		smgr_private_extend(reln, forknum, blocknum + i, zerobuf.data, skipFsync);
+}
+
 static bool
 smgr_private_prefetch(SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum)
 {
@@ -805,7 +825,7 @@ smgr_private_prefetch(SMgrRelation reln, ForkNumber forknum, BlockNumber blocknu
 
 static void
 smgr_private_read(SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum,
-			  char *buffer)
+			  void *buffer)
 {
 	off_t		seekpos;
 	int			nbytes;
@@ -840,7 +860,7 @@ smgr_private_read(SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum,
 
 static void
 smgr_private_write(SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum,
-			   char *buffer, bool skipFsync)
+			   const void *buffer, bool skipFsync)
 {
 	off_t		seekpos;
 	int			nbytes;
@@ -951,7 +971,7 @@ smgr_private_truncate(SMgrRelation reln, ForkNumber forknum, BlockNumber nblocks
 			return;
 		ereport(ERROR,
 				(errmsg("could not truncate file \"%s\" to %u blocks: it's only %u blocks now",
-						relpath(reln->smgr_rnode, forknum),
+						relpath(reln->smgr_rlocator, forknum),
 						nblocks, curnblk)));
 	}
 
@@ -1077,7 +1097,7 @@ ts_mdclose(SMgrRelation reln, ForkNumber forknum)
 
 static void
 ts_mdextend(SMgrRelation reln, ForkNumber forknum,
-			BlockNumber blocknum, char *buffer, bool skipFsync)
+			BlockNumber blocknum, const void *buffer, bool skipFsync)
 {
 	if (forknum <= MAX_FORKNUM)
 	{
@@ -1085,6 +1105,18 @@ ts_mdextend(SMgrRelation reln, ForkNumber forknum,
 		return;
 	}
 	smgr_private_extend(reln, forknum, blocknum, buffer, skipFsync);
+}
+
+static void
+ts_mdzeroextend(SMgrRelation reln, ForkNumber forknum,
+				BlockNumber blocknum, int nblocks, bool skipFsync)
+{
+	if (forknum <= MAX_FORKNUM)
+	{
+		mdzeroextend(reln, forknum, blocknum, nblocks, skipFsync);
+		return;
+	}
+	smgr_private_zeroextend(reln, forknum, blocknum, nblocks, skipFsync);
 }
 
 static bool
@@ -1097,7 +1129,7 @@ ts_mdprefetch(SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum)
 
 static void
 ts_mdread(SMgrRelation reln, ForkNumber forknum,
-		  BlockNumber blocknum, char *buffer)
+		  BlockNumber blocknum, void *buffer)
 {
 	if (forknum <= MAX_FORKNUM)
 	{
@@ -1109,7 +1141,7 @@ ts_mdread(SMgrRelation reln, ForkNumber forknum,
 
 static void
 ts_mdwrite(SMgrRelation reln, ForkNumber forknum,
-		   BlockNumber blocknum, char *buffer, bool skipFsync)
+		   BlockNumber blocknum, const void *buffer, bool skipFsync)
 {
 	if (forknum <= MAX_FORKNUM)
 	{
@@ -1140,11 +1172,12 @@ ts_mdnblocks(SMgrRelation reln, ForkNumber forknum)
 }
 
 static void
-ts_mdtruncate(SMgrRelation reln, ForkNumber forknum, BlockNumber nblocks)
+ts_mdtruncate(SMgrRelation reln, ForkNumber forknum, BlockNumber old_blocks, 
+	BlockNumber nblocks)
 {
 	if (forknum <= MAX_FORKNUM)
 	{
-		mdtruncate(reln, forknum, nblocks);
+		mdtruncate(reln, forknum, old_blocks, nblocks);
 		return;
 	}
 	smgr_private_truncate(reln, forknum, nblocks);
@@ -1176,6 +1209,7 @@ static const f_smgr ts_smgr_impl = {
 	.smgr_exists = ts_mdexists,
 	.smgr_unlink = mdunlink,
 	.smgr_extend = ts_mdextend,
+	.smgr_zeroextend = ts_mdzeroextend,
 	.smgr_prefetch = ts_mdprefetch,
 	.smgr_read = ts_mdread,
 	.smgr_write = ts_mdwrite,
@@ -1218,7 +1252,7 @@ ts_smgr_invalidate_nblocks(SMgrRelation reln, ForkNumber forknum)
 	}
 
 	{
-		TsSmgrPrivate *e = smgr_private_lookup(reln->smgr_rnode);
+		TsSmgrPrivate *e = smgr_private_lookup(reln->smgr_rlocator);
 
 		if (e != NULL && forknum < e->alloc_forks)
 			e->cached_nblocks[forknum] = InvalidBlockNumber;
@@ -1247,7 +1281,7 @@ ts_smgr_invalidate_nblocks(SMgrRelation reln, ForkNumber forknum)
  *		it sees the same per-relation event the kernel reports.
  */
 static void
-ts_file_unlink_hook(RelFileNodeBackend rnode)
+ts_file_unlink_hook(RelFileLocatorBackend rnode)
 {
 	char	   *dir;
 	char		prefix[32];
@@ -1258,8 +1292,8 @@ ts_file_unlink_hook(RelFileNodeBackend rnode)
 	if (prev_file_unlink_hook)
 		(*prev_file_unlink_hook)(rnode);
 
-	dir = GetDatabasePath(rnode.node.dbNode, rnode.node.spcNode);
-	plen = snprintf(prefix, sizeof(prefix), "%u_ts_", rnode.node.relNode);
+	dir = GetDatabasePath(rnode.locator.dbOid, rnode.locator.spcOid);
+	plen = snprintf(prefix, sizeof(prefix), "%u_ts_", rnode.locator.relNumber);
 
 	dh = AllocateDir(dir);
 	while ((de = ReadDir(dh, dir)) != NULL)

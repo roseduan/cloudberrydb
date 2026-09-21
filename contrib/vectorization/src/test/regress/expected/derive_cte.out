@@ -1,0 +1,407 @@
+set optimizer=on;
+create table s1(a int, b int, c int, d int);
+NOTICE:  Table doesn't have 'DISTRIBUTED BY' clause -- Using column named 'a' as the Apache Cloudberry data distribution key for this table.
+HINT:  The 'DISTRIBUTED BY' clause determines the distribution of data. Make sure column(s) chosen are the optimal data distribution key to minimize skew.
+create table s2(a int, b int, c int, d int);
+NOTICE:  Table doesn't have 'DISTRIBUTED BY' clause -- Using column named 'a' as the Apache Cloudberry data distribution key for this table.
+HINT:  The 'DISTRIBUTED BY' clause determines the distribution of data. Make sure column(s) chosen are the optimal data distribution key to minimize skew.
+explain select *
+from
+(select * from s1 where a < 0) q1,
+(select * from s1 where a > 0) q2;
+                                          QUERY PLAN                                           
+-----------------------------------------------------------------------------------------------
+ Sequence  (cost=0.00..1324463.33 rows=1 width=32)
+   ->  Shared Scan (share slice:id 0:0)  (cost=0.00..431.00 rows=1 width=1)
+         ->  Gather Motion 3:1  (slice1; segments: 3)  (cost=0.00..431.00 rows=1 width=16)
+               ->  Seq Scan on s1  (cost=0.00..431.00 rows=1 width=16)
+                     Filter: ((a < 0) OR (a > 0))
+   ->  Nested Loop  (cost=0.00..1324032.33 rows=1 width=32)
+         Join Filter: true
+         ->  Result  (cost=0.00..431.00 rows=1 width=16)
+               Filter: (share0_ref3.a < 0)
+               ->  Shared Scan (share slice:id 0:0)  (cost=0.00..431.00 rows=1 width=16)
+         ->  Materialize  (cost=0.00..431.00 rows=1 width=16)
+               ->  Result  (cost=0.00..431.00 rows=1 width=16)
+                     Filter: (share0_ref2.a > 0)
+                     ->  Shared Scan (share slice:id 0:0)  (cost=0.00..431.00 rows=1 width=16)
+ Optimizer: GPORCA
+(15 rows)
+
+explain select *
+from
+(select sum(b) from s1 where a < 0) q1,
+(select sum(b) from s1 where a > 0) q2;
+                                             QUERY PLAN                                             
+----------------------------------------------------------------------------------------------------
+ Sequence  (cost=0.00..1324463.20 rows=1 width=16)
+   ->  Shared Scan (share slice:id 0:0)  (cost=0.00..431.00 rows=1 width=1)
+         ->  Gather Motion 3:1  (slice1; segments: 3)  (cost=0.00..431.00 rows=1 width=8)
+               ->  Seq Scan on s1  (cost=0.00..431.00 rows=1 width=8)
+                     Filter: ((a < 0) OR (a > 0))
+   ->  Nested Loop  (cost=0.00..1324032.20 rows=1 width=16)
+         Join Filter: true
+         ->  Aggregate  (cost=0.00..431.00 rows=1 width=8)
+               ->  Result  (cost=0.00..431.00 rows=1 width=4)
+                     Filter: (share0_ref3.a < 0)
+                     ->  Shared Scan (share slice:id 0:0)  (cost=0.00..431.00 rows=1 width=8)
+         ->  Materialize  (cost=0.00..431.00 rows=1 width=8)
+               ->  Aggregate  (cost=0.00..431.00 rows=1 width=8)
+                     ->  Result  (cost=0.00..431.00 rows=1 width=4)
+                           Filter: (share0_ref2.a > 0)
+                           ->  Shared Scan (share slice:id 0:0)  (cost=0.00..431.00 rows=1 width=8)
+ Optimizer: GPORCA
+(17 rows)
+
+explain select *
+from
+(select sum(b) from s1 where int4lt(a, 0)) q1,
+(select sum(b) from s1 where int4eq(a, 0)) q2;
+                                             QUERY PLAN                                             
+----------------------------------------------------------------------------------------------------
+ Sequence  (cost=0.00..1324463.20 rows=1 width=16)
+   ->  Shared Scan (share slice:id 0:0)  (cost=0.00..431.00 rows=1 width=1)
+         ->  Gather Motion 3:1  (slice1; segments: 3)  (cost=0.00..431.00 rows=1 width=8)
+               ->  Seq Scan on s1  (cost=0.00..431.00 rows=1 width=8)
+                     Filter: (int4lt(a, 0) OR int4eq(a, 0))
+   ->  Nested Loop  (cost=0.00..1324032.20 rows=1 width=16)
+         Join Filter: true
+         ->  Aggregate  (cost=0.00..431.00 rows=1 width=8)
+               ->  Result  (cost=0.00..431.00 rows=1 width=4)
+                     Filter: int4lt(share0_ref3.a, 0)
+                     ->  Shared Scan (share slice:id 0:0)  (cost=0.00..431.00 rows=1 width=8)
+         ->  Materialize  (cost=0.00..431.00 rows=1 width=8)
+               ->  Aggregate  (cost=0.00..431.00 rows=1 width=8)
+                     ->  Result  (cost=0.00..431.00 rows=1 width=4)
+                           Filter: int4eq(share0_ref2.a, 0)
+                           ->  Shared Scan (share slice:id 0:0)  (cost=0.00..431.00 rows=1 width=8)
+ Optimizer: GPORCA
+(17 rows)
+
+explain select *
+from
+(select sum(s1.b)
+ from s1,s2
+ where s1.d = s2.d and s1.a < 0) q1,
+(select sum(s1.b)
+ from s1,s2
+ where s1.d = s2.d and s1.a > 0) q2;
+                                                  QUERY PLAN                                                   
+---------------------------------------------------------------------------------------------------------------
+ Sequence  (cost=0.00..1324894.20 rows=1 width=16)
+   ->  Shared Scan (share slice:id 0:0)  (cost=0.00..862.00 rows=1 width=1)
+         ->  Gather Motion 3:1  (slice1; segments: 3)  (cost=0.00..862.00 rows=1 width=8)
+               ->  Hash Join  (cost=0.00..862.00 rows=1 width=8)
+                     Hash Cond: (s1.d = s2.d)
+                     ->  Seq Scan on s1  (cost=0.00..431.00 rows=1 width=12)
+                           Filter: ((a < 0) OR (a > 0))
+                     ->  Hash  (cost=431.00..431.00 rows=1 width=4)
+                           ->  Broadcast Motion 3:3  (slice2; segments: 3)  (cost=0.00..431.00 rows=1 width=4)
+                                 ->  Seq Scan on s2  (cost=0.00..431.00 rows=1 width=4)
+   ->  Nested Loop  (cost=0.00..1324032.20 rows=1 width=16)
+         Join Filter: true
+         ->  Aggregate  (cost=0.00..431.00 rows=1 width=8)
+               ->  Result  (cost=0.00..431.00 rows=1 width=4)
+                     Filter: (share0_ref3.a < 0)
+                     ->  Shared Scan (share slice:id 0:0)  (cost=0.00..431.00 rows=1 width=8)
+         ->  Materialize  (cost=0.00..431.00 rows=1 width=8)
+               ->  Aggregate  (cost=0.00..431.00 rows=1 width=8)
+                     ->  Result  (cost=0.00..431.00 rows=1 width=4)
+                           Filter: (share0_ref2.a > 0)
+                           ->  Shared Scan (share slice:id 0:0)  (cost=0.00..431.00 rows=1 width=8)
+ Optimizer: GPORCA
+(22 rows)
+
+explain select *
+from
+(select sum(s1.b)
+ from s1,s2
+ where s1.d = s2.d and s1.a < 0) q1(x),
+(select sum(s1.b)
+ from s1,s2
+ where s1.d = s2.d and s1.a > 0) q2(x)
+where q2.x > 1;
+                                                  QUERY PLAN                                                   
+---------------------------------------------------------------------------------------------------------------
+ Sequence  (cost=0.00..1324894.20 rows=1 width=16)
+   ->  Shared Scan (share slice:id 0:0)  (cost=0.00..862.00 rows=1 width=1)
+         ->  Gather Motion 3:1  (slice1; segments: 3)  (cost=0.00..862.00 rows=1 width=8)
+               ->  Hash Join  (cost=0.00..862.00 rows=1 width=8)
+                     Hash Cond: (s1.d = s2.d)
+                     ->  Seq Scan on s1  (cost=0.00..431.00 rows=1 width=12)
+                           Filter: ((a < 0) OR (a > 0))
+                     ->  Hash  (cost=431.00..431.00 rows=1 width=4)
+                           ->  Broadcast Motion 3:3  (slice2; segments: 3)  (cost=0.00..431.00 rows=1 width=4)
+                                 ->  Seq Scan on s2  (cost=0.00..431.00 rows=1 width=4)
+   ->  Nested Loop  (cost=0.00..1324032.20 rows=1 width=16)
+         Join Filter: true
+         ->  Aggregate  (cost=0.00..431.00 rows=1 width=8)
+               ->  Result  (cost=0.00..431.00 rows=1 width=4)
+                     Filter: (share0_ref3.a < 0)
+                     ->  Shared Scan (share slice:id 0:0)  (cost=0.00..431.00 rows=1 width=8)
+         ->  Materialize  (cost=0.00..431.00 rows=1 width=8)
+               ->  Aggregate  (cost=0.00..431.00 rows=1 width=8)
+                     ->  Result  (cost=0.00..431.00 rows=1 width=4)
+                           Filter: (share0_ref2.a > 0)
+                           ->  Shared Scan (share slice:id 0:0)  (cost=0.00..431.00 rows=1 width=8)
+ Optimizer: GPORCA
+(22 rows)
+
+explain select *
+from
+(select sum(s1.b)
+ from s1,s2
+ where s1.d = s2.d and s1.a < 0) q1(x),
+(select avg(s1.b)
+ from s1,s2
+ where s1.d = s2.d and s1.a > 0) q2(x)
+where q2.x > 1;
+                                                  QUERY PLAN                                                   
+---------------------------------------------------------------------------------------------------------------
+ Sequence  (cost=0.00..1324894.20 rows=1 width=16)
+   ->  Shared Scan (share slice:id 0:0)  (cost=0.00..862.00 rows=1 width=1)
+         ->  Gather Motion 3:1  (slice1; segments: 3)  (cost=0.00..862.00 rows=1 width=8)
+               ->  Hash Join  (cost=0.00..862.00 rows=1 width=8)
+                     Hash Cond: (s1.d = s2.d)
+                     ->  Seq Scan on s1  (cost=0.00..431.00 rows=1 width=12)
+                           Filter: ((a < 0) OR (a > 0))
+                     ->  Hash  (cost=431.00..431.00 rows=1 width=4)
+                           ->  Broadcast Motion 3:3  (slice2; segments: 3)  (cost=0.00..431.00 rows=1 width=4)
+                                 ->  Seq Scan on s2  (cost=0.00..431.00 rows=1 width=4)
+   ->  Nested Loop  (cost=0.00..1324032.20 rows=1 width=16)
+         Join Filter: true
+         ->  Aggregate  (cost=0.00..431.00 rows=1 width=8)
+               ->  Result  (cost=0.00..431.00 rows=1 width=4)
+                     Filter: (share0_ref3.a < 0)
+                     ->  Shared Scan (share slice:id 0:0)  (cost=0.00..431.00 rows=1 width=8)
+         ->  Materialize  (cost=0.00..431.00 rows=1 width=8)
+               ->  Aggregate  (cost=0.00..431.00 rows=1 width=8)
+                     ->  Result  (cost=0.00..431.00 rows=1 width=4)
+                           Filter: (share0_ref2.a > 0)
+                           ->  Shared Scan (share slice:id 0:0)  (cost=0.00..431.00 rows=1 width=8)
+ Optimizer: GPORCA
+(22 rows)
+
+-- falied, orca can not give a plan
+explain select *
+from
+(select count(*)
+ from s1,s2
+ where s1.d = s2.d) q1(x),
+(select count(*)
+ from s1,s2
+ where s1.d = s2.d) q2(x);
+                                                  QUERY PLAN                                                   
+---------------------------------------------------------------------------------------------------------------
+ Sequence  (cost=0.00..1324894.10 rows=1 width=16)
+   ->  Shared Scan (share slice:id 0:0)  (cost=0.00..862.00 rows=1 width=1)
+         ->  Gather Motion 3:1  (slice1; segments: 3)  (cost=0.00..862.00 rows=1 width=1)
+               ->  Hash Join  (cost=0.00..862.00 rows=1 width=1)
+                     Hash Cond: (s1.d = s2.d)
+                     ->  Seq Scan on s1  (cost=0.00..431.00 rows=1 width=4)
+                     ->  Hash  (cost=431.00..431.00 rows=1 width=4)
+                           ->  Broadcast Motion 3:3  (slice2; segments: 3)  (cost=0.00..431.00 rows=1 width=4)
+                                 ->  Seq Scan on s2  (cost=0.00..431.00 rows=1 width=4)
+   ->  Nested Loop  (cost=0.00..1324032.10 rows=1 width=16)
+         Join Filter: true
+         ->  Aggregate  (cost=0.00..431.00 rows=1 width=8)
+               ->  Shared Scan (share slice:id 0:0)  (cost=0.00..431.00 rows=1 width=1)
+         ->  Materialize  (cost=0.00..431.00 rows=1 width=8)
+               ->  Aggregate  (cost=0.00..431.00 rows=1 width=8)
+                     ->  Shared Scan (share slice:id 0:0)  (cost=0.00..431.00 rows=1 width=1)
+ Optimizer: GPORCA
+(17 rows)
+
+-- failed, ref CTranslatorScalarToDXL::TranslateAggrefToDXL aggfilter does not support
+explain select *
+from
+(select sum(b) filter (where c < 0) from s1 where int4lt(a, 0)) q1,
+(select sum(b) filter (where c < 0) from s1 where int4eq(a, 0)) q2;
+                                            QUERY PLAN                                            
+--------------------------------------------------------------------------------------------------
+ Nested Loop  (cost=10000000739.61..10000000739.66 rows=3 width=16)
+   ->  Finalize Aggregate  (cost=369.81..369.82 rows=1 width=8)
+         ->  Gather Motion 3:1  (slice1; segments: 3)  (cost=369.75..369.80 rows=3 width=8)
+               ->  Partial Aggregate  (cost=369.75..369.76 rows=1 width=8)
+                     ->  Seq Scan on s1  (cost=0.00..330.25 rows=7900 width=8)
+                           Filter: int4lt(a, 0)
+   ->  Materialize  (cost=369.81..369.83 rows=1 width=8)
+         ->  Finalize Aggregate  (cost=369.81..369.82 rows=1 width=8)
+               ->  Gather Motion 3:1  (slice2; segments: 3)  (cost=369.75..369.80 rows=3 width=8)
+                     ->  Partial Aggregate  (cost=369.75..369.76 rows=1 width=8)
+                           ->  Seq Scan on s1 s1_1  (cost=0.00..330.25 rows=7900 width=8)
+                                 Filter: int4eq(a, 0)
+ Optimizer: Postgres query optimizer
+(13 rows)
+
+-- failed, join order does not same
+explain select *
+from
+(select sum(s1.b)
+ from s1,s2
+ where s1.d = s2.d and s1.a < 0) q1,
+(select sum(s1.b)
+ from s2,s1
+ where s1.d = s2.d and s1.a > 0) q2;
+                                                     QUERY PLAN                                                      
+---------------------------------------------------------------------------------------------------------------------
+ Nested Loop  (cost=0.00..2206720.98 rows=1 width=16)
+   Join Filter: true
+   ->  Aggregate  (cost=0.00..862.00 rows=1 width=8)
+         ->  Gather Motion 3:1  (slice3; segments: 3)  (cost=0.00..862.00 rows=1 width=4)
+               ->  Hash Join  (cost=0.00..862.00 rows=1 width=4)
+                     Hash Cond: (s1_1.d = s2_1.d)
+                     ->  Seq Scan on s1 s1_1  (cost=0.00..431.00 rows=1 width=8)
+                           Filter: (a < 0)
+                     ->  Hash  (cost=431.00..431.00 rows=1 width=4)
+                           ->  Broadcast Motion 3:3  (slice4; segments: 3)  (cost=0.00..431.00 rows=1 width=4)
+                                 ->  Seq Scan on s2 s2_1  (cost=0.00..431.00 rows=1 width=4)
+   ->  Materialize  (cost=0.00..862.00 rows=1 width=8)
+         ->  Aggregate  (cost=0.00..862.00 rows=1 width=8)
+               ->  Gather Motion 3:1  (slice1; segments: 3)  (cost=0.00..862.00 rows=1 width=4)
+                     ->  Hash Join  (cost=0.00..862.00 rows=1 width=4)
+                           Hash Cond: (s1.d = s2.d)
+                           ->  Seq Scan on s1  (cost=0.00..431.00 rows=1 width=8)
+                                 Filter: (a > 0)
+                           ->  Hash  (cost=431.00..431.00 rows=1 width=4)
+                                 ->  Broadcast Motion 3:3  (slice2; segments: 3)  (cost=0.00..431.00 rows=1 width=4)
+                                       ->  Seq Scan on s2  (cost=0.00..431.00 rows=1 width=4)
+ Optimizer: GPORCA
+(22 rows)
+
+--bug fix
+select count(*) from (select 1) a, (select 1) b;
+ count 
+-------
+     1
+(1 row)
+
+explain select *
+from
+(select sum(s1.b)
+ from s1,s2
+ where s1.d = s2.d and s1.a < 0) q1(x),
+(select 1) a,
+(select avg(s1.b)
+ from s1,s2
+ where s1.d = s2.d and s1.a > 0) q2(x),
+(select 1) b
+where q2.x > 1;
+                                                  QUERY PLAN                                                   
+---------------------------------------------------------------------------------------------------------------
+ Sequence  (cost=0.00..926018399031.97 rows=1 width=24)
+   ->  Shared Scan (share slice:id 0:0)  (cost=0.00..862.00 rows=1 width=1)
+         ->  Gather Motion 3:1  (slice1; segments: 3)  (cost=0.00..862.00 rows=1 width=8)
+               ->  Hash Join  (cost=0.00..862.00 rows=1 width=8)
+                     Hash Cond: (s1.d = s2.d)
+                     ->  Seq Scan on s1  (cost=0.00..431.00 rows=1 width=12)
+                           Filter: ((a < 0) OR (a > 0))
+                     ->  Hash  (cost=431.00..431.00 rows=1 width=4)
+                           ->  Broadcast Motion 3:3  (slice2; segments: 3)  (cost=0.00..431.00 rows=1 width=4)
+                                 ->  Seq Scan on s2  (cost=0.00..431.00 rows=1 width=4)
+   ->  Nested Loop  (cost=0.00..926018398169.97 rows=1 width=24)
+         Join Filter: true
+         ->  Nested Loop  (cost=0.00..904313979.96 rows=1 width=16)
+               Join Filter: true
+               ->  Nested Loop  (cost=0.00..882688.12 rows=1 width=12)
+                     Join Filter: true
+                     ->  Aggregate  (cost=0.00..431.00 rows=1 width=8)
+                           ->  Result  (cost=0.00..431.00 rows=1 width=4)
+                                 Filter: (share0_ref3.a < 0)
+                                 ->  Shared Scan (share slice:id 0:0)  (cost=0.00..431.00 rows=1 width=8)
+                     ->  Materialize  (cost=0.00..0.00 rows=1 width=4)
+                           ->  Result  (cost=0.00..0.00 rows=1 width=1)
+               ->  Materialize  (cost=0.00..0.00 rows=1 width=4)
+                     ->  Result  (cost=0.00..0.00 rows=1 width=1)
+         ->  Materialize  (cost=0.00..431.00 rows=1 width=8)
+               ->  Aggregate  (cost=0.00..431.00 rows=1 width=8)
+                     ->  Result  (cost=0.00..431.00 rows=1 width=4)
+                           Filter: (share0_ref2.a > 0)
+                           ->  Shared Scan (share slice:id 0:0)  (cost=0.00..431.00 rows=1 width=8)
+ Optimizer: GPORCA
+(30 rows)
+
+-- All args of the WHERE BoolExpr differ between the two grouped subqueries.
+-- Previously this left an empty BoolExpr in the shared-CTE jointree quals,
+-- tripping CTranslatorScalarToDXL.cpp:796 (0 < ListLength(bool_expr->args))
+-- and falling back to the Postgres planner. The reformer should now drop
+-- the empty BoolExpr and ORCA should produce a plan.
+explain (costs off) select *
+from
+(select sum(b) from s1 where a > 0 and b > 0) q1,
+(select sum(b) from s1 where a < 0 and b < 0) q2;
+                                   QUERY PLAN                                    
+---------------------------------------------------------------------------------
+ Sequence
+   ->  Shared Scan (share slice:id 0:0)
+         ->  Gather Motion 3:1  (slice1; segments: 3)
+               ->  Seq Scan on s1
+                     Filter: (((a > 0) AND (b > 0)) OR ((a < 0) AND (b < 0)))
+   ->  Nested Loop
+         Join Filter: true
+         ->  Aggregate
+               ->  Result
+                     Filter: ((share0_ref3.a > 0) AND (share0_ref3.b > 0))
+                     ->  Shared Scan (share slice:id 0:0)
+         ->  Materialize
+               ->  Aggregate
+                     ->  Result
+                           Filter: ((share0_ref2.a < 0) AND (share0_ref2.b < 0))
+                           ->  Shared Scan (share slice:id 0:0)
+ Optimizer: GPORCA
+(17 rows)
+
+-- TPC-DS query 28 pattern: same table, multiple disjoint range filters,
+-- comma cross join, all WHERE BoolExpr args differ across siblings.
+explain (costs off) select *
+from
+(select avg(b) lp from s1 where a between 0 and 5
+   and (b between 124 and 134 or c between 1160 and 2160 or d between 79 and 99)) q1,
+(select avg(b) lp from s1 where a between 6 and 10
+   and (b between 121 and 131 or c between 7528 and 8528 or d between 76 and 96)) q2;
+                                                                                                                                    QUERY PLAN                                                                                                                                     
+-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+ Sequence
+   ->  Shared Scan (share slice:id 0:0)
+         ->  Gather Motion 3:1  (slice1; segments: 3)
+               ->  Seq Scan on s1
+                     Filter: (((a >= 0) AND (a <= 5) AND (((b >= 124) AND (b <= 134)) OR ((c >= 1160) AND (c <= 2160)) OR ((d >= 79) AND (d <= 99)))) OR ((a >= 6) AND (a <= 10) AND (((b >= 121) AND (b <= 131)) OR ((c >= 7528) AND (c <= 8528)) OR ((d >= 76) AND (d <= 96)))))
+   ->  Nested Loop
+         Join Filter: true
+         ->  Aggregate
+               ->  Result
+                     Filter: ((share0_ref3.a >= 0) AND (share0_ref3.a <= 5) AND (((share0_ref3.b >= 124) AND (share0_ref3.b <= 134)) OR ((share0_ref3.c >= 1160) AND (share0_ref3.c <= 2160)) OR ((share0_ref3.d >= 79) AND (share0_ref3.d <= 99))))
+                     ->  Shared Scan (share slice:id 0:0)
+         ->  Materialize
+               ->  Aggregate
+                     ->  Result
+                           Filter: ((share0_ref2.a >= 6) AND (share0_ref2.a <= 10) AND (((share0_ref2.b >= 121) AND (share0_ref2.b <= 131)) OR ((share0_ref2.c >= 7528) AND (share0_ref2.c <= 8528)) OR ((share0_ref2.d >= 76) AND (share0_ref2.d <= 96))))
+                           ->  Shared Scan (share slice:id 0:0)
+ Optimizer: GPORCA
+(17 rows)
+
+-- Both subqueries have no WHERE clause. Previously crashed the segment in
+-- GroupedMatchSubquery via IsA(NULL, BoolExpr); ORCA should now produce a
+-- plan that shares the scan of s1.
+explain (costs off) select *
+from
+(select avg(b) from s1) q1,
+(select avg(b) from s1) q2;
+                        QUERY PLAN                        
+----------------------------------------------------------
+ Sequence
+   ->  Shared Scan (share slice:id 0:0)
+         ->  Gather Motion 3:1  (slice1; segments: 3)
+               ->  Seq Scan on s1
+   ->  Nested Loop
+         Join Filter: true
+         ->  Aggregate
+               ->  Shared Scan (share slice:id 0:0)
+         ->  Materialize
+               ->  Aggregate
+                     ->  Shared Scan (share slice:id 0:0)
+ Optimizer: GPORCA
+(12 rows)
+
+drop table s1, s2;
+reset optimizer;

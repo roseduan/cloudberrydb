@@ -22,6 +22,10 @@ NAME = gppc
 SO_MAJOR_VERSION = 1
 SO_MINOR_VERSION = 2
 
+# Export the GPPC public API (PG16 Makefile.shlib hides all symbols
+# without an explicit export list or PGDLLEXPORT).
+SHLIB_EXPORTS = exports.txt
+
 override CPPFLAGS := $(CPPFLAGS) -I$(includedir_server) -I$(includedir_internal)
 OBJS = gppc.o
 

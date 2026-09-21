@@ -5,7 +5,7 @@
  *
  * Portions Copyright (c) 2005-2008, Greenplum inc
  * Portions Copyright (c) 2012-Present VMware, Inc. or its affiliates.
- * Portions Copyright (c) 1996-2021, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2023, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  *
@@ -30,6 +30,7 @@
 #include "optimizer/optimizer.h"
 #include "optimizer/pathnode.h"
 #include "optimizer/paths.h"
+#include "optimizer/placeholder.h"
 #include "optimizer/planmain.h"
 #include "optimizer/prep.h"
 #include "optimizer/restrictinfo.h"
@@ -75,13 +76,17 @@ static int	append_startup_cost_compare(const ListCell *a, const ListCell *b);
 static List *reparameterize_pathlist_by_child(PlannerInfo *root,
 											  List *pathlist,
 											  RelOptInfo *child_rel);
+static bool contain_references_to(PlannerInfo *root, Node *clause,
+								  Relids relids);
+static bool ris_contain_references_to(PlannerInfo *root, List *rinfos,
+									  Relids relids);
 
 static bool set_append_path_locus(PlannerInfo *root, Path *pathnode, RelOptInfo *rel,
 					  List *pathkeys, int parallel_workers, bool parallel_aware);
 static CdbPathLocus
 adjust_modifytable_subpath(PlannerInfo *root, CmdType operation,
-							int resultRelationRTI, Path **pSubpath,
-							bool splitUpdate);
+							List *resultRelationRTI, Path **pSubpath,
+							bool splitUpdate, List *mergeActionLists);
 
 static Path*
 adjust_foreign_table_insert_order(PlannerInfo *root, Path*orig_path, int res_rti, ModifyPathExtraData *extra);
@@ -133,7 +138,7 @@ compare_path_costs(Path *path1, Path *path2, CostSelector criterion)
 }
 
 /*
- * compare_path_fractional_costs
+ * compare_fractional_path_costs
  *	  Return -1, 0, or +1 according as path1 is cheaper, the same cost,
  *	  or more expensive than path2 for fetching the specified fraction
  *	  of the total tuples.
@@ -1036,7 +1041,7 @@ create_seqscan_path(PlannerInfo *root, RelOptInfo *rel,
 	pathnode->pathtarget = rel->reltarget;
 	pathnode->param_info = get_baserel_parampathinfo(root, rel,
 													 required_outer);
-	pathnode->parallel_aware = parallel_workers > 0 ? true : false;
+	pathnode->parallel_aware = (parallel_workers > 0);
 	pathnode->parallel_safe = rel->consider_parallel;
 	pathnode->pathkeys = NIL;	/* seqscan has unordered result */
 
@@ -1094,9 +1099,7 @@ create_samplescan_path(PlannerInfo *root, RelOptInfo *rel, Relids required_outer
  * 'indexorderbycols' is an integer list of index column numbers (zero based)
  *			the ordering operators can be used with.
  * 'pathkeys' describes the ordering of the path.
- * 'indexscandir' is ForwardScanDirection or BackwardScanDirection
- *			for an ordered index, or NoMovementScanDirection for
- *			an unordered index.
+ * 'indexscandir' is either ForwardScanDirection or BackwardScanDirection.
  * 'indexonly' is true if an index-only scan is wanted.
  * 'required_outer' is the set of outer relids for a parameterized path.
  * 'loop_count' is the number of repetitions of the indexscan to factor into
@@ -1178,7 +1181,7 @@ create_bitmap_heap_path(PlannerInfo *root,
 	pathnode->path.pathtarget = rel->reltarget;
 	pathnode->path.param_info = get_baserel_parampathinfo(root, rel,
 														  required_outer);
-	pathnode->path.parallel_aware = parallel_degree > 0 ? true : false;
+	pathnode->path.parallel_aware = (parallel_degree > 0);
 	pathnode->path.parallel_safe = rel->consider_parallel;
 	pathnode->path.pathkeys = NIL;	/* always unordered */
 
@@ -1420,15 +1423,17 @@ create_append_path(PlannerInfo *root,
 	pathnode->path.pathtarget = rel->reltarget;
 
 	/*
-	 * When generating an Append path for a partitioned table, there may be
-	 * parameterized quals that are useful for run-time pruning.  Hence,
-	 * compute path.param_info the same way as for any other baserel, so that
-	 * such quals will be available for make_partition_pruneinfo().  (This
-	 * would not work right for a non-baserel, ie a scan on a non-leaf child
-	 * partition, and it's not necessary anyway in that case.  Must skip it if
-	 * we don't have "root", too.)
+	 * If this is for a baserel (not a join or non-leaf partition), we prefer
+	 * to apply get_baserel_parampathinfo to construct a full ParamPathInfo
+	 * for the path.  This supports building a Memoize path atop this path,
+	 * and if this is a partitioned table the info may be useful for run-time
+	 * pruning (cf make_partition_pruneinfo()).
+	 *
+	 * However, if we don't have "root" then that won't work and we fall back
+	 * on the simpler get_appendrel_parampathinfo.  There's no point in doing
+	 * the more expensive thing for a dummy path, either.
 	 */
-	if (root && rel->reloptkind == RELOPT_BASEREL && IS_PARTITIONED_REL(rel))
+	if (rel->reloptkind == RELOPT_BASEREL && root && subpaths != NIL)
 		pathnode->path.param_info = get_baserel_parampathinfo(root,
 															  rel,
 															  required_outer);
@@ -1473,7 +1478,7 @@ create_append_path(PlannerInfo *root,
 	 * Apply query-wide LIMIT if known and path is for sole base relation.
 	 * (Handling this at this low level is a bit klugy.)
 	 */
-	if (root != NULL && bms_equal(rel->relids, root->all_baserels))
+	if (root != NULL && bms_equal(rel->relids, root->all_query_rels))
 		pathnode->limit_tuples = root->limit_tuples;
 	else
 		pathnode->limit_tuples = -1.0;
@@ -1504,19 +1509,28 @@ create_append_path(PlannerInfo *root,
 #endif
 
 	/*
-	 * If there's exactly one child path, the Append is a no-op and will be
-	 * discarded later (in setrefs.c); therefore, we can inherit the child's
-	 * size and cost, as well as its pathkeys if any (overriding whatever the
-	 * caller might've said).  Otherwise, we must do the normal costsize
+	 * If there's exactly one child path then the output of the Append is
+	 * necessarily ordered the same as the child's, so we can inherit the
+	 * child's pathkeys if any, overriding whatever the caller might've said.
+	 * Furthermore, if the child's parallel awareness matches the Append's,
+	 * then the Append is a no-op and will be discarded later (in setrefs.c).
+	 * Then we can inherit the child's size and cost too, effectively charging
+	 * zero for the Append.  Otherwise, we must do the normal costsize
 	 * calculation.
 	 */
 	if (list_length(pathnode->subpaths) == 1)
 	{
 		Path	   *child = (Path *) linitial(pathnode->subpaths);
 
-		pathnode->path.rows = child->rows;
-		pathnode->path.startup_cost = child->startup_cost;
-		pathnode->path.total_cost = child->total_cost;
+		if (child->parallel_aware == parallel_aware)
+		{
+			pathnode->path.rows = child->rows;
+			pathnode->path.startup_cost = child->startup_cost;
+			pathnode->path.total_cost = child->total_cost;
+		}
+		else
+			cost_append(pathnode);
+		/* Must do this last, else cost_append complains */
 		pathnode->path.pathkeys = child->pathkeys;
 	}
 	else
@@ -1605,7 +1619,7 @@ create_merge_append_path(PlannerInfo *root,
 	 * Apply query-wide LIMIT if known and path is for sole base relation.
 	 * (Handling this at this low level is a bit klugy.)
 	 */
-	if (bms_equal(rel->relids, root->all_baserels))
+	if (bms_equal(rel->relids, root->all_query_rels))
 		pathnode->limit_tuples = root->limit_tuples;
 	else
 		pathnode->limit_tuples = -1.0;
@@ -1662,10 +1676,13 @@ create_merge_append_path(PlannerInfo *root,
 
 	/*
 	 * Now we can compute total costs of the MergeAppend.  If there's exactly
-	 * one child path, the MergeAppend is a no-op and will be discarded later
-	 * (in setrefs.c); otherwise we do the normal cost calculation.
+	 * one child path and its parallel awareness matches that of the
+	 * MergeAppend, then the MergeAppend is a no-op and will be discarded
+	 * later (in setrefs.c); otherwise we do the normal cost calculation.
 	 */
-	if (list_length(subpaths) == 1)
+	if (list_length(subpaths) == 1 &&
+		((Path *) linitial(subpaths))->parallel_aware ==
+		pathnode->path.parallel_aware)
 	{
 		pathnode->path.startup_cost = input_startup_cost;
 		pathnode->path.total_cost = input_total_cost;
@@ -2075,7 +2092,8 @@ set_append_path_locus(PlannerInfo *root, Path *pathnode, RelOptInfo *rel,
 												  (Expr *) makeSegmentFilterExpr(
 													  gp_session_id % numsegments),
 												  true,		/* is_pushed_down */
-												  false,	/* outerjoin_delayed */
+												  false,	/* has_clone */
+												  false,	/*.is_clone */
 												  true,		/* pseudoconstant */
 												  0,		/* security_level */
 												  NULL,		/* required_relids */
@@ -2165,12 +2183,28 @@ set_append_path_locus(PlannerInfo *root, Path *pathnode, RelOptInfo *rel,
 	 */
 	pathnode->parallel_workers = targetlocus.parallel_workers;
 
+	/*
+	 * set_append_path_locus may change parallel_workers (via targetlocus),
+	 * which can make it inconsistent with parallel_aware set by the caller.
+	 *
+	 * If parallel_workers was reduced to <= 1, force parallel_aware to false
+	 * to prevent inconsistent state (e.g., parallel_aware=true with
+	 * parallel_workers=0 causes cost_append to take the parallel branch
+	 * incorrectly, leading to memory corruption).
+	 *
+	 * Do NOT force parallel_aware to true when parallel_workers > 1, as that
+	 * would override the caller's setting (e.g., enable_parallel_append GUC),
+	 * causing barrier deadlocks in partitionwise join plans where Parallel
+	 * Append distributes Parallel Hash Join children across different workers.
+	 */
+	if (pathnode->parallel_workers <= 1)
+		pathnode->parallel_aware = false;
+
 	AssertImply(pathnode->parallel_workers > 1 &&
 				!CdbPathLocus_IsEntry(targetlocus) &&
 				!CdbPathLocus_IsOuterQuery(targetlocus) &&
 				!CdbPathLocus_IsGeneral(targetlocus) &&
 				!CdbPathLocus_IsSingleQE(targetlocus), targetlocus.parallel_workers > 1);
-
 	*subpaths_out = new_subpaths;
 
 	return true;
@@ -2302,7 +2336,7 @@ create_memoize_path(PlannerInfo *root, RelOptInfo *rel, Path *subpath,
 	pathnode->param_exprs = param_exprs;
 	pathnode->singlerow = singlerow;
 	pathnode->binary_mode = binary_mode;
-	pathnode->calls = calls;
+	pathnode->calls = clamp_row_est(calls);
 
 	/*
 	 * For now we set est_entries to 0.  cost_memoize_rescan() does all the
@@ -2438,8 +2472,13 @@ create_unique_path(PlannerInfo *root, RelOptInfo *rel, Path *subpath,
 	pathnode->path.pathkeys = NIL;
 
 	pathnode->subpath = subpath;
-	pathnode->in_operators = sjinfo->semi_operators;
-	pathnode->uniq_exprs = sjinfo->semi_rhs_exprs;
+
+	/*
+	 * Under GEQO, the sjinfo might be short-lived, so we'd better make copies
+	 * of data structures we extract from it.
+	 */
+	pathnode->in_operators = copyObject(sjinfo->semi_operators);
+	pathnode->uniq_exprs = copyObject(sjinfo->semi_rhs_exprs);
 
 	/*
 	 * If the input is a relation and it has a unique index that proves the
@@ -3042,9 +3081,15 @@ create_gather_path(PlannerInfo *root, RelOptInfo *rel, Path *subpath,
  * create_subqueryscan_path
  *	  Creates a path corresponding to a scan of a subquery,
  *	  returning the pathnode.
+ *
+ * Caller must pass trivial_pathtarget = true if it believes rel->reltarget to
+ * be trivial, ie just a fetch of all the subquery output columns in order.
+ * While we could determine that here, the caller can usually do it more
+ * efficiently (or at least amortize it over multiple calls).
  */
 SubqueryScanPath *
 create_subqueryscan_path(PlannerInfo *root, RelOptInfo *rel, Path *subpath,
+						 bool trivial_pathtarget,
 						 List *pathkeys, CdbPathLocus locus, Relids required_outer)
 {
 	SubqueryScanPath *pathnode = makeNode(SubqueryScanPath);
@@ -3068,7 +3113,8 @@ create_subqueryscan_path(PlannerInfo *root, RelOptInfo *rel, Path *subpath,
 	pathnode->path.sameslice_relids = NULL;
 
 	pathnode->required_outer = bms_copy(required_outer);
-	cost_subqueryscan(pathnode, root, rel, pathnode->path.param_info);
+	cost_subqueryscan(pathnode, root, rel, pathnode->path.param_info,
+					  trivial_pathtarget);
 
 	return pathnode;
 }
@@ -3838,12 +3884,6 @@ calc_nestloop_required_outer(Relids outerrelids,
 	/* ... and remove any mention of now-satisfied outer rels */
 	required_outer = bms_del_members(required_outer,
 									 outerrelids);
-	/* maintain invariant that required_outer is exactly NULL if empty */
-	if (bms_is_empty(required_outer))
-	{
-		bms_free(required_outer);
-		required_outer = NULL;
-	}
 	return required_outer;
 }
 
@@ -3995,12 +4035,12 @@ create_nestloop_path(PlannerInfo *root,
 	 * restrict_clauses that are due to be moved into the inner path.  We have
 	 * to do this now, rather than postpone the work till createplan time,
 	 * because the restrict_clauses list can affect the size and cost
-	 * estimates for this path.
+	 * estimates for this path.  We detect such clauses by checking for serial
+	 * number match to clauses already enforced in the inner path.
 	 */
 	if (bms_overlap(inner_req_outer, outer_path->parent->relids))
 	{
-		Relids		inner_and_outer = bms_union(inner_path->parent->relids,
-												inner_req_outer);
+		Bitmapset  *enforced_serials = get_param_path_clause_serials(inner_path);
 		List	   *jclauses = NIL;
 		ListCell   *lc;
 
@@ -4008,20 +4048,17 @@ create_nestloop_path(PlannerInfo *root,
 		{
 			RestrictInfo *rinfo = (RestrictInfo *) lfirst(lc);
 
-			if (!join_clause_is_movable_into(rinfo,
-											 inner_path->parent->relids,
-											 inner_and_outer))
+			if (!bms_is_member(rinfo->rinfo_serial, enforced_serials))
 				jclauses = lappend(jclauses, rinfo);
 		}
 		restrict_clauses = jclauses;
 	}
 
-
 	pathnode = makeNode(NestPath);
-	pathnode->path.pathtype = T_NestLoop;
-	pathnode->path.parent = joinrel;
-	pathnode->path.pathtarget = joinrel->reltarget;
-	pathnode->path.param_info =
+	pathnode->jpath.path.pathtype = T_NestLoop;
+	pathnode->jpath.path.parent = joinrel;
+	pathnode->jpath.path.pathtarget = joinrel->reltarget;
+	pathnode->jpath.path.param_info =
 		get_joinrel_parampathinfo(root,
 								  joinrel,
 								  outer_path,
@@ -4029,30 +4066,31 @@ create_nestloop_path(PlannerInfo *root,
 								  extra->sjinfo,
 								  required_outer,
 								  &restrict_clauses);
-	pathnode->path.parallel_aware = false;
-	pathnode->path.parallel_safe = joinrel->consider_parallel &&
+	pathnode->jpath.path.parallel_aware = false;
+	pathnode->jpath.path.parallel_safe = joinrel->consider_parallel &&
 		outer_path->parallel_safe && inner_path->parallel_safe;
 #if 0
 	/* This is a foolish way to estimate parallel_workers, but for now... */
 	pathnode->path.parallel_workers = outer_path->parallel_workers;
 #endif
 	/* GPDB parallel, use join locus parallel_workers as we may add Motion path above inner and outer */
-	pathnode->path.parallel_workers = join_locus.parallel_workers;
-	pathnode->path.pathkeys = pathkeys;
-	pathnode->jointype = jointype;
-	pathnode->inner_unique = extra->inner_unique;
-	pathnode->outerjoinpath = outer_path;
-	pathnode->innerjoinpath = inner_path;
-	pathnode->joinrestrictinfo = restrict_clauses;
 
-	pathnode->path.locus = join_locus;
-	pathnode->path.motionHazard = outer_path->motionHazard || inner_path->motionHazard;
-	pathnode->path.barrierHazard = outer_path->barrierHazard || inner_path->barrierHazard;
+	pathnode->jpath.path.parallel_workers = join_locus.parallel_workers;
+	pathnode->jpath.path.pathkeys = pathkeys;
+	pathnode->jpath.jointype = jointype;
+	pathnode->jpath.inner_unique = extra->inner_unique;
+	pathnode->jpath.outerjoinpath = outer_path;
+	pathnode->jpath.innerjoinpath = inner_path;
+	pathnode->jpath.joinrestrictinfo = restrict_clauses;
+
+	pathnode->jpath.path.locus = join_locus;
+	pathnode->jpath.path.motionHazard = outer_path->motionHazard || inner_path->motionHazard;
+	pathnode->jpath.path.barrierHazard = outer_path->barrierHazard || inner_path->barrierHazard;
 
 	/* we're only as rescannable as our child plans */
-	pathnode->path.rescannable = outer_path->rescannable && inner_path->rescannable;
+	pathnode->jpath.path.rescannable = outer_path->rescannable && inner_path->rescannable;
 
-	pathnode->path.sameslice_relids = bms_union(inner_path->sameslice_relids, outer_path->sameslice_relids);
+	pathnode->jpath.path.sameslice_relids = bms_union(inner_path->sameslice_relids, outer_path->sameslice_relids);
 
 	/*
 	 * inner_path & outer_path are possibly modified above. Let's recalculate
@@ -4070,7 +4108,7 @@ create_nestloop_path(PlannerInfo *root,
 		return (Path *) create_unique_rowid_path(root,
 												 joinrel,
 												 (Path *) pathnode,
-												 pathnode->innerjoinpath->parent->relids,
+												 pathnode->jpath.innerjoinpath->parent->relids,
 												 rowidexpr_id);
 	}
 
@@ -4093,7 +4131,7 @@ create_nestloop_path(PlannerInfo *root,
 	 */
 	return turn_volatile_seggen_to_singleqe(root,
 											(Path *) pathnode,
-											(Node *) (pathnode->joinrestrictinfo));
+											(Node *) (pathnode->jpath.joinrestrictinfo));
 }
 
 /*
@@ -5085,43 +5123,23 @@ create_agg_path(PlannerInfo *root,
 	pathnode->path.parallel_safe = rel->consider_parallel &&
 		subpath->parallel_safe;
 	pathnode->path.parallel_workers = subpath->parallel_workers;
+
 	if (aggstrategy == AGG_SORTED)
 	{
 		/*
-		 * When building execution paths, GroupAggregate was incorrectly inheriting all pathkeys from its subpath,
-		 * even when it cannot preserve the ordering of all columns.
-		 * This occurs because GroupAggregate only maintains ordering for columns that are part of GROUP BY or appear
-		 * in the target list in a way that preserves ordering semantics, but columns used as aggregate function arguments
-		 * lose their ordering guarantees.
-		 * The problematic case appears in queries where a subpath (like Unique with DISTINCT) provides ordering on multiple columns,
-		 * but the outer GroupAggregate only groups by a subset of those columns.
-		 * For example, when a query performs DISTINCT on two columns then groups by only the first column with an aggregate on the second,
-		 * the GroupAggregate cannot preserve ordering on the second column since it becomes an aggregate argument.
-		 *
-		 * SELECT para, max(para_name) para_name FROM (
-		 * SELECT DISTINCT pram_tp_nm || '' || PROC_NM || '' || ISP_GR_KEY_ID AS para, '[' || proc_nm || '] ' || isp_atc_nm AS para_name
-		 * FROM t_issue_internal_738
-		 * ) z GROUP BY para;
+		 * Attempt to preserve the order of the subpath.  Additional pathkeys
+		 * may have been added in adjust_group_pathkeys_for_groupagg() to
+		 * support ORDER BY / DISTINCT aggregates.  Pathkeys added there
+		 * belong to columns within the aggregate function, so we must strip
+		 * these additional pathkeys off as those columns are unavailable
+		 * above the aggregate node.
 		 */
-		List *pathkeys = NIL;
-		ListCell *i;
-
-		foreach(i, subpath->pathkeys)
-		{
-			PathKey    *pathkey = (PathKey *) lfirst(i);
-			EquivalenceClass *ec = pathkey->pk_eclass;
-
-			ListCell *lc;
-			foreach(lc, target->exprs)
-			{
-				Expr *expr = (Expr*) lfirst(lc);
-				EquivalenceMember *em =  find_ec_member_matching_expr(ec, expr, rel->relids);
-				/* ok, we could preserves the order */
-				if (em)
-					pathkeys = lappend(pathkeys, pathkey);
-			}
-		}
-		pathnode->path.pathkeys = pathkeys;	/* preserves order */
+		if (list_length(subpath->pathkeys) > root->num_groupby_pathkeys)
+			pathnode->path.pathkeys = list_copy_head(subpath->pathkeys,
+			 	root->num_groupby_pathkeys > list_length(groupClause) ?
+				 root->num_groupby_pathkeys : list_length(groupClause));
+		else
+			pathnode->path.pathkeys = subpath->pathkeys;	/* preserves order */
 	}
 	else
 		pathnode->path.pathkeys = NIL;	/* output is unordered */
@@ -5560,7 +5578,7 @@ create_minmaxagg_path(PlannerInfo *root,
 	/* For now, assume we are above any joins, so no parameterization */
 	pathnode->path.param_info = NULL;
 	pathnode->path.parallel_aware = false;
-	/* A MinMaxAggPath implies use of subplans, so cannot be parallel-safe */
+	/* A MinMaxAggPath implies use of initplans, so cannot be parallel-safe */
 	pathnode->path.parallel_safe = false;
 	pathnode->path.parallel_workers = 0;
 	/* Result is one unordered row */
@@ -5645,6 +5663,10 @@ create_minmaxagg_path(PlannerInfo *root,
  * 'target' is the PathTarget to be computed
  * 'windowFuncs' is a list of WindowFunc structs
  * 'winclause' is a WindowClause that is common to all the WindowFuncs
+ * 'qual' WindowClause.runconditions from lower-level WindowAggPaths.
+ *		Must always be NIL when topwindow == false
+ * 'topwindow' pass as true only for the top-level WindowAgg. False for all
+ *		intermediate WindowAggs.
  *
  * The input must be sorted according to the WindowClause's PARTITION keys
  * plus ORDER BY keys.
@@ -5655,9 +5677,14 @@ create_windowagg_path(PlannerInfo *root,
 					  Path *subpath,
 					  PathTarget *target,
 					  List *windowFuncs,
-					  WindowClause *winclause)
+					  WindowClause *winclause,
+					  List *qual,
+					  bool topwindow)
 {
 	WindowAggPath *pathnode = makeNode(WindowAggPath);
+
+	/* qual can only be set for the topwindow */
+	Assert(qual == NIL || topwindow);
 
 	pathnode->path.pathtype = T_WindowAgg;
 	pathnode->path.parent = rel;
@@ -5674,6 +5701,8 @@ create_windowagg_path(PlannerInfo *root,
 
 	pathnode->subpath = subpath;
 	pathnode->winclause = winclause;
+	pathnode->qual = qual;
+	pathnode->topwindow = topwindow;
 
 	/*
 	 * For costing purposes, assume that there are no redundant partitioning
@@ -5863,14 +5892,15 @@ create_lockrows_path(PlannerInfo *root, RelOptInfo *rel,
 
 /*
  * create_modifytable_path
- *	  Creates a pathnode that represents performing INSERT/UPDATE/DELETE mods
+ *	  Creates a pathnode that represents performing INSERT/UPDATE/DELETE/MERGE
+ *	  mods
  *
  * 'rel' is the parent relation associated with the result
  * 'subpath' is a Path producing source data
  * 'operation' is the operation type
  * 'canSetTag' is true if we set the command tag/es_processed
  * 'nominalRelation' is the parent RT index for use of EXPLAIN
- * 'rootRelation' is the partitioned table root RT index, or 0 if none
+ * 'rootRelation' is the partitioned/inherited table root RTI, or 0 if none
  * 'partColsUpdated' is true if any partitioning columns are being updated,
  *		either from the target relation or a descendent partitioned table.
  * 'resultRelations' is an integer list of actual RT indexes of target rel(s)
@@ -5881,6 +5911,7 @@ create_lockrows_path(PlannerInfo *root, RelOptInfo *rel,
  * 'rowMarks' is a list of PlanRowMarks (non-locking only)
  * 'onconflict' is the ON CONFLICT clause, or NULL
  * 'epqParam' is the ID of Param for EvalPlanQual re-eval
+ * 'mergeActionLists' is a list of lists of MERGE actions (one per rel)
  */
 ModifyTablePath *
 create_modifytable_path(PlannerInfo *root, RelOptInfo *rel,
@@ -5893,13 +5924,14 @@ create_modifytable_path(PlannerInfo *root, RelOptInfo *rel,
 						List *updateColnosLists,
 						List *withCheckOptionLists, List *returningLists,
 						List *rowMarks, OnConflictExpr *onconflict,
-						int epqParam, ModifyPathExtraData *extra)
+						List *mergeActionLists, int epqParam, ModifyPathExtraData *extra)
 {
 	ModifyTablePath *pathnode = makeNode(ModifyTablePath);
 
-	Assert(operation == CMD_UPDATE ?
-		   list_length(resultRelations) == list_length(updateColnosLists) :
-		   updateColnosLists == NIL);
+	Assert(operation == CMD_MERGE ||
+		   (operation == CMD_UPDATE ?
+			list_length(resultRelations) == list_length(updateColnosLists) :
+			updateColnosLists == NIL));
 	Assert(withCheckOptionLists == NIL ||
 		   list_length(resultRelations) == list_length(withCheckOptionLists));
 	Assert(returningLists == NIL ||
@@ -5924,9 +5956,10 @@ create_modifytable_path(PlannerInfo *root, RelOptInfo *rel,
 	{
 		pathnode->path.locus =
 			adjust_modifytable_subpath(root, operation,
-										linitial_int(resultRelations),
+										resultRelations,
 										&subpath, /* IN-OUT argument */
-										splitUpdate);
+										splitUpdate,
+										mergeActionLists);
 
 		if (root->parse->commandType == CMD_INSERT &&
 			list_length(resultRelations) == 1 &&
@@ -5992,6 +6025,7 @@ create_modifytable_path(PlannerInfo *root, RelOptInfo *rel,
 	pathnode->rowMarks = rowMarks;
 	pathnode->onconflict = onconflict;
 	pathnode->epqParam = epqParam;
+	pathnode->mergeActionLists = mergeActionLists;
 
 	return pathnode;
 }
@@ -6008,8 +6042,8 @@ create_modifytable_path(PlannerInfo *root, RelOptInfo *rel,
  */
 static CdbPathLocus
 adjust_modifytable_subpath(PlannerInfo *root, CmdType operation,
-							int resultRelationRTI, Path **pSubpath,
-							bool splitUpdate)
+							List *resultRelations, Path **pSubpath,
+							bool splitUpdate, List *mergeActionLists)
 {
 	/*
 	 * The input plans must be distributed correctly.
@@ -6020,7 +6054,7 @@ adjust_modifytable_subpath(PlannerInfo *root, CmdType operation,
 
 
 	{
-		int			rti = resultRelationRTI;
+		int			rti = linitial_int(resultRelations);
 		Path *subpath = *pSubpath;
 		RangeTblEntry *rte = rt_fetch(rti, root->parse->rtable);
 		GpPolicy   *targetPolicy;
@@ -6065,6 +6099,10 @@ adjust_modifytable_subpath(PlannerInfo *root, CmdType operation,
 			else
 				subpath = create_motion_path_for_upddel(root, rti, targetPolicy, subpath);
 		}
+		else if(operation == CMD_MERGE)
+		{
+			subpath = create_motion_path_for_merge(root, resultRelations, targetPolicy, mergeActionLists, subpath);
+		}		
 		*pSubpath = subpath;
 	}
 
@@ -6308,10 +6346,23 @@ reparameterize_path(PlannerInfo *root, Path *path,
 		case T_SubqueryScan:
 			{
 				SubqueryScanPath *spath = (SubqueryScanPath *) path;
+				Path	   *subpath = spath->subpath;
+				bool		trivial_pathtarget;
+
+				/*
+				 * If existing node has zero extra cost, we must have decided
+				 * its target is trivial.  (The converse is not true, because
+				 * it might have a trivial target but quals to enforce; but in
+				 * that case the new node will too, so it doesn't matter
+				 * whether we get the right answer here.)
+				 */
+				trivial_pathtarget =
+					(subpath->total_cost == spath->path.total_cost);
 
 				return (Path *) create_subqueryscan_path(root,
 														 rel,
-														 spath->subpath,
+														 subpath,
+														 trivial_pathtarget,
 														 spath->path.pathkeys,
 														 spath->path.locus,
 														 required_outer);
@@ -6354,6 +6405,18 @@ reparameterize_path(PlannerInfo *root, Path *path,
 									   apath->path.parallel_aware,
 									   -1);
 			}
+		case T_Material:
+		{
+			MaterialPath *mpath = (MaterialPath *) path;
+			Path	   *spath = mpath->subpath;
+
+			spath = reparameterize_path(root, spath,
+										required_outer,
+										loop_count);
+			if (spath == NULL)
+				return NULL;
+			return (Path *) create_material_path(rel, spath);
+		}
 		case T_Memoize:
 			{
 				MemoizePath *mpath = (MemoizePath *) path;
@@ -6388,7 +6451,8 @@ reparameterize_path(PlannerInfo *root, Path *path,
  * path->parent, which does not change during the translation. Hence those
  * members are copied as they are.
  *
- * If the given path can not be reparameterized, the function returns NULL.
+ * Currently, only a few path types are supported here, though more could be
+ * added at need.  We return NULL if we can't reparameterize the given path.
  */
 Path *
 reparameterize_path_by_child(PlannerInfo *root, Path *path,
@@ -6402,8 +6466,8 @@ reparameterize_path_by_child(PlannerInfo *root, Path *path,
 #define ADJUST_CHILD_ATTRS(node) \
 	((node) = \
 	 (List *) adjust_appendrel_attrs_multilevel(root, (Node *) (node), \
-												child_rel->relids, \
-												child_rel->top_parent_relids))
+												child_rel, \
+												child_rel->top_parent))
 
 #define REPARAMETERIZE_CHILD_PATH(path) \
 do { \
@@ -6451,12 +6515,58 @@ do { \
 	switch (nodeTag(path))
 	{
 		case T_Path:
+
+			/*
+			 * If the path's restriction clauses contain lateral references to
+			 * the other relation, we can't reparameterize, because we must
+			 * not change the RelOptInfo's contents here.  (Doing so would
+			 * break things if we end up using a non-partitionwise join.)
+			 */
+			if (ris_contain_references_to(root,
+										  path->parent->baserestrictinfo,
+										  child_rel->top_parent_relids))
+				return NULL;
+
+			/*
+			 * If it's a SampleScan with tablesample parameters referencing
+			 * the other relation, we can't reparameterize, because we must
+			 * not change the RTE's contents here.  (Doing so would break
+			 * things if we end up using a non-partitionwise join.)
+			 */
+			if (path->pathtype == T_SampleScan)
+			{
+				Index		scan_relid = path->parent->relid;
+				RangeTblEntry *rte;
+
+				/* it should be a base rel with a tablesample clause... */
+				Assert(scan_relid > 0);
+				rte = planner_rt_fetch(scan_relid, root);
+				Assert(rte->rtekind == RTE_RELATION);
+				Assert(rte->tablesample != NULL);
+
+				if (contain_references_to(root, (Node *) rte->tablesample,
+										  child_rel->top_parent_relids))
+					return NULL;
+			}
+
 			FLAT_COPY_PATH(new_path, path, Path);
 			break;
 
 		case T_IndexPath:
 			{
 				IndexPath  *ipath;
+
+				/*
+				 * If the path's restriction clauses contain lateral
+				 * references to the other relation, we can't reparameterize,
+				 * because we must not change the IndexOptInfo's contents
+				 * here.  (Doing so would break things if we end up using a
+				 * non-partitionwise join.)
+				 */
+				if (ris_contain_references_to(root,
+											  path->parent->baserestrictinfo,
+											  child_rel->top_parent_relids))
+					return NULL;
 
 				FLAT_COPY_PATH(ipath, path, IndexPath);
 				ADJUST_CHILD_ATTRS(ipath->indexclauses);
@@ -6467,6 +6577,18 @@ do { \
 		case T_BitmapHeapPath:
 			{
 				BitmapHeapPath *bhpath;
+
+				/*
+				 * If the path's restriction clauses contain lateral
+				 * references to the other relation, we can't reparameterize,
+				 * because we must not change the RelOptInfo's contents here.
+				 * (Doing so would break things if we end up using a
+				 * non-partitionwise join.)
+				 */
+				if (ris_contain_references_to(root,
+											  path->parent->baserestrictinfo,
+											  child_rel->top_parent_relids))
+					return NULL;
 
 				FLAT_COPY_PATH(bhpath, path, BitmapHeapPath);
 				REPARAMETERIZE_CHILD_PATH(bhpath->bitmapqual);
@@ -6499,6 +6621,18 @@ do { \
 				ForeignPath *fpath;
 				ReparameterizeForeignPathByChild_function rfpc_func;
 
+				/*
+				 * If the path's restriction clauses contain lateral
+				 * references to the other relation, we can't reparameterize,
+				 * because we must not change the RelOptInfo's contents here.
+				 * (Doing so would break things if we end up using a
+				 * non-partitionwise join.)
+				 */
+				if (ris_contain_references_to(root,
+											  path->parent->baserestrictinfo,
+											  child_rel->top_parent_relids))
+					return NULL;
+
 				FLAT_COPY_PATH(fpath, path, ForeignPath);
 				if (fpath->fdw_outerpath)
 					REPARAMETERIZE_CHILD_PATH(fpath->fdw_outerpath);
@@ -6517,6 +6651,18 @@ do { \
 			{
 				CustomPath *cpath;
 
+				/*
+				 * If the path's restriction clauses contain lateral
+				 * references to the other relation, we can't reparameterize,
+				 * because we must not change the RelOptInfo's contents here.
+				 * (Doing so would break things if we end up using a
+				 * non-partitionwise join.)
+				 */
+				if (ris_contain_references_to(root,
+											  path->parent->baserestrictinfo,
+											  child_rel->top_parent_relids))
+					return NULL;
+
 				FLAT_COPY_PATH(cpath, path, CustomPath);
 				REPARAMETERIZE_CHILD_PATH_LIST(cpath->custom_paths);
 				if (cpath->methods &&
@@ -6532,13 +6678,15 @@ do { \
 		case T_NestPath:
 			{
 				JoinPath   *jpath;
+				NestPath   *npath;
 
-				FLAT_COPY_PATH(jpath, path, NestPath);
+				FLAT_COPY_PATH(npath, path, NestPath);
 
+				jpath = (JoinPath *) npath;
 				REPARAMETERIZE_CHILD_PATH(jpath->outerjoinpath);
 				REPARAMETERIZE_CHILD_PATH(jpath->innerjoinpath);
 				ADJUST_CHILD_ATTRS(jpath->joinrestrictinfo);
-				new_path = (Path *) jpath;
+				new_path = (Path *) npath;
 			}
 			break;
 
@@ -6583,7 +6731,15 @@ do { \
 				new_path = (Path *) apath;
 			}
 			break;
+		case T_MaterialPath:
+		{
+			MaterialPath *mpath;
 
+			FLAT_COPY_PATH(mpath, path, MaterialPath);
+			REPARAMETERIZE_CHILD_PATH(mpath->subpath);
+			new_path = (Path *) mpath;
+		}
+			break;
 		case T_MemoizePath:
 			{
 				MemoizePath *mpath;
@@ -6618,8 +6774,8 @@ do { \
 	old_ppi = new_path->param_info;
 	required_outer =
 		adjust_child_relids_multilevel(root, old_ppi->ppi_req_outer,
-									   child_rel->relids,
-									   child_rel->top_parent_relids);
+									   child_rel,
+									   child_rel->top_parent);
 
 	/* If we already have a PPI for this parameterization, just return it */
 	new_ppi = find_param_path_info(new_path->parent, required_outer);
@@ -6641,6 +6797,7 @@ do { \
 		new_ppi->ppi_rows = old_ppi->ppi_rows;
 		new_ppi->ppi_clauses = old_ppi->ppi_clauses;
 		ADJUST_CHILD_ATTRS(new_ppi->ppi_clauses);
+		new_ppi->ppi_serials = bms_copy(old_ppi->ppi_serials);
 		rel->ppilist = lappend(rel->ppilist, new_ppi);
 
 		MemoryContextSwitchTo(oldcontext);
@@ -6765,4 +6922,92 @@ adjust_foreign_table_insert_order(PlannerInfo *root, Path*orig_path, int res_rti
 		return orig_path;
 	
 	return sorted_path;
+}
+
+/*
+ * contain_references_to
+ *		Detect whether any Vars or PlaceHolderVars in the given clause contain
+ *		lateral references to the given 'relids'.
+ */
+static bool
+contain_references_to(PlannerInfo *root, Node *clause, Relids relids)
+{
+	bool		ret = false;
+	List	   *vars;
+	ListCell   *lc;
+
+	/*
+	 * Examine all Vars and PlaceHolderVars used in the clause.
+	 *
+	 * By omitting the relevant flags, this also gives us a cheap sanity check
+	 * that no aggregates or window functions appear in the clause.  We don't
+	 * expect any of those in scan-level restrictions or tablesamples.
+	 */
+	vars = pull_var_clause(clause, PVC_INCLUDE_PLACEHOLDERS);
+	foreach(lc, vars)
+	{
+		Node	   *node = (Node *) lfirst(lc);
+
+		if (IsA(node, Var))
+		{
+			Var		   *var = (Var *) node;
+
+			if (bms_is_member(var->varno, relids))
+			{
+				ret = true;
+				break;
+			}
+		}
+		else if (IsA(node, PlaceHolderVar))
+		{
+			PlaceHolderVar *phv = (PlaceHolderVar *) node;
+			PlaceHolderInfo *phinfo = find_placeholder_info(root, phv);
+
+			/*
+			 * We should check both ph_eval_at (in case the PHV is to be
+			 * computed at the other relation and then laterally referenced
+			 * here) and ph_lateral (in case the PHV is to be evaluated here
+			 * but contains lateral references to the other relation).  The
+			 * former case should not occur in baserestrictinfo clauses, but
+			 * it can occur in tablesample clauses.
+			 */
+			if (bms_overlap(phinfo->ph_eval_at, relids) ||
+				bms_overlap(phinfo->ph_lateral, relids))
+			{
+				ret = true;
+				break;
+			}
+		}
+		else
+			Assert(false);
+	}
+
+	list_free(vars);
+
+	return ret;
+}
+
+/*
+ * ris_contain_references_to
+ *		Apply contain_references_to() to a list of RestrictInfos.
+ *
+ * We need extra code for this because pull_var_clause() can't descend
+ * through RestrictInfos.
+ */
+static bool
+ris_contain_references_to(PlannerInfo *root, List *rinfos, Relids relids)
+{
+	ListCell   *lc;
+
+	foreach(lc, rinfos)
+	{
+		RestrictInfo *rinfo = lfirst_node(RestrictInfo, lc);
+
+		/* Pseudoconstant clauses can't contain any Vars or PHVs */
+		if (rinfo->pseudoconstant)
+			continue;
+		if (contain_references_to(root, (Node *) rinfo->clause, relids))
+			return true;
+	}
+	return false;
 }

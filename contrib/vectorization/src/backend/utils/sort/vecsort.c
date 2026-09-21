@@ -24,6 +24,7 @@
 #include "utils/vecsort.h"
 #include "utils/arrow.h"
 #include "utils/tuptable_vec.h"
+#include "utils/logtape.h"
 #include "vecexecutor/execslot.h"
 
 typedef enum
@@ -133,7 +134,7 @@ struct VecTuplesortstate
 	 * the next tuple to return.  (In the tape case, the tape's current read
 	 * position is also critical state.)
 	 */
-	int			result_tape;	/* actual tape number of finished output */
+	LogicalTape *result_tape;	/* actual tape number of finished output */
 	int			current;		/* array index (only used if SORTEDINMEM) */
 	bool		eof_reached;	/* reached EOF (needed for cursors) */
 
@@ -220,7 +221,6 @@ static GArrowSortEncoding
 get_arrow_locale_from_collation(Oid collid)
 {
 	HeapTuple       tp;
-	Form_pg_collation collform;
 	const char *collcollate;
 
 	/* Callers must pass a valid OID */
@@ -246,13 +246,20 @@ get_arrow_locale_from_collation(Oid collid)
 	}
 	else
 	{
+		bool	   is_null;
+		Datum	   collcollate_datum;
+
 		tp = SearchSysCache1(COLLOID, ObjectIdGetDatum(collid));
 		if (!HeapTupleIsValid(tp))
 			elog(ERROR, "cache lookup failed for collation %u", collid);
 
-		collform = (Form_pg_collation) GETSTRUCT(tp);
-		collcollate = NameStr(collform->collcollate);
-
+		collcollate_datum = SysCacheGetAttr(COLLOID, tp,
+				Anum_pg_collation_collcollate, &is_null);
+		if (collcollate_datum)
+			collcollate = TextDatumGetCString(collcollate_datum);
+		else
+			collcollate = "";
+		
 		if(strcasecmp(collcollate, "en_US.utf8") == 0 || strcasecmp(collcollate, "en_US.UTF-8") == 0)
 		{
 			ReleaseSysCache(tp);
@@ -593,9 +600,7 @@ vecsort_rescan(VecTuplesortstate *state)
 			state->markpos_eof = false;
 			break;
 		case TSS_SORTEDONTAPE:
-			LogicalTapeRewindForRead(state->tapeset,
-									 state->result_tape,
-									 0);
+			LogicalTapeRewindForRead(state->result_tape, 0);
 			state->eof_reached = false;
 			state->markpos_block = 0L;
 			state->markpos_offset = 0;

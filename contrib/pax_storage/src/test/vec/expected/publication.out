@@ -3,7 +3,9 @@
 --
 CREATE ROLE regress_publication_user LOGIN SUPERUSER;
 CREATE ROLE regress_publication_user2;
+NOTICE:  resource queue required -- using default resource queue "pg_default"
 CREATE ROLE regress_publication_user_dummy LOGIN NOSUPERUSER;
+NOTICE:  resource queue required -- using default resource queue "pg_default"
 SET SESSION AUTHORIZATION 'regress_publication_user';
 -- suppress warning that depends on wal_level
 SET client_min_messages = 'ERROR';
@@ -24,9 +26,11 @@ ALTER PUBLICATION testpub_default SET (publish = update);
 CREATE PUBLICATION testpub_xxx WITH (foo);
 ERROR:  unrecognized publication parameter: "foo"
 CREATE PUBLICATION testpub_xxx WITH (publish = 'cluster, vacuum');
-ERROR:  unrecognized "publish" value: "cluster"
+ERROR:  unrecognized value for publication option "publish": "cluster"
 CREATE PUBLICATION testpub_xxx WITH (publish_via_partition_root = 'true', publish_via_partition_root = '0');
 ERROR:  conflicting or redundant options
+LINE 1: ...ub_xxx WITH (publish_via_partition_root = 'true', publish_vi...
+                                                             ^
 \dRp
                                               List of publications
         Name        |          Owner           | All tables | Inserts | Updates | Deletes | Truncates | Via root 
@@ -47,14 +51,22 @@ ALTER PUBLICATION testpub_default SET (publish = 'insert, update, delete');
 --- adding tables
 CREATE SCHEMA pub_test;
 CREATE TABLE testpub_tbl1 (id serial, data text);
+NOTICE:  Table doesn't have 'DISTRIBUTED BY' clause -- Using column named 'id' as the Apache Cloudberry data distribution key for this table.
+HINT:  The 'DISTRIBUTED BY' clause determines the distribution of data. Make sure column(s) chosen are the optimal data distribution key to minimize skew.
 CREATE TABLE pub_test.testpub_nopk (foo int, bar int);
+NOTICE:  Table doesn't have 'DISTRIBUTED BY' clause -- Using column named 'foo' as the Apache Cloudberry data distribution key for this table.
+HINT:  The 'DISTRIBUTED BY' clause determines the distribution of data. Make sure column(s) chosen are the optimal data distribution key to minimize skew.
 CREATE VIEW testpub_view AS SELECT 1;
 CREATE TABLE testpub_parted (a int) PARTITION BY LIST (a);
+NOTICE:  Table doesn't have 'DISTRIBUTED BY' clause -- Using column named 'a' as the Apache Cloudberry data distribution key for this table.
+HINT:  The 'DISTRIBUTED BY' clause determines the distribution of data. Make sure column(s) chosen are the optimal data distribution key to minimize skew.
 SET client_min_messages = 'ERROR';
 CREATE PUBLICATION testpub_foralltables FOR ALL TABLES WITH (publish = 'insert');
 RESET client_min_messages;
 ALTER PUBLICATION testpub_foralltables SET (publish = 'insert, update');
 CREATE TABLE testpub_tbl2 (id serial, data text);
+NOTICE:  Table doesn't have 'DISTRIBUTED BY' clause -- Using column named 'id' as the Apache Cloudberry data distribution key for this table.
+HINT:  The 'DISTRIBUTED BY' clause determines the distribution of data. Make sure column(s) chosen are the optimal data distribution key to minimize skew.
 -- fail - can't add to for all tables publication
 ALTER PUBLICATION testpub_foralltables ADD TABLE testpub_tbl2;
 ERROR:  publication "testpub_foralltables" is defined as FOR ALL TABLES
@@ -93,7 +105,10 @@ Distributed by: (id)
 DROP TABLE testpub_tbl2;
 DROP PUBLICATION testpub_foralltables;
 CREATE TABLE testpub_tbl3 (a int);
+NOTICE:  Table doesn't have 'DISTRIBUTED BY' clause -- Using column named 'a' as the Apache Cloudberry data distribution key for this table.
+HINT:  The 'DISTRIBUTED BY' clause determines the distribution of data. Make sure column(s) chosen are the optimal data distribution key to minimize skew.
 CREATE TABLE testpub_tbl3a (b text) INHERITS (testpub_tbl3);
+NOTICE:  table has parent, setting distribution columns to match parent table
 SET client_min_messages = 'ERROR';
 CREATE PUBLICATION testpub3 FOR TABLE testpub_tbl3;
 CREATE PUBLICATION testpub4 FOR TABLE ONLY testpub_tbl3;
@@ -123,7 +138,9 @@ CREATE PUBLICATION testpub_forparted;
 CREATE PUBLICATION testpub_forparted1;
 RESET client_min_messages;
 CREATE TABLE testpub_parted1 (LIKE testpub_parted);
+NOTICE:  table doesn't have 'DISTRIBUTED BY' clause, defaulting to distribution columns from LIKE table
 CREATE TABLE testpub_parted2 (LIKE testpub_parted);
+NOTICE:  table doesn't have 'DISTRIBUTED BY' clause, defaulting to distribution columns from LIKE table
 ALTER PUBLICATION testpub_forparted1 SET (publish='insert');
 ALTER TABLE testpub_parted ATTACH PARTITION testpub_parted1 FOR VALUES IN (1);
 ALTER TABLE testpub_parted ATTACH PARTITION testpub_parted2 FOR VALUES IN (2);
@@ -166,9 +183,9 @@ UPDATE testpub_parted2 SET a = 2;
 ALTER PUBLICATION testpub_forparted ADD TABLE testpub_parted, testpub_parted2;
 -- only parent is listed as being in publication, not the partition
 SELECT * FROM pg_publication_tables;
-      pubname      | schemaname |   tablename    
--------------------+------------+----------------
- testpub_forparted | public     | testpub_parted
+      pubname      | schemaname |   tablename    | attnames | rowfilter 
+-------------------+------------+----------------+----------+-----------
+ testpub_forparted | public     | testpub_parted | {a}      | 
 (1 row)
 
 DROP TABLE testpub_parted1, testpub_parted2;
@@ -190,8 +207,8 @@ UPDATE testpub_tbl4 set a = 3;
 DROP TABLE testpub_tbl4;
 -- fail - view
 CREATE PUBLICATION testpub_fortbl FOR TABLE testpub_view;
-ERROR:  "testpub_view" is not a table
-DETAIL:  Only tables can be added to publications.
+ERROR:  cannot add relation "testpub_view" to publication
+DETAIL:  This operation is not supported for views.
 SET client_min_messages = 'ERROR';
 CREATE PUBLICATION testpub_fortbl FOR TABLE testpub_tbl1, pub_test.testpub_nopk;
 RESET client_min_messages;
@@ -212,8 +229,8 @@ Tables:
 
 -- fail - view
 ALTER PUBLICATION testpub_default ADD TABLE testpub_view;
-ERROR:  "testpub_view" is not a table
-DETAIL:  Only tables can be added to publications.
+ERROR:  cannot add relation "testpub_view" to publication
+DETAIL:  This operation is not supported for views.
 ALTER PUBLICATION testpub_default ADD TABLE testpub_tbl1;
 ALTER PUBLICATION testpub_default SET TABLE testpub_tbl1;
 ALTER PUBLICATION testpub_default ADD TABLE pub_test.testpub_nopk;
@@ -269,6 +286,8 @@ Distributed by: (id)
 -- verify relation cache invalidation when a primary key is added using
 -- an existing index
 CREATE TABLE pub_test.testpub_addpk (id int not null, data int);
+NOTICE:  Table doesn't have 'DISTRIBUTED BY' clause -- Using column named 'id' as the Apache Cloudberry data distribution key for this table.
+HINT:  The 'DISTRIBUTED BY' clause determines the distribution of data. Make sure column(s) chosen are the optimal data distribution key to minimize skew.
 ALTER PUBLICATION testpub_default ADD TABLE pub_test.testpub_addpk;
 INSERT INTO pub_test.testpub_addpk VALUES(1, 11);
 -- fail:
@@ -278,6 +297,7 @@ HINT:  To enable updating the table, set REPLICA IDENTITY using ALTER TABLE.
 -- now it should work:
 UPDATE pub_test.testpub_addpk SET id = 2;
 ERROR:  cannot update table "testpub_addpk" because it does not have a replica identity and publishes updates
+HINT:  To enable updating the table, set REPLICA IDENTITY using ALTER TABLE.
 DROP TABLE pub_test.testpub_addpk;
 -- permissions
 SET ROLE regress_publication_user2;

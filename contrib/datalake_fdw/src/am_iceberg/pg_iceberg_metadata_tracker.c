@@ -205,12 +205,12 @@ free_tracked_file(TrackedDataFile *file)
 	/* Free the partition tuple; skip NULL (SQL NULL) list elements. */
 	foreach(lc, file->partition_values)
 	{
-		Value	   *v = (Value *) lfirst(lc);
+		String	   *v = (String *) lfirst(lc);
 
 		if (v)
 		{
-			if (v->val.str)
-				pfree(v->val.str);
+			if (v->sval)
+				pfree(v->sval);
 			pfree(v);
 		}
 	}
@@ -1503,7 +1503,7 @@ typedef struct
 	List	   *delete_files;
 } DLParseState;
 
-static void
+static JsonParseErrorType
 dl_object_start(void *semstate)
 {
 	DLParseState *s = (DLParseState *) semstate;
@@ -1521,9 +1521,11 @@ dl_object_start(void *semstate)
 		s->cur_is_delete = false;
 		s->cur_partition_values = NIL;
 	}
+
+	return JSON_SUCCESS;
 }
 
-static void
+static JsonParseErrorType
 dl_object_end(void *semstate)
 {
 	DLParseState *s = (DLParseState *) semstate;
@@ -1549,9 +1551,11 @@ dl_object_end(void *semstate)
 	}
 
 	s->object_depth--;
+
+	return JSON_SUCCESS;
 }
 
-static void
+static JsonParseErrorType
 dl_array_start(void *semstate)
 {
 	DLParseState *s = (DLParseState *) semstate;
@@ -1570,9 +1574,11 @@ dl_array_start(void *semstate)
 		s->partvals_array_depth = s->array_depth;
 		s->next_array_is_partvals = false;
 	}
+
+	return JSON_SUCCESS;
 }
 
-static void
+static JsonParseErrorType
 dl_array_end(void *semstate)
 {
 	DLParseState *s = (DLParseState *) semstate;
@@ -1586,9 +1592,11 @@ dl_array_end(void *semstate)
 		s->in_partvals_array = false;
 
 	s->array_depth--;
+
+	return JSON_SUCCESS;
 }
 
-static void
+static JsonParseErrorType
 dl_field_start(void *semstate, char *fname, bool isnull)
 {
 	DLParseState *s = (DLParseState *) semstate;
@@ -1622,15 +1630,17 @@ dl_field_start(void *semstate, char *fname, bool isnull)
 
 		s->current_field = DL_FIELD_NONE;
 	}
+
+	return JSON_SUCCESS;
 }
 
-static void
+static JsonParseErrorType
 dl_scalar(void *semstate, char *token, JsonTokenType tokentype)
 {
 	DLParseState *s = (DLParseState *) semstate;
 
 	if (!s->in_fragment_object)
-		return;
+		return JSON_SUCCESS;
 
 	/*
 	 * Elements of the partition_values array: a JSON string becomes a String
@@ -1644,7 +1654,7 @@ dl_scalar(void *semstate, char *token, JsonTokenType tokentype)
 		else
 			s->cur_partition_values =
 				lappend(s->cur_partition_values, makeString(pstrdup(token)));
-		return;
+		return JSON_SUCCESS;
 	}
 
 	switch (s->current_field)
@@ -1669,6 +1679,8 @@ dl_scalar(void *semstate, char *token, JsonTokenType tokentype)
 	}
 
 	s->current_field = DL_FIELD_NONE;
+
+	return JSON_SUCCESS;
 }
 
 /*

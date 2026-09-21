@@ -78,6 +78,8 @@ CREATE TABLE SUBSELECT_TBL (
   f2 integer,
   f3 float
 );
+NOTICE:  Table doesn't have 'DISTRIBUTED BY' clause -- Using column named 'f1' as the Apache Cloudberry data distribution key for this table.
+HINT:  The 'DISTRIBUTED BY' clause determines the distribution of data. Make sure column(s) chosen are the optimal data distribution key to minimize skew.
 INSERT INTO SUBSELECT_TBL VALUES (1, 2, 3);
 INSERT INTO SUBSELECT_TBL VALUES (2, 3, 4);
 INSERT INTO SUBSELECT_TBL VALUES (3, 4, 5);
@@ -90,12 +92,12 @@ SELECT * FROM SUBSELECT_TBL;
  f1 | f2 | f3 
 ----+----+----
   1 |  2 |  3
+  1 |  1 |  1
+  6 |  7 |  8
   2 |  3 |  4
   3 |  4 |  5
-  1 |  1 |  1
   2 |  2 |  2
   3 |  3 |  3
-  6 |  7 |  8
   8 |  9 |   
 (8 rows)
 
@@ -113,9 +115,9 @@ SELECT f1 AS "Uncorrelated Field" FROM SUBSELECT_TBL
  Uncorrelated Field 
 --------------------
                   1
+                  1
                   2
                   3
-                  1
                   2
                   3
 (6 rows)
@@ -126,9 +128,9 @@ SELECT f1 AS "Uncorrelated Field" FROM SUBSELECT_TBL
  Uncorrelated Field 
 --------------------
                   1
+                  1
                   2
                   3
-                  1
                   2
                   3
 (6 rows)
@@ -151,9 +153,9 @@ SELECT f1 AS "Correlated Field", f2 AS "Second Field"
  Correlated Field | Second Field 
 ------------------+--------------
                 1 |            2
+                1 |            1
                 2 |            3
                 3 |            4
-                1 |            1
                 2 |            2
                 3 |            3
 (6 rows)
@@ -164,9 +166,9 @@ SELECT f1 AS "Correlated Field", f3 AS "Second Field"
     (SELECT f2 FROM SUBSELECT_TBL WHERE CAST(upper.f2 AS float) = f3);
  Correlated Field | Second Field 
 ------------------+--------------
+                1 |            1
                 2 |            4
                 3 |            5
-                1 |            1
                 2 |            2
                 3 |            3
 (5 rows)
@@ -177,10 +179,10 @@ SELECT f1 AS "Correlated Field", f3 AS "Second Field"
                WHERE f2 = CAST(f3 AS integer));
  Correlated Field | Second Field 
 ------------------+--------------
-                1 |            3
                 2 |            4
                 3 |            5
                 6 |            8
+                1 |            3
 (4 rows)
 
 SELECT f1 AS "Correlated Field"
@@ -189,9 +191,9 @@ SELECT f1 AS "Correlated Field"
                      WHERE f3 IS NOT NULL);
  Correlated Field 
 ------------------
+                1
                 2
                 3
-                1
                 2
                 3
 (5 rows)
@@ -205,11 +207,11 @@ SELECT ss.f1 AS "Correlated Field", ss.f3 AS "Second Field"
                    WHERE f1 != ss.f1 AND f1 < 2147483647);
  Correlated Field | Second Field 
 ------------------+--------------
+                6 |            8
                 2 |            4
                 3 |            5
                 2 |            2
                 3 |            3
-                6 |            8
                 8 |             
 (6 rows)
 
@@ -233,30 +235,34 @@ SELECT *, pg_typeof(f1) FROM
 
 -- ... unless there's context to suggest differently
 explain (verbose, costs off) select '42' union all select '43';
-         QUERY PLAN         
-----------------------------
+             QUERY PLAN              
+-------------------------------------
  Append
    ->  Result
          Output: '42'::text
    ->  Result
          Output: '43'::text
-(5 rows)
+ Settings: optimizer = 'off'
+ Optimizer: Postgres query optimizer
+(7 rows)
 
 explain (verbose, costs off) select '42' union all select 43;
-     QUERY PLAN     
---------------------
+             QUERY PLAN              
+-------------------------------------
  Append
    ->  Result
          Output: 42
    ->  Result
          Output: 43
-(5 rows)
+ Settings: optimizer = 'off'
+ Optimizer: Postgres query optimizer
+(7 rows)
 
 -- check materialization of an initplan reference (bug #14524)
 explain (verbose, costs off)
 select 1 = all (select (select 1));
-            QUERY PLAN             
------------------------------------
+             QUERY PLAN              
+-------------------------------------
  Result
    Output: (SubPlan 2)
    SubPlan 2
@@ -267,7 +273,9 @@ select 1 = all (select (select 1));
                    Output: 1
            ->  Result
                  Output: $0
-(10 rows)
+ Settings: optimizer = 'off'
+ Optimizer: Postgres query optimizer
+(12 rows)
 
 select 1 = all (select (select 1));
  ?column? 
@@ -358,7 +366,11 @@ select count(distinct ss.ten) from
 -- Luca Pireddu and Michael Fuhr.
 --
 CREATE TEMP TABLE foo (id integer);
+NOTICE:  Table doesn't have 'DISTRIBUTED BY' clause -- Using column named 'id' as the Apache Cloudberry data distribution key for this table.
+HINT:  The 'DISTRIBUTED BY' clause determines the distribution of data. Make sure column(s) chosen are the optimal data distribution key to minimize skew.
 CREATE TEMP TABLE bar (id1 integer, id2 integer);
+NOTICE:  Table doesn't have 'DISTRIBUTED BY' clause -- Using column named 'id1' as the Apache Cloudberry data distribution key for this table.
+HINT:  The 'DISTRIBUTED BY' clause determines the distribution of data. Make sure column(s) chosen are the optimal data distribution key to minimize skew.
 INSERT INTO foo VALUES (1);
 INSERT INTO bar VALUES (1, 1);
 INSERT INTO bar VALUES (2, 2);
@@ -418,6 +430,8 @@ CREATE TABLE orderstest (
     po_ref integer,
     ordercanceled boolean
 );
+NOTICE:  Table doesn't have 'DISTRIBUTED BY' clause -- Using column named 'approver_ref' as the Apache Cloudberry data distribution key for this table.
+HINT:  The 'DISTRIBUTED BY' clause determines the distribution of data. Make sure column(s) chosen are the optimal data distribution key to minimize skew.
 INSERT INTO orderstest VALUES (1, 1, false);
 INSERT INTO orderstest VALUES (66, 5, false);
 INSERT INTO orderstest VALUES (66, 6, false);
@@ -469,6 +483,8 @@ SELECT * FROM orders_view;
  approver_ref | po_ref | ordercanceled | Approved |  Status  | Status_OK 
 --------------+--------+---------------+----------+----------+-----------
             1 |      1 | f             | ---      | ---      | ---
+            1 |      1 | f             | ---      | ---      | ---
+            1 |      1 | f             | ---      | ---      | ---
            66 |      5 | f             | Approved | PO       | PO
            66 |      6 | f             | Approved | PO       | PO
            66 |      7 | f             | Approved | PO       | PO
@@ -476,9 +492,7 @@ SELECT * FROM orders_view;
            66 |      8 | f             | Approved | PO       | PO
            66 |      1 | f             | Approved | Approved | Approved
            77 |      1 | f             | Approved | Approved | Approved
-            1 |      1 | f             | ---      | ---      | ---
            66 |      1 | f             | Approved | Approved | Approved
-            1 |      1 | f             | ---      | ---      | ---
 (11 rows)
 
 DROP TABLE orderstest cascade;
@@ -491,12 +505,16 @@ create temp table parts (
     partnum     text,
     cost        float8
 );
+NOTICE:  Table doesn't have 'DISTRIBUTED BY' clause -- Using column named 'partnum' as the Apache Cloudberry data distribution key for this table.
+HINT:  The 'DISTRIBUTED BY' clause determines the distribution of data. Make sure column(s) chosen are the optimal data distribution key to minimize skew.
 create temp table shipped (
     ttype       char(2),
     ordnum      int4,
     partnum     text,
     value       float8
 );
+NOTICE:  Table doesn't have 'DISTRIBUTED BY' clause -- Using column named 'ttype' as the Apache Cloudberry data distribution key for this table.
+HINT:  The 'DISTRIBUTED BY' clause determines the distribution of data. Make sure column(s) chosen are the optimal data distribution key to minimize skew.
 create temp view shipped_view as
     select * from shipped where ttype = 'wt';
 create rule shipped_view_insert as on insert to shipped_view do instead
@@ -528,9 +546,9 @@ select f1, ss1 as relabel from
      from int4_tbl a) ss;
      f1      |  relabel   
 -------------+------------
-           0 | 2147607103
       123456 | 2147607103
      -123456 | 2147483647
+           0 | 2147607103
   2147483647 | 2147483647
  -2147483647 |          0
 (5 rows)
@@ -566,25 +584,29 @@ select * from (
 -- pointless.)
 --
 create temp table numeric_table (num_col numeric);
+NOTICE:  Table doesn't have 'DISTRIBUTED BY' clause -- Using column named 'num_col' as the Apache Cloudberry data distribution key for this table.
+HINT:  The 'DISTRIBUTED BY' clause determines the distribution of data. Make sure column(s) chosen are the optimal data distribution key to minimize skew.
 insert into numeric_table values (1), (1.000000000000000000001), (2), (3);
 create temp table float_table (float_col float8);
+NOTICE:  Table doesn't have 'DISTRIBUTED BY' clause -- Using column named 'float_col' as the Apache Cloudberry data distribution key for this table.
+HINT:  The 'DISTRIBUTED BY' clause determines the distribution of data. Make sure column(s) chosen are the optimal data distribution key to minimize skew.
 insert into float_table values (1), (2), (3);
 select * from float_table
   where float_col in (select num_col from numeric_table);
  float_col 
 -----------
          1
-         2
          3
+         2
 (3 rows)
 
 select * from numeric_table
   where num_col in (select float_col from float_table);
          num_col         
 -------------------------
+                       2
                        1
  1.000000000000000000001
-                       2
                        3
 (4 rows)
 
@@ -611,6 +633,8 @@ ERROR:  correlated subquery with skip-level correlations is not supported
 -- Test case for 8.3 "failed to locate grouping columns" bug
 --
 create temp table t1 (f1 numeric(14,0), f2 varchar(30));
+NOTICE:  Table doesn't have 'DISTRIBUTED BY' clause -- Using column named 'f1' as the Apache Cloudberry data distribution key for this table.
+HINT:  The 'DISTRIBUTED BY' clause determines the distribution of data. Make sure column(s) chosen are the optimal data distribution key to minimize skew.
 select * from
   (select distinct f1, f2, (select f2 from t1 x where x.f1 = up.f1) as fs
    from t1 up) ss
@@ -623,6 +647,8 @@ group by f1,f2,fs;
 -- Test case for bug #5514 (mishandling of whole-row Vars in subselects)
 --
 create temp table table_a(id integer);
+NOTICE:  Table doesn't have 'DISTRIBUTED BY' clause -- Using column named 'id' as the Apache Cloudberry data distribution key for this table.
+HINT:  The 'DISTRIBUTED BY' clause determines the distribution of data. Make sure column(s) chosen are the optimal data distribution key to minimize skew.
 insert into table_a values (42);
 create temp view view_a as select * from table_a;
 select view_a from view_a;
@@ -670,10 +696,10 @@ with q as (select max(f1) from int4_tbl group by f1 order by f1)
   select q from q;  -- order none
        q       
 ---------------
- (-2147483647)
  (-123456)
- (0)
  (123456)
+ (-2147483647)
+ (0)
  (2147483647)
 (5 rows)
 
@@ -711,9 +737,9 @@ ERROR:  correlated subquery with skip-level correlations is not supported
 --
 create temp table upsert(key int4 primary key, val text);
 insert into upsert values(1, 'val') on conflict (key) do update set val = 'not seen';
-ERROR:  not implemented yet on pax relations: TupleInsertSpeculative  (seg1 127.0.0.1:7003 pid=7250)
+ERROR:  not implemented yet on pax relations: TupleInsertSpeculative  (seg1 172.18.0.2:7003 pid=135862)
 insert into upsert values(1, 'val') on conflict (key) do update set val = 'seen with subselect ' || (select f1 from int4_tbl where f1 != 0 order by f1 limit 1)::text;
-ERROR:  not implemented yet on pax relations: TupleInsertSpeculative  (seg1 127.0.0.1:7003 pid=7250)
+ERROR:  not implemented yet on pax relations: TupleInsertSpeculative  (seg1 172.18.0.2:7003 pid=135862)
 select * from upsert;
  key | val 
 -----+-----
@@ -723,16 +749,20 @@ with aa as (select 'int4_tbl' u from int4_tbl limit 1)
 insert into upsert values (1, 'x'), (999, 'y')
 on conflict (key) do update set val = (select u from aa)
 returning *;
-ERROR:  not implemented yet on pax relations: TupleInsertSpeculative  (seg1 slice1 127.0.0.1:7003 pid=7250)
+ERROR:  not implemented yet on pax relations: TupleInsertSpeculative  (seg1 slice1 172.18.0.2:7003 pid=135862)
 --
 -- Test case for cross-type partial matching in hashed subplan (bug #7597)
 --
 create temp table outer_7597 (f1 int4, f2 int4);
+NOTICE:  Table doesn't have 'DISTRIBUTED BY' clause -- Using column named 'f1' as the Apache Cloudberry data distribution key for this table.
+HINT:  The 'DISTRIBUTED BY' clause determines the distribution of data. Make sure column(s) chosen are the optimal data distribution key to minimize skew.
 insert into outer_7597 values (0, 0);
 insert into outer_7597 values (1, 0);
 insert into outer_7597 values (0, null);
 insert into outer_7597 values (1, null);
 create temp table inner_7597(c1 int8, c2 int8);
+NOTICE:  Table doesn't have 'DISTRIBUTED BY' clause -- Using column named 'c1' as the Apache Cloudberry data distribution key for this table.
+HINT:  The 'DISTRIBUTED BY' clause determines the distribution of data. Make sure column(s) chosen are the optimal data distribution key to minimize skew.
 insert into inner_7597 values(0, null);
 select * from outer_7597 where (f1, f2) not in (select * from inner_7597);
  f1 | f2 
@@ -747,11 +777,15 @@ select * from outer_7597 where (f1, f2) not in (select * from inner_7597);
 -- (otherwise it would error in texteq())
 --
 create temp table outer_text (f1 text, f2 text);
+NOTICE:  Table doesn't have 'DISTRIBUTED BY' clause -- Using column named 'f1' as the Apache Cloudberry data distribution key for this table.
+HINT:  The 'DISTRIBUTED BY' clause determines the distribution of data. Make sure column(s) chosen are the optimal data distribution key to minimize skew.
 insert into outer_text values ('a', 'a');
 insert into outer_text values ('b', 'a');
 insert into outer_text values ('a', null);
 insert into outer_text values ('b', null);
 create temp table inner_text (c1 text, c2 text);
+NOTICE:  Table doesn't have 'DISTRIBUTED BY' clause -- Using column named 'c1' as the Apache Cloudberry data distribution key for this table.
+HINT:  The 'DISTRIBUTED BY' clause determines the distribution of data. Make sure column(s) chosen are the optimal data distribution key to minimize skew.
 insert into inner_text values ('a', null);
 insert into inner_text values ('123', '456');
 select * from outer_text where (f1, f2) not in (select * from inner_text);
@@ -777,7 +811,9 @@ select 'foo'::text in (select 'bar'::name union all select 'bar'::name);
                  Output: 'bar'::name
            ->  Result
                  Output: 'bar'::name
-(8 rows)
+ Settings: optimizer = 'off'
+ Optimizer: Postgres query optimizer
+(10 rows)
 
 select 'foo'::text in (select 'bar'::name union all select 'bar'::name);
  ?column? 
@@ -791,8 +827,8 @@ select 'foo'::text in (select 'bar'::name union all select 'bar'::name);
 --
 explain (verbose, costs off)
 select row(row(row(1))) = any (select row(row(1)));
-                QUERY PLAN                 
--------------------------------------------
+             QUERY PLAN              
+-------------------------------------
  Result
    Output: (SubPlan 1)
    SubPlan 1
@@ -800,7 +836,9 @@ select row(row(row(1))) = any (select row(row(1)));
            Output: (ROW(ROW(1)))
            ->  Result
                  Output: ROW(ROW(1))
-(7 rows)
+ Settings: optimizer = 'off'
+ Optimizer: Postgres query optimizer
+(9 rows)
 
 select row(row(row(1))) = any (select row(row(1)));
  ?column? 
@@ -842,6 +880,7 @@ select * from int8_tbl where q1 in (select c1 from inner_text);
          SubPlan 1
            ->  Broadcast Motion 3:3  (slice2; segments: 3)
                  ->  Seq Scan on inner_text
+ Optimizer: Postgres query optimizer
 (7 rows)
 
 select * from int8_tbl where q1 in (select c1 from inner_text);
@@ -865,6 +904,7 @@ select * from int8_tbl where q1 in (select c1 from inner_text);
          SubPlan 1
            ->  Broadcast Motion 3:3  (slice2; segments: 3)
                  ->  Seq Scan on inner_text
+ Optimizer: Postgres query optimizer
 (7 rows)
 
 select * from int8_tbl where q1 in (select c1 from inner_text);
@@ -916,6 +956,7 @@ where (exists(select 1 from tenk1 k where k.unique1 = t.unique2) or ten < 0);
                      SubPlan 2
                        ->  Broadcast Motion 3:3  (slice2; segments: 3)
                              ->  Seq Scan on tenk1 k
+ Optimizer: Postgres query optimizer
 (9 rows)
 
 select count(*) from tenk1 t
@@ -945,7 +986,8 @@ where (exists(select 1 from tenk1 k where k.unique1 = t.unique2) or ten < 0)
                              ->  Materialize
                                    ->  Broadcast Motion 3:3  (slice2; segments: 3)
                                          ->  Seq Scan on tenk1 k
-(14 rows)
+ Optimizer: Postgres query optimizer
+(15 rows)
 
 select count(*) from tenk1 t
 where (exists(select 1 from tenk1 k where k.unique1 = t.unique2) or ten < 0)
@@ -957,8 +999,12 @@ where (exists(select 1 from tenk1 k where k.unique1 = t.unique2) or ten < 0)
 
 -- It's possible for the same EXISTS to get resolved both ways
 create temp table exists_tbl (c1 int, c2 int, c3 int) partition by list (c1);
+NOTICE:  Table doesn't have 'DISTRIBUTED BY' clause -- Using column named 'c1' as the Apache Cloudberry data distribution key for this table.
+HINT:  The 'DISTRIBUTED BY' clause determines the distribution of data. Make sure column(s) chosen are the optimal data distribution key to minimize skew.
 create temp table exists_tbl_null partition of exists_tbl for values in (null);
+NOTICE:  table has parent, setting distribution columns to match parent table
 create temp table exists_tbl_def partition of exists_tbl default;
+NOTICE:  table has parent, setting distribution columns to match parent table
 insert into exists_tbl select x, x/2, x+1 from generate_series(0,10) x;
 analyze exists_tbl;
 explain (costs off)
@@ -1036,14 +1082,15 @@ explain (verbose, costs off)
    InitPlan 2 (returns $1)
      ->  Result
            Output: 'regression'::name
+ Settings: optimizer = 'off'
  Optimizer: Postgres query optimizer
-(9 rows)
+(10 rows)
 
 explain (verbose, costs off)
   select x, x from
     (select (select random()) as x from (values(1),(2)) v(y)) ss;
-            QUERY PLAN             
------------------------------------
+             QUERY PLAN              
+-------------------------------------
  Subquery Scan on ss
    Output: ss.x, ss.x
    ->  Values Scan on "*VALUES*"
@@ -1051,8 +1098,9 @@ explain (verbose, costs off)
          InitPlan 1 (returns $0)
            ->  Result
                  Output: random()
+ Settings: optimizer = 'off'
  Optimizer: Postgres query optimizer
-(8 rows)
+(9 rows)
 
 explain (verbose, costs off)
   select x, x from
@@ -1069,8 +1117,9 @@ explain (verbose, costs off)
      ->  Result
            Output: 'regression'::name
            One-Time Filter: ("*VALUES*".column1 = "*VALUES*".column1)
+ Settings: optimizer = 'off'
  Optimizer: Postgres query optimizer
-(11 rows)
+(12 rows)
 
 explain (verbose, costs off)
   select x, x from
@@ -1085,8 +1134,9 @@ explain (verbose, costs off)
            ->  Result
                  Output: random()
                  One-Time Filter: ("*VALUES*".column1 = "*VALUES*".column1)
+ Settings: optimizer = 'off'
  Optimizer: Postgres query optimizer
-(9 rows)
+(10 rows)
 
 --
 -- Test rescan of a hashed subplan (the use of random() is to prevent the
@@ -1124,7 +1174,7 @@ where o.ten = 0;
                      SubPlan 1
                        ->  Result
                              Output: int4_tbl.f1
-                             Filter: (int4_tbl.f1 <= $0)
+                             Filter: (int4_tbl.f1 <= o.hundred)
                              ->  Materialize
                                    Output: int4_tbl.f1
                                    ->  Gather Motion 3:1  (slice2; segments: 3)
@@ -1208,8 +1258,8 @@ select sum(o.four), sum(ss.a) from
     select * from x
   ) ss
 where o.ten = 1;
-                       QUERY PLAN                        
----------------------------------------------------------
+                          QUERY PLAN                           
+---------------------------------------------------------------
  Finalize Aggregate
    ->  Gather Motion 3:1  (slice1; segments: 3)
          ->  Partial Aggregate
@@ -1246,7 +1296,11 @@ where o.ten = 1;
 -- Check we don't misoptimize a NOT IN where the subquery returns no rows.
 --
 create temp table notinouter (a int);
+NOTICE:  Table doesn't have 'DISTRIBUTED BY' clause -- Using column named 'a' as the Apache Cloudberry data distribution key for this table.
+HINT:  The 'DISTRIBUTED BY' clause determines the distribution of data. Make sure column(s) chosen are the optimal data distribution key to minimize skew.
 create temp table notininner (b int not null);
+NOTICE:  Table doesn't have 'DISTRIBUTED BY' clause -- Using column named 'b' as the Apache Cloudberry data distribution key for this table.
+HINT:  The 'DISTRIBUTED BY' clause determines the distribution of data. Make sure column(s) chosen are the optimal data distribution key to minimize skew.
 insert into notinouter values (null), (1);
 select * from notinouter where a not in (select b from notininner);
  a 
@@ -1310,7 +1364,9 @@ select * from
    SubPlan 1
      ->  Values Scan on "*VALUES*_1"
            Output: "*VALUES*_1".column1
-(5 rows)
+ Settings: optimizer = 'off'
+ Optimizer: Postgres query optimizer
+(7 rows)
 
 select * from
 (values
@@ -1331,8 +1387,8 @@ explain (verbose, costs off)
 select * from int4_tbl where
   (case when f1 in (select unique1 from tenk1 a) then f1 else null end) in
   (select ten from tenk1 b);
-                                                                                               QUERY PLAN                                                                                                
----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+                                                   QUERY PLAN                                                    
+-----------------------------------------------------------------------------------------------------------------
  Gather Motion 3:1  (slice1; segments: 3)
    Output: int4_tbl.f1
    ->  HashAggregate
@@ -1357,8 +1413,9 @@ select * from int4_tbl where
                                                Output: a.unique1
                                                ->  Seq Scan on public.tenk1 a
                                                      Output: a.unique1
+ Settings: optimizer = 'off'
  Optimizer: Postgres query optimizer
-(25 rows)
+(26 rows)
 
 select * from int4_tbl where
   (case when f1 in (select unique1 from tenk1 a) then f1 else null end) in
@@ -1374,26 +1431,27 @@ select * from int4_tbl where
 explain (verbose, costs off)
 select * from int4_tbl o where (f1, f1) in
   (select f1, generate_series(1,50) / 10 g from int4_tbl i group by f1);
-                               QUERY PLAN                                
--------------------------------------------------------------------------
+                            QUERY PLAN                             
+-------------------------------------------------------------------
  Gather Motion 3:1  (slice1; segments: 3)
    Output: o.f1
-   ->  Hash Semi Join
+   ->  Hash Right Semi Join
          Output: o.f1
-         Hash Cond: (o.f1 = "ANY_subquery".f1)
-         ->  Seq Scan on public.int4_tbl o
-               Output: o.f1
-         ->  Hash
+         Hash Cond: ("ANY_subquery".f1 = o.f1)
+         ->  Subquery Scan on "ANY_subquery"
                Output: "ANY_subquery".f1, "ANY_subquery".g
-               ->  Subquery Scan on "ANY_subquery"
-                     Output: "ANY_subquery".f1, "ANY_subquery".g
-                     Filter: ("ANY_subquery".f1 = "ANY_subquery".g)
-                     ->  Result
-                           Output: i.f1, ((generate_series(1, 50)) / 10)
-                           ->  ProjectSet
-                                 Output: generate_series(1, 50), i.f1
-                                 ->  Seq Scan on public.int4_tbl i
-                                       Output: i.f1
+               Filter: ("ANY_subquery".f1 = "ANY_subquery".g)
+               ->  Result
+                     Output: i.f1, ((generate_series(1, 50)) / 10)
+                     ->  ProjectSet
+                           Output: generate_series(1, 50), i.f1
+                           ->  Seq Scan on public.int4_tbl i
+                                 Output: i.f1
+         ->  Hash
+               Output: o.f1
+               ->  Seq Scan on public.int4_tbl o
+                     Output: o.f1
+ Settings: optimizer = 'off'
  Optimizer: Postgres query optimizer
 (20 rows)
 
@@ -1415,8 +1473,8 @@ select (select q from
 from int4_tbl;
      q     
 -----------
- (4,5,6.0)
  (1,2,3)
+ (4,5,6.0)
  (4,5,6.0)
  (1,2,3)
  (4,5,6.0)
@@ -1459,7 +1517,9 @@ where b and f1 >= 0;
                                          Output: random()
                      ->  Result
                            Output: true, 2
-(21 rows)
+ Settings: optimizer = 'off'
+ Optimizer: Postgres query optimizer
+(22 rows)
 
 select * from
     int4_tbl i4,
@@ -1472,9 +1532,9 @@ select * from
 where b and f1 >= 0;
      f1     | b | id 
 ------------+---+----
-          0 | t |  2
      123456 | t |  1
      123456 | t |  2
+          0 | t |  2
  2147483647 | t |  1
  2147483647 | t |  2
 (5 rows)
@@ -1530,7 +1590,9 @@ select * from
    ->  ProjectSet
          Output: 9, unnest('{1,2,3,11,12,13}'::integer[])
          ->  Result
-(6 rows)
+ Settings: optimizer = 'off'
+ Optimizer: Postgres query optimizer
+(8 rows)
 
 select * from
   (select 9 as x, unnest(array[1,2,3,11,12,13]) as u) ss
@@ -1563,7 +1625,9 @@ NOTICE:  x = 9, y = 8
  ProjectSet
    Output: 9, unnest('{1,2,3,11,12,13}'::integer[])
    ->  Result
-(4 rows)
+ Settings: optimizer = 'off'
+ Optimizer: Postgres query optimizer
+(5 rows)
 
 select * from
   (select 9 as x, unnest(array[1,2,3,11,12,13]) as u) ss
@@ -1592,7 +1656,9 @@ select * from
    ->  ProjectSet
          Output: 9, unnest('{1,2,3,11,12,13}'::integer[])
          ->  Result
-(6 rows)
+ Settings: optimizer = 'off'
+ Optimizer: Postgres query optimizer
+(8 rows)
 
 select * from
   (select 9 as x, unnest(array[1,2,3,11,12,13]) as u) ss
@@ -1650,10 +1716,14 @@ select * from explain_sq_limit();
  Vec Gather Motion 1:1  (slice1; segments: 1) (actual rows=3 loops=1)
    Executor Memory: xxx  Segments: 1  Max: 1kB (segment -1)
    ->  Vec Limit (actual rows=3 loops=1)
+         Executor Memory: xxx  Segments: 1  Max: 1kB (segment 0)
          ->  Vec Subquery Scan on x (actual rows=3 loops=1)
+               Executor Memory: xxx  Segments: 1  Max: 1kB (segment 0)
                ->  Vec Sort (actual rows=3 loops=1)
                      Sort Key: sq_limit.c1, sq_limit.pk
+                     Executor Memory: xxx  Segments: 1  Max: 1kB (segment 0)
                      ->  Vec Seq Scan on sq_limit (actual rows=8 loops=1)
+                           Executor Memory: xxx  Segments: 1  Max: 1kB (segment 0)
  Optimizer: Postgres query optimizer
 (12 rows)
 
@@ -1667,7 +1737,7 @@ select * from (select pk,c2 from sq_limit order by c1,pk) as x limit 3;
 ----+----
   1 |  1
   5 |  1
-  6 |  2
+  2 |  2
 (3 rows)
 
 --end_ignore
@@ -1696,15 +1766,15 @@ set gp_cte_sharing to on;
 explain (verbose, costs off)
 with x as (select * from (select f1 from subselect_tbl) ss)
 select * from x where f1 = 1;
-                  QUERY PLAN                  
-----------------------------------------------
+                     QUERY PLAN                     
+----------------------------------------------------
  Vec Gather Motion 1:1  (slice1; segments: 1)
    Output: subselect_tbl.f1
    ->  Vec Seq Scan on public.subselect_tbl
          Output: subselect_tbl.f1
          Filter: (subselect_tbl.f1 = 1)
+ Settings: optimizer = 'off', gp_cte_sharing = 'on'
  Optimizer: Postgres query optimizer
- Settings: optimizer=off
 (7 rows)
 
 -- Explicitly request materialization
@@ -1718,13 +1788,15 @@ select * from x where f1 = 1;
    ->  Vec Subquery Scan on x
          Output: x.f1
          Filter: (x.f1 = 1)
+         Vec Plan Merge:  1 child
          ->  Vec Shared Scan (share slice:id 1:0)
-               Output: f1
+               Output: share0_ref1.f1
+               Vec Plan Merge:  1 child
                ->  Vec Seq Scan on public.subselect_tbl
                      Output: subselect_tbl.f1
- Settings: enable_parallel = 'off', optimizer = 'off'
+ Settings: optimizer = 'off', gp_cte_sharing = 'on'
  Optimizer: Postgres query optimizer
-(11 rows)
+(13 rows)
 
 -- Stable functions are safe to inline
 explain (verbose, costs off)
@@ -1737,8 +1809,8 @@ select * from x where f1 = 1;
    ->  Seq Scan on public.subselect_tbl
          Output: subselect_tbl.f1, 'regression'::name
          Filter: (subselect_tbl.f1 = 1)
+ Settings: optimizer = 'off', gp_cte_sharing = 'on'
  Optimizer: Postgres query optimizer
- Settings: gp_cte_sharing=on
 (7 rows)
 
 -- Volatile functions prevent inlining
@@ -1758,7 +1830,7 @@ select * from x where f1 = 1;
                Output: share0_ref1.f1, share0_ref1.random
                ->  Seq Scan on public.subselect_tbl
                      Output: subselect_tbl.f1, random()
- Settings: enable_parallel = 'off', optimizer = 'off'
+ Settings: optimizer = 'off', gp_cte_sharing = 'on'
  Optimizer: Postgres query optimizer
 (11 rows)
 
@@ -1780,7 +1852,7 @@ select * from x where a = 1;
                Output: share0_ref1.a, share0_ref1.nextval
                ->  Seq Scan on public.vol_test
                      Output: vol_test.a, nextval('ts'::regclass)
- Settings: enable_parallel = 'off', optimizer = 'off'
+ Settings: optimizer = 'off', gp_cte_sharing = 'on'
  Optimizer: Postgres query optimizer
 (11 rows)
 
@@ -1800,12 +1872,13 @@ select * from x where f1 = 1;
    Output: ss.f1
    ->  Vec Subquery Scan on ss
          Output: ss.f1
+         Vec Plan Merge:  1 child
          ->  Vec Seq Scan on public.subselect_tbl
                Output: subselect_tbl.f1, subselect_tbl.ctid
                Filter: (subselect_tbl.f1 = 1)
- Settings: optimizer = 'off'
+ Settings: optimizer = 'off', gp_cte_sharing = 'on'
  Optimizer: Postgres query optimizer
-(9 rows)
+(10 rows)
 
 -- Multiply-referenced CTEs are inlined only when requested
 explain (verbose, costs off)
@@ -1832,7 +1905,7 @@ select * from x, x x2 where x.n = x2.n;
                            Output: share0_ref1.f1, share0_ref1.n
                            ->  Seq Scan on public.subselect_tbl
                                  Output: subselect_tbl.f1, 'regression'::name
- Settings: optimizer = 'off'
+ Settings: optimizer = 'off', gp_cte_sharing = 'on'
  Optimizer: Postgres query optimizer
 (21 rows)
 
@@ -1858,8 +1931,8 @@ select * from x, x x2 where x.n = x2.n;
                      Hash Key: ('regression'::name)
                      ->  Seq Scan on public.subselect_tbl subselect_tbl_1
                            Output: subselect_tbl_1.f1, 'regression'::name
+ Settings: optimizer = 'off', gp_cte_sharing = 'on'
  Optimizer: Postgres query optimizer
- Settings: gp_cte_sharing=on
 (19 rows)
 
 -- Multiply-referenced CTEs can't be inlined if they contain outer self-refs
@@ -1871,8 +1944,8 @@ with recursive x(a) as
     select z.a || z1.a as a from z cross join z as z1
     where length(z.a || z1.a) < 5))
 select * from x;
-                      QUERY PLAN                      
-------------------------------------------------------
+                     QUERY PLAN                     
+----------------------------------------------------
  Recursive Union
    ->  Values Scan on "*VALUES*"
          Output: "*VALUES*".column1
@@ -1883,7 +1956,7 @@ select * from x;
                Output: x.a
          ->  WorkTable Scan on x x_1
                Output: x_1.a
- Settings: enable_parallel = 'off', optimizer = 'off'
+ Settings: optimizer = 'off', gp_cte_sharing = 'on'
  Optimizer: Postgres query optimizer
 (12 rows)
 
@@ -1928,8 +2001,8 @@ with recursive x(a) as
     select z.a || z.a as a from z
     where length(z.a || z.a) < 5))
 select * from x;
-                    QUERY PLAN                    
---------------------------------------------------
+                     QUERY PLAN                     
+----------------------------------------------------
  Recursive Union
    ->  Values Scan on "*VALUES*"
          Output: "*VALUES*".column1
@@ -1938,8 +2011,8 @@ select * from x;
          ->  WorkTable Scan on x
                Output: x.a
                Filter: (length((x.a || x.a)) < 5)
+ Settings: optimizer = 'off', gp_cte_sharing = 'on'
  Optimizer: Postgres query optimizer
- Settings: gp_cte_sharing=on, optimizer=off
 (10 rows)
 
 with recursive x(a) as
@@ -1963,40 +2036,42 @@ select * from x;
 explain (verbose, costs off)
 with x as (select * from int4_tbl)
 select * from (with y as (select * from x) select * from y) ss;
-                  QUERY PLAN                  
-----------------------------------------------
+                     QUERY PLAN                     
+----------------------------------------------------
  Vec Gather Motion 3:1  (slice1; segments: 3)
    Output: int4_tbl.f1
    ->  Vec Seq Scan on public.int4_tbl
          Output: int4_tbl.f1
+ Settings: optimizer = 'off', gp_cte_sharing = 'on'
  Optimizer: Postgres query optimizer
 (6 rows)
 
 explain (verbose, costs off)
 with x as materialized (select * from int4_tbl)
 select * from (with y as (select * from x) select * from y) ss;
-                      QUERY PLAN                      
-------------------------------------------------------
+                     QUERY PLAN                     
+----------------------------------------------------
  Vec Gather Motion 3:1  (slice1; segments: 3)
-   Output: f1
+   Output: share0_ref1.f1
    ->  Vec Shared Scan (share slice:id 1:0)
-         Output: f1
+         Output: share0_ref1.f1
+         Vec Plan Merge:  1 child
          ->  Vec Seq Scan on public.int4_tbl
                Output: int4_tbl.f1
- Settings: enable_parallel = 'off', optimizer = 'off'
+ Settings: optimizer = 'off', gp_cte_sharing = 'on'
  Optimizer: Postgres query optimizer
-(8 rows)
+(9 rows)
 
 -- Ensure that we inline the currect CTE when there are
 -- multiple CTEs with the same name
 explain (verbose, costs off)
 with x as (select 1 as y)
 select * from (with x as (select 2 as y) select * from x) ss;
-             QUERY PLAN              
--------------------------------------
+                     QUERY PLAN                     
+----------------------------------------------------
  Result
    Output: 2
- Settings: optimizer = 'off'
+ Settings: optimizer = 'off', gp_cte_sharing = 'on'
  Optimizer: Postgres query optimizer
 (4 rows)
 
@@ -2010,7 +2085,7 @@ select * from x for update;
    Output: subselect_tbl.f1, subselect_tbl.f2, subselect_tbl.f3
    ->  Vec Seq Scan on public.subselect_tbl
          Output: subselect_tbl.f1, subselect_tbl.f2, subselect_tbl.f3
- Settings: optimizer = 'off'
+ Settings: optimizer = 'off', gp_cte_sharing = 'on'
  Optimizer: Postgres query optimizer
 (6 rows)
 
@@ -2033,8 +2108,8 @@ select j,
 (select j from (select j) q2)
 from t
 group by i, j;
-                      QUERY PLAN                      
-------------------------------------------------------
+                     QUERY PLAN                      
+-----------------------------------------------------
  Gather Motion 3:1  (slice1; segments: 3)
    Output: t.j, ((SubPlan 1)), t.i
    ->  HashAggregate
@@ -2045,7 +2120,7 @@ group by i, j;
          SubPlan 1
            ->  Result
                  Output: t.j
- Settings: enable_parallel = 'off', optimizer = 'off'
+ Settings: optimizer = 'off', gp_cte_sharing = 'off'
  Optimizer: Postgres query optimizer
 (12 rows)
 
@@ -2089,7 +2164,7 @@ group by j, q1;
                            SubPlan 1
                              ->  Result
                                    Output: t.j
- Settings: enable_parallel = 'off', optimizer = 'off'
+ Settings: optimizer = 'off', gp_cte_sharing = 'off'
  Optimizer: Postgres query optimizer
 (18 rows)
 
@@ -2108,8 +2183,8 @@ group by j, q1;
 -- should correctly process args of the aggregation during normalization.
 explain (verbose, costs off)
 select (select max((select t.i))) from t;
-                      QUERY PLAN                      
-------------------------------------------------------
+                     QUERY PLAN                      
+-----------------------------------------------------
  Finalize Aggregate
    Output: (SubPlan 2)
    ->  Gather Motion 3:1  (slice1; segments: 3)
@@ -2124,6 +2199,7 @@ select (select max((select t.i))) from t;
    SubPlan 2
      ->  Result
            Output: max((SubPlan 1))
+ Settings: optimizer = 'off', gp_cte_sharing = 'off'
  Optimizer: Postgres query optimizer
 (16 rows)
 

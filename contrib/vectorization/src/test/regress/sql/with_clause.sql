@@ -369,6 +369,37 @@ WITH RECURSIVE r1 AS (
 )
 SELECT * FROM r1 LIMIT 1;
 
+-- GPDB
+-- Greenplum does not support window functions in recursive part's target list
+-- See issue https://github.com/greenplum-db/gpdb/issues/13299 for details.
+-- Previously the following SQL will PANIC or Assert Fail if compiled with assert.
+create table t_window_ordered_set_agg_rte(a bigint, b bigint, c bigint);
+
+insert into t_window_ordered_set_agg_rte select i,i,i from generate_series(1, 10)i;
+
+-- should error out during parse-analyze
+with recursive rcte(x,y) as
+(
+  select a, b from t_window_ordered_set_agg_rte
+  union all
+  select (first_value(c) over (partition by b))::int, a+x
+  from rcte,
+       t_window_ordered_set_agg_rte as t
+  where t.b = x
+)
+select * from rcte limit 10;
+
+-- should error out during parse-analyze
+with recursive rcte(x,y) as
+(
+  select a, b from t_window_ordered_set_agg_rte
+  union all
+  select first_value(c) over (partition by b), a+x
+  from rcte,
+       t_window_ordered_set_agg_rte as t
+  where t.b = x
+)
+select * from rcte limit 10;
 
 -- This used to deadlock, before the IPC between ShareInputScans across
 -- slices was rewritten.
@@ -431,3 +462,32 @@ UNION ALL
   SELECT 'sleep', 1 where pg_sleep(1) is not null
 UNION ALL
   SELECT 'c', j FROM cte;
+
+
+-- Test issue from PR#1204
+-- Executor used to fail to execute this query
+
+CREATE TABLE foo_issue_1204_test (a INT, b INT, c INT, d INT, e INT, f INT);
+INSERT INTO foo_issue_1204_test SELECT generate_series(1,10000);
+
+ANALYZE foo_issue_1204_test;
+
+-- Assert than plan uses Merge Append strategy, and has Share Input Scan node.
+-- Also we are not actaully interested in output so discard it using SELECT EXISTS() hack
+EXPLAIN (COSTS OFF, TIMING OFF, BUFFERS OFF)
+SELECT EXISTS(
+	with inp as MATERIALIZED (select * from  foo_issue_1204_test ) select a,b,c, count(distinct d), count(distinct e), count(distinct f) from inp group by 1,2,3
+	UNION ALL
+	select a,b,c, count(distinct d), count(distinct e), count(distinct f) from foo_issue_1204_test group by 1,2,3
+	ORDER BY 1
+);
+
+-- Check execution is ok
+SELECT EXISTS(
+	with inp as MATERIALIZED (select * from  foo_issue_1204_test ) select a,b,c, count(distinct d), count(distinct e), count(distinct f) from inp group by 1,2,3
+	UNION ALL
+	select a,b,c, count(distinct d), count(distinct e), count(distinct f) from foo_issue_1204_test group by 1,2,3
+	ORDER BY 1
+);
+
+DROP TABLE foo_issue_1204_test;

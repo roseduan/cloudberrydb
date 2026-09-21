@@ -50,6 +50,13 @@ private:
 	// create the inlined version of this consumer as well as the column mapping
 	void CreateInlinedExpr(CMemoryPool *mp);
 
+	// is pruned
+	BOOL m_pruned;
+
+	void MarkAsNotPruned() {
+		m_pruned = false;
+	}
+
 public:
 	CLogicalCTEConsumer(const CLogicalCTEConsumer &) = delete;
 
@@ -63,6 +70,12 @@ public:
 	~CLogicalCTEConsumer() override;
 
 	void RecalOutputColumns(BoolPtrArray *column_prune_marker);
+
+	void MarkAsPruned() {
+		m_pruned = true;
+	}
+
+	void ApplyInline();
 
 	// ident accessors
 	EOperatorId

@@ -440,6 +440,12 @@ set enable_nestloop = 1;
 set enable_material = 0;
 set enable_seqscan = 0;
 set enable_bitmapscan = 0;
+-- The index chosen for tenk2 (tenk2_unique2 or tenk2_hundred) is non-deterministic
+-- since width=0 means any index works equally well.
+--
+-- start_matchignore
+-- m/Index Only Scan using tenk2_\w+ on tenk2/
+-- end_matchignore
 explain select tenk1.unique2 >= 0 from tenk1 left join tenk2 on true limit 1;
 select tenk1.unique2 >= 0 from tenk1 left join tenk2 on true limit 1;
 reset enable_nestloop;

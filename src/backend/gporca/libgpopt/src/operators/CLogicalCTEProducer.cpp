@@ -27,7 +27,8 @@ using namespace gpopt;
 //
 //---------------------------------------------------------------------------
 CLogicalCTEProducer::CLogicalCTEProducer(CMemoryPool *mp)
-	: CLogical(mp), m_id(0), m_pdrgpcr(nullptr), m_pcrsOutput(nullptr)
+	: CLogical(mp), m_id(0), m_pdrgpcr(nullptr), m_pcrsOutput(nullptr), 
+	  m_cbp(false), m_umask(nullptr)
 {
 	m_fPattern = true;
 }
@@ -41,9 +42,10 @@ CLogicalCTEProducer::CLogicalCTEProducer(CMemoryPool *mp)
 //
 //---------------------------------------------------------------------------
 CLogicalCTEProducer::CLogicalCTEProducer(CMemoryPool *mp, ULONG id,
-										 CColRefArray *colref_array)
-	: CLogical(mp), m_id(id), m_pdrgpcr(colref_array), 
-	  m_pcrsOutput(nullptr)
+										 CColRefArray *colref_array,
+										 BOOL canbepruned)
+	: CLogical(mp), m_id(id), m_pdrgpcr(colref_array),
+	  m_pcrsOutput(nullptr), m_cbp(canbepruned), m_umask(nullptr)
 {
 	GPOS_ASSERT(nullptr != colref_array);
 
@@ -86,6 +88,9 @@ CLogicalCTEProducer::~CLogicalCTEProducer()
 {
 	CRefCount::SafeRelease(m_pdrgpcr);
 	CRefCount::SafeRelease(m_pcrsOutput);
+	if (m_umask) {
+		GPOS_DELETE_ARRAY(m_umask);
+	}
 }
 
 //---------------------------------------------------------------------------
@@ -185,7 +190,8 @@ CLogicalCTEProducer::Matches(COperator *pop) const
 	CLogicalCTEProducer *popCTEProducer = CLogicalCTEProducer::PopConvert(pop);
 
 	return m_id == popCTEProducer->UlCTEId() &&
-		   m_pdrgpcr->Equals(popCTEProducer->Pdrgpcr());
+		   m_pdrgpcr->Equals(popCTEProducer->Pdrgpcr()) && 
+		   m_cbp == popCTEProducer->CanBePruned();
 }
 
 //---------------------------------------------------------------------------
@@ -201,6 +207,7 @@ CLogicalCTEProducer::HashValue() const
 {
 	ULONG ulHash = gpos::CombineHashes(COperator::HashValue(), m_id);
 	ulHash = gpos::CombineHashes(ulHash, CUtils::UlHashColArray(m_pdrgpcr));
+	ulHash = gpos::CombineHashes(ulHash, (ULONG)m_cbp);
 
 	return ulHash;
 }

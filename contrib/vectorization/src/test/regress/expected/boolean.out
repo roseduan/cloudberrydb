@@ -142,6 +142,25 @@ SELECT bool '' AS error;
 ERROR:  invalid input syntax for type boolean: ""
 LINE 1: SELECT bool '' AS error;
                     ^
+-- Also try it with non-error-throwing API
+SELECT pg_input_is_valid('true', 'bool');
+ pg_input_is_valid 
+-------------------
+ t
+(1 row)
+
+SELECT pg_input_is_valid('asdf', 'bool');
+ pg_input_is_valid 
+-------------------
+ f
+(1 row)
+
+SELECT * FROM pg_input_error_info('junk', 'bool');
+                    message                    | detail | hint | sql_error_code 
+-----------------------------------------------+--------+------+----------------
+ invalid input syntax for type boolean: "junk" |        |      | 22P02
+(1 row)
+
 -- and, or, not in qualifications
 SELECT bool 't' or bool 'f' AS true;
  true 
@@ -222,7 +241,7 @@ ERROR:  invalid input syntax for type boolean: "  tru e "
 SELECT ''::text::boolean AS invalid;            -- error
 ERROR:  invalid input syntax for type boolean: ""
 CREATE TABLE BOOLTBL1 (f1 bool);
-NOTICE:  Table doesn't have 'DISTRIBUTED BY' clause -- Using column named 'f1' as the Cloudberry Database data distribution key for this table.
+NOTICE:  Table doesn't have 'DISTRIBUTED BY' clause -- Using column named 'f1' as the Apache Cloudberry data distribution key for this table.
 HINT:  The 'DISTRIBUTED BY' clause determines the distribution of data. Make sure column(s) chosen are the optimal data distribution key to minimize skew.
 INSERT INTO BOOLTBL1 (f1) VALUES (bool 't');
 INSERT INTO BOOLTBL1 (f1) VALUES (bool 'True');
@@ -273,7 +292,7 @@ SELECT BOOLTBL1.*
 (1 row)
 
 CREATE TABLE BOOLTBL2 (f1 bool);
-NOTICE:  Table doesn't have 'DISTRIBUTED BY' clause -- Using column named 'f1' as the Cloudberry Database data distribution key for this table.
+NOTICE:  Table doesn't have 'DISTRIBUTED BY' clause -- Using column named 'f1' as the Apache Cloudberry data distribution key for this table.
 HINT:  The 'DISTRIBUTED BY' clause determines the distribution of data. Make sure column(s) chosen are the optimal data distribution key to minimize skew.
 INSERT INTO BOOLTBL2 (f1) VALUES (bool 'f');
 INSERT INTO BOOLTBL2 (f1) VALUES (bool 'false');

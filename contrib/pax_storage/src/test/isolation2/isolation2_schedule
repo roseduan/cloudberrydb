@@ -97,6 +97,7 @@ test: bitmap_index_inspect
 # external table not support pax storage
 # test: external_table
 
+# MERGE3X_FIXME: fsync_ao run good in local but failed in pipeline
 test: fsync_ao
 
 # Disable auto-vacuum for below tests

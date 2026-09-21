@@ -151,7 +151,7 @@ icebergSetFilePartition(IcebergFileIndexMap *map, uint32 fileId, List *partition
 	oldContext = MemoryContextSwitchTo(map->context);
 	foreach(lc, partitionValues)
 	{
-		Value *v = (Value *) lfirst(lc);	/* String node, or NULL for SQL NULL */
+		String *v = (String *) lfirst(lc);	/* String node, or NULL for SQL NULL */
 
 		if (v == NULL)
 			copy = lappend(copy, NULL);

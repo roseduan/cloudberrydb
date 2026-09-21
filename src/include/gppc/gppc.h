@@ -39,6 +39,17 @@
 #ifndef GPPC_H
 #define GPPC_H
 
+/*
+ * Symbols that must remain visible in a shared library built with
+ * -fvisibility=hidden (the default since PG16 for libraries without an
+ * explicit export list).
+ */
+#if defined(__GNUC__)
+#define GPPC_EXPORT __attribute__((visibility("default")))
+#else
+#define GPPC_EXPORT
+#endif
+
 #include <sys/types.h>
 #include <stdint.h>
 
@@ -78,8 +89,9 @@ typedef char		bool;
  * Every SQL invokable function must be declared via this macro.
  */
 #define GPPC_FUNCTION_INFO(funcname) \
-extern const void * pg_finfo_##funcname (void); \
-const void * \
+extern GPPC_EXPORT GppcDatum funcname(GppcFcinfo fcinfo); \
+extern GPPC_EXPORT const void * pg_finfo_##funcname (void); \
+GPPC_EXPORT const void * \
 pg_finfo_##funcname (void) \
 { \
 	return GppcFinfoV1(); \

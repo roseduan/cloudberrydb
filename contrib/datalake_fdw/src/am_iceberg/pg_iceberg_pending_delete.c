@@ -146,9 +146,9 @@ iceberg_register_staging_pending_delete(Relation rel, const char *path,
 
 	pending->reldelete.atCommit = false;	/* delete if abort */
 	pending->reldelete.nestLevel = GetCurrentTransactionNestLevel();
-	pending->reldelete.relnode.node = rel->rd_node;
-	pending->reldelete.relnode.isTempRelation = false;
-	pending->reldelete.relnode.smgr_which = SMGR_INVALID;	/* skip core smgr unlink */
+	pending->reldelete.rlocator.node = rel->rd_locator;
+	pending->reldelete.rlocator.isTempRelation = false;
+	pending->reldelete.rlocator.smgr_which = SMGR_INVALID;	/* skip core smgr unlink */
 	pending->reldelete.action = &iceberg_pending_rel_deletes_action;
 
 	RegisterPendingDelete(&pending->reldelete);

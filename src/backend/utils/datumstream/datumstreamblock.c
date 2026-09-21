@@ -160,7 +160,7 @@ DatumStreamBlockRead_GetReadyOrig(
 								  int32 rowCount,
 								  bool *hadToAdjustRowCount,
 								  int32 * adjustedRowCount,
-								  RelFileNode *node)
+								  RelFileLocator *node)
 {
 	uint8	   *p;
 
@@ -334,8 +334,8 @@ DatumStreamBlockRead_GetReadyOrig(
 
 	if (blockOrig->encrypted)
 	{
-		if (TblspcEncryptionEnabled(node->spcNode))
-			DecryptAOBlockForSpc(dsr->datump, dsr->physical_data_size, node);
+		if (TblspcEncryptionEnabled(node->spcOid))
+			DecryptAOBlockForSpc(dsr->datump, dsr->physical_data_size, (RelFileNode *) node);
 		else if (FileEncryptionEnabled)
 			DecryptAOBlock(dsr->datump, dsr->physical_data_size, node);
 		blockOrig->encrypted = 0;
@@ -635,7 +635,7 @@ DatumStreamBlockRead_GetReadyDense(
 								   int32 rowCount,
 								   bool *hadToAdjustRowCount,
 								   int32 * adjustedRowCount,
-								   RelFileNode *node)
+								   RelFileLocator *node)
 {
 	uint8	   *p;
 
@@ -951,8 +951,8 @@ DatumStreamBlockRead_GetReadyDense(
 	dsr->datump = dsr->datum_beginp;
 	if ((blockDense->orig_4_bytes.flags & DSB_HAS_ENCRYPTION) != 0)
 	{
-		if (TblspcEncryptionEnabled(node->spcNode))
-			DecryptAOBlockForSpc(dsr->datump, dsr->physical_data_size, node);
+		if (TblspcEncryptionEnabled(node->spcOid))
+			DecryptAOBlockForSpc(dsr->datump, dsr->physical_data_size, (RelFileNode *) node);
 		else if (FileEncryptionEnabled)
 			DecryptAOBlock(dsr->datump, dsr->physical_data_size, node);
 
@@ -3673,7 +3673,7 @@ static int64
 DatumStreamBlockWrite_BlockOrig(
 								DatumStreamBlockWrite * dsw,
 								uint8 * buffer,
-								RelFileNode *node)
+								RelFileLocator *node)
 {
 	uint8	   *p;
 	DatumStreamBlock_Orig block;
@@ -3690,7 +3690,7 @@ DatumStreamBlockWrite_BlockOrig(
 	block.ndatum = dsw->nth;
 	block.encrypted = 0;
 
-	if (TblspcEncryptionEnabled(node->spcNode) || FileEncryptionEnabled)
+	if (TblspcEncryptionEnabled(node->spcOid) || FileEncryptionEnabled)
 		block.encrypted = 1;
 /* NOTE:Unfortunately, this was not zeroed in the earlier releases of the code. */
 
@@ -3793,8 +3793,8 @@ DatumStreamBlockWrite_BlockOrig(
 		  /* errcontextCallback */ errcontext_datumstreamblockwrite_callback,
 										 /* errcontextArg */ (void *) dsw);
 
-	if (TblspcEncryptionEnabled(node->spcNode))
-		EncryptAOBlockForSpc(p - block.sz, block.sz, node);
+	if (TblspcEncryptionEnabled(node->spcOid))
+		EncryptAOBlockForSpc(p - block.sz, block.sz, (RelFileNode *) node);
 	else if (FileEncryptionEnabled)
 		EncryptAOBLock(p - block.sz, block.sz, node);
 
@@ -3805,7 +3805,7 @@ static int64
 DatumStreamBlockWrite_BlockDense(
 								 DatumStreamBlockWrite * dsw,
 								 uint8 * buffer,
-								 RelFileNode *node)
+								 RelFileLocator *node)
 {
 	int64		writesz = 0;
 	uint8	   *p = NULL;
@@ -3853,7 +3853,7 @@ DatumStreamBlockWrite_BlockDense(
 		dense.orig_4_bytes.flags |= DSB_HAS_DELTA_COMPRESSION;
 	}
 
-	if (TblspcEncryptionEnabled(node->spcNode) || FileEncryptionEnabled)
+	if (TblspcEncryptionEnabled(node->spcOid) || FileEncryptionEnabled)
 		dense.orig_4_bytes.flags |= DSB_HAS_ENCRYPTION;
 
 	dense.logical_row_count = dsw->nth;
@@ -4238,9 +4238,9 @@ DatumStreamBlockWrite_BlockDense(
 		  /* errcontextCallback */ errcontext_datumstreamblockwrite_callback,
 										  /* errcontextArg */ (void *) dsw);
 
-	if (TblspcEncryptionEnabled(node->spcNode))
+	if (TblspcEncryptionEnabled(node->spcOid))
 		EncryptAOBlockForSpc(buffer + metadataMaxAlignSize,
-							 dense.physical_data_size, node);
+							 dense.physical_data_size, (RelFileNode *) node);
 	else if (FileEncryptionEnabled)
 		EncryptAOBLock(buffer + metadataMaxAlignSize,
 					   dense.physical_data_size, node);
@@ -4251,7 +4251,7 @@ int64
 DatumStreamBlockWrite_Block(
 							DatumStreamBlockWrite * dsw,
 							uint8 * buffer,
-							RelFileNode *node)
+							RelFileLocator *node)
 {
 	if (strncmp(dsw->eyecatcher, DatumStreamBlockWrite_Eyecatcher, DatumStreamBlockWrite_EyecatcherLen) != 0)
 		elog(FATAL, "DatumStreamBlockWrite data structure not valid (eyecatcher)");
@@ -4290,7 +4290,7 @@ DatumStreamBlockWrite_Init(
 						   void *errdetailArg,
 						   int (*errcontextCallback) (void *errcontextArg),
 						   void *errcontextArg,
-						   RelFileNode *relFileNode)
+						   RelFileLocator *relFileNode)
 {
 	memcpy(dsw->eyecatcher, DatumStreamBlockWrite_Eyecatcher, DatumStreamBlockWrite_EyecatcherLen);
 
@@ -5240,8 +5240,6 @@ DatumStreamBlock_IntegrityCheckDense(
 	}
 	else
 	{
-		DatumStreamBlock_Rle_Extension *rleExtension;
-
 		int32		actualNullOnCount;
 
 		int32		compressBitMapSize;

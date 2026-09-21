@@ -40,7 +40,7 @@
 #include "storage/ufile.h"
 #include "storage/fd.h"
 #include "storage/lwlock.h"
-#include "storage/relfilenode.h"
+#include "storage/relfilelocator.h"
 #include "utils/elog.h"
 #include "utils/wait_event.h"
 
@@ -60,8 +60,8 @@ static int localFilePread(UFile *file, char *buffer, int amount, off_t offset);
 static int localFileWrite(UFile *file, char *buffer, int amount);
 static int localFilePwrite(UFile *file, char *buffer, int amount, off_t offset);
 static off_t localFileSize(UFile *file);
-static int localFileUnlink(Oid spcId, const char *fileName);
-static char *localFormatPathName(Oid relid, RelFileNode *relFileNode);
+static void localFileUnlink(Oid spcId, const char *fileName);
+static char *localFormatPathName(Oid relid, RelFileLocator *relFileNode);
 static bool localEnsurePath(Oid spcId, const char *PathName);
 static bool localFileExists(Oid spcId, const char *fileName);
 static const char *localFileName(UFile *file);
@@ -279,7 +279,7 @@ destory_local_file_directories(const char* directoryName)
 	return true;
 }
 
-static int
+static void
 localFileUnlink(Oid spcId, const char *fileName)
 {
 	struct stat st;
@@ -296,22 +296,18 @@ localFileUnlink(Oid spcId, const char *fileName)
 							   fileName),
 						 errhint("You can remove the directories manually if necessary.")));
 		LWLockRelease(DirectoryTableLock);
-		return 0;
 	}
 	else
 	{
-		int ret;
 		LWLockRelease(DirectoryTableLock);
 		/* remove file */
-		ret = unlink(fileName);
-		if (ret < 0)
+		if (unlink(fileName) < 0)
 		{
 			if (errno != ENOENT)
 				ereport(WARNING,
 							(errcode_for_file_access(),
 							 errmsg("could not remove file \"%s\": %m", fileName)));
 		}
-		return ret;
 	}
 
 }
@@ -328,15 +324,15 @@ localFileRmdir(Oid spcId, const char *dirName)
 }
 
 static char *
-localFormatPathName(Oid relid, RelFileNode *relFileNode)
+localFormatPathName(Oid relid, RelFileLocator *relFileNode)
 {
-	if (relFileNode->spcNode == DEFAULTTABLESPACE_OID)
+	if (relFileNode->spcOid == DEFAULTTABLESPACE_OID)
 		return psprintf("base/%u/%u_dirtable",
-				  		relFileNode->dbNode, relid);
+				  		relFileNode->dbOid, relid);
 	else
 		return psprintf("pg_tblspc/%u/%s/%u/%u_dirtable",
-						relFileNode->spcNode, GP_TABLESPACE_VERSION_DIRECTORY,
-						relFileNode->dbNode, relid);
+						relFileNode->spcOid, GP_TABLESPACE_VERSION_DIRECTORY,
+						relFileNode->dbOid, relid);
 }
 
 bool
@@ -469,7 +465,8 @@ UFileUnlink(Oid spcId, const char *fileName)
 
 	fileAm = GetTablespaceFileHandler(spcId);
 
-	return fileAm->unlink(spcId, fileName);
+	fileAm->unlink(spcId, fileName);
+	return 0;
 }
 
 int UFileRmdir(Oid spcId, const char *dirName)
@@ -482,11 +479,11 @@ int UFileRmdir(Oid spcId, const char *dirName)
 }
 
 char *
-UFileFormatPathName(Oid relid, RelFileNode *relFileNode)
+UFileFormatPathName(Oid relid, RelFileLocator *relFileNode)
 {
 	FileAm *fileAm;
 
-	fileAm = GetTablespaceFileHandler(relFileNode->spcNode);
+	fileAm = GetTablespaceFileHandler(relFileNode->spcOid);
 
 	return fileAm->formatPathName(relid, relFileNode);
 }

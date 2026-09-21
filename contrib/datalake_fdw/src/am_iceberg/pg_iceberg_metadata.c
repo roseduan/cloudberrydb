@@ -112,11 +112,12 @@ iceberg_metadata_heap_update(Relation metadata_rel, ItemPointer otid,
 	TM_Result		result;
 	TM_FailureData	tmfd;
 	LockTupleMode	lockmode;
+	TU_UpdateIndexes update_indexes;
 
 	result = heap_update(metadata_rel, otid, newtuple,
 						 GetCurrentCommandId(true), InvalidSnapshot,
 						 true /* wait for commit */,
-						 &tmfd, &lockmode);
+						 &tmfd, &lockmode, &update_indexes);
 
 	if (result == TM_Ok && !HeapTupleIsHeapOnly(newtuple))
 	{

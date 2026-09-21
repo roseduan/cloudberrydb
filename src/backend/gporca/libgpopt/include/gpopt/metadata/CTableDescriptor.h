@@ -242,7 +242,7 @@ public:
 	IsNonBlockTable() const
 	{
 		return m_erelstoragetype == IMDRelation::ErelstorageAppendOnlyCols ||
-			   m_erelstoragetype == IMDRelation::ErelstorageAppendOnlyRows || 
+			   m_erelstoragetype == IMDRelation::ErelstorageAppendOnlyRows ||
 			   m_erelstoragetype == IMDRelation::ErelstoragePAX ||
 			   m_erelstoragetype == IMDRelation::ErelstorageIceberg;
 	}

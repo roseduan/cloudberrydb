@@ -760,8 +760,20 @@ gp_activate_standby(void)
 		return true;
 	}
 
-	mirroring_sanity_check(SUPERUSER | UTILITY_MODE | STANDBY_ONLY,
-						   PG_FUNCNAME_MACRO);
+	/*
+	 * When gp_activate_standby() is invoked by the startup process itself
+	 * during promotion (the normal case -- see comment above), Gp_role is
+	 * never GP_ROLE_UTILITY: the startup process is an auxiliary process
+	 * that never goes through normal backend role assignment. Requiring
+	 * UTILITY_MODE here would make mirroring_sanity_check() unconditionally
+	 * elog(ERROR) for that caller, which is promoted to FATAL in the
+	 * startup process and takes down the whole postmaster. Skip the check
+	 * for this trusted, single-purpose caller; a manual/direct invocation
+	 * (not from the startup process) still goes through the full check.
+	 */
+	if (!am_startup)
+		mirroring_sanity_check(SUPERUSER | UTILITY_MODE | STANDBY_ONLY,
+							   PG_FUNCNAME_MACRO);
 
 	catalog_activate_standby(standby_dbid, master_dbid);
 

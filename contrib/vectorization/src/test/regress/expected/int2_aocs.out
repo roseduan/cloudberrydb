@@ -3,6 +3,8 @@ SET default_table_access_method=ao_column;
 -- INT2
 --
 CREATE TABLE INT2_TBL(f1 int2);
+NOTICE:  Table doesn't have 'DISTRIBUTED BY' clause -- Using column named 'f1' as the Apache Cloudberry data distribution key for this table.
+HINT:  The 'DISTRIBUTED BY' clause determines the distribution of data. Make sure column(s) chosen are the optimal data distribution key to minimize skew.
 INSERT INTO INT2_TBL(f1) VALUES ('0   ');
 ANALYZE INT2_TBL;
 INSERT INTO INT2_TBL(f1) VALUES ('  1234 ');
@@ -48,9 +50,9 @@ SELECT * FROM INT2_TBL;
 --------
       0
    1234
+ -32767
   -1234
   32767
- -32767
 (5 rows)
 
 SELECT * FROM INT2_TBL AS f(a, b);
@@ -61,18 +63,18 @@ SELECT i.* FROM INT2_TBL i WHERE i.f1 <> int2 '0';
    f1   
 --------
    1234
+ -32767
   -1234
   32767
- -32767
 (4 rows)
 
 SELECT i.* FROM INT2_TBL i WHERE i.f1 <> int4 '0';
    f1   
 --------
    1234
+ -32767
   -1234
   32767
- -32767
 (4 rows)
 
 SELECT i.* FROM INT2_TBL i WHERE i.f1 = int2 '0';
@@ -104,16 +106,16 @@ SELECT i.* FROM INT2_TBL i WHERE i.f1 < int4 '0';
 SELECT i.* FROM INT2_TBL i WHERE i.f1 <= int2 '0';
    f1   
 --------
-      0
   -1234
+      0
  -32767
 (3 rows)
 
 SELECT i.* FROM INT2_TBL i WHERE i.f1 <= int4 '0';
    f1   
 --------
-      0
   -1234
+      0
  -32767
 (3 rows)
 
@@ -127,8 +129,8 @@ SELECT i.* FROM INT2_TBL i WHERE i.f1 > int2 '0';
 SELECT i.* FROM INT2_TBL i WHERE i.f1 > int4 '0';
   f1   
 -------
-  1234
  32767
+  1234
 (2 rows)
 
 SELECT i.* FROM INT2_TBL i WHERE i.f1 >= int2 '0';
@@ -164,7 +166,7 @@ SELECT i.* FROM INT2_TBL i WHERE (i.f1 % int4 '2') = int2 '0';
 (3 rows)
 
 SELECT i.f1, i.f1 * int2 '2' AS x FROM INT2_TBL i;
-ERROR:  Read error: [record-batch-reader][read-next]: Invalid: overflow. (execMain.c:2058)  (seg0 slice1 127.0.1.1:7002 pid=9586) (execMain.c:2058)
+ERROR:  Read error: [record-batch-reader][read-next]: Invalid: overflow. (execMain.c:3100)  (seg1 slice1 172.19.0.2:7003 pid=1814405) (execMain.c:3100)
 SELECT i.f1, i.f1 * int2 '2' AS x FROM INT2_TBL i
 WHERE abs(f1) < 16384;
   f1   |   x   
@@ -179,43 +181,43 @@ SELECT i.f1, i.f1 * int4 '2' AS x FROM INT2_TBL i;
 --------+--------
       0 |      0
    1234 |   2468
+ -32767 | -65534
   -1234 |  -2468
   32767 |  65534
- -32767 | -65534
 (5 rows)
 
 SELECT i.f1, i.f1 + int2 '2' AS x FROM INT2_TBL i;
-ERROR:  Read error: [record-batch-reader][read-next]: Invalid: overflow. (execMain.c:2058)  (seg0 slice1 127.0.1.1:7002 pid=9586) (execMain.c:2058)
+ERROR:  Read error: [record-batch-reader][read-next]: Invalid: overflow. (execMain.c:3100)  (seg0 slice1 172.19.0.2:7002 pid=1814400) (execMain.c:3100)
 SELECT i.f1, i.f1 + int2 '2' AS x FROM INT2_TBL i
 WHERE f1 < 32766;
    f1   |   x    
 --------+--------
+  -1234 |  -1232
       0 |      2
    1234 |   1236
-  -1234 |  -1232
  -32767 | -32765
 (4 rows)
 
 SELECT i.f1, i.f1 + int4 '2' AS x FROM INT2_TBL i;
    f1   |   x    
 --------+--------
-      0 |      2
-   1234 |   1236
   -1234 |  -1232
   32767 |  32769
+      0 |      2
+   1234 |   1236
  -32767 | -32765
 (5 rows)
 
 SELECT i.f1, i.f1 - int2 '2' AS x FROM INT2_TBL i;
-ERROR:  Read error: [record-batch-reader][read-next]: Invalid: overflow. (execMain.c:2058)  (seg1 slice1 127.0.1.1:7003 pid=9583) (execMain.c:2058)
+ERROR:  Read error: [record-batch-reader][read-next]: Invalid: overflow. (execMain.c:3100)  (seg1 slice1 172.19.0.2:7003 pid=1814405) (execMain.c:3100)
 SELECT i.f1, i.f1 - int2 '2' AS x FROM INT2_TBL i
 WHERE f1 > -32767;
   f1   |   x   
 -------+-------
-     0 |    -2
-  1234 |  1232
  -1234 | -1236
  32767 | 32765
+     0 |    -2
+  1234 |  1232
 (4 rows)
 
 SELECT i.f1, i.f1 - int4 '2' AS x FROM INT2_TBL i;
@@ -223,9 +225,9 @@ SELECT i.f1, i.f1 - int4 '2' AS x FROM INT2_TBL i;
 --------+--------
       0 |     -2
    1234 |   1232
+ -32767 | -32769
   -1234 |  -1236
   32767 |  32765
- -32767 | -32769
 (5 rows)
 
 SELECT i.f1, i.f1 / int2 '2' AS x FROM INT2_TBL i;
@@ -233,18 +235,18 @@ SELECT i.f1, i.f1 / int2 '2' AS x FROM INT2_TBL i;
 --------+--------
       0 |      0
    1234 |    617
+ -32767 | -16383
   -1234 |   -617
   32767 |  16383
- -32767 | -16383
 (5 rows)
 
 SELECT i.f1, i.f1 / int4 '2' AS x FROM INT2_TBL i;
    f1   |   x    
 --------+--------
-      0 |      0
-   1234 |    617
   -1234 |   -617
   32767 |  16383
+      0 |      0
+   1234 |    617
  -32767 | -16383
 (5 rows)
 

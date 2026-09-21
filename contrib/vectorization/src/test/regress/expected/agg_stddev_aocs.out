@@ -46,6 +46,7 @@ explain SELECT stddev_samp(a.i) FROM test_agg_stddev a , test_agg_stddev b WHERE
  Optimizer: Postgres query optimizer
 (11 rows)
 
+-- MREGE3X_FIXME: This sql record a error
 SELECT stddev_samp(i) FROM test_agg_stddev;
     stddev_samp     
 --------------------

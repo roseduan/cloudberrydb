@@ -25,19 +25,18 @@ Datum
 invalidate_buffers(PG_FUNCTION_ARGS)
 {
 	SMgrRelation reln = (SMgrRelation) palloc(sizeof(SMgrRelationData));
-	RelFileNodeBackend  rnodebackend;
+	RelFileLocatorBackend  rnodebackend;
 	ForkNumber forknum = MAIN_FORKNUM;
 	BlockNumber firstDelBlock = 0;
 
-	rnodebackend.node.spcNode = PG_GETARG_OID(0);
-	rnodebackend.node.dbNode  = PG_GETARG_OID(1);
-	rnodebackend.node.relNode = PG_GETARG_OID(2);
+	rnodebackend.locator.spcOid = PG_GETARG_OID(0);
+	rnodebackend.locator.dbOid  = PG_GETARG_OID(1);
+	rnodebackend.locator.relNumber = PG_GETARG_OID(2);
 
 	rnodebackend.backend = InvalidBackendId; /* not temporary/local */
-	Assert(!InRecovery); /* can't be used in recovery mode */
-	reln->smgr_rnode = rnodebackend;
+	reln->smgr_rlocator = rnodebackend;
 
-	DropRelFileNodeBuffers(reln, &forknum, 1, &firstDelBlock);
+	DropRelationBuffers(reln, &forknum, 1, &firstDelBlock);
 	pfree(reln);
 
 	PG_RETURN_BOOL(true);

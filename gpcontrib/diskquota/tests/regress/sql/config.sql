@@ -3,7 +3,7 @@ CREATE DATABASE diskquota;
 
 \! gpconfig -c shared_preload_libraries -v $(./data/current_binary_name);
 \! gpconfig -c diskquota.naptime -v 0 --skipvalidation
-\! gpconfig -c max_worker_processes -v 32 --skipvalidation
+\! gpconfig -c max_worker_processes -v 20 --skipvalidation
 \! gpconfig -c diskquota.hard_limit -v "off" --skipvalidation
 \! gpconfig -c diskquota.max_workers -v 1 --skipvalidation
 \! gpconfig -c plpython3.python_path -v "'$GPHOME/lib/python'" --skipvalidation;

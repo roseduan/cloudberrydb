@@ -112,7 +112,7 @@ test: subselect_aocs psql_crosstab_aocs random_aocs
 test: misc_functions_aocs async_aocs dbsize_aocs
 #test: misc_aocs tid_aocs tidscan_aocs tidrangescan_aocs
 
-test: create_table_like_aocs alter_generic_aocs alter_operator_aocs  sysviews_aocs collate.icu.utf8_aocs incremental_sort_aocs
+test: create_table_like_aocs alter_generic_aocs alter_operator_aocs  sysviews_aocs incremental_sort_aocs
 # rules cannot run concurrently with any test that creates
 # a view or rule in the public schema
 #

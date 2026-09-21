@@ -27,13 +27,19 @@ ifeq ($(with_openssl),yes)
 	cp data/gpfdist_ssl/certs_matching/root.crt data/gpfdist_ssl/certs_not_matching
 endif
 endif
+	# gpfdist2's writable external tables write through these files; gpfdist
+	# appends to a pre-existing target instead of truncating it, so leftover
+	# data from a previous installcheck run inflates the row counts the next
+	# time round unless we remove them first.
+	rm -f data/gpfdist2/test_quote.csv
 ifeq ($(with_zstd),yes)
+	rm -f data/gpfdist2/lineitem.tbl.w
 	rm -rf data/gpfdist2/lineitem.tbl.long
 	touch data/gpfdist2/lineitem.tbl.long
 	for name in `seq 1 1000`; \
 	do \
 		head -100 data/gpfdist2/lineitem.tbl >> data/gpfdist2/lineitem.tbl.long; \
-	done  
+	done
 endif
 	$(top_builddir)/src/test/regress/pg_regress --dbname=gpfdist_regression $(REGRESS) $(REGRESS_OPTS)
 

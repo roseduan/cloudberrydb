@@ -37,7 +37,8 @@ CLogicalCTEConsumer::CLogicalCTEConsumer(CMemoryPool *mp)
 	  m_pdrgpcr(nullptr),
 	  m_pexprInlined(nullptr),
 	  m_phmulcr(nullptr),
-	  m_pcrsOutput(nullptr)
+	  m_pcrsOutput(nullptr),
+	  m_pruned(false)
 {
 	m_fPattern = true;
 }
@@ -57,7 +58,8 @@ CLogicalCTEConsumer::CLogicalCTEConsumer(CMemoryPool *mp, ULONG id,
 	  m_pdrgorigpcr(nullptr),
 	  m_pdrgpcr(colref_array),
 	  m_pexprInlined(nullptr),
-	  m_phmulcr(nullptr)
+	  m_phmulcr(nullptr),
+	  m_pruned(false)
 {
 	GPOS_ASSERT(nullptr != colref_array);
 	m_pcrsOutput = GPOS_NEW(mp) CColRefSet(mp, m_pdrgpcr);
@@ -130,6 +132,38 @@ void CLogicalCTEConsumer::RecalOutputColumns(BoolPtrArray *column_prune_marker)
 	COptCtxt::PoctxtFromTLS()->Pcteinfo()->AddConsumerCols(m_id, m_pdrgpcr);
 }
 
+
+void
+CLogicalCTEConsumer::ApplyInline() {
+	// do nothing
+	if (!m_pruned) {
+		return;
+	}
+	CCTEInfo *pcteinfo = COptCtxt::PoctxtFromTLS()->Pcteinfo();
+	CExpressionArray *pcexprs = pcteinfo->PexprCTEConsumer(m_id);
+	ULONG cpexrssz = pcexprs->Size();
+	UlongToColRefMap *pcmpulcr = pcteinfo->GetCTEConsumerMapping();
+
+	for (ULONG ulPos = 0; ulPos < cpexrssz; ulPos++) {
+		CExpression *cepxr = (*pcexprs)[ulPos];
+		CLogicalCTEConsumer *pcoper = CLogicalCTEConsumer::PopConvert(cepxr->Pop());
+		CColRefArray *colrefs = pcoper->Pdrgpcr();
+
+		for (ULONG ulcrPos = 0; ulcrPos < colrefs->Size(); ulcrPos++) {
+			CColRef *colref = (*colrefs)[ulcrPos];
+			ULONG colid = colref->Id();
+			colref->MarkAsUsed();
+
+			CColRef *producer_colref = nullptr;
+			producer_colref = pcmpulcr->Find(&colid);
+			if (producer_colref) {
+				producer_colref->MarkAsUsed();
+			}
+		}
+
+		pcoper->MarkAsNotPruned();
+	}
+}
 
 //---------------------------------------------------------------------------
 //	@function:
@@ -345,11 +379,36 @@ CLogicalCTEConsumer::PopCopyWithRemappedColumns(
 	CMemoryPool *mp, UlongToColRefMap *colref_mapping, BOOL must_exist)
 {
 	CColRefArray *colref_array = nullptr;
+	CCTEInfo *cteinfo = COptCtxt::PoctxtFromTLS()->Pcteinfo();
 
 	if (must_exist)
 	{
-		colref_array =
-			CUtils::PdrgpcrRemapAndCreate(mp, m_pdrgpcr, colref_mapping);
+		UlongToColRefMap *consumer_mapping;
+		ULONG colid;
+		ULONG colref_size;
+
+		colref_array = CUtils::PdrgpcrRemapAndCreate(mp, m_pdrgpcr, colref_mapping);
+
+		colref_size = colref_array->Size();
+		GPOS_ASSERT(colref_size == colref_array->Size());
+
+		consumer_mapping = cteinfo->GetCTEConsumerMapping();
+		for (ULONG ul = 0; ul < colref_size; ul++) {
+			CColRef *old_colref = (*m_pdrgpcr)[ul];
+			CColRef *new_colref = (*colref_array)[ul];
+			
+			colid = old_colref->Id();
+			CColRef *p_colref = consumer_mapping->Find(&colid);
+			if (nullptr == p_colref) {
+				GPOS_RAISE(
+					CException::ExmaInvalid, CException::ExmiInvalid,
+					GPOS_WSZ_LIT(
+						"Not found CTE consumer colid regsiterd in consumer mapping"));
+			}
+			
+			consumer_mapping->Insert(
+				GPOS_NEW(mp) ULONG(new_colref->Id()), p_colref);
+		}
 	}
 	else
 	{

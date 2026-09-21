@@ -45,7 +45,7 @@ EXPLAIN (ANALYZE, COSTS OFF, SUMMARY OFF, TIMING OFF)
                One-Time Filter: (gp_execution_segment() = 0)
                ->  ProjectSet (actual rows=3 loops=1)
                      ->  Result (actual rows=1 loops=1)
- Optimizer: GPORCA
+ Optimizer: Pivotal Optimizer (GPORCA)
 (7 rows)
 
 -- WITH NO DATA, passes.
@@ -62,7 +62,7 @@ EXPLAIN (ANALYZE, COSTS OFF, SUMMARY OFF, TIMING OFF)
                One-Time Filter: (gp_execution_segment() = 0)
                ->  ProjectSet (never executed)
                      ->  Result (never executed)
- Optimizer: GPORCA
+ Optimizer: Pivotal Optimizer (GPORCA)
 (7 rows)
 
 -- EXECUTE and WITH DATA, passes.
@@ -80,7 +80,7 @@ EXPLAIN (ANALYZE, COSTS OFF, SUMMARY OFF, TIMING OFF)
                One-Time Filter: (gp_execution_segment() = 0)
                ->  ProjectSet (actual rows=3 loops=1)
                      ->  Result (actual rows=1 loops=1)
- Optimizer: GPORCA
+ Optimizer: Pivotal Optimizer (GPORCA)
 (7 rows)
 
 -- EXECUTE and WITH NO DATA, passes.
@@ -97,7 +97,7 @@ EXPLAIN (ANALYZE, COSTS OFF, SUMMARY OFF, TIMING OFF)
                One-Time Filter: (gp_execution_segment() = 1)
                ->  ProjectSet (never executed)
                      ->  Result (never executed)
- Optimizer: GPORCA
+ Optimizer: Pivotal Optimizer (GPORCA)
 (7 rows)
 
 RESET SESSION AUTHORIZATION;
@@ -202,9 +202,9 @@ DROP TABLE easi, easi2;
 --
 -- Disallowed uses of SELECT ... INTO.  All should fail
 --
-DECLARE foo CURSOR FOR SELECT 1 INTO b;
+DECLARE foo CURSOR FOR SELECT 1 INTO int4_tbl;
 ERROR:  SELECT ... INTO is not allowed here
-LINE 1: DECLARE foo CURSOR FOR SELECT 1 INTO b;
+LINE 1: DECLARE foo CURSOR FOR SELECT 1 INTO int4_tbl;
                                              ^
 COPY (SELECT 1 INTO frak UNION SELECT 2) TO 'blob';
 ERROR:  COPY (SELECT INTO) is not supported
@@ -212,12 +212,55 @@ SELECT * FROM (SELECT 1 INTO f) bar;
 ERROR:  SELECT ... INTO is not allowed here
 LINE 1: SELECT * FROM (SELECT 1 INTO f) bar;
                                      ^
-CREATE VIEW foo AS SELECT 1 INTO b;
+CREATE VIEW foo AS SELECT 1 INTO int4_tbl;
 ERROR:  views must not contain SELECT INTO
-INSERT INTO b SELECT 1 INTO f;
+INSERT INTO int4_tbl SELECT 1 INTO f;
 ERROR:  SELECT ... INTO is not allowed here
-LINE 1: INSERT INTO b SELECT 1 INTO f;
-                                    ^
+LINE 1: INSERT INTO int4_tbl SELECT 1 INTO f;
+                                           ^
+--
+-- Empty target list 
+--
+explain (costs off) select into empty_tl from generate_series(0, 10);
+NOTICE:  Table doesn't have 'DISTRIBUTED BY' clause. Creating a NULL policy entry.
+                         QUERY PLAN                          
+-------------------------------------------------------------
+ Result
+   ->  Redistribute Motion 3:3  (slice1; segments: 3)
+         ->  Result
+               One-Time Filter: (gp_execution_segment() = 2)
+               ->  Function Scan on generate_series
+ Optimizer: GPORCA
+(6 rows)
+
+select into empty_tl from generate_series(0, 10);
+NOTICE:  Table doesn't have 'DISTRIBUTED BY' clause. Creating a NULL policy entry.
+select * from empty_tl;
+--
+(11 rows)
+
+drop table empty_tl;
+--
+-- Empty target list 
+--
+explain (costs off) select into empty_tl from generate_series(0, 10);
+NOTICE:  Table doesn't have 'DISTRIBUTED BY' clause. Creating a NULL policy entry.
+                         QUERY PLAN                          
+-------------------------------------------------------------
+ Result
+   ->  Redistribute Motion 3:3  (slice1; segments: 3)
+         ->  Result
+               One-Time Filter: (gp_execution_segment() = 1)
+               ->  Function Scan on generate_series
+ Optimizer: GPORCA
+(6 rows)
+
+select into empty_tl from generate_series(0, 10);
+select * from empty_tl;
+--
+(11 rows)
+
+drop table empty_tl;
 -- Test CREATE TABLE AS ... IF NOT EXISTS
 CREATE TABLE ctas_ine_tbl AS SELECT 1;
 CREATE TABLE ctas_ine_tbl AS SELECT 1 / 0; -- error

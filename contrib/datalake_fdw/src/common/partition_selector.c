@@ -8,7 +8,7 @@
 #include "utils/memutils.h"
 #include "utils/typcache.h"
 #include "utils/syscache.h"
-#include "utils/int8.h"
+#include "utils/fmgrprotos.h"
 #include "nodes/makefuncs.h"
 #include "parser/parse_expr.h"
 #include "catalog/pg_operator.h"

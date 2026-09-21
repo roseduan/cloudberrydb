@@ -306,11 +306,12 @@ ORDER BY bucket;
                      Group Key: (time_series.time_bucket_gapfill('@ 1 hour'::interval, "time", 'Mon Jan 01 00:00:00 2024 UTC'::timestamp with time zone, 'Mon Jan 01 04:00:00 2024 UTC'::timestamp with time zone))
                      ->  Sort
                            Sort Key: (time_series.time_bucket_gapfill('@ 1 hour'::interval, "time", 'Mon Jan 01 00:00:00 2024 UTC'::timestamp with time zone, 'Mon Jan 01 04:00:00 2024 UTC'::timestamp with time zone))
-                           ->  Custom Scan (ChunkScan) on gf_mpp
-                                 Filter: (("time" >= 'Mon Jan 01 00:00:00 2024 UTC'::timestamp with time zone) AND ("time" < 'Mon Jan 01 04:00:00 2024 UTC'::timestamp with time zone) AND (device_id = 1))
-                                 Storage: Time-Series Chunk
+                           ->  Result
+                                 ->  Custom Scan (ChunkScan) on gf_mpp
+                                       Filter: (("time" >= 'Mon Jan 01 00:00:00 2024 UTC'::timestamp with time zone) AND ("time" < 'Mon Jan 01 04:00:00 2024 UTC'::timestamp with time zone) AND (device_id = 1))
+                                       Storage: Time-Series Chunk
  Optimizer: Postgres query optimizer
-(14 rows)
+(15 rows)
 
 -- 7b. Multi-device gapfill — Gather Motion N:1 + GapFill on segments
 EXPLAIN (COSTS OFF)
@@ -325,8 +326,8 @@ WHERE device_id IN (1, 2)
   AND time >= '2024-01-01 00:00:00+00' AND time < '2024-01-01 04:00:00+00'
 GROUP BY bucket, device_id
 ORDER BY device_id, bucket;
-                                                                                                             QUERY PLAN                                                                                                             
-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+                                                                                                               QUERY PLAN                                                                                                                
+-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
  Sort
    Sort Key: device_id, (time_series.time_bucket_gapfill('@ 1 hour'::interval, "time", 'Mon Jan 01 00:00:00 2024 UTC'::timestamp with time zone, 'Mon Jan 01 04:00:00 2024 UTC'::timestamp with time zone))
    ->  Custom Scan (GapFill)
@@ -337,11 +338,12 @@ ORDER BY device_id, bucket;
                      Group Key: device_id, (time_series.time_bucket_gapfill('@ 1 hour'::interval, "time", 'Mon Jan 01 00:00:00 2024 UTC'::timestamp with time zone, 'Mon Jan 01 04:00:00 2024 UTC'::timestamp with time zone))
                      ->  Sort
                            Sort Key: device_id, (time_series.time_bucket_gapfill('@ 1 hour'::interval, "time", 'Mon Jan 01 00:00:00 2024 UTC'::timestamp with time zone, 'Mon Jan 01 04:00:00 2024 UTC'::timestamp with time zone))
-                           ->  Custom Scan (ChunkScan) on gf_mpp
-                                 Filter: ((device_id = ANY ('{1,2}'::integer[])) AND ("time" >= 'Mon Jan 01 00:00:00 2024 UTC'::timestamp with time zone) AND ("time" < 'Mon Jan 01 04:00:00 2024 UTC'::timestamp with time zone))
-                                 Storage: Time-Series Chunk
+                           ->  Result
+                                 ->  Custom Scan (ChunkScan) on gf_mpp
+                                       Filter: ((device_id = ANY ('{1,2}'::integer[])) AND ("time" >= 'Mon Jan 01 00:00:00 2024 UTC'::timestamp with time zone) AND ("time" < 'Mon Jan 01 04:00:00 2024 UTC'::timestamp with time zone))
+                                       Storage: Time-Series Chunk
  Optimizer: Postgres query optimizer
-(14 rows)
+(15 rows)
 
 -- 7c. LOCF plan — Result → GapFill → GroupAggregate
 EXPLAIN (COSTS OFF)
@@ -368,11 +370,12 @@ ORDER BY bucket;
                            Group Key: (time_series.time_bucket_gapfill('@ 1 hour'::interval, "time", 'Mon Jan 01 00:00:00 2024 UTC'::timestamp with time zone, 'Mon Jan 01 04:00:00 2024 UTC'::timestamp with time zone))
                            ->  Sort
                                  Sort Key: (time_series.time_bucket_gapfill('@ 1 hour'::interval, "time", 'Mon Jan 01 00:00:00 2024 UTC'::timestamp with time zone, 'Mon Jan 01 04:00:00 2024 UTC'::timestamp with time zone))
-                                 ->  Custom Scan (ChunkScan) on gf_mpp
-                                       Filter: (("time" >= 'Mon Jan 01 00:00:00 2024 UTC'::timestamp with time zone) AND ("time" < 'Mon Jan 01 04:00:00 2024 UTC'::timestamp with time zone) AND (device_id = 1))
-                                       Storage: Time-Series Chunk
+                                 ->  Result
+                                       ->  Custom Scan (ChunkScan) on gf_mpp
+                                             Filter: (("time" >= 'Mon Jan 01 00:00:00 2024 UTC'::timestamp with time zone) AND ("time" < 'Mon Jan 01 04:00:00 2024 UTC'::timestamp with time zone) AND (device_id = 1))
+                                             Storage: Time-Series Chunk
  Optimizer: Postgres query optimizer
-(15 rows)
+(16 rows)
 
 -- ============================================================
 -- Section 8: Edge cases
@@ -553,8 +556,8 @@ WHERE device_id IN (1, 2)
   AND time >= '2024-01-01 00:00:00+00' AND time < '2024-01-01 04:00:00+00'
 GROUP BY bucket, device_id
 ORDER BY device_id, bucket;
-                                                                                                             QUERY PLAN                                                                                                             
-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+                                                                                                               QUERY PLAN                                                                                                                
+-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
  Sort
    Sort Key: device_id, (time_series.time_bucket_gapfill('@ 1 hour'::interval, "time", 'Mon Jan 01 00:00:00 2024 UTC'::timestamp with time zone, 'Mon Jan 01 04:00:00 2024 UTC'::timestamp with time zone))
    ->  Custom Scan (GapFill)
@@ -565,11 +568,12 @@ ORDER BY device_id, bucket;
                      Group Key: device_id, (time_series.time_bucket_gapfill('@ 1 hour'::interval, "time", 'Mon Jan 01 00:00:00 2024 UTC'::timestamp with time zone, 'Mon Jan 01 04:00:00 2024 UTC'::timestamp with time zone))
                      ->  Sort
                            Sort Key: device_id, (time_series.time_bucket_gapfill('@ 1 hour'::interval, "time", 'Mon Jan 01 00:00:00 2024 UTC'::timestamp with time zone, 'Mon Jan 01 04:00:00 2024 UTC'::timestamp with time zone))
-                           ->  Custom Scan (ChunkScan) on gf_mpp
-                                 Filter: ((device_id = ANY ('{1,2}'::integer[])) AND ("time" >= 'Mon Jan 01 00:00:00 2024 UTC'::timestamp with time zone) AND ("time" < 'Mon Jan 01 04:00:00 2024 UTC'::timestamp with time zone))
-                                 Storage: Time-Series Chunk
+                           ->  Result
+                                 ->  Custom Scan (ChunkScan) on gf_mpp
+                                       Filter: ((device_id = ANY ('{1,2}'::integer[])) AND ("time" >= 'Mon Jan 01 00:00:00 2024 UTC'::timestamp with time zone) AND ("time" < 'Mon Jan 01 04:00:00 2024 UTC'::timestamp with time zone))
+                                       Storage: Time-Series Chunk
  Optimizer: Postgres query optimizer
-(14 rows)
+(15 rows)
 
 -- 12b. GapFill in subquery — should also trigger fallback
 EXPLAIN (COSTS OFF)
@@ -596,11 +600,12 @@ ORDER BY bucket;
                      Group Key: (time_series.time_bucket_gapfill('@ 1 hour'::interval, gf_mpp."time", 'Mon Jan 01 00:00:00 2024 UTC'::timestamp with time zone, 'Mon Jan 01 04:00:00 2024 UTC'::timestamp with time zone))
                      ->  Sort
                            Sort Key: (time_series.time_bucket_gapfill('@ 1 hour'::interval, gf_mpp."time", 'Mon Jan 01 00:00:00 2024 UTC'::timestamp with time zone, 'Mon Jan 01 04:00:00 2024 UTC'::timestamp with time zone))
-                           ->  Custom Scan (ChunkScan) on gf_mpp
-                                 Filter: (("time" >= 'Mon Jan 01 00:00:00 2024 UTC'::timestamp with time zone) AND ("time" < 'Mon Jan 01 04:00:00 2024 UTC'::timestamp with time zone) AND (device_id = 1))
-                                 Storage: Time-Series Chunk
+                           ->  Result
+                                 ->  Custom Scan (ChunkScan) on gf_mpp
+                                       Filter: (("time" >= 'Mon Jan 01 00:00:00 2024 UTC'::timestamp with time zone) AND ("time" < 'Mon Jan 01 04:00:00 2024 UTC'::timestamp with time zone) AND (device_id = 1))
+                                       Storage: Time-Series Chunk
  Optimizer: Postgres query optimizer
-(14 rows)
+(15 rows)
 
 -- 12c. GapFill in CTE — should also trigger fallback
 EXPLAIN (COSTS OFF)
@@ -627,11 +632,12 @@ SELECT * FROM filled ORDER BY bucket;
                      Group Key: (time_series.time_bucket_gapfill('@ 1 hour'::interval, gf_mpp."time", 'Mon Jan 01 00:00:00 2024 UTC'::timestamp with time zone, 'Mon Jan 01 04:00:00 2024 UTC'::timestamp with time zone))
                      ->  Sort
                            Sort Key: (time_series.time_bucket_gapfill('@ 1 hour'::interval, gf_mpp."time", 'Mon Jan 01 00:00:00 2024 UTC'::timestamp with time zone, 'Mon Jan 01 04:00:00 2024 UTC'::timestamp with time zone))
-                           ->  Custom Scan (ChunkScan) on gf_mpp
-                                 Filter: (("time" >= 'Mon Jan 01 00:00:00 2024 UTC'::timestamp with time zone) AND ("time" < 'Mon Jan 01 04:00:00 2024 UTC'::timestamp with time zone) AND (device_id = 1))
-                                 Storage: Time-Series Chunk
+                           ->  Result
+                                 ->  Custom Scan (ChunkScan) on gf_mpp
+                                       Filter: (("time" >= 'Mon Jan 01 00:00:00 2024 UTC'::timestamp with time zone) AND ("time" < 'Mon Jan 01 04:00:00 2024 UTC'::timestamp with time zone) AND (device_id = 1))
+                                       Storage: Time-Series Chunk
  Optimizer: Postgres query optimizer
-(14 rows)
+(15 rows)
 
 RESET optimizer;
 -- ============================================================
@@ -1151,11 +1157,12 @@ SELECT time_series.time_bucket_gapfill('1 hour'::interval, time,
                      Group Key: (time_series.time_bucket_gapfill('@ 1 hour'::interval, "time", 'Mon Jan 01 00:00:00 2024 UTC'::timestamp with time zone, 'Tue Jan 02 00:00:00 2024 UTC'::timestamp with time zone))
                      ->  Sort
                            Sort Key: (time_series.time_bucket_gapfill('@ 1 hour'::interval, "time", 'Mon Jan 01 00:00:00 2024 UTC'::timestamp with time zone, 'Tue Jan 02 00:00:00 2024 UTC'::timestamp with time zone))
-                           ->  Custom Scan (ChunkScan) on gf_multichunk
-                                 Filter: (("time" >= 'Mon Jan 01 00:00:00 2024 UTC'::timestamp with time zone) AND ("time" < 'Tue Jan 02 00:00:00 2024 UTC'::timestamp with time zone) AND (device_id = 1))
-                                 Storage: Time-Series Chunk
+                           ->  Result
+                                 ->  Custom Scan (ChunkScan) on gf_multichunk
+                                       Filter: (("time" >= 'Mon Jan 01 00:00:00 2024 UTC'::timestamp with time zone) AND ("time" < 'Tue Jan 02 00:00:00 2024 UTC'::timestamp with time zone) AND (device_id = 1))
+                                       Storage: Time-Series Chunk
  Optimizer: Postgres query optimizer
-(14 rows)
+(15 rows)
 
 RESET enable_hashagg;
 DROP TABLE gf_multichunk;

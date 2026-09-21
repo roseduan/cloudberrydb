@@ -56,7 +56,7 @@ void MockExecStoreVirtualTuple(TupleTableSlot *) {
   // do nothing
 }
 
-std::string MockBuildPaxDirectoryPath(RelFileNode, BackendId) {
+std::string MockBuildPaxDirectoryPath(RelFileLocator, BackendId) {
   return std::string(".");
 }
 

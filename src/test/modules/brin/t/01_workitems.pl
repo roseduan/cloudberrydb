@@ -1,17 +1,16 @@
 
-# Copyright (c) 2021, PostgreSQL Global Development Group
+# Copyright (c) 2021-2023, PostgreSQL Global Development Group
 
 # Verify that work items work correctly
 
 use strict;
 use warnings;
 
-use TestLib;
-use Test::More tests => 1;
-# use Test::More tests => 2;
-use PostgresNode;
+use PostgreSQL::Test::Utils;
+use Test::More;
+use PostgreSQL::Test::Cluster;
 
-my $node = get_new_node('tango');
+my $node = PostgreSQL::Test::Cluster->new('tango');
 $node->init;
 $node->append_conf('postgresql.conf', 'autovacuum_naptime=1s');
 $node->start;
@@ -44,3 +43,5 @@ is($count, '1', "initial index state is correct");
 # );
 # is($count, 't', "index got summarized");
 $node->stop;
+
+done_testing();

@@ -122,6 +122,7 @@ extern "C" {
 #include "storage/md.h"
 #include "storage/procarray.h"
 #include "storage/relfilenode.h"
+#include "storage/relfilelocator.h"
 #include "storage/smgr.h"
 #include "storage/ufile.h"
 #include "tcop/utility.h"

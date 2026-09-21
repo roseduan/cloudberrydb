@@ -272,7 +272,6 @@ EXPLAIN (COSTS OFF) SELECT * FROM box_temp WHERE f1 << '(10,20),(30,40)';
  Gather Motion 3:1  (slice1; segments: 3)
    ->  Seq Scan on box_temp
          Filter: (f1 << '(30,40),(10,20)'::box)
- Optimizer: GPORCA
 (4 rows)
 
 SELECT * FROM box_temp WHERE f1 &< '(10,4.333334),(5,100)';
@@ -294,7 +293,6 @@ EXPLAIN (COSTS OFF) SELECT * FROM box_temp WHERE f1 &< '(10,4.333334),(5,100)';
  Gather Motion 3:1  (slice1; segments: 3)
    ->  Seq Scan on box_temp
          Filter: (f1 &< '(10,100),(5,4.333334)'::box)
- Optimizer: GPORCA
 (4 rows)
 
 SELECT * FROM box_temp WHERE f1 && '(15,20),(25,30)';
@@ -325,7 +323,6 @@ EXPLAIN (COSTS OFF) SELECT * FROM box_temp WHERE f1 && '(15,20),(25,30)';
  Gather Motion 3:1  (slice1; segments: 3)
    ->  Seq Scan on box_temp
          Filter: (f1 && '(25,30),(15,20)'::box)
- Optimizer: GPORCA
 (4 rows)
 
 SELECT * FROM box_temp WHERE f1 &> '(40,30),(45,50)';
@@ -350,7 +347,6 @@ EXPLAIN (COSTS OFF) SELECT * FROM box_temp WHERE f1 &> '(40,30),(45,50)';
  Gather Motion 3:1  (slice1; segments: 3)
    ->  Seq Scan on box_temp
          Filter: (f1 &> '(45,50),(40,30)'::box)
- Optimizer: GPORCA
 (4 rows)
 
 SELECT * FROM box_temp WHERE f1 >> '(30,40),(40,30)';
@@ -374,7 +370,6 @@ EXPLAIN (COSTS OFF) SELECT * FROM box_temp WHERE f1 >> '(30,40),(40,30)';
  Gather Motion 3:1  (slice1; segments: 3)
    ->  Seq Scan on box_temp
          Filter: (f1 >> '(40,40),(30,30)'::box)
- Optimizer: GPORCA
 (4 rows)
 
 SELECT * FROM box_temp WHERE f1 <<| '(10,4.33334),(5,100)';
@@ -391,7 +386,6 @@ EXPLAIN (COSTS OFF) SELECT * FROM box_temp WHERE f1 <<| '(10,4.33334),(5,100)';
  Gather Motion 3:1  (slice1; segments: 3)
    ->  Seq Scan on box_temp
          Filter: (f1 <<| '(10,100),(5,4.33334)'::box)
- Optimizer: GPORCA
 (4 rows)
 
 SELECT * FROM box_temp WHERE f1 &<| '(10,4.3333334),(5,1)';
@@ -408,7 +402,6 @@ EXPLAIN (COSTS OFF) SELECT * FROM box_temp WHERE f1 &<| '(10,4.3333334),(5,1)';
  Gather Motion 3:1  (slice1; segments: 3)
    ->  Seq Scan on box_temp
          Filter: (f1 &<| '(10,4.3333334),(5,1)'::box)
- Optimizer: GPORCA
 (4 rows)
 
 SELECT * FROM box_temp WHERE f1 |&> '(49.99,49.99),(49.99,49.99)';
@@ -424,7 +417,6 @@ EXPLAIN (COSTS OFF) SELECT * FROM box_temp WHERE f1 |&> '(49.99,49.99),(49.99,49
  Gather Motion 3:1  (slice1; segments: 3)
    ->  Seq Scan on box_temp
          Filter: (f1 |&> '(49.99,49.99),(49.99,49.99)'::box)
- Optimizer: GPORCA
 (4 rows)
 
 SELECT * FROM box_temp WHERE f1 |>> '(37,38),(39,40)';
@@ -449,7 +441,6 @@ EXPLAIN (COSTS OFF) SELECT * FROM box_temp WHERE f1 |>> '(37,38),(39,40)';
  Gather Motion 3:1  (slice1; segments: 3)
    ->  Seq Scan on box_temp
          Filter: (f1 |>> '(39,40),(37,38)'::box)
- Optimizer: GPORCA
 (4 rows)
 
 SELECT * FROM box_temp WHERE f1 @> '(10,11),(15,16)';
@@ -467,7 +458,6 @@ EXPLAIN (COSTS OFF) SELECT * FROM box_temp WHERE f1 @> '(10,11),(15,15)';
  Gather Motion 3:1  (slice1; segments: 3)
    ->  Seq Scan on box_temp
          Filter: (f1 @> '(15,15),(10,11)'::box)
- Optimizer: GPORCA
 (4 rows)
 
 SELECT * FROM box_temp WHERE f1 <@ '(10,15),(30,35)';
@@ -482,7 +472,6 @@ EXPLAIN (COSTS OFF) SELECT * FROM box_temp WHERE f1 <@ '(10,15),(30,35)';
  Gather Motion 3:1  (slice1; segments: 3)
    ->  Seq Scan on box_temp
          Filter: (f1 <@ '(30,35),(10,15)'::box)
- Optimizer: GPORCA
 (4 rows)
 
 SELECT * FROM box_temp WHERE f1 ~= '(20,20),(40,40)';
@@ -497,7 +486,6 @@ EXPLAIN (COSTS OFF) SELECT * FROM box_temp WHERE f1 ~= '(20,20),(40,40)';
  Gather Motion 3:1  (slice1; segments: 3)
    ->  Seq Scan on box_temp
          Filter: (f1 ~= '(40,40),(20,20)'::box)
- Optimizer: GPORCA
 (4 rows)
 
 RESET enable_seqscan;
@@ -506,6 +494,7 @@ DROP INDEX box_spgist;
 -- Test the SP-GiST index on the larger volume of data
 --
 CREATE TABLE quad_box_tbl (id int, b box);
+NOTICE:  Table doesn't have 'DISTRIBUTED BY' clause -- Using column named 'id' as the Apache Cloudberry data distribution key for this table.
 INSERT INTO quad_box_tbl
   SELECT (x - 1) * 100 + y, box(point(x * 10, y * 10), point(x * 10 + 5, y * 10 + 5))
   FROM generate_series(1, 100) x,
@@ -637,7 +626,7 @@ FROM quad_box_tbl;
                ->  Sort
                      Sort Key: ((b <-> '(123,456)'::point))
                      ->  Seq Scan on quad_box_tbl
- Optimizer: GPORCA
+ Optimizer: Pivotal Optimizer (GPORCA)
 (9 rows)
 
 CREATE TEMP TABLE quad_box_tbl_ord_idx1 AS
@@ -667,7 +656,7 @@ FROM quad_box_tbl WHERE b <@ box '((200,300),(500,600))';
                      Sort Key: ((b <-> '(123,456)'::point))
                      ->  Seq Scan on quad_box_tbl
                            Filter: (b <@ '(500,600),(200,300)'::box)
- Optimizer: GPORCA
+ Optimizer: Pivotal Optimizer (GPORCA)
 (10 rows)
 
 CREATE TEMP TABLE quad_box_tbl_ord_idx2 AS
@@ -686,3 +675,28 @@ WHERE seq.id IS NULL OR idx.id IS NULL;
 RESET enable_seqscan;
 RESET enable_indexscan;
 RESET enable_bitmapscan;
+-- test non-error-throwing API for some core types
+SELECT pg_input_is_valid('200', 'box');
+ pg_input_is_valid 
+-------------------
+ f
+(1 row)
+
+SELECT * FROM pg_input_error_info('200', 'box');
+                 message                  | detail | hint | sql_error_code 
+------------------------------------------+--------+------+----------------
+ invalid input syntax for type box: "200" |        |      | 22P02
+(1 row)
+
+SELECT pg_input_is_valid('((200,300),(500, xyz))', 'box');
+ pg_input_is_valid 
+-------------------
+ f
+(1 row)
+
+SELECT * FROM pg_input_error_info('((200,300),(500, xyz))', 'box');
+                           message                           | detail | hint | sql_error_code 
+-------------------------------------------------------------+--------+------+----------------
+ invalid input syntax for type box: "((200,300),(500, xyz))" |        |      | 22P02
+(1 row)
+

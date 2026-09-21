@@ -17,7 +17,7 @@
 #include "lib/stringinfo.h"
 #include "mb/pg_wchar.h"
 #include "utils/builtins.h"
-#include "utils/int8.h"
+#include "nodes/miscnodes.h"
 #include "utils/json.h"
 #include "utils/jsonfuncs.h"
 
@@ -49,7 +49,7 @@ typedef struct
 	List		   *written_files;
 } MetadataParseState;
 
-static void
+static JsonParseErrorType
 metadata_object_field_start(void *state, char *fname, bool isnull)
 {
 	MetadataParseState *s = (MetadataParseState *) state;
@@ -69,18 +69,22 @@ metadata_object_field_start(void *state, char *fname, bool isnull)
 		s->state = PARSE_START;
 		s->in_written_files = false;
 	}
+
+	return JSON_SUCCESS;
 }
 
-static void
+static JsonParseErrorType
 metadata_array_end(void *state)
 {
 	MetadataParseState *s = (MetadataParseState *) state;
 
 	/* Leaving the "written-metadata-files" array (or any array). */
 	s->in_written_files = false;
+
+	return JSON_SUCCESS;
 }
 
-static void
+static JsonParseErrorType
 metadata_scalar(void *state, char *token, JsonTokenType tokentype)
 {
 	MetadataParseState *s = (MetadataParseState *) state;
@@ -95,6 +99,8 @@ metadata_scalar(void *state, char *token, JsonTokenType tokentype)
 	{
 		s->written_files = lappend(s->written_files, pstrdup(token));
 	}
+
+	return JSON_SUCCESS;
 }
 
 /*
@@ -162,15 +168,17 @@ typedef struct
 	List		   *paths;
 } PathCollectState;
 
-static void
+static JsonParseErrorType
 pathcollect_object_field_start(void *state, char *fname, bool isnull)
 {
 	PathCollectState *s = (PathCollectState *) state;
 
 	s->in_path = (pg_strcasecmp(fname, "path") == 0);
+
+	return JSON_SUCCESS;
 }
 
-static void
+static JsonParseErrorType
 pathcollect_scalar(void *state, char *token, JsonTokenType tokentype)
 {
 	PathCollectState *s = (PathCollectState *) state;
@@ -179,6 +187,8 @@ pathcollect_scalar(void *state, char *token, JsonTokenType tokentype)
 		token != NULL && token[0] != '\0')
 		s->paths = lappend(s->paths, pstrdup(token));
 	s->in_path = false;
+
+	return JSON_SUCCESS;
 }
 
 /*
@@ -256,14 +266,16 @@ typedef struct
 	const char		   *credentials_end;
 } LoadTableParseState;
 
-static void
+static JsonParseErrorType
 lt_object_start(void *state)
 {
 	LoadTableParseState *s = (LoadTableParseState *) state;
 	s->depth++;
+
+	return JSON_SUCCESS;
 }
 
-static void
+static JsonParseErrorType
 lt_object_end(void *state)
 {
 	LoadTableParseState *s = (LoadTableParseState *) state;
@@ -275,16 +287,20 @@ lt_object_end(void *state)
 		s->config_end = s->lex->prev_token_terminator;
 		s->current_field = LT_PARSE_NONE;
 	}
+
+	return JSON_SUCCESS;
 }
 
-static void
+static JsonParseErrorType
 lt_array_start(void *state)
 {
 	LoadTableParseState *s = (LoadTableParseState *) state;
 	s->depth++;
+
+	return JSON_SUCCESS;
 }
 
-static void
+static JsonParseErrorType
 lt_array_end(void *state)
 {
 	LoadTableParseState *s = (LoadTableParseState *) state;
@@ -295,16 +311,18 @@ lt_array_end(void *state)
 		s->credentials_end = s->lex->prev_token_terminator;
 		s->current_field = LT_PARSE_NONE;
 	}
+
+	return JSON_SUCCESS;
 }
 
-static void
+static JsonParseErrorType
 lt_object_field_start(void *state, char *fname, bool isnull)
 {
 	LoadTableParseState *s = (LoadTableParseState *) state;
 
 	/* Only care about top-level fields (depth == 1 means we are inside the root object) */
 	if (s->depth != 1)
-		return;
+		return JSON_SUCCESS;
 
 	if (pg_strcasecmp(fname, "metadata-location") == 0)
 		s->current_field = LT_PARSE_METADATA_LOCATION;
@@ -338,9 +356,11 @@ lt_object_field_start(void *state, char *fname, bool isnull)
 	}
 	else if (pg_strcasecmp(fname, DATALAKEFDW_ICEBERG_KEY_METADATA_TIMESTAMP_RESP) == 0)
 		s->current_field = LT_PARSE_METADATA_TIMESTAMP;
+
+	return JSON_SUCCESS;
 }
 
-static void
+static JsonParseErrorType
 lt_scalar(void *state, char *token, JsonTokenType tokentype)
 {
 	LoadTableParseState *s = (LoadTableParseState *) state;
@@ -370,16 +390,20 @@ lt_scalar(void *state, char *token, JsonTokenType tokentype)
 			 s->depth == 1 &&
 			 tokentype == JSON_TOKEN_NUMBER)
 	{
-		int64	ts;
+		int64				ts;
+		ErrorSaveContext	escontext = {T_ErrorSaveContext};
 
 		/* Plain integer epoch-ms emitted by the agent; ignore if unparsable. */
-		if (scanint8(token, true, &ts))
+		ts = pg_strtoint64_safe(token, (Node *) &escontext);
+		if (!escontext.error_occurred)
 		{
 			s->metadata_timestamp = ts;
 			s->metadata_timestamp_present = true;
 		}
 		s->current_field = LT_PARSE_NONE;
 	}
+
+	return JSON_SUCCESS;
 }
 
 /*
@@ -486,7 +510,7 @@ typedef struct
 	bool			has_total_bytes;
 } StatisticsParseState;
 
-static void
+static JsonParseErrorType
 statistics_object_field_start(void *state, char *fname, bool isnull)
 {
 	StatisticsParseState *s = (StatisticsParseState *) state;
@@ -499,22 +523,29 @@ statistics_object_field_start(void *state, char *fname, bool isnull)
 		s->current_field = STATS_PARSE_TOTAL_BYTES;
 	else
 		s->current_field = STATS_PARSE_NONE;
+
+	return JSON_SUCCESS;
 }
 
-static void
+static JsonParseErrorType
 statistics_scalar(void *state, char *token, JsonTokenType tokentype)
 {
 	StatisticsParseState *s = (StatisticsParseState *) state;
 	int64 value;
 
 	if (token == NULL)
-		return;
+		return JSON_SUCCESS;
 
 	if (tokentype != JSON_TOKEN_STRING && tokentype != JSON_TOKEN_NUMBER)
-		return;
+		return JSON_SUCCESS;
 
-	if (!scanint8(token, true, &value))
-		elog(ERROR, "invalid int64 value in statistics response: %s", token);
+	{
+		ErrorSaveContext escontext = {T_ErrorSaveContext};
+
+		value = pg_strtoint64_safe(token, (Node *) &escontext);
+		if (escontext.error_occurred)
+			elog(ERROR, "invalid int64 value in statistics response: %s", token);
+	}
 
 	if (s->current_field == STATS_PARSE_RECORD_COUNT)
 	{
@@ -528,6 +559,8 @@ statistics_scalar(void *state, char *token, JsonTokenType tokentype)
 	}
 
 	s->current_field = STATS_PARSE_NONE;
+
+	return JSON_SUCCESS;
 }
 
 IcebergTableStatistics *
@@ -867,7 +900,7 @@ typedef struct SnapSchemaParseState
 	bool		in_columns;
 } SnapSchemaParseState;
 
-static void
+static JsonParseErrorType
 sss_object_start(void *state)
 {
 	SnapSchemaParseState *s = (SnapSchemaParseState *) state;
@@ -879,9 +912,11 @@ sss_object_start(void *state)
 		s->col_type = NULL;
 		s->col_field_id = 0;
 	}
+
+	return JSON_SUCCESS;
 }
 
-static void
+static JsonParseErrorType
 sss_object_end(void *state)
 {
 	SnapSchemaParseState *s = (SnapSchemaParseState *) state;
@@ -904,15 +939,19 @@ sss_object_end(void *state)
 	}
 	s->depth--;
 	s->cur = SSS_NONE;
+
+	return JSON_SUCCESS;
 }
 
-static void
+static JsonParseErrorType
 sss_array_start(void *state)
 {
 	((SnapSchemaParseState *) state)->depth++;
+
+	return JSON_SUCCESS;
 }
 
-static void
+static JsonParseErrorType
 sss_array_end(void *state)
 {
 	SnapSchemaParseState *s = (SnapSchemaParseState *) state;
@@ -920,9 +959,11 @@ sss_array_end(void *state)
 	s->depth--;
 	if (s->depth == 1)
 		s->in_columns = false;
+
+	return JSON_SUCCESS;
 }
 
-static void
+static JsonParseErrorType
 sss_object_field_start(void *state, char *fname, bool isnull)
 {
 	SnapSchemaParseState *s = (SnapSchemaParseState *) state;
@@ -948,9 +989,11 @@ sss_object_field_start(void *state, char *fname, bool isnull)
 		else
 			s->cur = SSS_NONE;
 	}
+
+	return JSON_SUCCESS;
 }
 
-static void
+static JsonParseErrorType
 sss_scalar(void *state, char *token, JsonTokenType tokentype)
 {
 	SnapSchemaParseState *s = (SnapSchemaParseState *) state;
@@ -969,6 +1012,8 @@ sss_scalar(void *state, char *token, JsonTokenType tokentype)
 			 tokentype == JSON_TOKEN_NUMBER)
 		s->col_field_id = atoi(token);
 	s->cur = SSS_NONE;
+
+	return JSON_SUCCESS;
 }
 
 void
@@ -1049,7 +1094,7 @@ typedef struct SnapListParseState
 	List		   *entries;		/* List of IcebergSnapshotEntry * */
 } SnapListParseState;
 
-static void
+static JsonParseErrorType
 sl_object_start(void *state)
 {
 	SnapListParseState *s = (SnapListParseState *) state;
@@ -1060,9 +1105,11 @@ sl_object_start(void *state)
 		memset(&s->entry, 0, sizeof(s->entry));
 		s->entry.schema_id = -1;
 	}
+
+	return JSON_SUCCESS;
 }
 
-static void
+static JsonParseErrorType
 sl_object_end(void *state)
 {
 	SnapListParseState *s = (SnapListParseState *) state;
@@ -1091,21 +1138,27 @@ sl_object_end(void *state)
 	}
 	s->depth--;
 	s->cur = SL_NONE;
+
+	return JSON_SUCCESS;
 }
 
-static void
+static JsonParseErrorType
 sl_array_start(void *state)
 {
 	((SnapListParseState *) state)->depth++;
+
+	return JSON_SUCCESS;
 }
 
-static void
+static JsonParseErrorType
 sl_array_end(void *state)
 {
 	((SnapListParseState *) state)->depth--;
+
+	return JSON_SUCCESS;
 }
 
-static void
+static JsonParseErrorType
 sl_object_field_start(void *state, char *fname, bool isnull)
 {
 	SnapListParseState *s = (SnapListParseState *) state;
@@ -1143,20 +1196,24 @@ sl_object_field_start(void *state, char *fname, bool isnull)
 		 */
 		s->cur = SL_NONE;
 	}
+
+	return JSON_SUCCESS;
 }
 
 /* Parse an int64 JSON scalar, erroring out rather than silently yielding 0. */
 static int64
 sl_int64(const char *token)
 {
-	int64		value;
+	int64				value;
+	ErrorSaveContext	escontext = {T_ErrorSaveContext};
 
-	if (!scanint8(token, true, &value))
+	value = pg_strtoint64_safe(token, (Node *) &escontext);
+	if (escontext.error_occurred)
 		elog(ERROR, "invalid int64 value in getSnapshots response: %s", token);
 	return value;
 }
 
-static void
+static JsonParseErrorType
 sl_scalar(void *state, char *token, JsonTokenType tokentype)
 {
 	SnapListParseState *s = (SnapListParseState *) state;
@@ -1166,17 +1223,17 @@ sl_scalar(void *state, char *token, JsonTokenType tokentype)
 	s->cur = SL_NONE;
 
 	if (token == NULL)
-		return;
+		return JSON_SUCCESS;
 
 	if (s->depth == 1)
 	{
 		if (field == SL_CURRENT_ID && tokentype == JSON_TOKEN_NUMBER)
 			s->current_snapshot_id = sl_int64(token);
-		return;
+		return JSON_SUCCESS;
 	}
 
 	if (s->depth != 3)
-		return;
+		return JSON_SUCCESS;
 
 	switch (field)
 	{
@@ -1207,6 +1264,8 @@ sl_scalar(void *state, char *token, JsonTokenType tokentype)
 		default:
 			break;
 	}
+
+	return JSON_SUCCESS;
 }
 
 void
@@ -1265,31 +1324,39 @@ typedef struct SummaryParseState
 	int64		value;
 } SummaryParseState;
 
-static void
+static JsonParseErrorType
 sm_object_start(void *state)
 {
 	((SummaryParseState *) state)->depth++;
+
+	return JSON_SUCCESS;
 }
 
-static void
+static JsonParseErrorType
 sm_object_end(void *state)
 {
 	((SummaryParseState *) state)->depth--;
+
+	return JSON_SUCCESS;
 }
 
-static void
+static JsonParseErrorType
 sm_array_start(void *state)
 {
 	((SummaryParseState *) state)->depth++;
+
+	return JSON_SUCCESS;
 }
 
-static void
+static JsonParseErrorType
 sm_array_end(void *state)
 {
 	((SummaryParseState *) state)->depth--;
+
+	return JSON_SUCCESS;
 }
 
-static void
+static JsonParseErrorType
 sm_object_field_start(void *state, char *fname, bool isnull)
 {
 	SummaryParseState *s = (SummaryParseState *) state;
@@ -1300,9 +1367,11 @@ sm_object_field_start(void *state, char *fname, bool isnull)
 	 * in the slot selected by the enclosing object's last field name.
 	 */
 	s->want = (s->depth == 1 && strcmp(fname, s->key) == 0);
+
+	return JSON_SUCCESS;
 }
 
-static void
+static JsonParseErrorType
 sm_scalar(void *state, char *token, JsonTokenType tokentype)
 {
 	SummaryParseState *s = (SummaryParseState *) state;
@@ -1312,12 +1381,19 @@ sm_scalar(void *state, char *token, JsonTokenType tokentype)
 	s->want = false;
 
 	if (!want || s->found || token == NULL || s->depth != 1)
-		return;
+		return JSON_SUCCESS;
 	if (tokentype != JSON_TOKEN_STRING && tokentype != JSON_TOKEN_NUMBER)
-		return;
+		return JSON_SUCCESS;
 	/* A non-integral value is treated as absent, never as zero. */
-	if (scanint8(token, true, &s->value))
-		s->found = true;
+	{
+		ErrorSaveContext	escontext = {T_ErrorSaveContext};
+
+		s->value = pg_strtoint64_safe(token, (Node *) &escontext);
+		if (!escontext.error_occurred)
+			s->found = true;
+	}
+
+	return JSON_SUCCESS;
 }
 
 /*

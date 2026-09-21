@@ -360,7 +360,11 @@ class GpStop:
         logger.info("Obtaining Cloudberry Coordinator catalog information")
 
         logger.info("Obtaining Segment details from coordinator...")
-        self.dburl = dbconn.DbURL(port=self.port, dbname='template1')
+        # The coordinator may still be finishing crash recovery from a
+        # previous restart when gpstop is invoked (e.g. back-to-back
+        # "gpstop -r" calls); ride out that transient window instead of
+        # failing outright.  See gpstart._startCoordinator() for the same fix.
+        self.dburl = dbconn.DbURL(port=self.port, dbname='template1', timeout=5, retries=60)
         self.gparray = GpArray.initFromCatalog(self.dburl, utility=True)
 
     class _SigIntHandler(object):

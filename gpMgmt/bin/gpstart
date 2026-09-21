@@ -509,7 +509,11 @@ class GpStart:
         logger.info("Obtaining Cloudberry Coordinator catalog information")
 
         logger.info("Obtaining Segment details from coordinator...")
-        self.dburl = dbconn.DbURL(port=self.port, dbname='template1')
+        # pg_ctl -w only waits for the postmaster to respond at all, which it
+        # does (with a "not accepting connections" rejection) while still
+        # replaying WAL after a restart.  Retry for a while so a normal, short
+        # crash-recovery window doesn't get reported as a failed gpstart.
+        self.dburl = dbconn.DbURL(port=self.port, dbname='template1', timeout=5, retries=60)
         self.gparray = GpArray.initFromCatalog(self.dburl, utility=True)
 
         logger.info("Setting new coordinator era")

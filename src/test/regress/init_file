@@ -69,6 +69,12 @@ m/^NOTICE:.*plan parallel aware node count: .*/
 
 m/^WARNING:  could not close temporary file .*: No such file or directory/
 
+# Prolonged IVM transition-table tuplestores are force-closed by the owning
+# subtransaction's resource owner when a savepoint is released; the file
+# itself and the maintenance results are still correct, just the ResourceOwner
+# bookkeeping warns about the deferred close. See incremental_matview test.
+m/^WARNING:  temporary file .* leak: File .* still referenced/
+
 # Messages when resource group is enabled:
 # WARNING:  resource queue is disabled
 # HINT:  To enable set gp_resource_manager=queue
@@ -170,6 +176,10 @@ s/ERROR:  could not devise a query plan for the given query \(.*\)/ERROR:  could
 
 m/ERROR:  requested functionality not allowed in FIPS mode \(.*\)/
 s/ERROR:  requested functionality not allowed in FIPS mode \(.*\)/ERROR:  requested functionality not allowed in FIPS mode/
+
+m/Parallel Seq Scan on /
+s/Parallel Seq Scan on /Seq Scan on /
+
 
 m/^DETAIL:.*gid=.*/
 s/gid=\d+/gid DUMMY/

@@ -1302,6 +1302,7 @@ pg_iceberg_refresh_pg_class_stats(Relation rel)
 						rel->rd_rel->relhasindex,
 						InvalidTransactionId,
 						InvalidMultiXactId,
+						NULL, NULL, /* frozenxid_updated, minmulti_updated */
 						false,		/* in_outer_xact */
 						false);		/* isvacuum */
 
@@ -1353,6 +1354,7 @@ pg_iceberg_restore_relpages(Oid relid, BlockNumber pages)
 						rel->rd_rel->relhasindex,
 						InvalidTransactionId,
 						InvalidMultiXactId,
+						NULL, NULL, /* frozenxid_updated, minmulti_updated */
 						false,		/* in_outer_xact */
 						false);		/* isvacuum */
 
@@ -1699,8 +1701,8 @@ pg_iceberg_acquire_sample_rows(Relation relation, int elevel,
 	sampler_random_init_state(random() ^
 							  ((long) MyProcPid << 16) ^
 							  (long) GpIdentity.segindex,
-							  rstate.randstate);
-	rstate.W = exp(-log(sampler_random_fract(rstate.randstate)) / targrows);
+							  &rstate.randstate);
+	rstate.W = exp(-log(sampler_random_fract(&rstate.randstate)) / targrows);
 
 	temp_cxt = AllocSetContextCreate(CurrentMemoryContext,
 									 "iceberg analyze sample",
@@ -1732,7 +1734,7 @@ pg_iceberg_acquire_sample_rows(Relation relation, int elevel,
 
 			if (rowstoskip <= 0)
 			{
-				pos = (int) (targrows * sampler_random_fract(rstate.randstate));
+				pos = (int) (targrows * sampler_random_fract(&rstate.randstate));
 				Assert(pos >= 0 && pos < targrows);
 				heap_freetuple(rows[pos]);
 			}
@@ -1791,7 +1793,7 @@ pg_iceberg_tuple_insert(IcebergModifyDesc *insertDesc, TupleTableSlot *slot, Com
 TM_Result
 pg_iceberg_tuple_update(IcebergModifyDesc *updateDesc, ItemPointer otid, TupleTableSlot *slot, CommandId cid,
 						Snapshot snapshot, Snapshot crosscheck, bool wait, TM_FailureData *tmfd,
-						LockTupleMode *lockmode, bool *update_indexes)
+						LockTupleMode *lockmode, TU_UpdateIndexes *update_indexes)
 {
 	FdwRoutine *fdwRoutine = updateDesc->fdwroutine;
 	TupleTableSlot *planSlot = updateDesc->planSlot;

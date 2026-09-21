@@ -14,7 +14,7 @@ select * from (select * from tenk1 order by four) t order by four, ten;
    ->  Sort
          Sort Key: four, ten
          ->  Seq Scan on tenk1
- Optimizer: GPORCA
+ Optimizer: Pivotal Optimizer (GPORCA)
 (6 rows)
 
 -- When there is a LIMIT clause, incremental sort is beneficial because
@@ -31,7 +31,7 @@ limit 1;
                ->  Sort
                      Sort Key: four, ten
                      ->  Seq Scan on tenk1
- Optimizer: GPORCA
+ Optimizer: Pivotal Optimizer (GPORCA)
 (8 rows)
 
 -- When planner_work_mem is not enough to sort the entire table, incremental sort
@@ -46,7 +46,7 @@ select * from (select * from tenk1 order by four) t order by four, ten;
    ->  Sort
          Sort Key: four, ten
          ->  Seq Scan on tenk1
- Optimizer: GPORCA
+ Optimizer: Pivotal Optimizer (GPORCA)
 (6 rows)
 
 reset planner_work_mem;
@@ -160,7 +160,7 @@ explain (costs off) select * from (select * from t order by a) s order by a, b l
                ->  Sort
                      Sort Key: a, b
                      ->  Seq Scan on t
- Optimizer: GPORCA
+ Optimizer: Pivotal Optimizer (GPORCA)
 (8 rows)
 
 select * from (select * from t order by a) s order by a, b limit 31;
@@ -209,7 +209,7 @@ explain (costs off) select * from (select * from t order by a) s order by a, b l
                ->  Sort
                      Sort Key: a, b
                      ->  Seq Scan on t
- Optimizer: GPORCA
+ Optimizer: Pivotal Optimizer (GPORCA)
 (8 rows)
 
 select * from (select * from t order by a) s order by a, b limit 32;
@@ -259,7 +259,7 @@ explain (costs off) select * from (select * from t order by a) s order by a, b l
                ->  Sort
                      Sort Key: a, b
                      ->  Seq Scan on t
- Optimizer: GPORCA
+ Optimizer: Pivotal Optimizer (GPORCA)
 (8 rows)
 
 select * from (select * from t order by a) s order by a, b limit 33;
@@ -310,7 +310,7 @@ explain (costs off) select * from (select * from t order by a) s order by a, b l
                ->  Sort
                      Sort Key: a, b
                      ->  Seq Scan on t
- Optimizer: GPORCA
+ Optimizer: Pivotal Optimizer (GPORCA)
 (8 rows)
 
 select * from (select * from t order by a) s order by a, b limit 65;
@@ -393,7 +393,7 @@ explain (costs off) select * from (select * from t order by a) s order by a, b l
                ->  Sort
                      Sort Key: a, b
                      ->  Seq Scan on t
- Optimizer: GPORCA
+ Optimizer: Pivotal Optimizer (GPORCA)
 (8 rows)
 
 select * from (select * from t order by a) s order by a, b limit 66;
@@ -481,7 +481,7 @@ explain (costs off) select * from (select * from t order by a) s order by a, b l
                ->  Sort
                      Sort Key: a, b
                      ->  Seq Scan on t
- Optimizer: GPORCA
+ Optimizer: Pivotal Optimizer (GPORCA)
 (8 rows)
 
 select * from (select * from t order by a) s order by a, b limit 55;
@@ -557,10 +557,9 @@ select explain_analyze_without_memory('select * from (select * from t order by a
                      Sort Key: a, b
                      Sort Method:  top-N heapsort  Memory: NNkB
                      ->  Seq Scan on t (actual rows=400 loops=1)
- Optimizer: GPORCA
+ Optimizer: Pivotal Optimizer (GPORCA)
 (9 rows)
 
-reset max_parallel_workers_per_gather;
 select jsonb_pretty(explain_analyze_inc_sort_nodes_without_memory('select * from (select * from t order by a) s order by a, b limit 55'));
  jsonb_pretty 
 --------------
@@ -568,6 +567,7 @@ select jsonb_pretty(explain_analyze_inc_sort_nodes_without_memory('select * from
  ]
 (1 row)
 
+reset max_parallel_workers_per_gather;
 select explain_analyze_inc_sort_nodes_verify_invariants('select * from (select * from t order by a) s order by a, b limit 55');
  explain_analyze_inc_sort_nodes_verify_invariants 
 --------------------------------------------------
@@ -588,7 +588,7 @@ explain (costs off) select * from (select * from t order by a) s order by a, b l
                ->  Sort
                      Sort Key: a, b
                      ->  Seq Scan on t
- Optimizer: GPORCA
+ Optimizer: Pivotal Optimizer (GPORCA)
 (8 rows)
 
 select * from (select * from t order by a) s order by a, b limit 70;
@@ -680,7 +680,7 @@ explain (costs off) select * from (select * from t order by a) s order by a, b l
                ->  Sort
                      Sort Key: a, b
                      ->  Seq Scan on t
- Optimizer: GPORCA
+ Optimizer: Pivotal Optimizer (GPORCA)
 (8 rows)
 
 select * from (select * from t order by a) s order by a, b limit 5;
@@ -712,7 +712,7 @@ explain (costs off) select * from t left join (select * from (select * from t or
          ->  Hash
                ->  Seq Scan on t t_1
                      Filter: (a = ANY ('{1,2}'::integer[]))
- Optimizer: GPORCA
+ Optimizer: Pivotal Optimizer (GPORCA)
 (9 rows)
 
 --
@@ -740,10 +740,9 @@ select explain_analyze_without_memory('select * from (select * from t order by a
                      Sort Method:  top-N heapsort  Memory: NNkB
                      Sort Method:  quicksort  Memory: NNkB
                      ->  Seq Scan on t (actual rows=996 loops=1)
- Optimizer: GPORCA
+ Optimizer: Pivotal Optimizer (GPORCA)
 (10 rows)
 
-reset max_parallel_workers_per_gather;
 select jsonb_pretty(explain_analyze_inc_sort_nodes_without_memory('select * from (select * from t order by a) s order by a, b limit 70'));
  jsonb_pretty 
 --------------
@@ -751,6 +750,7 @@ select jsonb_pretty(explain_analyze_inc_sort_nodes_without_memory('select * from
  ]
 (1 row)
 
+reset max_parallel_workers_per_gather;
 select explain_analyze_inc_sort_nodes_verify_invariants('select * from (select * from t order by a) s order by a, b limit 70');
  explain_analyze_inc_sort_nodes_verify_invariants 
 --------------------------------------------------
@@ -771,7 +771,7 @@ explain (costs off) select * from (select * from t order by a) s order by a, b l
                ->  Sort
                      Sort Key: a, b
                      ->  Seq Scan on t
- Optimizer: GPORCA
+ Optimizer: Pivotal Optimizer (GPORCA)
 (8 rows)
 
 select * from (select * from t order by a) s order by a, b limit 31;
@@ -820,7 +820,7 @@ explain (costs off) select * from (select * from t order by a) s order by a, b l
                ->  Sort
                      Sort Key: a, b
                      ->  Seq Scan on t
- Optimizer: GPORCA
+ Optimizer: Pivotal Optimizer (GPORCA)
 (8 rows)
 
 select * from (select * from t order by a) s order by a, b limit 32;
@@ -870,7 +870,7 @@ explain (costs off) select * from (select * from t order by a) s order by a, b l
                ->  Sort
                      Sort Key: a, b
                      ->  Seq Scan on t
- Optimizer: GPORCA
+ Optimizer: Pivotal Optimizer (GPORCA)
 (8 rows)
 
 select * from (select * from t order by a) s order by a, b limit 33;
@@ -921,7 +921,7 @@ explain (costs off) select * from (select * from t order by a) s order by a, b l
                ->  Sort
                      Sort Key: a, b
                      ->  Seq Scan on t
- Optimizer: GPORCA
+ Optimizer: Pivotal Optimizer (GPORCA)
 (8 rows)
 
 select * from (select * from t order by a) s order by a, b limit 65;
@@ -1004,7 +1004,7 @@ explain (costs off) select * from (select * from t order by a) s order by a, b l
                ->  Sort
                      Sort Key: a, b
                      ->  Seq Scan on t
- Optimizer: GPORCA
+ Optimizer: Pivotal Optimizer (GPORCA)
 (8 rows)
 
 select * from (select * from t order by a) s order by a, b limit 66;
@@ -1092,7 +1092,7 @@ explain (costs off) select * from (select * from t order by a) s order by a, b l
                ->  Sort
                      Sort Key: a, b
                      ->  Seq Scan on t
- Optimizer: GPORCA
+ Optimizer: Pivotal Optimizer (GPORCA)
 (8 rows)
 
 select * from (select * from t order by a) s order by a, b limit 31;
@@ -1141,7 +1141,7 @@ explain (costs off) select * from (select * from t order by a) s order by a, b l
                ->  Sort
                      Sort Key: a, b
                      ->  Seq Scan on t
- Optimizer: GPORCA
+ Optimizer: Pivotal Optimizer (GPORCA)
 (8 rows)
 
 select * from (select * from t order by a) s order by a, b limit 32;
@@ -1191,7 +1191,7 @@ explain (costs off) select * from (select * from t order by a) s order by a, b l
                ->  Sort
                      Sort Key: a, b
                      ->  Seq Scan on t
- Optimizer: GPORCA
+ Optimizer: Pivotal Optimizer (GPORCA)
 (8 rows)
 
 select * from (select * from t order by a) s order by a, b limit 33;
@@ -1242,7 +1242,7 @@ explain (costs off) select * from (select * from t order by a) s order by a, b l
                ->  Sort
                      Sort Key: a, b
                      ->  Seq Scan on t
- Optimizer: GPORCA
+ Optimizer: Pivotal Optimizer (GPORCA)
 (8 rows)
 
 select * from (select * from t order by a) s order by a, b limit 65;
@@ -1325,7 +1325,7 @@ explain (costs off) select * from (select * from t order by a) s order by a, b l
                ->  Sort
                      Sort Key: a, b
                      ->  Seq Scan on t
- Optimizer: GPORCA
+ Optimizer: Pivotal Optimizer (GPORCA)
 (8 rows)
 
 select * from (select * from t order by a) s order by a, b limit 66;
@@ -1424,7 +1424,7 @@ explain (costs off) select a,b,sum(c) from t group by 1,2 order by 1,2,3 limit 1
                      ->  HashAggregate
                            Group Key: a, b
                            ->  Seq Scan on t
- Optimizer: GPORCA
+ Optimizer: Pivotal Optimizer (GPORCA)
 (10 rows)
 
 set enable_incremental_sort = on;
@@ -1440,7 +1440,7 @@ explain (costs off) select a,b,sum(c) from t group by 1,2 order by 1,2,3 limit 1
                      ->  HashAggregate
                            Group Key: a, b
                            ->  Seq Scan on t
- Optimizer: GPORCA
+ Optimizer: Pivotal Optimizer (GPORCA)
 (10 rows)
 
 -- Incremental sort vs. set operations with varno 0
@@ -1457,7 +1457,7 @@ explain (costs off) select * from t union select * from t order by 1,3;
                ->  Append
                      ->  Seq Scan on t
                      ->  Seq Scan on t t_1
- Optimizer: GPORCA
+ Optimizer: Pivotal Optimizer (GPORCA)
 (10 rows)
 
 -- Full sort, not just incremental sort can be pushed below a gather merge path
@@ -1469,7 +1469,7 @@ explain (costs off) select distinct a,b from t;
    ->  HashAggregate
          Group Key: a, b
          ->  Seq Scan on t
- Optimizer: GPORCA
+ Optimizer: Pivotal Optimizer (GPORCA)
 (5 rows)
 
 drop table t;
@@ -1656,19 +1656,5 @@ order by 1, 2;
                ->  Index Scan using tenk1_unique1 on tenk1
                ->  Function Scan on generate_series
  Optimizer: Postgres query optimizer
-(8 rows)
-
--- Disallow pushing down sort when pathkey is an SRF.
-explain (costs off) select unique1 from tenk1 order by unnest('{1,2}'::int[]);
-                     QUERY PLAN
------------------------------------------------------
- Result
-   ->  Gather Motion 3:1  (slice1; segments: 3)
-         Merge Key: (unnest('{1,2}'::anyarray))
-         ->  Sort
-               Sort Key: (unnest('{1,2}'::anyarray))
-               ->  ProjectSet
-                     ->  Seq Scan on tenk1
- Optimizer: GPORCA
 (8 rows)
 

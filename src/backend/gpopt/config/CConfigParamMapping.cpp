@@ -286,6 +286,11 @@ CConfigParamMapping::SConfigMappingElem CConfigParamMapping::m_elements[] = {
 	 false,	 // m_negate_param
 	 GPOS_WSZ_LIT(
 		 "Always pick a plan for aggregate distinct that minimizes skew.")},
+	
+	{EopttraceForceSplitWindowFunc, &optimizer_force_split_window_function,
+		false,	 // m_negate_param
+		GPOS_WSZ_LIT(
+				"Always split the window function.")},
 
 	{EopttraceForceSplitWindowFunc, &optimizer_force_split_window_function,
 	 false,	 // m_negate_param
@@ -457,6 +462,13 @@ CConfigParamMapping::PackConfigParamInBitset(
 		bitmap_index_bitset->Release();
 		traceflag_bitset->ExchangeSet(GPOPT_DISABLE_XFORM_TF(
 			CXform::ExfBitmapTableGet2ParallelBitmapTableScan));
+	}
+
+	// disable dynamic bitmap scan if the corresponding GUC is turned off
+	if (!optimizer_enable_dynamicbitmapscan)
+	{
+		traceflag_bitset->ExchangeSet(
+			GPOPT_DISABLE_XFORM_TF(CXform::ExfSelect2DynamicBitmapBoolOp));
 	}
 
 	// disable dynamic bitmap scan if the corresponding GUC is turned off

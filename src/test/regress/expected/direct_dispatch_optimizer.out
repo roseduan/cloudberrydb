@@ -1672,14 +1672,16 @@ NOTICE:  table has parent, setting distribution columns to match parent table
 create table t2_14887 partition of t_14887 for values with (modulus 3,remainder 2);
 NOTICE:  table has parent, setting distribution columns to match parent table
 explain select * from t_14887 where a = 'a'::text;
-                                    QUERY PLAN                                    
-----------------------------------------------------------------------------------
- Gather Motion 3:1  (slice1; segments: 3)  (cost=0.00..764.38 rows=158 width=32)
-   ->  Dynamic Seq Scan on t_14887
+NOTICE:  One or more columns in the following table(s) do not have statistics: t_14887
+HINT:  For non-partitioned tables, run analyze <table_name>(<column_list>). For partitioned tables, run analyze rootpartition <table_name>(<column_list>). See log for columns missing statistics.
+                                  QUERY PLAN                                  
+------------------------------------------------------------------------------
+ Gather Motion 3:1  (slice1; segments: 3)  (cost=0.00..431.00 rows=1 width=8)
+   ->  Dynamic Seq Scan on t_14887  (cost=0.00..431.00 rows=1 width=8)
          Number of partitions to scan: 3 (out of 3)
          Filter: ((a)::text = 'a'::text)
- Optimizer: Pivotal Optimizer (GPORCA)
-(4 rows)
+ Optimizer: GPORCA
+(5 rows)
 
 begin;
 drop table if exists direct_test;

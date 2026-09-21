@@ -3,11 +3,8 @@
 #include "fmgr.h"
 #include "hstore/hstore.h"
 #include "plperl.h"
-#include "plperl_helpers.h"
 
 PG_MODULE_MAGIC;
-
-extern void _PG_init(void);
 
 /* Linkage to functions in hstore module */
 typedef HStore *(*hstoreUpgrade_t) (Datum orig);
@@ -121,7 +118,7 @@ plperl_to_hstore(PG_FUNCTION_ARGS)
 
 	pcount = hv_iterinit(hv);
 
-	pairs = palloc(pcount * sizeof(Pairs));
+	pairs = palloc_array(Pairs, pcount);
 
 	i = 0;
 	while ((he = hv_iternext(hv)))

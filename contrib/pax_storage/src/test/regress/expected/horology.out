@@ -1,11 +1,16 @@
 --
 -- HOROLOGY
 --
-SET DateStyle = 'Postgres, MDY';
-SHOW TimeZone;  -- Many of these tests depend on the prevailing setting
- TimeZone 
-----------
- PST8PDT
+SHOW TimeZone;  -- Many of these tests depend on the prevailing settings
+      TimeZone       
+---------------------
+ America/Los_Angeles
+(1 row)
+
+SHOW DateStyle;
+   DateStyle   
+---------------
+ Postgres, MDY
 (1 row)
 
 --
@@ -83,6 +88,18 @@ SELECT timestamp with time zone '12/27/2001 04:05:06.789-08';
  Thu Dec 27 04:05:06.789 2001 PST
 (1 row)
 
+SELECT timestamp with time zone '2001-12-27 04:05:06.789 MET DST';
+           timestamptz            
+----------------------------------
+ Wed Dec 26 18:05:06.789 2001 PST
+(1 row)
+
+SELECT timestamp with time zone '2001-12-27 allballs';
+         timestamptz          
+------------------------------
+ Wed Dec 26 16:00:00 2001 PST
+(1 row)
+
 -- should fail in mdy mode:
 SELECT timestamp with time zone '27/12/2001 04:05:06.789-08';
 ERROR:  date/time field value out of range: "27/12/2001 04:05:06.789-08"
@@ -97,30 +114,6 @@ SELECT timestamp with time zone '27/12/2001 04:05:06.789-08';
 (1 row)
 
 reset datestyle;
-SELECT timestamp with time zone 'Y2001M12D27H04M05S06.789+08';
-           timestamptz            
-----------------------------------
- Wed Dec 26 12:05:06.789 2001 PST
-(1 row)
-
-SELECT timestamp with time zone 'Y2001M12D27H04M05S06.789-08';
-           timestamptz            
-----------------------------------
- Thu Dec 27 04:05:06.789 2001 PST
-(1 row)
-
-SELECT timestamp with time zone 'Y2001M12D27H04MM05S06.789+08';
-           timestamptz            
-----------------------------------
- Wed Dec 26 12:05:06.789 2001 PST
-(1 row)
-
-SELECT timestamp with time zone 'Y2001M12D27H04MM05S06.789-08';
-           timestamptz            
-----------------------------------
- Thu Dec 27 04:05:06.789 2001 PST
-(1 row)
-
 SELECT timestamp with time zone 'J2452271+08';
          timestamptz          
 ------------------------------
@@ -269,6 +262,178 @@ SELECT time with time zone 'T040506.789 -08';
  04:05:06.789-08
 (1 row)
 
+-- time with time zone should accept a date for DST resolution purposes
+SELECT time with time zone 'T040506.789 America/Los_Angeles';
+ERROR:  invalid input syntax for type time with time zone: "T040506.789 America/Los_Angeles"
+LINE 1: SELECT time with time zone 'T040506.789 America/Los_Angeles'...
+                                   ^
+SELECT time with time zone '2001-12-27 T040506.789 America/Los_Angeles';
+     timetz      
+-----------------
+ 04:05:06.789-08
+(1 row)
+
+SELECT time with time zone 'J2452271 T040506.789 America/Los_Angeles';
+     timetz      
+-----------------
+ 04:05:06.789-08
+(1 row)
+
+-- Check time formats required by ISO 8601
+SELECT time without time zone '040506.07';
+    time     
+-------------
+ 04:05:06.07
+(1 row)
+
+SELECT time without time zone '04:05:06.07';
+    time     
+-------------
+ 04:05:06.07
+(1 row)
+
+SELECT time without time zone '040506';
+   time   
+----------
+ 04:05:06
+(1 row)
+
+SELECT time without time zone '04:05:06';
+   time   
+----------
+ 04:05:06
+(1 row)
+
+SELECT time without time zone '0405';
+   time   
+----------
+ 04:05:00
+(1 row)
+
+SELECT time without time zone '04:05';
+   time   
+----------
+ 04:05:00
+(1 row)
+
+SELECT time without time zone 'T040506.07';
+    time     
+-------------
+ 04:05:06.07
+(1 row)
+
+SELECT time without time zone 'T04:05:06.07';
+    time     
+-------------
+ 04:05:06.07
+(1 row)
+
+SELECT time without time zone 'T040506';
+   time   
+----------
+ 04:05:06
+(1 row)
+
+SELECT time without time zone 'T04:05:06';
+   time   
+----------
+ 04:05:06
+(1 row)
+
+SELECT time without time zone 'T0405';
+   time   
+----------
+ 04:05:00
+(1 row)
+
+SELECT time without time zone 'T04:05';
+   time   
+----------
+ 04:05:00
+(1 row)
+
+-- 8601 says "Thh" is allowed, but we intentionally reject it as too vague
+SELECT time without time zone 'T04';
+ERROR:  invalid input syntax for type time: "T04"
+LINE 1: SELECT time without time zone 'T04';
+                                      ^
+SELECT time with time zone '040506.07+08';
+     timetz     
+----------------
+ 04:05:06.07+08
+(1 row)
+
+SELECT time with time zone '04:05:06.07+08';
+     timetz     
+----------------
+ 04:05:06.07+08
+(1 row)
+
+SELECT time with time zone '040506+08';
+   timetz    
+-------------
+ 04:05:06+08
+(1 row)
+
+SELECT time with time zone '04:05:06+08';
+   timetz    
+-------------
+ 04:05:06+08
+(1 row)
+
+SELECT time with time zone '0405+08';
+   timetz    
+-------------
+ 04:05:00+08
+(1 row)
+
+SELECT time with time zone '04:05+08';
+   timetz    
+-------------
+ 04:05:00+08
+(1 row)
+
+SELECT time with time zone 'T040506.07+08';
+     timetz     
+----------------
+ 04:05:06.07+08
+(1 row)
+
+SELECT time with time zone 'T04:05:06.07+08';
+     timetz     
+----------------
+ 04:05:06.07+08
+(1 row)
+
+SELECT time with time zone 'T040506+08';
+   timetz    
+-------------
+ 04:05:06+08
+(1 row)
+
+SELECT time with time zone 'T04:05:06+08';
+   timetz    
+-------------
+ 04:05:06+08
+(1 row)
+
+SELECT time with time zone 'T0405+08';
+   timetz    
+-------------
+ 04:05:00+08
+(1 row)
+
+SELECT time with time zone 'T04:05+08';
+   timetz    
+-------------
+ 04:05:00+08
+(1 row)
+
+-- 8601 says "Thh" is allowed, but we intentionally reject it as too vague
+SELECT time with time zone 'T04+08';
+ERROR:  invalid input syntax for type time with time zone: "T04+08"
+LINE 1: SELECT time with time zone 'T04+08';
+                                   ^
 SET DateStyle = 'Postgres, MDY';
 -- Check Julian dates BC
 SELECT date 'J1520447' AS "Confucius' Birthday";
@@ -283,6 +448,110 @@ SELECT date 'J0' AS "Julian Epoch";
  11-24-4714 BC
 (1 row)
 
+-- test error on dangling Julian units
+SELECT date '1995-08-06  J J J';
+ERROR:  invalid input syntax for type date: "1995-08-06  J J J"
+LINE 1: SELECT date '1995-08-06  J J J';
+                    ^
+SELECT date 'J J 1520447';
+ERROR:  invalid input syntax for type date: "J J 1520447"
+LINE 1: SELECT date 'J J 1520447';
+                    ^
+-- We used to accept this input style, but it was based on a misreading
+-- of ISO8601, and it was never documented anyway
+SELECT timestamp with time zone 'Y2001M12D27H04M05S06.789+08';
+ERROR:  invalid input syntax for type timestamp with time zone: "Y2001M12D27H04M05S06.789+08"
+LINE 1: SELECT timestamp with time zone 'Y2001M12D27H04M05S06.789+08...
+                                        ^
+SELECT timestamp with time zone 'Y2001M12D27H04MM05S06.789-08';
+ERROR:  invalid input syntax for type timestamp with time zone: "Y2001M12D27H04MM05S06.789-08"
+LINE 1: SELECT timestamp with time zone 'Y2001M12D27H04MM05S06.789-0...
+                                        ^
+-- conflicting fields should throw errors
+SELECT date '1995-08-06 epoch';
+ERROR:  invalid input syntax for type date: "1995-08-06 epoch"
+LINE 1: SELECT date '1995-08-06 epoch';
+                    ^
+SELECT date '1995-08-06 infinity';
+ERROR:  invalid input syntax for type date: "1995-08-06 infinity"
+LINE 1: SELECT date '1995-08-06 infinity';
+                    ^
+SELECT date '1995-08-06 -infinity';
+ERROR:  invalid input syntax for type date: "1995-08-06 -infinity"
+LINE 1: SELECT date '1995-08-06 -infinity';
+                    ^
+SELECT date 'today infinity';
+ERROR:  invalid input syntax for type date: "today infinity"
+LINE 1: SELECT date 'today infinity';
+                    ^
+SELECT date '-infinity infinity';
+ERROR:  invalid input syntax for type date: "-infinity infinity"
+LINE 1: SELECT date '-infinity infinity';
+                    ^
+SELECT timestamp '1995-08-06 epoch';
+ERROR:  invalid input syntax for type timestamp: "1995-08-06 epoch"
+LINE 1: SELECT timestamp '1995-08-06 epoch';
+                         ^
+SELECT timestamp '1995-08-06 infinity';
+ERROR:  invalid input syntax for type timestamp: "1995-08-06 infinity"
+LINE 1: SELECT timestamp '1995-08-06 infinity';
+                         ^
+SELECT timestamp '1995-08-06 -infinity';
+ERROR:  invalid input syntax for type timestamp: "1995-08-06 -infinity"
+LINE 1: SELECT timestamp '1995-08-06 -infinity';
+                         ^
+SELECT timestamp 'epoch 01:01:01';
+ERROR:  invalid input syntax for type timestamp: "epoch 01:01:01"
+LINE 1: SELECT timestamp 'epoch 01:01:01';
+                         ^
+SELECT timestamp 'infinity 01:01:01';
+ERROR:  invalid input syntax for type timestamp: "infinity 01:01:01"
+LINE 1: SELECT timestamp 'infinity 01:01:01';
+                         ^
+SELECT timestamp '-infinity 01:01:01';
+ERROR:  invalid input syntax for type timestamp: "-infinity 01:01:01"
+LINE 1: SELECT timestamp '-infinity 01:01:01';
+                         ^
+SELECT timestamp 'now epoch';
+ERROR:  invalid input syntax for type timestamp: "now epoch"
+LINE 1: SELECT timestamp 'now epoch';
+                         ^
+SELECT timestamp '-infinity infinity';
+ERROR:  invalid input syntax for type timestamp: "-infinity infinity"
+LINE 1: SELECT timestamp '-infinity infinity';
+                         ^
+SELECT timestamptz '1995-08-06 epoch';
+ERROR:  invalid input syntax for type timestamp with time zone: "1995-08-06 epoch"
+LINE 1: SELECT timestamptz '1995-08-06 epoch';
+                           ^
+SELECT timestamptz '1995-08-06 infinity';
+ERROR:  invalid input syntax for type timestamp with time zone: "1995-08-06 infinity"
+LINE 1: SELECT timestamptz '1995-08-06 infinity';
+                           ^
+SELECT timestamptz '1995-08-06 -infinity';
+ERROR:  invalid input syntax for type timestamp with time zone: "1995-08-06 -infinity"
+LINE 1: SELECT timestamptz '1995-08-06 -infinity';
+                           ^
+SELECT timestamptz 'epoch 01:01:01';
+ERROR:  invalid input syntax for type timestamp with time zone: "epoch 01:01:01"
+LINE 1: SELECT timestamptz 'epoch 01:01:01';
+                           ^
+SELECT timestamptz 'infinity 01:01:01';
+ERROR:  invalid input syntax for type timestamp with time zone: "infinity 01:01:01"
+LINE 1: SELECT timestamptz 'infinity 01:01:01';
+                           ^
+SELECT timestamptz '-infinity 01:01:01';
+ERROR:  invalid input syntax for type timestamp with time zone: "-infinity 01:01:01"
+LINE 1: SELECT timestamptz '-infinity 01:01:01';
+                           ^
+SELECT timestamptz 'now epoch';
+ERROR:  invalid input syntax for type timestamp with time zone: "now epoch"
+LINE 1: SELECT timestamptz 'now epoch';
+                           ^
+SELECT timestamptz '-infinity infinity';
+ERROR:  invalid input syntax for type timestamp with time zone: "-infinity infinity"
+LINE 1: SELECT timestamptz '-infinity infinity';
+                           ^
 --
 -- date, time arithmetic
 --
@@ -373,6 +642,14 @@ SELECT timestamp without time zone 'Jan 1, 4713 BC' + interval '109203489 days' 
  Sun Dec 31 00:00:00 294276
 (1 row)
 
+SELECT timestamp without time zone '2000-01-01' - interval '2483590 days' AS "out of range";
+        out of range         
+-----------------------------
+ Mon Aug 16 00:00:00 4560 BC
+(1 row)
+
+SELECT timestamp without time zone '294276-12-31 23:59:59' + interval '9223372036854775807 microseconds' AS "out of range";
+ERROR:  timestamp out of range
 SELECT timestamp without time zone '12/31/294276' - timestamp without time zone '12/23/1999' AS "106751991 Days";
   106751991 Days  
 ------------------
@@ -472,6 +749,33 @@ SELECT timestamptz(date '1994-01-01', time with time zone '11:00-5') AS "Jan_01_
 SELECT d1 + interval '1 year' AS one_year FROM TIMESTAMP_TBL;
           one_year           
 -----------------------------
+ Wed Jun 10 17:32:01 1998
+ Fri Feb 13 17:32:01 1998
+ Sun Feb 15 17:32:01 1998
+ Mon Feb 16 17:32:01 1998
+ Thu Feb 16 17:32:01 0096 BC
+ Fri Feb 16 17:32:01 1798
+ Mon Feb 16 17:32:01 1998
+ Sat Feb 28 17:32:01 1998
+ Wed Dec 30 17:32:01 1998
+ Mon Jan 01 17:32:01 2001
+ Mon Dec 31 17:32:01 2001
+ Tue Feb 10 17:32:01.5 1998
+ Tue Feb 10 17:32:01.6 1998
+ Fri Jan 02 03:04:05 1998
+ Sun Sep 22 18:19:20 2002
+ Thu Mar 15 13:14:02 2001
+ Thu Mar 15 03:14:04 2001
+ Thu Feb 12 17:32:01 1998
+ Sat Feb 14 17:32:01 1998
+ Sun Feb 16 17:32:01 0098
+ Fri Feb 16 17:32:01 0598
+ Wed Feb 16 17:32:01 1098
+ Wed Feb 16 17:32:01 1898
+ Fri Feb 28 17:32:01 1997
+ Fri Feb 28 17:32:01 1997
+ Sat Mar 01 17:32:01 1997
+ Tue Jan 01 17:32:01 2002
  -infinity
  infinity
  Fri Jan 01 00:00:00 1971
@@ -479,20 +783,13 @@ SELECT d1 + interval '1 year' AS one_year FROM TIMESTAMP_TBL;
  Tue Feb 10 17:32:01 1998
  Tue Feb 10 17:32:02 1998
  Tue Feb 10 17:32:01.4 1998
- Tue Feb 10 17:32:01.5 1998
- Tue Feb 10 17:32:01.6 1998
  Fri Jan 02 00:00:00 1998
- Fri Jan 02 03:04:05 1998
  Tue Feb 10 17:32:01 1998
  Tue Feb 10 17:32:01 1998
  Tue Feb 10 17:32:01 1998
  Tue Feb 10 17:32:01 1998
- Wed Jun 10 17:32:01 1998
- Sun Sep 22 18:19:20 2002
  Thu Mar 15 08:14:01 2001
- Thu Mar 15 13:14:02 2001
  Thu Mar 15 12:14:03 2001
- Thu Mar 15 03:14:04 2001
  Thu Mar 15 02:14:05 2001
  Tue Feb 10 17:32:01 1998
  Tue Feb 10 17:32:01 1998
@@ -509,39 +806,30 @@ SELECT d1 + interval '1 year' AS one_year FROM TIMESTAMP_TBL;
  Wed Jun 10 18:32:01 1998
  Tue Feb 10 17:32:01 1998
  Wed Feb 11 17:32:01 1998
- Thu Feb 12 17:32:01 1998
- Fri Feb 13 17:32:01 1998
- Sat Feb 14 17:32:01 1998
- Sun Feb 15 17:32:01 1998
- Mon Feb 16 17:32:01 1998
- Thu Feb 16 17:32:01 0096 BC
- Sun Feb 16 17:32:01 0098
- Fri Feb 16 17:32:01 0598
- Wed Feb 16 17:32:01 1098
  Sun Feb 16 17:32:01 1698
- Fri Feb 16 17:32:01 1798
- Wed Feb 16 17:32:01 1898
- Mon Feb 16 17:32:01 1998
  Sun Feb 16 17:32:01 2098
- Fri Feb 28 17:32:01 1997
- Fri Feb 28 17:32:01 1997
- Sat Mar 01 17:32:01 1997
  Tue Dec 30 17:32:01 1997
  Wed Dec 31 17:32:01 1997
  Thu Jan 01 17:32:01 1998
- Sat Feb 28 17:32:01 1998
  Sun Mar 01 17:32:01 1998
- Wed Dec 30 17:32:01 1998
  Thu Dec 31 17:32:01 1998
  Sun Dec 31 17:32:01 2000
- Mon Jan 01 17:32:01 2001
- Mon Dec 31 17:32:01 2001
- Tue Jan 01 17:32:01 2002
 (65 rows)
 
 SELECT d1 - interval '1 year' AS one_year FROM TIMESTAMP_TBL;
           one_year           
 -----------------------------
+ Mon Jun 10 17:32:01 1996
+ Tue Feb 13 17:32:01 1996
+ Thu Feb 15 17:32:01 1996
+ Fri Feb 16 17:32:01 1996
+ Mon Feb 16 17:32:01 0098 BC
+ Tue Feb 16 17:32:01 1796
+ Fri Feb 16 17:32:01 1996
+ Wed Feb 28 17:32:01 1996
+ Mon Dec 30 17:32:01 1996
+ Fri Jan 01 17:32:01 1999
+ Fri Dec 31 17:32:01 1999
  -infinity
  infinity
  Wed Jan 01 00:00:00 1969
@@ -549,20 +837,13 @@ SELECT d1 - interval '1 year' AS one_year FROM TIMESTAMP_TBL;
  Sat Feb 10 17:32:01 1996
  Sat Feb 10 17:32:02 1996
  Sat Feb 10 17:32:01.4 1996
- Sat Feb 10 17:32:01.5 1996
- Sat Feb 10 17:32:01.6 1996
  Tue Jan 02 00:00:00 1996
- Tue Jan 02 03:04:05 1996
  Sat Feb 10 17:32:01 1996
  Sat Feb 10 17:32:01 1996
  Sat Feb 10 17:32:01 1996
  Sat Feb 10 17:32:01 1996
- Mon Jun 10 17:32:01 1996
- Fri Sep 22 18:19:20 2000
  Mon Mar 15 08:14:01 1999
- Mon Mar 15 13:14:02 1999
  Mon Mar 15 12:14:03 1999
- Mon Mar 15 03:14:04 1999
  Mon Mar 15 02:14:05 1999
  Sat Feb 10 17:32:01 1996
  Sat Feb 10 17:32:01 1996
@@ -579,33 +860,29 @@ SELECT d1 - interval '1 year' AS one_year FROM TIMESTAMP_TBL;
  Mon Jun 10 18:32:01 1996
  Sat Feb 10 17:32:01 1996
  Sun Feb 11 17:32:01 1996
- Mon Feb 12 17:32:01 1996
- Tue Feb 13 17:32:01 1996
- Wed Feb 14 17:32:01 1996
- Thu Feb 15 17:32:01 1996
- Fri Feb 16 17:32:01 1996
- Mon Feb 16 17:32:01 0098 BC
- Thu Feb 16 17:32:01 0096
- Tue Feb 16 17:32:01 0596
- Sun Feb 16 17:32:01 1096
  Thu Feb 16 17:32:01 1696
- Tue Feb 16 17:32:01 1796
- Sun Feb 16 17:32:01 1896
- Fri Feb 16 17:32:01 1996
  Thu Feb 16 17:32:01 2096
- Tue Feb 28 17:32:01 1995
- Tue Feb 28 17:32:01 1995
- Wed Mar 01 17:32:01 1995
  Sat Dec 30 17:32:01 1995
  Sun Dec 31 17:32:01 1995
  Mon Jan 01 17:32:01 1996
- Wed Feb 28 17:32:01 1996
  Fri Mar 01 17:32:01 1996
- Mon Dec 30 17:32:01 1996
  Tue Dec 31 17:32:01 1996
  Thu Dec 31 17:32:01 1998
- Fri Jan 01 17:32:01 1999
- Fri Dec 31 17:32:01 1999
+ Sat Feb 10 17:32:01.5 1996
+ Sat Feb 10 17:32:01.6 1996
+ Tue Jan 02 03:04:05 1996
+ Fri Sep 22 18:19:20 2000
+ Mon Mar 15 13:14:02 1999
+ Mon Mar 15 03:14:04 1999
+ Mon Feb 12 17:32:01 1996
+ Wed Feb 14 17:32:01 1996
+ Thu Feb 16 17:32:01 0096
+ Tue Feb 16 17:32:01 0596
+ Sun Feb 16 17:32:01 1096
+ Sun Feb 16 17:32:01 1896
+ Tue Feb 28 17:32:01 1995
+ Tue Feb 28 17:32:01 1995
+ Wed Mar 01 17:32:01 1995
  Sat Jan 01 17:32:01 2000
 (65 rows)
 
@@ -633,6 +910,10 @@ SELECT timestamp with time zone '1999-12-01' + interval '1 month - 1 second' AS 
  Fri Dec 31 23:59:59 1999 PST
 (1 row)
 
+SELECT timestamp with time zone '2000-01-01' - interval '2483590 days' AS "out of range";
+ERROR:  timestamp out of range
+SELECT timestamp with time zone '294276-12-31 23:59:59 UTC' + interval '9223372036854775807 microseconds' AS "out of range";
+ERROR:  timestamp out of range
 SELECT (timestamp with time zone 'today' = (timestamp with time zone 'yesterday' + interval '1 day')) as "True";
  True 
 ------
@@ -718,28 +999,14 @@ SELECT timestamptz(date '1994-01-01', time with time zone '11:00-5') AS "Jan_01_
 SELECT d1 + interval '1 year' AS one_year FROM TIMESTAMPTZ_TBL;
             one_year             
 ---------------------------------
- -infinity
- infinity
- Thu Dec 31 16:00:00 1970 PST
- Tue Feb 10 17:32:01 1998 PST
- Tue Feb 10 17:32:01 1998 PST
- Tue Feb 10 17:32:02 1998 PST
- Tue Feb 10 17:32:01.4 1998 PST
- Tue Feb 10 17:32:01.5 1998 PST
- Tue Feb 10 17:32:01.6 1998 PST
- Fri Jan 02 00:00:00 1998 PST
- Fri Jan 02 03:04:05 1998 PST
  Tue Feb 10 17:32:01 1998 PST
  Tue Feb 10 17:32:01 1998 PST
  Tue Feb 10 17:32:01 1998 PST
  Tue Feb 10 17:32:01 1998 PST
- Wed Jun 10 17:32:01 1998 PDT
+ Tue Feb 10 17:32:01 1998 PST
+ Tue Feb 10 17:32:01 1998 PST
  Sun Sep 22 18:19:20 2002 PDT
- Thu Mar 15 08:14:01 2001 PST
- Thu Mar 15 04:14:02 2001 PST
  Thu Mar 15 02:14:03 2001 PST
- Thu Mar 15 03:14:04 2001 PST
- Thu Mar 15 01:14:05 2001 PST
  Tue Feb 10 17:32:01 1998 PST
  Tue Feb 10 17:32:01 1998 PST
  Tue Feb 10 17:32:00 1998 PST
@@ -748,69 +1015,69 @@ SELECT d1 + interval '1 year' AS one_year FROM TIMESTAMPTZ_TBL;
  Tue Feb 10 17:32:01 1998 PST
  Tue Feb 10 17:32:01 1998 PST
  Tue Feb 10 17:32:01 1998 PST
+ Fri Jul 10 14:32:01 1998 PDT
+ Tue Feb 10 17:32:01 1998 PST
+ Thu Feb 12 17:32:01 1998 PST
+ Fri Feb 16 17:32:01 1798 LMT
+ Fri Feb 28 17:32:01 1997 PST
+ Sat Mar 01 17:32:01 1997 PST
+ Thu Jan 01 17:32:01 1998 PST
+ Sat Feb 28 17:32:01 1998 PST
+ Sun Mar 01 17:32:01 1998 PST
+ Thu Dec 31 17:32:01 1998 PST
+ Mon Jan 01 17:32:01 2001 PST
+ -infinity
+ infinity
+ Thu Dec 31 16:00:00 1970 PST
+ Tue Feb 10 17:32:02 1998 PST
+ Tue Feb 10 17:32:01.4 1998 PST
+ Tue Feb 10 17:32:01.6 1998 PST
+ Fri Jan 02 03:04:05 1998 PST
+ Thu Mar 15 08:14:01 2001 PST
+ Thu Mar 15 04:14:02 2001 PST
+ Thu Mar 15 01:14:05 2001 PST
  Tue Feb 10 09:32:01 1998 PST
  Tue Feb 10 09:32:01 1998 PST
  Tue Feb 10 09:32:01 1998 PST
  Tue Feb 10 14:32:01 1998 PST
- Fri Jul 10 14:32:01 1998 PDT
  Wed Jun 10 18:32:01 1998 PDT
- Tue Feb 10 17:32:01 1998 PST
- Wed Feb 11 17:32:01 1998 PST
- Thu Feb 12 17:32:01 1998 PST
  Fri Feb 13 17:32:01 1998 PST
- Sat Feb 14 17:32:01 1998 PST
  Sun Feb 15 17:32:01 1998 PST
- Mon Feb 16 17:32:01 1998 PST
- Thu Feb 16 17:32:01 0096 PST BC
- Sun Feb 16 17:32:01 0098 PST
- Fri Feb 16 17:32:01 0598 PST
- Wed Feb 16 17:32:01 1098 PST
- Sun Feb 16 17:32:01 1698 PST
- Fri Feb 16 17:32:01 1798 PST
- Wed Feb 16 17:32:01 1898 PST
- Mon Feb 16 17:32:01 1998 PST
+ Fri Feb 16 17:32:01 0598 LMT
+ Wed Feb 16 17:32:01 1098 LMT
+ Sun Feb 16 17:32:01 1698 LMT
  Sun Feb 16 17:32:01 2098 PST
- Fri Feb 28 17:32:01 1997 PST
- Fri Feb 28 17:32:01 1997 PST
- Sat Mar 01 17:32:01 1997 PST
  Tue Dec 30 17:32:01 1997 PST
  Wed Dec 31 17:32:01 1997 PST
- Thu Jan 01 17:32:01 1998 PST
- Sat Feb 28 17:32:01 1998 PST
- Sun Mar 01 17:32:01 1998 PST
- Wed Dec 30 17:32:01 1998 PST
- Thu Dec 31 17:32:01 1998 PST
- Sun Dec 31 17:32:01 2000 PST
- Mon Jan 01 17:32:01 2001 PST
  Mon Dec 31 17:32:01 2001 PST
+ Tue Feb 10 17:32:01.5 1998 PST
+ Fri Jan 02 00:00:00 1998 PST
+ Wed Jun 10 17:32:01 1998 PDT
+ Thu Mar 15 03:14:04 2001 PST
+ Wed Feb 11 17:32:01 1998 PST
+ Sat Feb 14 17:32:01 1998 PST
+ Mon Feb 16 17:32:01 1998 PST
+ Thu Feb 16 17:32:01 0096 LMT BC
+ Sun Feb 16 17:32:01 0098 LMT
+ Wed Feb 16 17:32:01 1898 PST
+ Mon Feb 16 17:32:01 1998 PST
+ Fri Feb 28 17:32:01 1997 PST
+ Wed Dec 30 17:32:01 1998 PST
+ Sun Dec 31 17:32:01 2000 PST
  Tue Jan 01 17:32:01 2002 PST
 (66 rows)
 
 SELECT d1 - interval '1 year' AS one_year FROM TIMESTAMPTZ_TBL;
             one_year             
 ---------------------------------
- -infinity
- infinity
- Tue Dec 31 16:00:00 1968 PST
- Sat Feb 10 17:32:01 1996 PST
- Sat Feb 10 17:32:01 1996 PST
- Sat Feb 10 17:32:02 1996 PST
- Sat Feb 10 17:32:01.4 1996 PST
- Sat Feb 10 17:32:01.5 1996 PST
- Sat Feb 10 17:32:01.6 1996 PST
- Tue Jan 02 00:00:00 1996 PST
- Tue Jan 02 03:04:05 1996 PST
  Sat Feb 10 17:32:01 1996 PST
  Sat Feb 10 17:32:01 1996 PST
  Sat Feb 10 17:32:01 1996 PST
  Sat Feb 10 17:32:01 1996 PST
- Mon Jun 10 17:32:01 1996 PDT
+ Sat Feb 10 17:32:01 1996 PST
+ Sat Feb 10 17:32:01 1996 PST
  Fri Sep 22 18:19:20 2000 PDT
- Mon Mar 15 08:14:01 1999 PST
- Mon Mar 15 04:14:02 1999 PST
  Mon Mar 15 02:14:03 1999 PST
- Mon Mar 15 03:14:04 1999 PST
- Mon Mar 15 01:14:05 1999 PST
  Sat Feb 10 17:32:01 1996 PST
  Sat Feb 10 17:32:01 1996 PST
  Sat Feb 10 17:32:00 1996 PST
@@ -819,41 +1086,55 @@ SELECT d1 - interval '1 year' AS one_year FROM TIMESTAMPTZ_TBL;
  Sat Feb 10 17:32:01 1996 PST
  Sat Feb 10 17:32:01 1996 PST
  Sat Feb 10 17:32:01 1996 PST
+ Wed Jul 10 14:32:01 1996 PDT
+ Sat Feb 10 17:32:01 1996 PST
+ Mon Feb 12 17:32:01 1996 PST
+ Tue Feb 16 17:32:01 1796 LMT
+ Tue Feb 28 17:32:01 1995 PST
+ Wed Mar 01 17:32:01 1995 PST
+ Mon Jan 01 17:32:01 1996 PST
+ Wed Feb 28 17:32:01 1996 PST
+ Fri Mar 01 17:32:01 1996 PST
+ Tue Dec 31 17:32:01 1996 PST
+ Fri Jan 01 17:32:01 1999 PST
+ -infinity
+ infinity
+ Tue Dec 31 16:00:00 1968 PST
+ Sat Feb 10 17:32:02 1996 PST
+ Sat Feb 10 17:32:01.4 1996 PST
+ Sat Feb 10 17:32:01.6 1996 PST
+ Tue Jan 02 03:04:05 1996 PST
+ Mon Mar 15 08:14:01 1999 PST
+ Mon Mar 15 04:14:02 1999 PST
+ Mon Mar 15 01:14:05 1999 PST
  Sat Feb 10 09:32:01 1996 PST
  Sat Feb 10 09:32:01 1996 PST
  Sat Feb 10 09:32:01 1996 PST
  Sat Feb 10 14:32:01 1996 PST
- Wed Jul 10 14:32:01 1996 PDT
  Mon Jun 10 18:32:01 1996 PDT
- Sat Feb 10 17:32:01 1996 PST
- Sun Feb 11 17:32:01 1996 PST
- Mon Feb 12 17:32:01 1996 PST
  Tue Feb 13 17:32:01 1996 PST
- Wed Feb 14 17:32:01 1996 PST
  Thu Feb 15 17:32:01 1996 PST
- Fri Feb 16 17:32:01 1996 PST
- Mon Feb 16 17:32:01 0098 PST BC
- Thu Feb 16 17:32:01 0096 PST
- Tue Feb 16 17:32:01 0596 PST
- Sun Feb 16 17:32:01 1096 PST
- Thu Feb 16 17:32:01 1696 PST
- Tue Feb 16 17:32:01 1796 PST
- Sun Feb 16 17:32:01 1896 PST
- Fri Feb 16 17:32:01 1996 PST
+ Tue Feb 16 17:32:01 0596 LMT
+ Sun Feb 16 17:32:01 1096 LMT
+ Thu Feb 16 17:32:01 1696 LMT
  Thu Feb 16 17:32:01 2096 PST
- Tue Feb 28 17:32:01 1995 PST
- Tue Feb 28 17:32:01 1995 PST
- Wed Mar 01 17:32:01 1995 PST
  Sat Dec 30 17:32:01 1995 PST
  Sun Dec 31 17:32:01 1995 PST
- Mon Jan 01 17:32:01 1996 PST
- Wed Feb 28 17:32:01 1996 PST
- Fri Mar 01 17:32:01 1996 PST
- Mon Dec 30 17:32:01 1996 PST
- Tue Dec 31 17:32:01 1996 PST
- Thu Dec 31 17:32:01 1998 PST
- Fri Jan 01 17:32:01 1999 PST
  Fri Dec 31 17:32:01 1999 PST
+ Sat Feb 10 17:32:01.5 1996 PST
+ Tue Jan 02 00:00:00 1996 PST
+ Mon Jun 10 17:32:01 1996 PDT
+ Mon Mar 15 03:14:04 1999 PST
+ Sun Feb 11 17:32:01 1996 PST
+ Wed Feb 14 17:32:01 1996 PST
+ Fri Feb 16 17:32:01 1996 PST
+ Mon Feb 16 17:32:01 0098 LMT BC
+ Thu Feb 16 17:32:01 0096 LMT
+ Sun Feb 16 17:32:01 1896 PST
+ Fri Feb 16 17:32:01 1996 PST
+ Tue Feb 28 17:32:01 1995 PST
+ Mon Dec 30 17:32:01 1996 PST
+ Thu Dec 31 17:32:01 1998 PST
  Sat Jan 01 17:32:01 2000 PST
 (66 rows)
 
@@ -1402,6 +1683,8 @@ SELECT (time '00:00', interval '1 hour')
 (1 row)
 
 CREATE TABLE TEMP_TIMESTAMP (f1 timestamp with time zone);
+NOTICE:  Table doesn't have 'DISTRIBUTED BY' clause -- Using column named 'f1' as the Apache Cloudberry data distribution key for this table.
+HINT:  The 'DISTRIBUTED BY' clause determines the distribution of data. Make sure column(s) chosen are the optimal data distribution key to minimize skew.
 -- get some candidate input values
 INSERT INTO TEMP_TIMESTAMP (f1)
   SELECT d1 FROM TIMESTAMP_TBL
@@ -2116,7 +2399,7 @@ SELECT '2020-10-05'::timestamptz > '2202020-10-05'::date as f;
 SELECT '4714-11-24 BC'::date::timestamptz;
            timestamptz           
 ---------------------------------
- Mon Nov 24 00:00:00 4714 PST BC
+ Mon Nov 24 00:00:00 4714 LMT BC
 (1 row)
 
 SET TimeZone = 'UTC-2';
@@ -2148,6 +2431,89 @@ SELECT '2020-10-05'::timestamptz >= '4714-11-24 BC'::timestamp as t;
 
 RESET TimeZone;
 --
+-- Tests for BETWEEN
+--
+explain (costs off)
+select count(*) from date_tbl
+  where f1 between '1997-01-01' and '1998-01-01';
+                                       QUERY PLAN                                        
+-----------------------------------------------------------------------------------------
+ Finalize Aggregate
+   ->  Gather Motion 3:1  (slice1; segments: 3)
+         ->  Partial Aggregate
+               ->  Seq Scan on date_tbl
+                     Filter: ((f1 >= '01-01-1997'::date) AND (f1 <= '01-01-1998'::date))
+ Optimizer: Postgres query optimizer
+(6 rows)
+
+select count(*) from date_tbl
+  where f1 between '1997-01-01' and '1998-01-01';
+ count 
+-------
+     3
+(1 row)
+
+explain (costs off)
+select count(*) from date_tbl
+  where f1 not between '1997-01-01' and '1998-01-01';
+                                      QUERY PLAN                                      
+--------------------------------------------------------------------------------------
+ Finalize Aggregate
+   ->  Gather Motion 3:1  (slice1; segments: 3)
+         ->  Partial Aggregate
+               ->  Seq Scan on date_tbl
+                     Filter: ((f1 < '01-01-1997'::date) OR (f1 > '01-01-1998'::date))
+ Optimizer: Postgres query optimizer
+(6 rows)
+
+select count(*) from date_tbl
+  where f1 not between '1997-01-01' and '1998-01-01';
+ count 
+-------
+    13
+(1 row)
+
+explain (costs off)
+select count(*) from date_tbl
+  where f1 between symmetric '1997-01-01' and '1998-01-01';
+                                                                        QUERY PLAN                                                                        
+----------------------------------------------------------------------------------------------------------------------------------------------------------
+ Finalize Aggregate
+   ->  Gather Motion 3:1  (slice1; segments: 3)
+         ->  Partial Aggregate
+               ->  Seq Scan on date_tbl
+                     Filter: (((f1 >= '01-01-1997'::date) AND (f1 <= '01-01-1998'::date)) OR ((f1 >= '01-01-1998'::date) AND (f1 <= '01-01-1997'::date)))
+ Optimizer: Postgres query optimizer
+(6 rows)
+
+select count(*) from date_tbl
+  where f1 between symmetric '1997-01-01' and '1998-01-01';
+ count 
+-------
+     3
+(1 row)
+
+explain (costs off)
+select count(*) from date_tbl
+  where f1 not between symmetric '1997-01-01' and '1998-01-01';
+                                                                     QUERY PLAN                                                                      
+-----------------------------------------------------------------------------------------------------------------------------------------------------
+ Finalize Aggregate
+   ->  Gather Motion 3:1  (slice1; segments: 3)
+         ->  Partial Aggregate
+               ->  Seq Scan on date_tbl
+                     Filter: (((f1 < '01-01-1997'::date) OR (f1 > '01-01-1998'::date)) AND ((f1 < '01-01-1998'::date) OR (f1 > '01-01-1997'::date)))
+ Optimizer: Postgres query optimizer
+(6 rows)
+
+select count(*) from date_tbl
+  where f1 not between symmetric '1997-01-01' and '1998-01-01';
+ count 
+-------
+    13
+(1 row)
+
+--
 -- Formats
 --
 SET DateStyle TO 'US,Postgres';
@@ -2160,6 +2526,33 @@ SHOW DateStyle;
 SELECT d1 AS us_postgres FROM TIMESTAMP_TBL;
          us_postgres         
 -----------------------------
+ Mon Feb 10 17:32:01.5 1997
+ Mon Feb 10 17:32:01.6 1997
+ Thu Jan 02 03:04:05 1997
+ Sat Sep 22 18:19:20 2001
+ Wed Mar 15 13:14:02 2000
+ Wed Mar 15 03:14:04 2000
+ Wed Feb 12 17:32:01 1997
+ Fri Feb 14 17:32:01 1997
+ Sat Feb 16 17:32:01 0097
+ Thu Feb 16 17:32:01 0597
+ Tue Feb 16 17:32:01 1097
+ Tue Feb 16 17:32:01 1897
+ Wed Feb 28 17:32:01 1996
+ Thu Feb 29 17:32:01 1996
+ Fri Mar 01 17:32:01 1996
+ Mon Jan 01 17:32:01 2001
+ Tue Jun 10 17:32:01 1997
+ Thu Feb 13 17:32:01 1997
+ Sat Feb 15 17:32:01 1997
+ Sun Feb 16 17:32:01 1997
+ Tue Feb 16 17:32:01 0097 BC
+ Thu Feb 16 17:32:01 1797
+ Sun Feb 16 17:32:01 1997
+ Fri Feb 28 17:32:01 1997
+ Tue Dec 30 17:32:01 1997
+ Sat Jan 01 17:32:01 2000
+ Sun Dec 31 17:32:01 2000
  -infinity
  infinity
  Thu Jan 01 00:00:00 1970
@@ -2167,20 +2560,13 @@ SELECT d1 AS us_postgres FROM TIMESTAMP_TBL;
  Mon Feb 10 17:32:01 1997
  Mon Feb 10 17:32:02 1997
  Mon Feb 10 17:32:01.4 1997
- Mon Feb 10 17:32:01.5 1997
- Mon Feb 10 17:32:01.6 1997
  Thu Jan 02 00:00:00 1997
- Thu Jan 02 03:04:05 1997
  Mon Feb 10 17:32:01 1997
  Mon Feb 10 17:32:01 1997
  Mon Feb 10 17:32:01 1997
  Mon Feb 10 17:32:01 1997
- Tue Jun 10 17:32:01 1997
- Sat Sep 22 18:19:20 2001
  Wed Mar 15 08:14:01 2000
- Wed Mar 15 13:14:02 2000
  Wed Mar 15 12:14:03 2000
- Wed Mar 15 03:14:04 2000
  Wed Mar 15 02:14:05 2000
  Mon Feb 10 17:32:01 1997
  Mon Feb 10 17:32:01 1997
@@ -2197,40 +2583,47 @@ SELECT d1 AS us_postgres FROM TIMESTAMP_TBL;
  Tue Jun 10 18:32:01 1997
  Mon Feb 10 17:32:01 1997
  Tue Feb 11 17:32:01 1997
- Wed Feb 12 17:32:01 1997
- Thu Feb 13 17:32:01 1997
- Fri Feb 14 17:32:01 1997
- Sat Feb 15 17:32:01 1997
- Sun Feb 16 17:32:01 1997
- Tue Feb 16 17:32:01 0097 BC
- Sat Feb 16 17:32:01 0097
- Thu Feb 16 17:32:01 0597
- Tue Feb 16 17:32:01 1097
  Sat Feb 16 17:32:01 1697
- Thu Feb 16 17:32:01 1797
- Tue Feb 16 17:32:01 1897
- Sun Feb 16 17:32:01 1997
  Sat Feb 16 17:32:01 2097
- Wed Feb 28 17:32:01 1996
- Thu Feb 29 17:32:01 1996
- Fri Mar 01 17:32:01 1996
  Mon Dec 30 17:32:01 1996
  Tue Dec 31 17:32:01 1996
  Wed Jan 01 17:32:01 1997
- Fri Feb 28 17:32:01 1997
  Sat Mar 01 17:32:01 1997
- Tue Dec 30 17:32:01 1997
  Wed Dec 31 17:32:01 1997
  Fri Dec 31 17:32:01 1999
- Sat Jan 01 17:32:01 2000
- Sun Dec 31 17:32:01 2000
- Mon Jan 01 17:32:01 2001
 (65 rows)
 
 SET DateStyle TO 'US,ISO';
 SELECT d1 AS us_iso FROM TIMESTAMP_TBL;
          us_iso         
 ------------------------
+ 1997-06-10 17:32:01
+ 1997-02-13 17:32:01
+ 1997-02-15 17:32:01
+ 1997-02-16 17:32:01
+ 0097-02-16 17:32:01 BC
+ 1797-02-16 17:32:01
+ 1997-02-16 17:32:01
+ 1997-02-28 17:32:01
+ 1997-12-30 17:32:01
+ 2000-01-01 17:32:01
+ 2000-12-31 17:32:01
+ 1997-02-10 17:32:01.5
+ 1997-02-10 17:32:01.6
+ 1997-01-02 03:04:05
+ 2001-09-22 18:19:20
+ 2000-03-15 13:14:02
+ 2000-03-15 03:14:04
+ 1997-02-12 17:32:01
+ 1997-02-14 17:32:01
+ 0097-02-16 17:32:01
+ 0597-02-16 17:32:01
+ 1097-02-16 17:32:01
+ 1897-02-16 17:32:01
+ 1996-02-28 17:32:01
+ 1996-02-29 17:32:01
+ 1996-03-01 17:32:01
+ 2001-01-01 17:32:01
  -infinity
  infinity
  1970-01-01 00:00:00
@@ -2238,20 +2631,13 @@ SELECT d1 AS us_iso FROM TIMESTAMP_TBL;
  1997-02-10 17:32:01
  1997-02-10 17:32:02
  1997-02-10 17:32:01.4
- 1997-02-10 17:32:01.5
- 1997-02-10 17:32:01.6
  1997-01-02 00:00:00
- 1997-01-02 03:04:05
  1997-02-10 17:32:01
  1997-02-10 17:32:01
  1997-02-10 17:32:01
  1997-02-10 17:32:01
- 1997-06-10 17:32:01
- 2001-09-22 18:19:20
  2000-03-15 08:14:01
- 2000-03-15 13:14:02
  2000-03-15 12:14:03
- 2000-03-15 03:14:04
  2000-03-15 02:14:05
  1997-02-10 17:32:01
  1997-02-10 17:32:01
@@ -2268,34 +2654,14 @@ SELECT d1 AS us_iso FROM TIMESTAMP_TBL;
  1997-06-10 18:32:01
  1997-02-10 17:32:01
  1997-02-11 17:32:01
- 1997-02-12 17:32:01
- 1997-02-13 17:32:01
- 1997-02-14 17:32:01
- 1997-02-15 17:32:01
- 1997-02-16 17:32:01
- 0097-02-16 17:32:01 BC
- 0097-02-16 17:32:01
- 0597-02-16 17:32:01
- 1097-02-16 17:32:01
  1697-02-16 17:32:01
- 1797-02-16 17:32:01
- 1897-02-16 17:32:01
- 1997-02-16 17:32:01
  2097-02-16 17:32:01
- 1996-02-28 17:32:01
- 1996-02-29 17:32:01
- 1996-03-01 17:32:01
  1996-12-30 17:32:01
  1996-12-31 17:32:01
  1997-01-01 17:32:01
- 1997-02-28 17:32:01
  1997-03-01 17:32:01
- 1997-12-30 17:32:01
  1997-12-31 17:32:01
  1999-12-31 17:32:01
- 2000-01-01 17:32:01
- 2000-12-31 17:32:01
- 2001-01-01 17:32:01
 (65 rows)
 
 SET DateStyle TO 'US,SQL';
@@ -2315,20 +2681,13 @@ SELECT d1 AS us_sql FROM TIMESTAMP_TBL;
  02/10/1997 17:32:01
  02/10/1997 17:32:02
  02/10/1997 17:32:01.4
- 02/10/1997 17:32:01.5
- 02/10/1997 17:32:01.6
  01/02/1997 00:00:00
- 01/02/1997 03:04:05
  02/10/1997 17:32:01
  02/10/1997 17:32:01
  02/10/1997 17:32:01
  02/10/1997 17:32:01
- 06/10/1997 17:32:01
- 09/22/2001 18:19:20
  03/15/2000 08:14:01
- 03/15/2000 13:14:02
  03/15/2000 12:14:03
- 03/15/2000 03:14:04
  03/15/2000 02:14:05
  02/10/1997 17:32:01
  02/10/1997 17:32:01
@@ -2345,33 +2704,40 @@ SELECT d1 AS us_sql FROM TIMESTAMP_TBL;
  06/10/1997 18:32:01
  02/10/1997 17:32:01
  02/11/1997 17:32:01
- 02/12/1997 17:32:01
- 02/13/1997 17:32:01
- 02/14/1997 17:32:01
- 02/15/1997 17:32:01
- 02/16/1997 17:32:01
- 02/16/0097 17:32:01 BC
- 02/16/0097 17:32:01
- 02/16/0597 17:32:01
- 02/16/1097 17:32:01
  02/16/1697 17:32:01
- 02/16/1797 17:32:01
- 02/16/1897 17:32:01
- 02/16/1997 17:32:01
  02/16/2097 17:32:01
- 02/28/1996 17:32:01
- 02/29/1996 17:32:01
- 03/01/1996 17:32:01
  12/30/1996 17:32:01
  12/31/1996 17:32:01
  01/01/1997 17:32:01
- 02/28/1997 17:32:01
  03/01/1997 17:32:01
- 12/30/1997 17:32:01
  12/31/1997 17:32:01
  12/31/1999 17:32:01
+ 06/10/1997 17:32:01
+ 02/13/1997 17:32:01
+ 02/15/1997 17:32:01
+ 02/16/1997 17:32:01
+ 02/16/0097 17:32:01 BC
+ 02/16/1797 17:32:01
+ 02/16/1997 17:32:01
+ 02/28/1997 17:32:01
+ 12/30/1997 17:32:01
  01/01/2000 17:32:01
  12/31/2000 17:32:01
+ 02/10/1997 17:32:01.5
+ 02/10/1997 17:32:01.6
+ 01/02/1997 03:04:05
+ 09/22/2001 18:19:20
+ 03/15/2000 13:14:02
+ 03/15/2000 03:14:04
+ 02/12/1997 17:32:01
+ 02/14/1997 17:32:01
+ 02/16/0097 17:32:01
+ 02/16/0597 17:32:01
+ 02/16/1097 17:32:01
+ 02/16/1897 17:32:01
+ 02/28/1996 17:32:01
+ 02/29/1996 17:32:01
+ 03/01/1996 17:32:01
  01/01/2001 17:32:01
 (65 rows)
 
@@ -2399,20 +2765,13 @@ SELECT d1 AS european_postgres FROM TIMESTAMP_TBL;
  Mon 10 Feb 17:32:01 1997
  Mon 10 Feb 17:32:02 1997
  Mon 10 Feb 17:32:01.4 1997
- Mon 10 Feb 17:32:01.5 1997
- Mon 10 Feb 17:32:01.6 1997
  Thu 02 Jan 00:00:00 1997
- Thu 02 Jan 03:04:05 1997
  Mon 10 Feb 17:32:01 1997
  Mon 10 Feb 17:32:01 1997
  Mon 10 Feb 17:32:01 1997
  Mon 10 Feb 17:32:01 1997
- Tue 10 Jun 17:32:01 1997
- Sat 22 Sep 18:19:20 2001
  Wed 15 Mar 08:14:01 2000
- Wed 15 Mar 13:14:02 2000
  Wed 15 Mar 12:14:03 2000
- Wed 15 Mar 03:14:04 2000
  Wed 15 Mar 02:14:05 2000
  Mon 10 Feb 17:32:01 1997
  Mon 10 Feb 17:32:01 1997
@@ -2429,35 +2788,42 @@ SELECT d1 AS european_postgres FROM TIMESTAMP_TBL;
  Tue 10 Jun 18:32:01 1997
  Mon 10 Feb 17:32:01 1997
  Tue 11 Feb 17:32:01 1997
- Wed 12 Feb 17:32:01 1997
- Thu 13 Feb 17:32:01 1997
- Fri 14 Feb 17:32:01 1997
- Sat 15 Feb 17:32:01 1997
- Sun 16 Feb 17:32:01 1997
- Tue 16 Feb 17:32:01 0097 BC
- Sat 16 Feb 17:32:01 0097
- Thu 16 Feb 17:32:01 0597
- Tue 16 Feb 17:32:01 1097
  Sat 16 Feb 17:32:01 1697
- Thu 16 Feb 17:32:01 1797
- Tue 16 Feb 17:32:01 1897
- Sun 16 Feb 17:32:01 1997
  Sat 16 Feb 17:32:01 2097
- Wed 28 Feb 17:32:01 1996
- Thu 29 Feb 17:32:01 1996
- Fri 01 Mar 17:32:01 1996
  Mon 30 Dec 17:32:01 1996
  Tue 31 Dec 17:32:01 1996
  Wed 01 Jan 17:32:01 1997
- Fri 28 Feb 17:32:01 1997
  Sat 01 Mar 17:32:01 1997
- Tue 30 Dec 17:32:01 1997
  Wed 31 Dec 17:32:01 1997
  Fri 31 Dec 17:32:01 1999
+ Thu 13 Jun 00:00:00 1957
+ Tue 10 Jun 17:32:01 1997
+ Thu 13 Feb 17:32:01 1997
+ Sat 15 Feb 17:32:01 1997
+ Sun 16 Feb 17:32:01 1997
+ Tue 16 Feb 17:32:01 0097 BC
+ Thu 16 Feb 17:32:01 1797
+ Sun 16 Feb 17:32:01 1997
+ Fri 28 Feb 17:32:01 1997
+ Tue 30 Dec 17:32:01 1997
  Sat 01 Jan 17:32:01 2000
  Sun 31 Dec 17:32:01 2000
+ Mon 10 Feb 17:32:01.5 1997
+ Mon 10 Feb 17:32:01.6 1997
+ Thu 02 Jan 03:04:05 1997
+ Sat 22 Sep 18:19:20 2001
+ Wed 15 Mar 13:14:02 2000
+ Wed 15 Mar 03:14:04 2000
+ Wed 12 Feb 17:32:01 1997
+ Fri 14 Feb 17:32:01 1997
+ Sat 16 Feb 17:32:01 0097
+ Thu 16 Feb 17:32:01 0597
+ Tue 16 Feb 17:32:01 1097
+ Tue 16 Feb 17:32:01 1897
+ Wed 28 Feb 17:32:01 1996
+ Thu 29 Feb 17:32:01 1996
+ Fri 01 Mar 17:32:01 1996
  Mon 01 Jan 17:32:01 2001
- Thu 13 Jun 00:00:00 1957
 (66 rows)
 
 SET DateStyle TO 'European,ISO';
@@ -2470,6 +2836,33 @@ SHOW DateStyle;
 SELECT d1 AS european_iso FROM TIMESTAMP_TBL;
       european_iso      
 ------------------------
+ 1997-02-10 17:32:01.5
+ 1997-02-10 17:32:01.6
+ 1997-01-02 03:04:05
+ 2001-09-22 18:19:20
+ 2000-03-15 13:14:02
+ 2000-03-15 03:14:04
+ 1997-02-12 17:32:01
+ 1997-02-14 17:32:01
+ 0097-02-16 17:32:01
+ 0597-02-16 17:32:01
+ 1097-02-16 17:32:01
+ 1897-02-16 17:32:01
+ 1996-02-28 17:32:01
+ 1996-02-29 17:32:01
+ 1996-03-01 17:32:01
+ 2001-01-01 17:32:01
+ 1997-06-10 17:32:01
+ 1997-02-13 17:32:01
+ 1997-02-15 17:32:01
+ 1997-02-16 17:32:01
+ 0097-02-16 17:32:01 BC
+ 1797-02-16 17:32:01
+ 1997-02-16 17:32:01
+ 1997-02-28 17:32:01
+ 1997-12-30 17:32:01
+ 2000-01-01 17:32:01
+ 2000-12-31 17:32:01
  -infinity
  infinity
  1970-01-01 00:00:00
@@ -2477,20 +2870,13 @@ SELECT d1 AS european_iso FROM TIMESTAMP_TBL;
  1997-02-10 17:32:01
  1997-02-10 17:32:02
  1997-02-10 17:32:01.4
- 1997-02-10 17:32:01.5
- 1997-02-10 17:32:01.6
  1997-01-02 00:00:00
- 1997-01-02 03:04:05
  1997-02-10 17:32:01
  1997-02-10 17:32:01
  1997-02-10 17:32:01
  1997-02-10 17:32:01
- 1997-06-10 17:32:01
- 2001-09-22 18:19:20
  2000-03-15 08:14:01
- 2000-03-15 13:14:02
  2000-03-15 12:14:03
- 2000-03-15 03:14:04
  2000-03-15 02:14:05
  1997-02-10 17:32:01
  1997-02-10 17:32:01
@@ -2507,34 +2893,14 @@ SELECT d1 AS european_iso FROM TIMESTAMP_TBL;
  1997-06-10 18:32:01
  1997-02-10 17:32:01
  1997-02-11 17:32:01
- 1997-02-12 17:32:01
- 1997-02-13 17:32:01
- 1997-02-14 17:32:01
- 1997-02-15 17:32:01
- 1997-02-16 17:32:01
- 0097-02-16 17:32:01 BC
- 0097-02-16 17:32:01
- 0597-02-16 17:32:01
- 1097-02-16 17:32:01
  1697-02-16 17:32:01
- 1797-02-16 17:32:01
- 1897-02-16 17:32:01
- 1997-02-16 17:32:01
  2097-02-16 17:32:01
- 1996-02-28 17:32:01
- 1996-02-29 17:32:01
- 1996-03-01 17:32:01
  1996-12-30 17:32:01
  1996-12-31 17:32:01
  1997-01-01 17:32:01
- 1997-02-28 17:32:01
  1997-03-01 17:32:01
- 1997-12-30 17:32:01
  1997-12-31 17:32:01
  1999-12-31 17:32:01
- 2000-01-01 17:32:01
- 2000-12-31 17:32:01
- 2001-01-01 17:32:01
  1957-06-13 00:00:00
 (66 rows)
 
@@ -2555,20 +2921,13 @@ SELECT d1 AS european_sql FROM TIMESTAMP_TBL;
  10/02/1997 17:32:01
  10/02/1997 17:32:02
  10/02/1997 17:32:01.4
- 10/02/1997 17:32:01.5
- 10/02/1997 17:32:01.6
  02/01/1997 00:00:00
- 02/01/1997 03:04:05
  10/02/1997 17:32:01
  10/02/1997 17:32:01
  10/02/1997 17:32:01
  10/02/1997 17:32:01
- 10/06/1997 17:32:01
- 22/09/2001 18:19:20
  15/03/2000 08:14:01
- 15/03/2000 13:14:02
  15/03/2000 12:14:03
- 15/03/2000 03:14:04
  15/03/2000 02:14:05
  10/02/1997 17:32:01
  10/02/1997 17:32:01
@@ -2585,35 +2944,42 @@ SELECT d1 AS european_sql FROM TIMESTAMP_TBL;
  10/06/1997 18:32:01
  10/02/1997 17:32:01
  11/02/1997 17:32:01
- 12/02/1997 17:32:01
- 13/02/1997 17:32:01
- 14/02/1997 17:32:01
- 15/02/1997 17:32:01
- 16/02/1997 17:32:01
- 16/02/0097 17:32:01 BC
- 16/02/0097 17:32:01
- 16/02/0597 17:32:01
- 16/02/1097 17:32:01
  16/02/1697 17:32:01
- 16/02/1797 17:32:01
- 16/02/1897 17:32:01
- 16/02/1997 17:32:01
  16/02/2097 17:32:01
- 28/02/1996 17:32:01
- 29/02/1996 17:32:01
- 01/03/1996 17:32:01
  30/12/1996 17:32:01
  31/12/1996 17:32:01
  01/01/1997 17:32:01
- 28/02/1997 17:32:01
  01/03/1997 17:32:01
- 30/12/1997 17:32:01
  31/12/1997 17:32:01
  31/12/1999 17:32:01
+ 13/06/1957 00:00:00
+ 10/06/1997 17:32:01
+ 13/02/1997 17:32:01
+ 15/02/1997 17:32:01
+ 16/02/1997 17:32:01
+ 16/02/0097 17:32:01 BC
+ 16/02/1797 17:32:01
+ 16/02/1997 17:32:01
+ 28/02/1997 17:32:01
+ 30/12/1997 17:32:01
  01/01/2000 17:32:01
  31/12/2000 17:32:01
+ 10/02/1997 17:32:01.5
+ 10/02/1997 17:32:01.6
+ 02/01/1997 03:04:05
+ 22/09/2001 18:19:20
+ 15/03/2000 13:14:02
+ 15/03/2000 03:14:04
+ 12/02/1997 17:32:01
+ 14/02/1997 17:32:01
+ 16/02/0097 17:32:01
+ 16/02/0597 17:32:01
+ 16/02/1097 17:32:01
+ 16/02/1897 17:32:01
+ 28/02/1996 17:32:01
+ 29/02/1996 17:32:01
+ 01/03/1996 17:32:01
  01/01/2001 17:32:01
- 13/06/1957 00:00:00
 (66 rows)
 
 RESET DateStyle;
@@ -2623,13 +2989,13 @@ RESET DateStyle;
 SELECT to_timestamp('0097/Feb/16 --> 08:14:30', 'YYYY/Mon/DD --> HH:MI:SS');
          to_timestamp         
 ------------------------------
- Sat Feb 16 08:14:30 0097 PST
+ Sat Feb 16 08:14:30 0097 LMT
 (1 row)
 
 SELECT to_timestamp('97/2/16 8:14:30', 'FMYYYY/FMMM/FMDD FMHH:FMMI:FMSS');
          to_timestamp         
 ------------------------------
- Sat Feb 16 08:14:30 0097 PST
+ Sat Feb 16 08:14:30 0097 LMT
 (1 row)
 
 SELECT to_timestamp('2011$03!18 23_38_15', 'YYYY-MM-DD HH24:MI:SS');
@@ -2666,7 +3032,7 @@ SELECT to_timestamp('My birthday-> Year: 1976, Month: May, Day: 16',
 SELECT to_timestamp('1,582nd VIII 21', 'Y,YYYth FMRM DD');
          to_timestamp         
 ------------------------------
- Sat Aug 21 00:00:00 1582 PST
+ Sat Aug 21 00:00:00 1582 LMT
 (1 row)
 
 SELECT to_timestamp('15 "text between quote marks" 98 54 45',
@@ -2730,7 +3096,7 @@ SELECT to_timestamp('1997 AD 11 16', 'YYYY BC MM DD');
 SELECT to_timestamp('1997 BC 11 16', 'YYYY BC MM DD');
           to_timestamp           
 ---------------------------------
- Tue Nov 16 00:00:00 1997 PST BC
+ Tue Nov 16 00:00:00 1997 LMT BC
 (1 row)
 
 SELECT to_timestamp('1997 A.D. 11 16', 'YYYY B.C. MM DD');
@@ -2742,7 +3108,7 @@ SELECT to_timestamp('1997 A.D. 11 16', 'YYYY B.C. MM DD');
 SELECT to_timestamp('1997 B.C. 11 16', 'YYYY B.C. MM DD');
           to_timestamp           
 ---------------------------------
- Tue Nov 16 00:00:00 1997 PST BC
+ Tue Nov 16 00:00:00 1997 LMT BC
 (1 row)
 
 SELECT to_timestamp('9-1116', 'Y-MMDD');
@@ -2970,6 +3336,17 @@ SELECT i, to_timestamp('2018-11-02 12:34:56.123456', 'YYYY-MM-DD HH24:MI:SS.FF' 
 
 SELECT i, to_timestamp('2018-11-02 12:34:56.123456789', 'YYYY-MM-DD HH24:MI:SS.FF' || i) FROM generate_series(1, 6) i;
 ERROR:  date/time field value out of range: "2018-11-02 12:34:56.123456789"
+SELECT i, to_timestamp('20181102123456123456', 'YYYYMMDDHH24MISSFF' || i) FROM generate_series(1, 6) i;
+ i |            to_timestamp             
+---+-------------------------------------
+ 1 | Fri Nov 02 12:34:56.1 2018 PDT
+ 2 | Fri Nov 02 12:34:56.12 2018 PDT
+ 3 | Fri Nov 02 12:34:56.123 2018 PDT
+ 4 | Fri Nov 02 12:34:56.1235 2018 PDT
+ 5 | Fri Nov 02 12:34:56.12346 2018 PDT
+ 6 | Fri Nov 02 12:34:56.123456 2018 PDT
+(6 rows)
+
 SELECT to_date('1 4 1902', 'Q MM YYYY');  -- Q is ignored
   to_date   
 ------------
@@ -3012,19 +3389,19 @@ SELECT to_date('-44-02-01 BC','YYYY-MM-DD BC');
 SELECT to_timestamp('44-02-01 11:12:13 BC','YYYY-MM-DD HH24:MI:SS BC');
           to_timestamp           
 ---------------------------------
- Fri Feb 01 11:12:13 0044 PST BC
+ Fri Feb 01 11:12:13 0044 LMT BC
 (1 row)
 
 SELECT to_timestamp('-44-02-01 11:12:13','YYYY-MM-DD HH24:MI:SS');
           to_timestamp           
 ---------------------------------
- Fri Feb 01 11:12:13 0044 PST BC
+ Fri Feb 01 11:12:13 0044 LMT BC
 (1 row)
 
 SELECT to_timestamp('-44-02-01 11:12:13 BC','YYYY-MM-DD HH24:MI:SS BC');
          to_timestamp         
 ------------------------------
- Mon Feb 01 11:12:13 0044 PST
+ Mon Feb 01 11:12:13 0044 LMT
 (1 row)
 
 --

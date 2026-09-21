@@ -586,7 +586,7 @@ EXPLAIN (verbose, costs off) SELECT * FROM functest_sri1();
  Function Scan on temp_func_test.functest_sri1
    Output: functest_sri1
    Function Call: functest_sri1()
- Optimizer: GPORCA
+ Optimizer: Postgres query optimizer
 (5 rows)
 
 CREATE FUNCTION functest_sri2() RETURNS SETOF int
@@ -609,7 +609,7 @@ EXPLAIN (verbose, costs off) SELECT * FROM functest_sri2();
  Function Scan on temp_func_test.functest_sri2
    Output: functest_sri2
    Function Call: functest_sri2()
- Optimizer: GPORCA
+ Optimizer: Postgres query optimizer
 (5 rows)
 
 DROP TABLE functest3 CASCADE;

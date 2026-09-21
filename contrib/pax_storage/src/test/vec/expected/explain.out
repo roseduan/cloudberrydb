@@ -64,43 +64,49 @@ select explain_filter('explain (analyze) select * from int8_tbl i8');
                                                    explain_filter                                                   
 --------------------------------------------------------------------------------------------------------------------
  Vec Gather Motion N:N  (slice1; segments: N)  (cost=N.N..N.N rows=N width=N) (actual time=N.N..N.N rows=N loops=N)
+   Executor Memory: NkB  Segments: N  Max: NkB (segment N)
    ->  Vec Seq Scan on int8_tbl i8  (cost=N.N..N.N rows=N width=N) (actual time=N.N..N.N rows=N loops=N)
+         Executor Memory: NkB  Segments: N  Max: NkB (segment N)
  Planning Time: N.N ms
-   (slice0)    Executor memory: 1042K bytes.
-   (slice1)    Executor memory: 1310K bytes avg x N workers, 1348K bytes max (seg0).
+   (slice0)    Executor memory: 1044K bytes.
+   (slice1)    Executor memory: 1037K bytes avg x N workers, 1037K bytes max (seg0).
  Memory used:  NkB
  Optimizer: Postgres query optimizer
  Execution Time: N.N ms
-(8 rows)
+(10 rows)
 
 select explain_filter('explain (analyze, verbose) select * from int8_tbl i8');
                                                    explain_filter                                                   
 --------------------------------------------------------------------------------------------------------------------
  Vec Gather Motion N:N  (slice1; segments: N)  (cost=N.N..N.N rows=N width=N) (actual time=N.N..N.N rows=N loops=N)
    Output: q1, q2
+   Executor Memory: NkB  Segments: N  Max: NkB (segment N)
    ->  Vec Seq Scan on public.int8_tbl i8  (cost=N.N..N.N rows=N width=N) (actual time=N.N..N.N rows=N loops=N)
          Output: q1, q2
- Settings: optimizer = 'off'
+         Executor Memory: NkB  Segments: N  Max: NkB (segment N)
+ Settings: optimizer = 'off', enable_parallel = 'off'
  Planning Time: N.N ms
-   (slice0)    Executor memory: 1042K bytes.
-   (slice1)    Executor memory: 1310K bytes avg x N workers, 1348K bytes max (seg0).
+   (slice0)    Executor memory: 1044K bytes.
+   (slice1)    Executor memory: 1037K bytes avg x N workers, 1037K bytes max (seg0).
  Memory used:  NkB
  Optimizer: Postgres query optimizer
  Execution Time: N.N ms
-(11 rows)
+(13 rows)
 
 select explain_filter('explain (analyze, buffers, format text) select * from int8_tbl i8');
                                                    explain_filter                                                   
 --------------------------------------------------------------------------------------------------------------------
  Vec Gather Motion N:N  (slice1; segments: N)  (cost=N.N..N.N rows=N width=N) (actual time=N.N..N.N rows=N loops=N)
+   Executor Memory: NkB  Segments: N  Max: NkB (segment N)
    ->  Vec Seq Scan on int8_tbl i8  (cost=N.N..N.N rows=N width=N) (actual time=N.N..N.N rows=N loops=N)
+         Executor Memory: NkB  Segments: N  Max: NkB (segment N)
  Planning Time: N.N ms
-   (slice0)    Executor memory: 1042K bytes.
-   (slice1)    Executor memory: 1310K bytes avg x N workers, 1348K bytes max (seg0).
+   (slice0)    Executor memory: 1044K bytes.
+   (slice1)    Executor memory: 1037K bytes avg x N workers, 1037K bytes max (seg0).
  Memory used:  NkB
  Optimizer: Postgres query optimizer
  Execution Time: N.N ms
-(8 rows)
+(10 rows)
 
 select explain_filter('explain (analyze, buffers, format json) select * from int8_tbl i8');
                 explain_filter                 
@@ -124,6 +130,10 @@ select explain_filter('explain (analyze, buffers, format json) select * from int
        "Actual Total Time": N.N,              +
        "Actual Rows": N,                      +
        "Actual Loops": N,                     +
+       "Executor Memory": N,                  +
+       "Executor Memory Segments": N,         +
+       "Executor Max Memory": N,              +
+       "Executor Max Memory Segment": N,      +
        "Shared Hit Blocks": N,                +
        "Shared Read Blocks": N,               +
        "Shared Dirtied Blocks": N,            +
@@ -153,6 +163,10 @@ select explain_filter('explain (analyze, buffers, format json) select * from int
            "Actual Total Time": N.N,          +
            "Actual Rows": N,                  +
            "Actual Loops": N,                 +
+           "Executor Memory": N,              +
+           "Executor Memory Segments": N,     +
+           "Executor Max Memory": N,          +
+           "Executor Max Memory Segment": N,  +
            "Shared Hit Blocks": N,            +
            "Shared Read Blocks": N,           +
            "Shared Dirtied Blocks": N,        +
@@ -228,6 +242,10 @@ select explain_filter('explain (analyze, buffers, format xml) select * from int8
        <Actual-Total-Time>N.N</Actual-Total-Time>                      +
        <Actual-Rows>N</Actual-Rows>                                    +
        <Actual-Loops>N</Actual-Loops>                                  +
+       <Executor-Memory>N</Executor-Memory>                            +
+       <Executor-Memory-Segments>N</Executor-Memory-Segments>          +
+       <Executor-Max-Memory>N</Executor-Max-Memory>                    +
+       <Executor-Max-Memory-Segment>N</Executor-Max-Memory-Segment>    +
        <Shared-Hit-Blocks>N</Shared-Hit-Blocks>                        +
        <Shared-Read-Blocks>N</Shared-Read-Blocks>                      +
        <Shared-Dirtied-Blocks>N</Shared-Dirtied-Blocks>                +
@@ -257,6 +275,10 @@ select explain_filter('explain (analyze, buffers, format xml) select * from int8
            <Actual-Total-Time>N.N</Actual-Total-Time>                  +
            <Actual-Rows>N</Actual-Rows>                                +
            <Actual-Loops>N</Actual-Loops>                              +
+           <Executor-Memory>N</Executor-Memory>                        +
+           <Executor-Memory-Segments>N</Executor-Memory-Segments>      +
+           <Executor-Max-Memory>N</Executor-Max-Memory>                +
+           <Executor-Max-Memory-Segment>N</Executor-Max-Memory-Segment>+
            <Shared-Hit-Blocks>N</Shared-Hit-Blocks>                    +
            <Shared-Read-Blocks>N</Shared-Read-Blocks>                  +
            <Shared-Dirtied-Blocks>N</Shared-Dirtied-Blocks>            +
@@ -330,6 +352,10 @@ select explain_filter('explain (analyze, buffers, format yaml) select * from int
      Actual Total Time: N.N               +
      Actual Rows: N                       +
      Actual Loops: N                      +
+     Executor Memory: N                   +
+     Executor Memory Segments: N          +
+     Executor Max Memory: N               +
+     Executor Max Memory Segment: N       +
      Shared Hit Blocks: N                 +
      Shared Read Blocks: N                +
      Shared Dirtied Blocks: N             +
@@ -358,6 +384,10 @@ select explain_filter('explain (analyze, buffers, format yaml) select * from int
          Actual Total Time: N.N           +
          Actual Rows: N                   +
          Actual Loops: N                  +
+         Executor Memory: N               +
+         Executor Memory Segments: N      +
+         Executor Max Memory: N           +
+         Executor Max Memory Segment: N   +
          Shared Hit Blocks: N             +
          Shared Read Blocks: N            +
          Shared Dirtied Blocks: N         +
@@ -603,13 +633,6 @@ select jsonb_pretty(
                      "Sort Key": [                          +
                          "tenk1.tenthous"                   +
                      ],                                     +
-                     "work_mem": {                          +
-                         "Used": 0,                         +
-                         "Segments": 0,                     +
-                         "Max Memory": 0,                   +
-                         "Workfile Spilling": 0,            +
-                         "Max Memory Segment": 0            +
-                     },                                     +
                      "Gang Type": "primary reader",         +
                      "Node Type": "Sort",                   +
                      "Plan Rows": 0,                        +
@@ -723,8 +746,7 @@ select jsonb_pretty(
                      "Workers": 0,                          +
                      "Subworkers": 0,                       +
                      "Maximum Memory Used": 0               +
-                 },                                         +
-                 "Work Maximum Memory": 0                   +
+                 }                                          +
              }                                              +
          ],                                                 +
          "Statement statistics": {                          +
@@ -743,7 +765,7 @@ select explain_filter('explain (verbose) select * from int8_tbl i8');
    Output: q1, q2
    ->  Vec Seq Scan on public.int8_tbl i8  (cost=N.N..N.N rows=N width=N)
          Output: q1, q2
- Settings: optimizer = 'off'
+ Settings: optimizer = 'off', enable_parallel = 'off'
  Query Identifier: N
  Optimizer: Postgres query optimizer
 (7 rows)

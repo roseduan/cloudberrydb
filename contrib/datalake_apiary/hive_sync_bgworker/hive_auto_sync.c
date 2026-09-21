@@ -61,7 +61,7 @@ PG_MODULE_MAGIC;
 
 /* Module load */
 void _PG_init(void);
-void hive_sync_main(Datum main_arg);
+PGDLLEXPORT void hive_sync_main(Datum main_arg);
 static void hive_sync_start_worker(void);
 
 /* Helper function */

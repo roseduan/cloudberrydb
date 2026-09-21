@@ -32,7 +32,6 @@
 #include "vecexecutor/execslot.h"
 #include "vecexecutor/executor.h"
 
-MotionIPCLayer *CurrentMotionIPCLayer = NULL;
 /*
  * MOTION NODE INFO DATA STRUCTURES
  */

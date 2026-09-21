@@ -8,7 +8,8 @@
 #include "utils/memdebug.h"
 #include "utils/timestamp.h"
 #include "utils/hsearch.h"
-#include "utils/int8.h"
+#include "utils/fmgrprotos.h"
+#include "gopher/gopher.h"
 #include "utils.h"
 #include <curl/curl.h>
 #include "common/hashfn.h"
@@ -471,20 +472,20 @@ hudiGreaterThan(Oid type, Datum datum1, Datum datum2)
 			return DatumGetFloat8(datum1) > DatumGetFloat8(datum2);
 		case NUMERICOID:
 			return DirectFunctionCall2(numeric_gt,
-									   PointerGetDatum(datum1),
-									   PointerGetDatum(datum2));
+									   datum1,
+									   datum2);
 		case TEXTOID:
 		{
 			return DatumGetBool(DirectFunctionCall2Coll(text_gt,
 												DEFAULT_COLLATION_OID,
-												PointerGetDatum(datum1),
-												PointerGetDatum(datum2)));
+												datum1,
+												datum2));
 		}
 		case UUIDOID:
 		{
 			return DirectFunctionCall2(uuid_gt,
-									   PointerGetDatum(datum1),
-									   PointerGetDatum(datum2));
+									   datum1,
+									   datum2);
 		}
 		default:
 		{

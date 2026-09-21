@@ -959,7 +959,7 @@ drop table fun_tree;
 drop table logtable;
 drop table db;
 create table stress_source as select a from generate_series(1,100) a;
-NOTICE:  Table doesn't have 'DISTRIBUTED BY' clause -- Using column(s) named 'a' as the Cloudberry Database data distribution key for this table.
+NOTICE:  Table doesn't have 'DISTRIBUTED BY' clause -- Using column(s) named 'a' as the Apache Cloudberry data distribution key for this table.
 HINT:  The 'DISTRIBUTED BY' clause determines the distribution of data. Make sure column(s) chosen are the optimal data distribution key to minimize skew.
 create table stress_table (a int primary key, b int);
 create or replace function stress_test() returns text as $body$
@@ -995,7 +995,7 @@ begin
 end;
 $body$ language plpgsql volatile;
 select bad_ddl();
-NOTICE:  Table doesn't have 'DISTRIBUTED BY' clause -- Using column named 'a' as the Cloudberry Database data distribution key for this table.
+NOTICE:  Table doesn't have 'DISTRIBUTED BY' clause -- Using column named 'a' as the Apache Cloudberry data distribution key for this table.
 HINT:  The 'DISTRIBUTED BY' clause determines the distribution of data. Make sure column(s) chosen are the optimal data distribution key to minimize skew.
  bad_ddl 
 ---------
@@ -1003,7 +1003,7 @@ HINT:  The 'DISTRIBUTED BY' clause determines the distribution of data. Make sur
 (1 row)
 
 select bad_ddl();
-NOTICE:  Table doesn't have 'DISTRIBUTED BY' clause -- Using column named 'a' as the Cloudberry Database data distribution key for this table.
+NOTICE:  Table doesn't have 'DISTRIBUTED BY' clause -- Using column named 'a' as the Apache Cloudberry data distribution key for this table.
 HINT:  The 'DISTRIBUTED BY' clause determines the distribution of data. Make sure column(s) chosen are the optimal data distribution key to minimize skew.
  bad_ddl 
 ---------
@@ -1017,7 +1017,7 @@ begin
 end;
 $body$ language plpgsql volatile;
 select bad_ddl();
-NOTICE:  Table doesn't have 'DISTRIBUTED BY' clause -- Using column named 'a' as the Cloudberry Database data distribution key for this table.
+NOTICE:  Table doesn't have 'DISTRIBUTED BY' clause -- Using column named 'a' as the Apache Cloudberry data distribution key for this table.
 HINT:  The 'DISTRIBUTED BY' clause determines the distribution of data. Make sure column(s) chosen are the optimal data distribution key to minimize skew.
  bad_ddl 
 ---------
@@ -1132,3 +1132,25 @@ $$;
 NOTICE:  n: 9.12
 NOTICE:  t: 9.1
 NOTICE:  n: 9.12
+create table invalid_name (name text) distributed replicated;
+create table candidate (name text, parent_name text) distributed by (name);
+create or replace function is_invalid_name (aname text) returns boolean language sql as $$ select aname in (select name from invalid_name)$$;
+create table tst_valid_name (a text) distributed randomly;
+create table tst_invalid_name (a text) distributed randomly;
+insert into invalid_name (name) values ('tst_invalid_name');
+insert into candidate(name, parent_name) values ('tst_valid_name', 'tst_invalid_name');
+select a.name as a_name,
+       a.parent_name as a_parent_name,
+       b.name as b_name,
+       b.parent_name as b_parent_name
+  from candidate a
+  full join (select c.relname as name,
+                    'tst_invalid_name' as parent_name
+               from pg_class c
+              where c.relname like 'tst%' and
+                    not is_invalid_name(c.relname)) b
+         on a.name = b.name and
+            a.parent_name = b.parent_name
+ order by 1,2,3,4;
+ERROR:  function cannot execute on a QE slice because it accesses relation "public.invalid_name"
+CONTEXT:  SQL function "is_invalid_name" during startup

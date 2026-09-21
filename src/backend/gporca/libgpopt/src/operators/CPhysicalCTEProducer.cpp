@@ -14,6 +14,7 @@
 #include "gpos/base.h"
 
 #include "gpopt/base/CCTEMap.h"
+#include "gpopt/base/CDistributionSpecRandom.h"
 #include "gpopt/base/COptCtxt.h"
 #include "gpopt/operators/CExpression.h"
 #include "gpopt/operators/CExpressionHandle.h"
@@ -30,13 +31,49 @@ using namespace gpopt;
 //
 //---------------------------------------------------------------------------
 CPhysicalCTEProducer::CPhysicalCTEProducer(CMemoryPool *mp, ULONG id,
-										   CColRefArray *colref_array)
+										   CColRefArray *colref_array,
+										   BOOL *umask)
 	: CPhysical(mp), m_id(id), m_pdrgpcr(nullptr), m_pcrs(nullptr), m_pdrgpcr_unused(nullptr), m_pidxmap(nullptr)
 {
 	GPOS_ASSERT(nullptr != colref_array);
 
-	m_pdrgpcr = colref_array;
-	m_pcrs = GPOS_NEW(mp) CColRefSet(mp, m_pdrgpcr);
+#ifdef GPOS_DEBUG
+	if (umask) {
+		ULONG colref_size = colref_array->Size();
+		for (ULONG ul = 0; ul < colref_size; ul++) {
+			CColRef *col_ref = (*colref_array)[ul];
+			if (col_ref->GetUsage(true, true) != CColRef::EUsed) {
+				GPOS_ASSERT(!umask[ul]);
+			}
+		}
+	}
+#endif 
+
+	if (umask) {
+		ULONG colref_size = colref_array->Size();
+		ULONG unused_inc = 0;
+		m_pcrs = GPOS_NEW(mp) CColRefSet(mp);
+		m_pdrgpcr = GPOS_NEW(mp) CColRefArray(mp);
+		m_pdrgpcr_unused = GPOS_NEW(mp) ULongPtrArray(mp, colref_size);
+		m_pidxmap = GPOS_NEW(mp) ULongPtrArray(mp, colref_size);
+
+		for (ULONG ul = 0; ul < colref_size; ul++) {
+			CColRef *col_ref = (*colref_array)[ul];
+			m_pdrgpcr_unused->Append(GPOS_NEW(m_mp) ULONG(unused_inc));
+			if (umask[ul]) {
+				m_pidxmap->Append(GPOS_NEW(m_mp) ULONG(m_pdrgpcr->Size()));
+				m_pdrgpcr->Append(col_ref);
+				m_pcrs->Include(col_ref);
+			} else {
+				m_pidxmap->Append(GPOS_NEW(m_mp) ULONG(gpos::ulong_max));
+				unused_inc++;
+			}
+		}
+		
+	} else {
+		m_pdrgpcr = colref_array;
+		m_pcrs = GPOS_NEW(mp) CColRefSet(mp, m_pdrgpcr);
+	}
 }
 
 //---------------------------------------------------------------------------

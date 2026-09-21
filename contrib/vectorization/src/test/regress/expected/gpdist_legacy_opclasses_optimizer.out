@@ -2,6 +2,7 @@
 -- Tests for legacy cdbhash opclasses
 --
 drop schema if exists gpdist_legacy_opclasses;
+NOTICE:  schema "gpdist_legacy_opclasses" does not exist, skipping
 create schema gpdist_legacy_opclasses;
 set search_path to gpdist_legacy_opclasses;
 -- Basic sanity check of all the legacy hash opclasses. Create a table that
@@ -145,6 +146,7 @@ insert into all_legacy_types values (
 -- Test that CTAS honors the gp_use_legacy_hashops GUC
 -- Note: When ORCA is on, the distribution is RANDOM.
 create table legacy_hashops_ctas as select 1;
+NOTICE:  Table doesn't have 'DISTRIBUTED BY' clause. Creating a NULL policy entry.
 select gpdp.distkey, pgopc.opcname
   from gp_distribution_policy gpdp, pg_opclass pgopc
   where gpdp.localoid='legacy_hashops_ctas'::regclass and pgopc.oid::text = gpdp.distclass::text;
@@ -295,31 +297,27 @@ explain (costs off) select * from modern_int a inner join legacy_domain_over_int
  Optimizer: Postgres query optimizer
 (9 rows)
 
--- Distributing by enum has been banned, so this test is updated to instead distribute by a dummy int column
--- Banned because in backup/restore scenarios the data will be in the "wrong" segment as oids for each enum
--- entry are re-generated and hashing them will result in arbitrary segment assignment.
 create type colors as enum ('red', 'green', 'blue');
-create table legacy_enum(col1 int, color colors) distributed by(col1);
-insert into legacy_enum values (1, 'red'), (2, 'green'), (3, 'blue');
+create table legacy_enum(color colors) distributed by(color cdbhash_enum_ops);
+insert into legacy_enum values ('red'), ('green'), ('blue');
 explain (costs off) select * from legacy_enum a inner join legacy_enum b on a.color = b.color;
-                          QUERY PLAN                           
----------------------------------------------------------------
+                          QUERY PLAN                          
+--------------------------------------------------------------
  Gather Motion 3:1  (slice1; segments: 3)
    ->  Hash Join
          Hash Cond: ((a.color)::anyenum = (b.color)::anyenum)
          ->  Seq Scan on legacy_enum a
          ->  Hash
-               ->  Broadcast Motion 3:3  (slice2; segments: 3)
-                     ->  Seq Scan on legacy_enum b
+               ->  Seq Scan on legacy_enum b
  Optimizer: GPORCA
-(8 rows)
+(7 rows)
 
 select * from legacy_enum a inner join legacy_enum b on a.color = b.color;
- col1 | color | col1 | color 
-------+-------+------+-------
-    2 | green |    2 | green
-    3 | blue  |    3 | blue
-    1 | red   |    1 | red
+ color | color 
+-------+-------
+ red   | red
+ green | green
+ blue  | blue
 (3 rows)
 
 --
@@ -484,12 +482,12 @@ select dp.localoid::regclass as name, opc.opcname
                        'ctas_explicit_nonlegacy'::regclass);
           name           |     opcname      
 -------------------------+------------------
- ctas_explicit_nonlegacy | int4_ops
  ctas_base_nonlegacy     | int4_ops
  ctas_from_legacy        | int4_ops
- ctas_from_nonlegacy     | cdbhash_int4_ops
- ctas_explicit_legacy    | cdbhash_int4_ops
+ ctas_explicit_nonlegacy | int4_ops
  ctas_base_legacy        | cdbhash_int4_ops
+ ctas_explicit_legacy    | cdbhash_int4_ops
+ ctas_from_nonlegacy     | cdbhash_int4_ops
 (6 rows)
 
 select * from ctas_from_legacy where col=1;

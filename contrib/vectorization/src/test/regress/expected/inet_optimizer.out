@@ -272,7 +272,7 @@ SELECT * FROM inet_tbl WHERE i<<'192.168.1.0/24'::cidr;
  Gather Motion 3:1  (slice1; segments: 3)
    ->  Seq Scan on inet_tbl
          Filter: (i << '192.168.1.0/24'::inet)
- Optimizer: GPORCA
+ Optimizer: Pivotal Optimizer (GPORCA)
 (4 rows)
 
 SELECT * FROM inet_tbl WHERE i<<'192.168.1.0/24'::cidr;
@@ -290,7 +290,7 @@ SELECT * FROM inet_tbl WHERE i<<='192.168.1.0/24'::cidr;
  Gather Motion 3:1  (slice1; segments: 3)
    ->  Seq Scan on inet_tbl
          Filter: (i <<= '192.168.1.0/24'::inet)
- Optimizer: GPORCA
+ Optimizer: Pivotal Optimizer (GPORCA)
 (4 rows)
 
 SELECT * FROM inet_tbl WHERE i<<='192.168.1.0/24'::cidr;
@@ -311,7 +311,7 @@ SELECT * FROM inet_tbl WHERE '192.168.1.0/24'::cidr >>= i;
  Gather Motion 3:1  (slice1; segments: 3)
    ->  Seq Scan on inet_tbl
          Filter: (i <<= '192.168.1.0/24'::inet)
- Optimizer: GPORCA
+ Optimizer: Pivotal Optimizer (GPORCA)
 (4 rows)
 
 SELECT * FROM inet_tbl WHERE '192.168.1.0/24'::cidr >>= i;
@@ -332,7 +332,7 @@ SELECT * FROM inet_tbl WHERE '192.168.1.0/24'::cidr >> i;
  Gather Motion 3:1  (slice1; segments: 3)
    ->  Seq Scan on inet_tbl
          Filter: (i << '192.168.1.0/24'::inet)
- Optimizer: GPORCA
+ Optimizer: Pivotal Optimizer (GPORCA)
 (4 rows)
 
 SELECT * FROM inet_tbl WHERE '192.168.1.0/24'::cidr >> i;
@@ -484,8 +484,8 @@ SELECT i FROM inet_tbl WHERE i << '192.168.1.0/24'::cidr ORDER BY i;
          ->  Index Scan using inet_idx2 on inet_tbl
                Index Cond: (i << '192.168.1.0/24'::inet)
                Filter: (i << '192.168.1.0/24'::inet)
- Optimizer: GPORCA
-(8 rows)
+ Optimizer: Pivotal Optimizer (GPORCA) version 3.44.0
+(7 rows)
 
 SELECT i FROM inet_tbl WHERE i << '192.168.1.0/24'::cidr ORDER BY i;
         i         
@@ -635,7 +635,7 @@ SELECT i FROM inet_tbl WHERE i << '192.168.1.0/24'::cidr ORDER BY i;
          Sort Key: i
          ->  Seq Scan on inet_tbl
                Filter: (i << '192.168.1.0/24'::inet)
- Optimizer: GPORCA
+ Optimizer: Pivotal Optimizer (GPORCA)
 (7 rows)
 
 SELECT i FROM inet_tbl WHERE i << '192.168.1.0/24'::cidr ORDER BY i;
@@ -1067,4 +1067,41 @@ SELECT a FROM (VALUES
  ffff:ffff:ffff:fffe::
  ffff:ffff:ffff:ffff:ffff:ffff:ffff:ffff
 (91 rows)
+
+-- test non-error-throwing API for some core types
+SELECT pg_input_is_valid('1234', 'cidr');
+ pg_input_is_valid 
+-------------------
+ f
+(1 row)
+
+SELECT * FROM pg_input_error_info('1234', 'cidr');
+                  message                   | detail | hint | sql_error_code 
+--------------------------------------------+--------+------+----------------
+ invalid input syntax for type cidr: "1234" |        |      | 22P02
+(1 row)
+
+SELECT pg_input_is_valid('192.168.198.200/24', 'cidr');
+ pg_input_is_valid 
+-------------------
+ f
+(1 row)
+
+SELECT * FROM pg_input_error_info('192.168.198.200/24', 'cidr');
+                 message                  |                detail                | hint | sql_error_code 
+------------------------------------------+--------------------------------------+------+----------------
+ invalid cidr value: "192.168.198.200/24" | Value has bits set to right of mask. |      | 22P02
+(1 row)
+
+SELECT pg_input_is_valid('1234', 'inet');
+ pg_input_is_valid 
+-------------------
+ f
+(1 row)
+
+SELECT * FROM pg_input_error_info('1234', 'inet');
+                  message                   | detail | hint | sql_error_code 
+--------------------------------------------+--------+------+----------------
+ invalid input syntax for type inet: "1234" |        |      | 22P02
+(1 row)
 

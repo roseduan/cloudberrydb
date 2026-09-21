@@ -233,7 +233,7 @@ Datum orcFileReader::readField(TupleDesc tupDesc, Oid typeOid, int rowIndex, con
 			{
 				elog(ERROR, "ORC Decimal precision more than 38 is not support");
 			}
-			return NumericGetDatum(ptr->buffer);
+			return NumericGetDatum((Numeric) ptr->buffer);
 		}
 		case CHAROID:
 		{

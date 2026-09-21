@@ -870,7 +870,7 @@ bgw_launcher_main(PG_FUNCTION_ARGS)
 
 		for (curr = 1; curr <= n; curr++)
 		{
-			LocalPgBackendStatus *local = pgstat_fetch_stat_local_beentry(curr);
+			LocalPgBackendStatus *local = pgstat_get_local_beentry_by_index(curr);
 			const PgBackendStatus *be;
 			const char *bt;
 

@@ -21,7 +21,7 @@
  * Also, we have changed the API to return tuples in TupleTableSlots,
  * so that there is a check to prevent attempted access to system columns.
  *
- * Portions Copyright (c) 1996-2021, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2023, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * src/include/utils/tuplestore.h
@@ -62,7 +62,7 @@ extern void tuplestore_puttuple(Tuplestorestate *state, HeapTuple tuple);
 extern void tuplestore_putvalues(Tuplestorestate *state, TupleDesc tdesc,
 								 Datum *values, bool *isnull);
 
-/* tuplestore_donestoring() used to be required, but is no longer used */
+/* Backwards compatibility macro */
 #define tuplestore_donestoring(state)	((void) 0)
 
 extern int	tuplestore_alloc_read_pointer(Tuplestorestate *state, int eflags);
@@ -118,6 +118,7 @@ extern void tuplestore_make_sharedV2(Tuplestorestate *state, SharedFileSet *file
 extern void tuplestore_set_tuplecount(Tuplestorestate *state, int64 tuplecount);
 extern char *tuplestore_get_sharedname(Tuplestorestate *state);
 extern ResourceOwner tuplestore_get_resowner(Tuplestorestate *state);
+extern void tuplestore_set_resowner(Tuplestorestate *state, ResourceOwner resowner);
 extern void tuplestore_set_tableid(Tuplestorestate *state, Oid tableid);
 extern void tuplestore_set_sharedname(Tuplestorestate *state, char* sharedname);
 #endif							/* TUPLESTORE_H */

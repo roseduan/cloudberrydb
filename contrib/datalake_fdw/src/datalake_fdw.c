@@ -827,7 +827,7 @@ datalake_ProcessUtility(PlannedStmt *pstmt,
 					 * so this keeps the pre-pass consistent and avoids touching
 					 * other owners' tables.
 					 */
-					if (!pg_class_ownercheck(relid, GetUserId()))
+					if (!object_ownercheck(RelationRelationId, relid, GetUserId()))
 					{
 						table_close(rel, ShareUpdateExclusiveLock);
 						continue;
@@ -2200,7 +2200,7 @@ datalake_acquire_sample_rows(PG_FUNCTION_ARGS)
 		ctx->targrows = targrows;
 		ctx->inherited = inherited;
 
-		if (!pg_class_ownercheck(relOid, GetUserId()))
+		if (!object_ownercheck(RelationRelationId, relOid, GetUserId()))
 			aclcheck_error(ACLCHECK_NOT_OWNER, OBJECT_TABLE,
 						   get_rel_name(relOid));
 
@@ -2475,11 +2475,11 @@ static QueryDesc *build_querydesc(Portal portal, char *sql)
 	Assert(list_length(raw_parsetree_list) == 1);
 	parsetree = (RawStmt *) linitial(raw_parsetree_list);
 
-	querytree_list = pg_analyze_and_rewrite(parsetree,
-											sql,
-											NULL,
-											0,
-											NULL);
+	querytree_list = pg_analyze_and_rewrite_fixedparams(parsetree,
+														sql,
+														NULL,
+														0,
+														NULL);
 	plantree_list = pg_plan_queries(querytree_list, sql, 0, NULL);
 
 	/* There is only one statement in list due to simple select. */
@@ -2651,7 +2651,7 @@ analyze_row_processor(TupleTableSlot *slot, DataLakeAnalyzeState *astate)
 		if (astate->rowstoskip <= 0)
 		{
 			/* Choose a random reservoir element to replace. */
-			pos = (int) (targrows * sampler_random_fract(astate->rstate.randstate));
+			pos = (int) (targrows * sampler_random_fract(&astate->rstate.randstate));
 			Assert(pos >= 0 && pos < targrows);
 			heap_freetuple(astate->rows[pos]);
 		}

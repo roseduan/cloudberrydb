@@ -68,7 +68,7 @@ PG_MODULE_MAGIC;
 
 /* Module load */
 void _PG_init(void);
-void datalake_proxy_main(Datum main_arg);
+PGDLLEXPORT void datalake_proxy_main(Datum main_arg);
 static void datalake_proxy_start_worker(void);
 
 /* Helper function */

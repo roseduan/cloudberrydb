@@ -425,7 +425,7 @@ CREATE TEMP TABLE test_jsonb (
        json_type text,
        test_json jsonb
 );
-NOTICE:  Table doesn't have 'DISTRIBUTED BY' clause -- Using column named 'json_type' as the Cloudberry Database data distribution key for this table.
+NOTICE:  Table doesn't have 'DISTRIBUTED BY' clause -- Using column named 'json_type' as the Apache Cloudberry data distribution key for this table.
 HINT:  The 'DISTRIBUTED BY' clause determines the distribution of data. Make sure column(s) chosen are the optimal data distribution key to minimize skew.
 INSERT INTO test_jsonb VALUES
 ('scalar','"a scalar"'),
@@ -546,9 +546,9 @@ SELECT test_json ->> 2 FROM test_jsonb WHERE json_type = 'object';
 (1 row)
 
 SELECT jsonb_object_keys(test_json) FROM test_jsonb WHERE json_type = 'scalar';
-ERROR:  cannot call jsonb_object_keys on a scalar  (seg2 slice1 127.0.1.1:7004 pid=16428)
+ERROR:  cannot call jsonb_object_keys on a scalar  (seg2 slice1 172.18.0.2:7004 pid=4153615)
 SELECT jsonb_object_keys(test_json) FROM test_jsonb WHERE json_type = 'array';
-ERROR:  cannot call jsonb_object_keys on an array  (seg0 slice1 127.0.1.1:7002 pid=16426)
+ERROR:  cannot call jsonb_object_keys on an array  (seg0 slice1 172.18.0.2:7002 pid=4153610)
 SELECT jsonb_object_keys(test_json) FROM test_jsonb WHERE json_type = 'object';
  jsonb_object_keys 
 -------------------
@@ -1543,7 +1543,7 @@ SELECT jsonb_object_agg(1, NULL::jsonb);
 SELECT jsonb_object_agg(NULL, '{"a":1}');
 ERROR:  field name must not be null
 CREATE TEMP TABLE foo (serial_num int, name text, type text);
-NOTICE:  Table doesn't have 'DISTRIBUTED BY' clause -- Using column named 'serial_num' as the Cloudberry Database data distribution key for this table.
+NOTICE:  Table doesn't have 'DISTRIBUTED BY' clause -- Using column named 'serial_num' as the Apache Cloudberry data distribution key for this table.
 HINT:  The 'DISTRIBUTED BY' clause determines the distribution of data. Make sure column(s) chosen are the optimal data distribution key to minimize skew.
 INSERT INTO foo VALUES (847001,'t15','GE1043');
 INSERT INTO foo VALUES (847002,'t16','GE1043');
@@ -2751,7 +2751,7 @@ select * from jsonb_to_record('{"out": "{\"key\": 1}"}') as x(out jsonb);
 
 -- test type info caching in jsonb_populate_record()
 CREATE TEMP TABLE jsbpoptest (js jsonb);
-NOTICE:  Table doesn't have 'DISTRIBUTED BY' clause -- Using column named 'js' as the Cloudberry Database data distribution key for this table.
+NOTICE:  Table doesn't have 'DISTRIBUTED BY' clause -- Using column named 'js' as the Apache Cloudberry data distribution key for this table.
 HINT:  The 'DISTRIBUTED BY' clause determines the distribution of data. Make sure column(s) chosen are the optimal data distribution key to minimize skew.
 INSERT INTO jsbpoptest
 SELECT '{
@@ -3025,7 +3025,7 @@ SELECT count(*) FROM testjsonb WHERE j @@ '$.wait == null';
                      Recheck Cond: (j @@ '($."wait" == null)'::jsonpath)
                      ->  Bitmap Index Scan on jidx
                            Index Cond: (j @@ '($."wait" == null)'::jsonpath)
- Optimizer: Pivotal Optimizer (GPORCA)
+ Optimizer: GPORCA
 (8 rows)
 
 SELECT count(*) FROM testjsonb WHERE j @@ '$.wait == null';
@@ -3141,7 +3141,7 @@ SELECT count(*) FROM testjsonb WHERE j @? '$.wait ? (@ == null)';
                      Recheck Cond: (j @? '$."wait"?(@ == null)'::jsonpath)
                      ->  Bitmap Index Scan on jidx
                            Index Cond: (j @? '$."wait"?(@ == null)'::jsonpath)
- Optimizer: Pivotal Optimizer (GPORCA)
+ Optimizer: GPORCA
 (8 rows)
 
 SELECT count(*) FROM testjsonb WHERE j @? '$.wait ? (@ == null)';
@@ -3450,7 +3450,7 @@ SELECT count(*) FROM testjsonb WHERE j @? '$.wait ? (@ == null)';
                      Recheck Cond: (j @? '$."wait"?(@ == null)'::jsonpath)
                      ->  Bitmap Index Scan on jidx
                            Index Cond: (j @? '$."wait"?(@ == null)'::jsonpath)
- Optimizer: Pivotal Optimizer (GPORCA)
+ Optimizer: GPORCA
 (8 rows)
 
 SELECT count(*) FROM testjsonb WHERE j @? '$.wait ? (@ == null)';
@@ -3674,7 +3674,7 @@ SELECT '{"a":[1,2,{"c":3,"x":4}],"c":"b"}'::jsonb @> '{"a":[{"x":4},1]}';
 
 -- check some corner cases for indexed nested containment (bug #13756)
 create temp table nestjsonb (j jsonb);
-NOTICE:  Table doesn't have 'DISTRIBUTED BY' clause -- Using column named 'j' as the Cloudberry Database data distribution key for this table.
+NOTICE:  Table doesn't have 'DISTRIBUTED BY' clause -- Using column named 'j' as the Apache Cloudberry data distribution key for this table.
 HINT:  The 'DISTRIBUTED BY' clause determines the distribution of data. Make sure column(s) chosen are the optimal data distribution key to minimize skew.
 insert into nestjsonb (j) values ('{"a":[["b",{"x":1}],["b",{"x":2}]],"c":3}');
 insert into nestjsonb (j) values ('[[14,2,3]]');
@@ -4951,7 +4951,7 @@ create TEMP TABLE test_jsonb_subscript (
        id int,
        test_json jsonb
 );
-NOTICE:  Table doesn't have 'DISTRIBUTED BY' clause -- Using column named 'id' as the Cloudberry Database data distribution key for this table.
+NOTICE:  Table doesn't have 'DISTRIBUTED BY' clause -- Using column named 'id' as the Apache Cloudberry data distribution key for this table.
 HINT:  The 'DISTRIBUTED BY' clause determines the distribution of data. Make sure column(s) chosen are the optimal data distribution key to minimize skew.
 insert into test_jsonb_subscript values
 (1, '{}'), -- empty jsonb
@@ -4979,8 +4979,8 @@ update test_jsonb_subscript set test_json['a'] = '"test"';
 select * from test_jsonb_subscript;
  id |           test_json           
 ----+-------------------------------
-  1 | {"a": "test"}
   2 | {"a": "test", "key": "value"}
+  1 | {"a": "test"}
 (2 rows)
 
 -- replace by object
@@ -4997,8 +4997,8 @@ update test_jsonb_subscript set test_json['a'] = '[1, 2, 3]'::jsonb;
 select * from test_jsonb_subscript;
  id |            test_json             
 ----+----------------------------------
-  1 | {"a": [1, 2, 3]}
   2 | {"a": [1, 2, 3], "key": "value"}
+  1 | {"a": [1, 2, 3]}
 (2 rows)
 
 -- use jsonb subscription in where clause
@@ -5020,13 +5020,13 @@ select * from test_jsonb_subscript where test_json['key'] = '"wrong_value"';
 
 -- NULL
 update test_jsonb_subscript set test_json[NULL] = '1';
-ERROR:  jsonb subscript in assignment must not be null  (seg0 127.0.1.1:7002 pid=16426)
+ERROR:  jsonb subscript in assignment must not be null  (seg0 172.18.0.2:7002 pid=4153610)
 update test_jsonb_subscript set test_json['another_key'] = NULL;
 select * from test_jsonb_subscript;
  id |                       test_json                       
 ----+-------------------------------------------------------
-  1 | {"a": [1, 2, 3], "another_key": null}
   2 | {"a": [1, 2, 3], "key": "value", "another_key": null}
+  1 | {"a": [1, 2, 3], "another_key": null}
 (2 rows)
 
 -- NULL as jsonb source
@@ -5068,7 +5068,7 @@ select * from test_jsonb_subscript;
 (1 row)
 
 update test_jsonb_subscript set test_json[-8] = '1';
-ERROR:  path element at position 1 is out of range: -8  (seg1 127.0.1.1:7003 pid=16427)
+ERROR:  path element at position 1 is out of range: -8  (seg1 172.18.0.2:7003 pid=4153614)
 select * from test_jsonb_subscript;
  id |          test_json          
 ----+-----------------------------
@@ -5189,28 +5189,28 @@ select * from test_jsonb_subscript;
 delete from test_jsonb_subscript;
 insert into test_jsonb_subscript values (1, '{"a": 1}');
 update test_jsonb_subscript set test_json['a']['b'] = '1';
-ERROR:  cannot replace existing key  (seg1 127.0.1.1:7003 pid=16427)
+ERROR:  cannot replace existing key  (seg1 172.18.0.2:7003 pid=4153614)
 DETAIL:  The path assumes key is a composite object, but it is a scalar value.
 update test_jsonb_subscript set test_json['a']['b']['c'] = '1';
-ERROR:  cannot replace existing key  (seg1 127.0.1.1:7003 pid=16427)
+ERROR:  cannot replace existing key  (seg1 172.18.0.2:7003 pid=4153614)
 DETAIL:  The path assumes key is a composite object, but it is a scalar value.
 update test_jsonb_subscript set test_json['a'][0] = '1';
-ERROR:  cannot replace existing key  (seg1 127.0.1.1:7003 pid=16427)
+ERROR:  cannot replace existing key  (seg1 172.18.0.2:7003 pid=4153614)
 DETAIL:  The path assumes key is a composite object, but it is a scalar value.
 update test_jsonb_subscript set test_json['a'][0]['c'] = '1';
-ERROR:  cannot replace existing key  (seg1 127.0.1.1:7003 pid=16427)
+ERROR:  cannot replace existing key  (seg1 172.18.0.2:7003 pid=4153614)
 DETAIL:  The path assumes key is a composite object, but it is a scalar value.
 update test_jsonb_subscript set test_json['a'][0][0] = '1';
-ERROR:  cannot replace existing key  (seg1 127.0.1.1:7003 pid=16427)
+ERROR:  cannot replace existing key  (seg1 172.18.0.2:7003 pid=4153614)
 DETAIL:  The path assumes key is a composite object, but it is a scalar value.
 -- trying replace assuming a composite object, but it's a raw scalar
 delete from test_jsonb_subscript;
 insert into test_jsonb_subscript values (1, 'null');
 update test_jsonb_subscript set test_json[0] = '1';
-ERROR:  cannot replace existing key  (seg1 127.0.1.1:7003 pid=16427)
+ERROR:  cannot replace existing key  (seg1 172.18.0.2:7003 pid=4153614)
 DETAIL:  The path assumes key is a composite object, but it is a scalar value.
 update test_jsonb_subscript set test_json[0][0] = '1';
-ERROR:  cannot replace existing key  (seg1 127.0.1.1:7003 pid=16427)
+ERROR:  cannot replace existing key  (seg1 172.18.0.2:7003 pid=4153614)
 DETAIL:  The path assumes key is a composite object, but it is a scalar value.
 -- jsonb to tsvector
 select to_tsvector('{"a": "aaa bbb ddd ccc", "b": ["eee fff ggg"], "c": {"d": "hhh iii"}}'::jsonb);

@@ -1,0 +1,376 @@
+-- start_matchsubs
+-- m/ERROR:  can not drop a internal task "gp_dynamic_table_refresh_.*/
+-- s/ERROR:  can not drop a internal task "gp_dynamic_table_refresh_.*/ERROR:  can not drop a internal task "gp_dynamic_table_refresh_xxx"/g
+-- m/WARNING:  relation of oid "\d+" is not dynamic table/
+-- s/WARNING:  relation of oid "\d+" is not dynamic table/WARNING:  relation of oid "XXX" is not dynamic table/g
+-- end_matchsubs
+CREATE SCHEMA dynamic_table_schema;
+SET search_path TO dynamic_table_schema;
+SET optimizer = OFF;
+CREATE TABLE t1(a int, b int, c int) DISTRIBUTED BY (b);
+INSERT INTO t1 SELECT i, i + 1, i + 2 FROM GENERATE_SERIES(1, 10) i;
+INSERT INTO t1 SELECT i, i + 1, i + 2 FROM GENERATE_SERIES(1, 5) i;
+ANALYZE t1;
+CREATE DYNAMIC TABLE dt0 SCHEDULE '5 * * * *' AS
+  SELECT a, b, sum(c) FROM t1 GROUP BY a, b DISTRIBUTED BY(b);
+\d+ dt0
+                         Dynamic table "dynamic_table_schema.dt0"
+ Column |  Type   | Collation | Nullable | Default | Storage | Stats target | Description 
+--------+---------+-----------+----------+---------+---------+--------------+-------------
+ a      | integer |           |          |         | plain   |              | 
+ b      | integer |           |          |         | plain   |              | 
+ sum    | bigint  |           |          |         | plain   |              | 
+View definition:
+ SELECT a,
+    b,
+    sum(c) AS sum
+   FROM t1
+  GROUP BY a, b;
+Distributed by: (b)
+
+ANALYZE dt0;
+-- test backgroud auto-refresh
+SELECT schedule, command FROM pg_task WHERE jobname LIKE 'gp_dynamic_table_refresh%';
+ schedule  |                    command                     
+-----------+------------------------------------------------
+ 5 * * * * | REFRESH DYNAMIC TABLE dynamic_table_schema.dt0
+(1 row)
+
+EXPLAIN(COSTS OFF, VERBOSE)
+SELECT a, b, sum(c) FROM t1 GROUP BY a, b;
+                   QUERY PLAN                    
+-------------------------------------------------
+ Gather Motion 3:1  (slice1; segments: 3)
+   Output: a, b, (sum(c))
+   ->  HashAggregate
+         Output: a, b, sum(c)
+         Group Key: t1.a, t1.b
+         ->  Seq Scan on dynamic_table_schema.t1
+               Output: a, b, c
+ Settings: optimizer = 'off'
+ Optimizer: Postgres query optimizer
+(9 rows)
+
+SELECT a, b, sum(c) FROM t1 GROUP BY a, b;
+ a  | b  | sum 
+----+----+-----
+  9 | 10 |  11
+  8 |  9 |  10
+  5 |  6 |  14
+ 10 | 11 |  12
+  4 |  5 |  12
+  1 |  2 |   6
+  2 |  3 |   8
+  7 |  8 |   9
+  3 |  4 |  10
+  6 |  7 |   8
+(10 rows)
+
+SELECT * FROM dt0;
+ a  | b  | sum 
+----+----+-----
+  1 |  2 |   6
+  2 |  3 |   8
+  7 |  8 |   9
+  3 |  4 |  10
+  6 |  7 |   8
+  9 | 10 |  11
+  8 |  9 |  10
+  5 |  6 |  14
+ 10 | 11 |  12
+  4 |  5 |  12
+(10 rows)
+
+-- test join on distributed keys
+EXPLAIN(COSTS OFF, VERBOSE)
+SELECT * FROM dt0 JOIN t1 USING(b);
+                       QUERY PLAN                       
+--------------------------------------------------------
+ Gather Motion 3:1  (slice1; segments: 3)
+   Output: dt0.b, dt0.a, dt0.sum, t1.a, t1.c
+   ->  Hash Join
+         Output: dt0.b, dt0.a, dt0.sum, t1.a, t1.c
+         Hash Cond: (t1.b = dt0.b)
+         ->  Seq Scan on dynamic_table_schema.t1
+               Output: t1.a, t1.b, t1.c
+         ->  Hash
+               Output: dt0.b, dt0.a, dt0.sum
+               ->  Seq Scan on dynamic_table_schema.dt0
+                     Output: dt0.b, dt0.a, dt0.sum
+ Settings: optimizer = 'off'
+ Optimizer: Postgres query optimizer
+(13 rows)
+
+-- Create Dynamic Table without SCHEDULE.
+CREATE DYNAMIC TABLE dt1  AS
+  SELECT * FROM t1 WHERE a = 1 DISTRIBUTED BY(b);
+ANALYZE dt1;
+-- Create Dynamic Table without DISTRIBUTION KEYS. 
+CREATE DYNAMIC TABLE dt2  AS
+  SELECT * FROM t1 WHERE a = 2 WITH NO DATA;
+NOTICE:  Table doesn't have 'DISTRIBUTED BY' clause -- Using column(s) named 'b' as the Apache Cloudberry data distribution key for this table.
+HINT:  The 'DISTRIBUTED BY' clause determines the distribution of data. Make sure column(s) chosen are the optimal data distribution key to minimize skew.
+-- Refresh Dynamic Table WITH NO DATA
+REFRESH DYNAMIC TABLE dt0 WITH NO DATA;
+-- Refresh Dynamic Table
+REFRESH DYNAMIC TABLE dt2;
+ANALYZE dt2;
+-- Test Answer Query using Dynamic Tables.
+SET enable_answer_query_using_materialized_views = ON;
+EXPLAIN(COSTS OFF, VERBOSE)
+SELECT * FROM t1 WHERE a = 1;
+                                    QUERY PLAN                                    
+----------------------------------------------------------------------------------
+ Gather Motion 3:1  (slice1; segments: 3)
+   Output: a, b, c
+   ->  Seq Scan on dynamic_table_schema.dt1
+         Output: a, b, c
+ Settings: enable_answer_query_using_materialized_views = 'on', optimizer = 'off'
+ Optimizer: Postgres query optimizer
+(6 rows)
+
+SELECT * FROM t1 WHERE a = 1;
+ a | b | c 
+---+---+---
+ 1 | 2 | 3
+ 1 | 2 | 3
+(2 rows)
+
+EXPLAIN(COSTS OFF, VERBOSE)
+SELECT * FROM t1 WHERE a = 2;
+                                    QUERY PLAN                                    
+----------------------------------------------------------------------------------
+ Gather Motion 3:1  (slice1; segments: 3)
+   Output: a, b, c
+   ->  Seq Scan on dynamic_table_schema.dt2
+         Output: a, b, c
+ Settings: enable_answer_query_using_materialized_views = 'on', optimizer = 'off'
+ Optimizer: Postgres query optimizer
+(6 rows)
+
+SELECT * FROM t1 WHERE a = 2;
+ a | b | c 
+---+---+---
+ 2 | 3 | 4
+ 2 | 3 | 4
+(2 rows)
+
+-- test DROP DYNAMIC TABLE
+SELECT schedule, command FROM pg_task WHERE jobname LIKE 'gp_dynamic_table_refresh%' AND command LIKE '%dt0%';
+ schedule  |                    command                     
+-----------+------------------------------------------------
+ 5 * * * * | REFRESH DYNAMIC TABLE dynamic_table_schema.dt0
+(1 row)
+
+DROP DYNAMIC TABLE dt0;
+SELECT schedule, command FROM pg_task WHERE jobname LIKE 'gp_dynamic_table_refresh%' AND command LIKE '%dt0%';
+ schedule | command 
+----------+---------
+(0 rows)
+
+-- drop base tables will drop DYNAMIC TABLEs too.
+SELECT schedule, command FROM pg_task WHERE jobname LIKE 'gp_dynamic_table_refresh%';
+  schedule   |                    command                     
+-------------+------------------------------------------------
+ */5 * * * * | REFRESH DYNAMIC TABLE dynamic_table_schema.dt1
+ */5 * * * * | REFRESH DYNAMIC TABLE dynamic_table_schema.dt2
+(2 rows)
+
+DROP TABLE t1 CASCADE;
+NOTICE:  drop cascades to 2 other objects
+DETAIL:  drop cascades to dynamic table dt1
+drop cascades to dynamic table dt2
+SELECT schedule, command FROM pg_task WHERE jobname LIKE 'gp_dynamic_table_refresh%';
+ schedule | command 
+----------+---------
+(0 rows)
+
+-- construct dynamic table
+CREATE TABLE t2(a int, b int, c int) DISTRIBUTED BY (b);
+CREATE MATERIALIZED VIEW mv_t2 AS
+  SELECT * FROM t2 WHERE a > 1;
+NOTICE:  Table doesn't have 'DISTRIBUTED BY' clause -- Using column(s) named 'b' as the Apache Cloudberry data distribution key for this table.
+HINT:  The 'DISTRIBUTED BY' clause determines the distribution of data. Make sure column(s) chosen are the optimal data distribution key to minimize skew.
+-- construct dynamic table from materialized view
+CREATE DYNAMIC TABLE dt3  AS
+  SELECT * FROM mv_t2 WHERE a = 2;
+NOTICE:  Table doesn't have 'DISTRIBUTED BY' clause -- Using column(s) named 'b' as the Apache Cloudberry data distribution key for this table.
+HINT:  The 'DISTRIBUTED BY' clause determines the distribution of data. Make sure column(s) chosen are the optimal data distribution key to minimize skew.
+-- construct dynamic table from dynamic table
+CREATE DYNAMIC TABLE dt4  AS
+  SELECT * FROM dt3 WHERE b = 3;
+NOTICE:  Table doesn't have 'DISTRIBUTED BY' clause -- Using column(s) named 'b' as the Apache Cloudberry data distribution key for this table.
+HINT:  The 'DISTRIBUTED BY' clause determines the distribution of data. Make sure column(s) chosen are the optimal data distribution key to minimize skew.
+-- construct dynamic table from joins
+CREATE DYNAMIC TABLE dt5  AS
+  SELECT * FROM dt3 natural join t2 natural join mv_t2;
+NOTICE:  Table doesn't have 'DISTRIBUTED BY' clause -- Using column(s) named 'b' as the Apache Cloudberry data distribution key for this table.
+HINT:  The 'DISTRIBUTED BY' clause determines the distribution of data. Make sure column(s) chosen are the optimal data distribution key to minimize skew.
+-- construct dynamic table from external table 
+begin;
+--start_ignore
+CREATE OR REPLACE FUNCTION write_to_file() RETURNS integer as '$libdir/gpextprotocol.so', 'demoprot_export' LANGUAGE C STABLE NO SQL;
+CREATE OR REPLACE FUNCTION read_from_file() RETURNS integer as '$libdir/gpextprotocol.so', 'demoprot_import' LANGUAGE C STABLE NO SQL;
+DROP PROTOCOL IF EXISTS demoprot;
+NOTICE:  protocol "demoprot" does not exist, skipping
+--end_ignore
+CREATE TRUSTED PROTOCOL demoprot (readfunc = 'read_from_file', writefunc = 'write_to_file'); -- should succeed
+CREATE WRITABLE EXTERNAL TABLE ext_w(id int)
+    LOCATION('demoprot://dynamic_table_text_file.txt') 
+FORMAT 'text'
+DISTRIBUTED BY (id);
+INSERT INTO ext_w SELECT * FROM generate_series(1, 10);
+CREATE READABLE EXTERNAL TABLE ext_r(id int)
+    LOCATION('demoprot://dynamic_table_text_file.txt') 
+FORMAT 'text';
+EXPLAIN(COSTS OFF, VERBOSE)
+SELECT sum(id) FROM ext_r where id > 5;
+                                    QUERY PLAN                                    
+----------------------------------------------------------------------------------
+ Finalize Aggregate
+   Output: sum(id)
+   ->  Gather Motion 3:1  (slice1; segments: 3)
+         Output: (PARTIAL sum(id))
+         ->  Partial Aggregate
+               Output: PARTIAL sum(id)
+               ->  Foreign Scan on dynamic_table_schema.ext_r
+                     Output: id
+                     Filter: (ext_r.id > 5)
+ Settings: enable_answer_query_using_materialized_views = 'on', optimizer = 'off'
+ Optimizer: Postgres query optimizer
+(11 rows)
+
+SELECT sum(id) FROM ext_r where id > 5;
+ sum 
+-----
+  40
+(1 row)
+
+CREATE DYNAMIC TABLE dt_external  AS
+  SELECT * FROM ext_r where id > 5;
+NOTICE:  Table doesn't have 'DISTRIBUTED BY' clause -- Using column(s) named 'id' as the Apache Cloudberry data distribution key for this table.
+HINT:  The 'DISTRIBUTED BY' clause determines the distribution of data. Make sure column(s) chosen are the optimal data distribution key to minimize skew.
+ANALYZE dt_external;
+SHOW optimizer;
+ optimizer 
+-----------
+ off
+(1 row)
+
+SET LOCAL enable_answer_query_using_materialized_views = ON;
+SET LOCAL aqumv_allow_foreign_table = ON;
+EXPLAIN(COSTS OFF, VERBOSE)
+SELECT sum(id) FROM ext_r where id > 5;
+                                    QUERY PLAN                                    
+----------------------------------------------------------------------------------
+ Finalize Aggregate
+   Output: sum(id)
+   ->  Gather Motion 3:1  (slice1; segments: 3)
+         Output: (PARTIAL sum(id))
+         ->  Partial Aggregate
+               Output: PARTIAL sum(id)
+               ->  Seq Scan on dynamic_table_schema.dt_external
+                     Output: id
+ Settings: enable_answer_query_using_materialized_views = 'on', optimizer = 'off'
+ Optimizer: Postgres query optimizer
+(10 rows)
+
+SELECT sum(id) FROM ext_r where id > 5;
+ sum 
+-----
+  40
+(1 row)
+
+DROP FOREIGN TABLE ext_r CASCADE;
+NOTICE:  drop cascades to dynamic table dt_external
+DROP FOREIGN TABLE ext_w;
+ABORT;
+-- Test resevered job name for Dynamic Tables.
+SELECT 'dt5'::regclass::oid AS dtoid \gset
+-- should fail
+CREATE TASK gp_dynamic_table_refresh_xxx SCHEDULE '1 second' AS 'REFRESH DYNAMIC TABLE dt5';
+ERROR:  unacceptable task name "gp_dynamic_table_refresh_xxx"
+DETAIL:  The prefix "gp_dynamic_table_refresh_" is reserved for system tasks.
+-- can not alter the REFRESH SQL of Dynamic Tables.
+ALTER TASK gp_dynamic_table_refresh_:dtoid AS '* * * * *';
+ERROR:  can not alter REFRESH SQL of dynamic tables
+ALTER TASK gp_dynamic_table_refresh_:dtoid AS '';
+ERROR:  can not alter REFRESH SQL of dynamic tables
+-- should fail
+DROP TASK gp_dynamic_table_refresh_:dtoid;
+ERROR:  can not drop a internal task "gp_dynamic_table_refresh_17387" paried with dynamic table
+DETAIL:  please drop the dynamic table instead
+\unset dtoid
+CREATE DYNAMIC TABLE dt_schedule SCHEDULE '1 2 3 4 5' AS SELECT * FROM t2;
+NOTICE:  Table doesn't have 'DISTRIBUTED BY' clause -- Using column(s) named 'b' as the Apache Cloudberry data distribution key for this table.
+HINT:  The 'DISTRIBUTED BY' clause determines the distribution of data. Make sure column(s) chosen are the optimal data distribution key to minimize skew.
+SELECT pg_catalog.pg_get_dynamic_table_schedule('dt_schedule'::regclass::oid);
+ pg_get_dynamic_table_schedule 
+-------------------------------
+ 1 2 3 4 5
+(1 row)
+
+-- not a dynamic table
+SELECT pg_catalog.pg_get_dynamic_table_schedule('t2'::regclass::oid);
+WARNING:  relation of oid "XXX" is not dynamic table
+ pg_get_dynamic_table_schedule 
+-------------------------------
+ 
+(1 row)
+
+SELECT * FROM pg_dynamic_tables;
+      schemaname      | dynamictablename | dynamictableowner | tablespace | hasindexes | ispopulated |            definition             
+----------------------+------------------+-------------------+------------+------------+-------------+-----------------------------------
+ dynamic_table_schema | dt3              | gpadmin           |            | f          | t           |  SELECT a,                       +
+                      |                  |                   |            |            |             |     b,                           +
+                      |                  |                   |            |            |             |     c                            +
+                      |                  |                   |            |            |             |    FROM mv_t2                    +
+                      |                  |                   |            |            |             |   WHERE (a = 2);
+ dynamic_table_schema | dt4              | gpadmin           |            | f          | t           |  SELECT a,                       +
+                      |                  |                   |            |            |             |     b,                           +
+                      |                  |                   |            |            |             |     c                            +
+                      |                  |                   |            |            |             |    FROM dt3                      +
+                      |                  |                   |            |            |             |   WHERE (b = 3);
+ dynamic_table_schema | dt5              | gpadmin           |            | f          | t           |  SELECT dt3.a,                   +
+                      |                  |                   |            |            |             |     dt3.b,                       +
+                      |                  |                   |            |            |             |     dt3.c                        +
+                      |                  |                   |            |            |             |    FROM ((dt3                    +
+                      |                  |                   |            |            |             |      JOIN t2 USING (a, b, c))    +
+                      |                  |                   |            |            |             |      JOIN mv_t2 USING (a, b, c));
+ dynamic_table_schema | dt_schedule      | gpadmin           |            | f          | t           |  SELECT a,                       +
+                      |                  |                   |            |            |             |     b,                           +
+                      |                  |                   |            |            |             |     c                            +
+                      |                  |                   |            |            |             |    FROM t2;
+(4 rows)
+
+CREATE TABLE t3(a int);
+NOTICE:  Table doesn't have 'DISTRIBUTED BY' clause -- Using column named 'a' as the Apache Cloudberry data distribution key for this table.
+HINT:  The 'DISTRIBUTED BY' clause determines the distribution of data. Make sure column(s) chosen are the optimal data distribution key to minimize skew.
+CREATE DYNAMIC TABLE dt_1_min SCHEDULE '* * * * *' AS SELECT * FROM t3 WITH NO DATA;
+NOTICE:  Table doesn't have 'DISTRIBUTED BY' clause -- Using column(s) named 'a' as the Apache Cloudberry data distribution key for this table.
+HINT:  The 'DISTRIBUTED BY' clause determines the distribution of data. Make sure column(s) chosen are the optimal data distribution key to minimize skew.
+INSERT INTO T3 VALUES(1);
+-- wait for backgroud refresh
+SELECT pg_sleep(80);
+ pg_sleep 
+----------
+ 
+(1 row)
+
+SELECT * FROM dt_1_min;
+ a 
+---
+ 1
+(1 row)
+
+RESET enable_answer_query_using_materialized_views;
+RESET optimizer;
+--start_ignore
+DROP SCHEMA dynamic_table_schema cascade;
+NOTICE:  drop cascades to 5 other objects
+DETAIL:  drop cascades to table t2
+drop cascades to materialized view mv_t2
+drop cascades to dynamic table dt3
+drop cascades to dynamic table dt4
+drop cascades to dynamic table dt5
+--end_ignore

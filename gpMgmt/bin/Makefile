@@ -128,22 +128,24 @@ download-python-deps:
 #
 # PyGreSQL
 #
-PYGRESQL_VERSION=5.2
 PYGRESQL_DIR=PyGreSQL-$(PYGRESQL_VERSION)
-pygresql:
+pygresql: download-python-deps
 	@echo "--- PyGreSQL"
+	# Stale build/lib.*-<oldpyver> dirs from a previous build with a
+	# different python3 (e.g. after a toolchain/python upgrade) match the
+	# same build/lib*-3*/* glob below as the current one and make the cp -r
+	# below fail with "will not overwrite just-created ...". Start from a
+	# clean extraction so only the current interpreter'"'"'s build dir exists.
+	rm -rf $(PYLIB_SRC_EXT)/$(PYGRESQL_DIR)
 	cd $(PYLIB_SRC_EXT)/ && $(TAR) xzf $(PYGRESQL_DIR).tar.gz
 	cd $(PYLIB_SRC_EXT)/$(PYGRESQL_DIR)/ && PATH=$(DESTDIR)$(bindir):$$PATH LDFLAGS='$(LDFLAGS) $(PYGRESQL_LDFLAGS)' python3 setup.py build
 	cp -r $(PYLIB_SRC_EXT)/$(PYGRESQL_DIR)/build/lib*-3*/* $(PYLIB_DIR)/
 
-
 #
 # PSUTIL
 #
-PSUTIL_VERSION=5.7.0
 PSUTIL_DIR=psutil-$(PSUTIL_VERSION)
-
-psutil:
+psutil: download-python-deps
 	@echo "--- psutil"
 ifeq "$(findstring $(BLD_ARCH),aix7_ppc_64 )" ""
 	cd $(PYLIB_SRC_EXT)/ && $(TAR) xzf $(PSUTIL_DIR).tar.gz
@@ -157,8 +159,11 @@ endif
 PYYAML_VERSION=5.4.1
 PYYAML_DIR=PyYAML-$(PYYAML_VERSION)
 
-pyyaml:
+pyyaml: download-python-deps
 	@echo "--- pyyaml"
+	# See the comment in the pygresql target: avoid stale build/lib.*-<oldpyver>
+	# dirs from a previous python3 tripping the build/lib*-3*/* cp -r below.
+	rm -rf $(PYLIB_SRC_EXT)/$(PYYAML_DIR)
 	cd $(PYLIB_SRC_EXT)/ && $(TAR) xzf $(PYYAML_DIR).tar.gz
 	cd $(PYLIB_SRC_EXT)/$(PYYAML_DIR)/ && env -u CC python3 setup.py build
 	cp -r $(PYLIB_SRC_EXT)/$(PYYAML_DIR)/build/lib*-3*/* $(PYLIB_DIR)/
@@ -168,16 +173,12 @@ pyyaml:
 #
 MOCK_VERSION=1.0.1
 MOCK_DIR=mock-$(MOCK_VERSION)
-SETUP_TOOLS_VERSION=36.6.0
-PARSE_VERSION=1.8.2
-SETUP_TOOLS_DIR=setuptools-$(SETUP_TOOLS_VERSION)
-PARSE_DIR=parse-$(PARSE_VERSION)
 PYTHONSRC_INSTALL=$(PYLIB_SRC_EXT)/install
 PYTHON_VERSION=$(shell python3 -c "import sys; print ('%s.%s' % (sys.version_info[0:2]))")
 PYTHONSRC_INSTALL_SITE=$(PYLIB_SRC_EXT)/install/lib/python$(PYTHON_VERSION)/site-packages
 PYTHONSRC_INSTALL_PYTHON_PATH=$(PYTHONPATH):$(PYTHONSRC_INSTALL_SITE)
 # TODO: mock-1.0.1-py2.6.egg package should be updated.
-MOCK_BIN=$(PYTHONSRC_INSTALL)/lib/python$(PYTHON_VERSION)/site-packages/mock-1.0.1-py2.6.egg
+MOCK_BIN=$(PYTHONSRC_INSTALL)/lib/python$(PYTHON_VERSION)/site-packages/mock-$(MOCK_VERSION)-py$(PYTHON_VERSION).egg
 UBUNTU_PLATFORM=$(shell if lsb_release -a 2>/dev/null | grep -q 'Ubuntu' ; then echo "Ubuntu"; fi)
 
 $(MOCK_BIN):
@@ -193,7 +194,7 @@ $(MOCK_BIN):
            echo "mock-$(MOCK_VERSION).zip already exists, skipping download"; \
        fi && \
        mkdir -p $(PYTHONSRC_INSTALL_SITE) && \
-       cd $(PYLIB_SRC_EXT)/ && unzip -q $(MOCK_DIR).zip && \
+       cd $(PYLIB_SRC_EXT)/ && unzip -q -o $(MOCK_DIR).zip && \
        cd $(PYLIB_SRC_EXT)/$(MOCK_DIR)/ && \
        PYTHONPATH=$(PYTHONSRC_INSTALL_PYTHON_PATH) python3 setup.py install --prefix $(PYTHONSRC_INSTALL) ; \
     fi;

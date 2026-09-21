@@ -13,7 +13,7 @@ SET seq_page_cost=100;
 -- That allows us to test all the different combinations of
 -- lossy and non-lossy pages with the minimum amount of data
 CREATE TABLE bmscantest (a int, b int, t text);
-NOTICE:  Table doesn't have 'DISTRIBUTED BY' clause -- Using column named 'a' as the Cloudberry Database data distribution key for this table.
+NOTICE:  Table doesn't have 'DISTRIBUTED BY' clause -- Using column named 'a' as the Apache Cloudberry data distribution key for this table.
 HINT:  The 'DISTRIBUTED BY' clause determines the distribution of data. Make sure column(s) chosen are the optimal data distribution key to minimize skew.
 INSERT INTO bmscantest
   SELECT (r%53), (r%59), 'foooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooo'
@@ -43,7 +43,7 @@ SELECT count(*) FROM bmscantest WHERE a = 1 OR b = 1;
 -- Test mix BitmapOp load of on-disk bitmap index scan and in-memory bitmap index scan:
 -- 1) heap
 CREATE TABLE bmscantest2 (a int, b int, c int, d int, t text);
-NOTICE:  Table doesn't have 'DISTRIBUTED BY' clause -- Using column named 'a' as the Cloudberry Database data distribution key for this table.
+NOTICE:  Table doesn't have 'DISTRIBUTED BY' clause -- Using column named 'a' as the Apache Cloudberry data distribution key for this table.
 HINT:  The 'DISTRIBUTED BY' clause determines the distribution of data. Make sure column(s) chosen are the optimal data distribution key to minimize skew.
 INSERT INTO bmscantest2
   SELECT (r%53), (r%59), (r%53), (r%59), 'foooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooo'
@@ -68,7 +68,7 @@ EXPLAIN SELECT count(*) FROM bmscantest2 WHERE a = 1 AND b = 1 AND c = 1;
                                  Index Cond: (a = 1)
                      ->  Bitmap Index Scan on i_bmtest2_c  (cost=0.00..0.00 rows=0 width=0)
                            Index Cond: (c = 1)
- Optimizer: Pivotal Optimizer (GPORCA)
+ Optimizer: GPORCA
 (13 rows)
 
 SELECT count(*) FROM bmscantest2 WHERE a = 1 AND b = 1 AND c = 1;
@@ -99,7 +99,7 @@ EXPLAIN SELECT count(*) FROM bmscantest2 WHERE a = 1 OR b = 1 OR c = 1;
                                        Index Cond: (b = 1)
                            ->  Bitmap Index Scan on i_bmtest2_c  (cost=0.00..0.00 rows=0 width=0)
                                  Index Cond: (c = 1)
- Optimizer: Pivotal Optimizer (GPORCA)
+ Optimizer: GPORCA
 (14 rows)
 
 SELECT count(*) FROM bmscantest2 WHERE a = 1 OR b = 1 OR c = 1;
@@ -116,7 +116,7 @@ SELECT count(*) FROM bmscantest2 WHERE a = 1 OR (b = 1 AND c = 1) OR d = 1;
 
 -- 2) ao
 CREATE TABLE bmscantest_ao (a int, b int, c int, d int, t text) WITH(appendonly=true, orientation=row);
-NOTICE:  Table doesn't have 'DISTRIBUTED BY' clause -- Using column named 'a' as the Cloudberry Database data distribution key for this table.
+NOTICE:  Table doesn't have 'DISTRIBUTED BY' clause -- Using column named 'a' as the Apache Cloudberry data distribution key for this table.
 HINT:  The 'DISTRIBUTED BY' clause determines the distribution of data. Make sure column(s) chosen are the optimal data distribution key to minimize skew.
 INSERT INTO bmscantest_ao
   SELECT (r%53), (r%59), (r%53), (r%59), 'foooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooo'
@@ -141,7 +141,7 @@ EXPLAIN SELECT count(*) FROM bmscantest_ao WHERE a = 1 AND b = 1 AND c = 1;
                                  Index Cond: (a = 1)
                      ->  Bitmap Index Scan on i_bmtest_ao_c  (cost=0.00..0.00 rows=0 width=0)
                            Index Cond: (c = 1)
- Optimizer: Pivotal Optimizer (GPORCA)
+ Optimizer: GPORCA
 (13 rows)
 
 SELECT count(*) FROM bmscantest_ao WHERE a = 1 AND b = 1 AND c = 1;
@@ -168,7 +168,7 @@ EXPLAIN SELECT count(*) FROM bmscantest_ao WHERE a = 1 AND (b = 1 OR c = 1) AND 
                                  Index Cond: (d = 1)
                            ->  Bitmap Index Scan on i_bmtest_ao_a  (cost=0.00..0.00 rows=0 width=0)
                                  Index Cond: (a = 1)
- Optimizer: Pivotal Optimizer (GPORCA)
+ Optimizer: GPORCA
 (16 rows)
 
 SELECT count(*) FROM bmscantest_ao WHERE a = 1 AND (b = 1 OR c = 1) AND d = 1;
@@ -193,7 +193,7 @@ EXPLAIN SELECT count(*) FROM bmscantest_ao WHERE a = 1 OR b = 1 OR c = 1;
                                        Index Cond: (b = 1)
                            ->  Bitmap Index Scan on i_bmtest_ao_c  (cost=0.00..0.00 rows=0 width=0)
                                  Index Cond: (c = 1)
- Optimizer: Pivotal Optimizer (GPORCA)
+ Optimizer: GPORCA
 (14 rows)
 
 SELECT count(*) FROM bmscantest_ao WHERE a = 1 OR b = 1 OR c = 1;
@@ -221,7 +221,7 @@ EXPLAIN SELECT count(*) FROM bmscantest_ao WHERE a = 1 OR (b = 1 AND c = 1) OR d
                                              Index Cond: (c = 1)
                            ->  Bitmap Index Scan on i_bmtest_ao_d  (cost=0.00..0.00 rows=0 width=0)
                                  Index Cond: (d = 1)
- Optimizer: Pivotal Optimizer (GPORCA)
+ Optimizer: GPORCA
 (17 rows)
 
 SELECT count(*) FROM bmscantest_ao WHERE a = 1 OR (b = 1 AND c = 1) OR d = 1;
@@ -232,7 +232,7 @@ SELECT count(*) FROM bmscantest_ao WHERE a = 1 OR (b = 1 AND c = 1) OR d = 1;
 
 -- 3) aocs
 CREATE TABLE bmscantest_aocs (a int, b int, c int, d int, t text) WITH(appendonly=true, orientation=column);
-NOTICE:  Table doesn't have 'DISTRIBUTED BY' clause -- Using column named 'a' as the Cloudberry Database data distribution key for this table.
+NOTICE:  Table doesn't have 'DISTRIBUTED BY' clause -- Using column named 'a' as the Apache Cloudberry data distribution key for this table.
 HINT:  The 'DISTRIBUTED BY' clause determines the distribution of data. Make sure column(s) chosen are the optimal data distribution key to minimize skew.
 INSERT INTO bmscantest_aocs
   SELECT (r%53), (r%59), (r%53), (r%59), 'foooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooo'
@@ -257,7 +257,7 @@ EXPLAIN SELECT count(*) FROM bmscantest_aocs WHERE a = 1 AND b = 1 AND c = 1;
                                  Index Cond: (a = 1)
                      ->  Bitmap Index Scan on i_bmtest_aocs_c  (cost=0.00..0.00 rows=0 width=0)
                            Index Cond: (c = 1)
- Optimizer: Pivotal Optimizer (GPORCA)
+ Optimizer: GPORCA
 (13 rows)
 
 SELECT count(*) FROM bmscantest_aocs WHERE a = 1 AND b = 1 AND c = 1;
@@ -284,7 +284,7 @@ EXPLAIN SELECT count(*) FROM bmscantest_aocs WHERE a = 1 AND (b = 1 OR c = 1) AN
                                  Index Cond: (d = 1)
                            ->  Bitmap Index Scan on i_bmtest_aocs_a  (cost=0.00..0.00 rows=0 width=0)
                                  Index Cond: (a = 1)
- Optimizer: Pivotal Optimizer (GPORCA)
+ Optimizer: GPORCA
 (16 rows)
 
 SELECT count(*) FROM bmscantest_aocs WHERE a = 1 AND (b = 1 OR c = 1) AND d = 1;
@@ -309,7 +309,7 @@ EXPLAIN SELECT count(*) FROM bmscantest_aocs WHERE a = 1 OR b = 1 OR c = 1;
                                        Index Cond: (b = 1)
                            ->  Bitmap Index Scan on i_bmtest_aocs_c  (cost=0.00..0.00 rows=0 width=0)
                                  Index Cond: (c = 1)
- Optimizer: Pivotal Optimizer (GPORCA)
+ Optimizer: GPORCA
 (14 rows)
 
 SELECT count(*) FROM bmscantest_aocs WHERE a = 1 OR b = 1 OR c = 1;
@@ -337,7 +337,7 @@ EXPLAIN SELECT count(*) FROM bmscantest_aocs WHERE a = 1 OR (b = 1 AND c = 1) OR
                                              Index Cond: (c = 1)
                            ->  Bitmap Index Scan on i_bmtest_aocs_d  (cost=0.00..0.00 rows=0 width=0)
                                  Index Cond: (d = 1)
- Optimizer: Pivotal Optimizer (GPORCA)
+ Optimizer: GPORCA
 (17 rows)
 
 SELECT count(*) FROM bmscantest_aocs WHERE a = 1 OR (b = 1 AND c = 1) OR d = 1;

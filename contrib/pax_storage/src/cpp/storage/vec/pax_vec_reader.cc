@@ -44,15 +44,15 @@
 #include "storage/toast/pax_toast.h"
 #include "storage/vec/pax_vec_adapter.h"
 
-#include <arrow/scalar.h>
-#include <arrow/compute/exec/topk_threshold_state.h>
-
 #ifdef __x86_64__
 #include <cpuid.h>
 #include <immintrin.h>
 #endif
 
 #ifdef VEC_BUILD
+
+#include <arrow/scalar.h>
+#include <arrow/compute/exec/topk_threshold_state.h>
 
 namespace pax {
 

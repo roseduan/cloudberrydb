@@ -2399,8 +2399,8 @@ NOTICE:  table has parent, setting distribution columns to match parent table
 CREATE INDEX idx_on_tbl_hash ON tbl_hash using btree(col1);
 ANALYZE tbl_hash;
 explain(costs off) select * from tbl_hash order by col1 limit 3;
-                              QUERY PLAN                               
------------------------------------------------------------------------
+                           QUERY PLAN                           
+----------------------------------------------------------------
  Limit
    ->  Gather Motion 3:1  (slice1; segments: 3)
          Merge Key: col1
@@ -2408,7 +2408,7 @@ explain(costs off) select * from tbl_hash order by col1 limit 3;
                Sort Key: col1
                ->  Dynamic Seq Scan on tbl_hash
                      Number of partitions to scan: 2 (out of 2)
- Optimizer: Pivotal Optimizer (GPORCA)
+ Optimizer: GPORCA
 (8 rows)
 
 -- Clean Up

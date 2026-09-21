@@ -40,7 +40,7 @@ create table part (c1 int, c2 int) partition by list(c2) (
 partition part1 values (1, 2, 3, 4), 
 partition part2 values (5, 6, 7), 
 partition part3 values (8, 9, 0));
-NOTICE:  Table doesn't have 'DISTRIBUTED BY' clause -- Using column named 'c1' as the Apache Cloudberry data distribution key for this table.
+NOTICE:  Table doesn't have 'DISTRIBUTED BY' clause -- Using column named 'c1' as the Greenplum Database data distribution key for this table.
 HINT:  The 'DISTRIBUTED BY' clause determines the distribution of data. Make sure column(s) chosen are the optimal data distribution key to minimize skew.
 insert into part select i, i%10 from generate_series(1, 999) i;
 -- const tvf (universal)
@@ -120,7 +120,7 @@ explain (analyze, timing off, summary off) select * from rand join const_tvf(1) 
  Gather Motion 3:1  (slice1; segments: 3)  (cost=0.00..5.18 rows=1 width=8) (actual rows=1 loops=1)
    ->  Seq Scan on rand  (cost=0.00..5.16 rows=1 width=8) (actual rows=1 loops=1)
          Filter: (c1 = 1)
-         Rows Removed by Filter: 333
+         Rows Removed by Filter: 346
  Optimizer: Postgres query optimizer
 (5 rows)
 
@@ -130,8 +130,8 @@ explain (analyze, timing off, summary off) select * from rand join unnest_arr on
  Gather Motion 3:1  (slice1; segments: 3)  (cost=0.33..5.66 rows=10 width=8) (actual rows=3 loops=1)
    ->  Hash Join  (cost=0.33..5.53 rows=3 width=8) (actual rows=2 loops=1)
          Hash Cond: (rand.c1 = (((unnest('{-3,-2,-1,0,1,2,3}'::text[])))::integer))
-         Extra Text: (seg1)   Hash chain length 1.0 avg, 1 max, using 7 of 524288 buckets.
-         ->  Seq Scan on rand  (cost=0.00..4.33 rows=333 width=4) (actual rows=349 loops=1)
+         Extra Text: (seg2)   Hash chain length 1.0 avg, 1 max, using 7 of 524288 buckets.
+         ->  Seq Scan on rand  (cost=0.00..4.33 rows=333 width=4) (actual rows=346 loops=1)
          ->  Hash  (cost=0.25..0.25 rows=7 width=4) (actual rows=7 loops=1)
                Buckets: 524288  Batches: 1  Memory Usage: 4097kB
                ->  Result  (cost=0.00..0.18 rows=7 width=4) (actual rows=7 loops=1)
@@ -143,11 +143,11 @@ explain (analyze, timing off, summary off) select * from rand join unnest_arr on
 explain (analyze, timing off, summary off) select * from rand join gen_series on rand.c1 = gen_series.c1;
                                               QUERY PLAN                                              
 ------------------------------------------------------------------------------------------------------
- Gather Motion 3:1  (slice1; segments: 3)  (cost=0.60..6.12 rows=21 width=8) (actual rows=10 loops=1)
-   ->  Hash Join  (cost=0.60..5.84 rows=7 width=8) (actual rows=4 loops=1)
+ Gather Motion 3:1  (slice1; segments: 3)  (cost=0.59..6.12 rows=21 width=8) (actual rows=10 loops=1)
+   ->  Hash Join  (cost=0.59..5.84 rows=7 width=8) (actual rows=4 loops=1)
          Hash Cond: (rand.c1 = (generate_series('-10'::integer, 10)))
-         Extra Text: (seg0)   Hash chain length 1.0 avg, 1 max, using 21 of 524288 buckets.
-         ->  Seq Scan on rand  (cost=0.00..4.33 rows=333 width=4) (actual rows=349 loops=1)
+         Extra Text: (seg1)   Hash chain length 1.0 avg, 1 max, using 21 of 524288 buckets.
+         ->  Seq Scan on rand  (cost=0.00..4.33 rows=333 width=4) (actual rows=346 loops=1)
          ->  Hash  (cost=0.33..0.33 rows=21 width=4) (actual rows=21 loops=1)
                Buckets: 524288  Batches: 1  Memory Usage: 4097kB
                ->  ProjectSet  (cost=0.00..0.12 rows=21 width=4) (actual rows=21 loops=1)

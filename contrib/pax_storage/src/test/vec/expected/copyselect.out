@@ -2,7 +2,7 @@
 -- Test cases for COPY (select) TO
 --
 create table copyselect_test1 (id serial, t text);
-NOTICE:  Table doesn't have 'DISTRIBUTED BY' clause -- Using column named 'id' as the Cloudberry Database data distribution key for this table.
+NOTICE:  Table doesn't have 'DISTRIBUTED BY' clause -- Using column named 'id' as the Apache Cloudberry data distribution key for this table.
 HINT:  The 'DISTRIBUTED BY' clause determines the distribution of data. Make sure column(s) chosen are the optimal data distribution key to minimize skew.
 insert into copyselect_test1 (t) values ('a');
 insert into copyselect_test1 (t) values ('b');
@@ -10,7 +10,7 @@ insert into copyselect_test1 (t) values ('c');
 insert into copyselect_test1 (t) values ('d');
 insert into copyselect_test1 (t) values ('e');
 create table copyselect_test2 (id serial, t text);
-NOTICE:  Table doesn't have 'DISTRIBUTED BY' clause -- Using column named 'id' as the Cloudberry Database data distribution key for this table.
+NOTICE:  Table doesn't have 'DISTRIBUTED BY' clause -- Using column named 'id' as the Apache Cloudberry data distribution key for this table.
 HINT:  The 'DISTRIBUTED BY' clause determines the distribution of data. Make sure column(s) chosen are the optimal data distribution key to minimize skew.
 insert into copyselect_test2 (t) values ('A');
 insert into copyselect_test2 (t) values ('B');
@@ -23,11 +23,11 @@ as select 'v_'||t from copyselect_test1;
 -- Test COPY table TO
 --
 copy copyselect_test1 to stdout;
-1	a
 2	b
+1	a
+5	e
 3	c
 4	d
-5	e
 --
 -- This should fail
 --
@@ -67,10 +67,10 @@ LINE 1: copy (select * from copyselect_test1) (t,id) to stdout;
 -- Test JOIN
 --
 copy (select * from copyselect_test1 join copyselect_test2 using (id)) to stdout;
-1	a	A
 2	b	B
 3	c	C
 4	d	D
+1	a	A
 5	e	E
 --
 -- Test UNION SELECT
@@ -102,11 +102,11 @@ t
 -- Test psql builtins, plain table
 --
 \copy copyselect_test1 to stdout
-1	a
 2	b
+1	a
+5	e
 3	c
 4	d
-5	e
 --
 -- This should fail
 --
@@ -135,11 +135,23 @@ copy (select 1) to stdout\; copy (select 2) to stdout\; select 0\; select 3; -- 
 2
  ?column? 
 ----------
+        0
+(1 row)
+
+ ?column? 
+----------
         3
 (1 row)
 
 create table test3 (c int);
+NOTICE:  Table doesn't have 'DISTRIBUTED BY' clause -- Using column named 'c' as the Apache Cloudberry data distribution key for this table.
+HINT:  The 'DISTRIBUTED BY' clause determines the distribution of data. Make sure column(s) chosen are the optimal data distribution key to minimize skew.
 select 0\; copy test3 from stdin\; copy test3 from stdin\; select 1; -- 1
+ ?column? 
+----------
+        0
+(1 row)
+
  ?column? 
 ----------
         1
@@ -148,8 +160,8 @@ select 0\; copy test3 from stdin\; copy test3 from stdin\; select 1; -- 1
 select * from test3;
  c 
 ---
- 1
  2
+ 1
 (2 rows)
 
 drop table test3;

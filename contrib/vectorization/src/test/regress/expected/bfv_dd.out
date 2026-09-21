@@ -19,7 +19,9 @@ insert into dd_singlecol_1 values(null, null);
 INFO:  (slice 0) Dispatch command to SINGLE content
 INFO:  Distributed transaction command 'Distributed Commit (one-phase)' to SINGLE content
 analyze dd_singlecol_1;
+INFO:  (slice 1) Dispatch command to ALL contents: 0 1 2
 -- ctas tests
+set enable_parallel = off;
 create table dd_ctas_1 as select * from dd_singlecol_1 where a=1 distributed by (a);
 INFO:  (slice 0) Dispatch command to ALL contents: 0 1 2
 INFO:  Distributed transaction command 'Distributed Prepare' to ALL contents: 0 1 2
@@ -28,6 +30,7 @@ create table dd_ctas_2  as select * from dd_singlecol_1 where a is NULL distribu
 INFO:  (slice 0) Dispatch command to ALL contents: 0 1 2
 INFO:  Distributed transaction command 'Distributed Prepare' to ALL contents: 0 1 2
 INFO:  Distributed transaction command 'Distributed Commit Prepared' to ALL contents: 0 1 2
+reset enable_parallel;
 select * from dd_ctas_1;
 INFO:  (slice 1) Dispatch command to ALL contents: 0 1 2
  a | b 
@@ -269,6 +272,8 @@ INFO:  (slice 1) Dispatch command to SINGLE content
 (1 row)
 
 -- group by and sort
+-- disable parallel for regress tests
+set enable_parallel = off;
 select a, count(*) from dd_part_singlecol where a=1 group by a;
 INFO:  (slice 1) Dispatch command to SINGLE content
  a | count 
@@ -276,6 +281,7 @@ INFO:  (slice 1) Dispatch command to SINGLE content
  1 |     1
 (1 row)
 
+reset enable_parallel;
 select a, count(*) from dd_part_singlecol where a=1 group by a order by a;
 INFO:  (slice 1) Dispatch command to SINGLE content
  a | count 
@@ -316,7 +322,9 @@ insert into dd_singlecol_idx2 values(null, null);
 INFO:  (slice 0) Dispatch command to SINGLE content
 INFO:  Distributed transaction command 'Distributed Commit (one-phase)' to SINGLE content
 analyze dd_singlecol_idx;
+INFO:  (slice 1) Dispatch command to ALL contents: 0 1 2
 analyze dd_singlecol_idx2;
+INFO:  (slice 1) Dispatch command to ALL contents: 0 1 2
 -- disjunction with index scans
 select * from dd_singlecol_idx where (a=1 or a=2) and b<2;
 INFO:  (slice 1) Dispatch command to PARTIAL contents: 1 0
@@ -332,6 +340,7 @@ INFO:  (slice 1) Dispatch command to PARTIAL contents: 1 0
  one
 (1 row)
 
+set enable_parallel = off;
 select a, count(*) from dd_singlecol_idx where (a=1 or a=2) and b=1  group by a;
 INFO:  (slice 1) Dispatch command to PARTIAL contents: 1 0
  a | count 
@@ -339,6 +348,7 @@ INFO:  (slice 1) Dispatch command to PARTIAL contents: 1 0
  1 |     1
 (1 row)
 
+reset enable_parallel;
 select count(*) from dd_singlecol_idx;
 INFO:  (slice 1) Dispatch command to ALL contents: 0 1 2
  count 
@@ -365,6 +375,7 @@ insert into dd_singlecol_bitmap_idx values(null, null);
 INFO:  (slice 0) Dispatch command to SINGLE content
 INFO:  Distributed transaction command 'Distributed Commit (one-phase)' to SINGLE content
 analyze dd_singlecol_bitmap_idx;
+INFO:  (slice 1) Dispatch command to ALL contents: 0 1 2
 -- disjunction with bitmap index scans
 select * from dd_singlecol_bitmap_idx where (a=1 or a=2) and b<2;
 INFO:  (slice 1) Dispatch command to PARTIAL contents: 1 0
@@ -441,6 +452,12 @@ insert into dd_singlecol_part_bitmap_idx values(null, null);
 INFO:  (slice 0) Dispatch command to SINGLE content
 INFO:  Distributed transaction command 'Distributed Commit (one-phase)' to SINGLE content
 analyze dd_singlecol_part_bitmap_idx;
+INFO:  (slice 1) Dispatch command to ALL contents: 0 1 2
+INFO:  (slice 1) Dispatch command to ALL contents: 0 1 2
+INFO:  (slice 1) Dispatch command to ALL contents: 0 1 2
+INFO:  (slice 1) Dispatch command to ALL contents: 0 1 2
+INFO:  (slice 1) Dispatch command to ALL contents: 0 1 2
+INFO:  (slice 1) Dispatch command to ALL contents: 0 1 2
 -- bitmap indexes on partitioned tables
 select * from dd_singlecol_part_bitmap_idx where a=1 and b=0;
 INFO:  (slice 1) Dispatch command to SINGLE content
@@ -486,6 +503,7 @@ insert into dd_multicol_idx values(null, null);
 INFO:  (slice 0) Dispatch command to SINGLE content
 INFO:  Distributed transaction command 'Distributed Commit (one-phase)' to SINGLE content
 analyze dd_multicol_idx;
+INFO:  (slice 1) Dispatch command to ALL contents: 0 1 2
 select count(*) from dd_multicol_idx;
 INFO:  (slice 1) Dispatch command to ALL contents: 0 1 2
  count 
@@ -550,6 +568,7 @@ INFO:  (slice 1) Dispatch command to SINGLE content
         2
 (1 row)
 
+set enable_parallel = off;
 -- group by
 select a, count(*) from dd_singlecol_idx where a=1 and b=1  group by a;
 INFO:  (slice 1) Dispatch command to SINGLE content
@@ -558,6 +577,7 @@ INFO:  (slice 1) Dispatch command to SINGLE content
  1 |     1
 (1 row)
 
+reset enable_parallel;
 -- multicol
 select * from dd_multicol_idx where a=1 and b=1 and c<5;
 INFO:  (slice 1) Dispatch command to SINGLE content
@@ -609,7 +629,19 @@ insert into dd_singlecol_part_idx2 values(null, null);
 INFO:  (slice 0) Dispatch command to SINGLE content
 INFO:  Distributed transaction command 'Distributed Commit (one-phase)' to SINGLE content
 analyze dd_singlecol_part_idx;
+INFO:  (slice 1) Dispatch command to ALL contents: 0 1 2
+INFO:  (slice 1) Dispatch command to ALL contents: 0 1 2
+INFO:  (slice 1) Dispatch command to ALL contents: 0 1 2
+INFO:  (slice 1) Dispatch command to ALL contents: 0 1 2
+INFO:  (slice 1) Dispatch command to ALL contents: 0 1 2
+INFO:  (slice 1) Dispatch command to ALL contents: 0 1 2
 analyze dd_singlecol_part_idx2;
+INFO:  (slice 1) Dispatch command to ALL contents: 0 1 2
+INFO:  (slice 1) Dispatch command to ALL contents: 0 1 2
+INFO:  (slice 1) Dispatch command to ALL contents: 0 1 2
+INFO:  (slice 1) Dispatch command to ALL contents: 0 1 2
+INFO:  (slice 1) Dispatch command to ALL contents: 0 1 2
+INFO:  (slice 1) Dispatch command to ALL contents: 0 1 2
 -- indexes on partitioned tables
 select * from dd_singlecol_part_idx where a=1 and b>0;
 INFO:  (slice 1) Dispatch command to SINGLE content
@@ -757,6 +789,7 @@ INFO:  (slice 1) Dispatch command to SINGLE content
 (1 row)
 
 -- group by and sort
+set enable_parallel = off;
 select a, count(*) from dd_singlecol_1 where a=1 group by a;
 INFO:  (slice 1) Dispatch command to SINGLE content
  a | count 
@@ -764,6 +797,7 @@ INFO:  (slice 1) Dispatch command to SINGLE content
  1 |     1
 (1 row)
 
+reset enable_parallel;
 select a, count(*) from dd_singlecol_1 where a=1 group by a order by a;
 INFO:  (slice 1) Dispatch command to SINGLE content
  a | count 
@@ -780,6 +814,7 @@ INFO:  (slice 2) Dispatch command to SINGLE content
  1 | 1 | 1 | 1
 (1 row)
 
+set enable_parallel = off;
 select * from dd_singlecol_1 t1, dd_singlecol_2 t2 where t1.a=t2.b and t1.a=1;
 INFO:  (slice 1) Dispatch command to SINGLE content
  a | b | a  | b 
@@ -796,6 +831,7 @@ INFO:  (slice 1) Dispatch command to SINGLE content
  1 | 1 | 91 | 1
 (10 rows)
 
+reset enable_parallel;
 select * from dd_singlecol_1 t1, dd_singlecol_2 t2 where t1.b>t2.a and t1.a=1;
 INFO:  (slice 1) Dispatch command to ALL contents: 0 1 2
 INFO:  (slice 2) Dispatch command to SINGLE content
@@ -812,6 +848,7 @@ INFO:  (slice 1) Dispatch command to ALL contents: 0 1 2
  1 | 1 | 1 | 1
 (1 row)
 
+set enable_parallel = off;
 select * from dd_singlecol_1 t1 left outer join dd_singlecol_2 t2 on (t1.a=t2.b) where t1.a=1 and t2.b=1;
 INFO:  (slice 1) Dispatch command to SINGLE content
  a | b | a  | b 
@@ -828,6 +865,7 @@ INFO:  (slice 1) Dispatch command to SINGLE content
  1 | 1 | 91 | 1
 (10 rows)
 
+reset enable_parallel;
 select * from dd_singlecol_1 t1 left outer join dd_singlecol_2 t2 on (t1.b=t2.b) where t1.a=1;
 INFO:  (slice 1) Dispatch command to ALL contents: 0 1 2
 INFO:  (slice 2) Dispatch command to SINGLE content
@@ -863,13 +901,16 @@ INFO:  (slice 2) Dispatch command to SINGLE content
 (10 rows)
 
 -- subqueries
+set enable_parallel = off;
 select * from dd_singlecol_1 t1 where a=1 and b < (select count(*) from dd_singlecol_2 t2 where t2.a=t1.a);
-INFO:  (slice 2) Dispatch command to ALL contents: 0 1 2
+INFO:  (slice 3) Dispatch command to ALL contents: 0 1 2
 INFO:  (slice 1) Dispatch command to ALL contents: 0 1 2
+INFO:  (slice 2) Dispatch command to SINGLE content
  a | b 
 ---+---
 (0 rows)
 
+reset enable_parallel;
 select * from dd_singlecol_1 t1 where a=1 and b in (select count(*) from dd_singlecol_2 t2 where t2.a<=t1.a);
 INFO:  (slice 2) Dispatch command to ALL contents: 0 1 2
 INFO:  (slice 1) Dispatch command to SINGLE content
@@ -919,6 +960,7 @@ INFO:  (slice 1) Dispatch command to ALL contents: 0 1 2
  20 | 5
 (8 rows)
 
+set enable_parallel = off;
 -- group by and sort
 select b, count(*) from dd_singlecol_1 where a=1 group by b;
 INFO:  (slice 1) Dispatch command to SINGLE content
@@ -934,6 +976,7 @@ INFO:  (slice 1) Dispatch command to SINGLE content
  1 |     1
 (1 row)
 
+reset enable_parallel;
 -- randomly distributed tables
 create table dd_random(a int, b int) distributed randomly;
 INFO:  Distributed transaction command 'Distributed Prepare' to ALL contents: 0 1 2

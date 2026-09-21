@@ -134,4 +134,6 @@ SELECT time_series.bgw_params_destroy();
 DROP VIEW public.sorted_bgw_log;
 DROP TABLE public.bgw_log;
 DROP TABLE public.bgw_dsm_handle_store;
+-- start_ignore
 DROP EXTENSION time_series CASCADE;
+-- end_ignore

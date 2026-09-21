@@ -47,6 +47,7 @@ SET statement_timeout = '15s';
 :qry ;
 
 RESET statement_timeout;
+
 SELECT COUNT(*)
 FROM (SELECT *,
         (
@@ -93,3 +94,57 @@ $$;
 
 -- This should only ERROR and should not SIGSEGV
 SELECT col_mismatch_func2();
+
+-- https://github.com/greenplum-db/gpdb/issues/12701
+-- Disable cte sharing in subquery
+drop table if exists pk_list;
+create table pk_list (id int, schema_name varchar, table_name varchar) distributed by (id);
+drop table if exists calender;
+create table calender (id int, data_hour timestamp) distributed by (id);
+
+explain (costs off)
+with
+	tbls as (select distinct schema_name, table_name as table_nm from pk_list),
+	tbls_daily_report_23 as (select unnest(string_to_array('mart_cm.card' ,',')) as table_nm_23),
+	tbls_w_onl_actl_data as (select unnest(string_to_array('mart_cm.cont_resp,mart_cm.card', ',')) as table_nm_onl_act)
+select  data_hour, stat.schema_name as schema_nm, dt.table_nm
+from (
+	select * from calender c
+	cross join tbls
+) dt
+inner join (
+	select tbls.schema_name, tbls.table_nm as table_name
+	from tbls tbls
+) stat on dt.table_nm = stat.table_name
+where
+	(data_hour = date_trunc('day',data_hour) and stat.schema_name || '.' ||stat.table_name not in (select table_nm_23 from tbls_daily_report_23))
+	and (stat.schema_name || '.' ||stat.table_name not in (select table_nm_onl_act from tbls_w_onl_actl_data))
+	or (stat.schema_name || '.' ||stat.table_name in (select table_nm_onl_act from tbls_w_onl_actl_data));
+
+-- ORCA should fallback when a CTE over a replicated table is referenced
+-- from multiple scalar subqueries.
+-- ss_t1 needs enough rows (40000) to push ORCA to the cross-slice plan;
+-- with fewer rows the bug does not manifest and the test would silently
+-- pass even without the fix.
+-- start_ignore
+DROP TABLE IF EXISTS ss_t1, ss_t2;
+-- end_ignore
+CREATE TABLE ss_t1 AS
+  SELECT generate_series(1, 40000) id
+  DISTRIBUTED BY (id);
+CREATE TABLE ss_t2 AS
+  SELECT * FROM (VALUES (1, 10), (2, 20)) AS v(id, v)
+  DISTRIBUTED REPLICATED;
+ANALYZE ss_t1;
+ANALYZE ss_t2;
+
+SET statement_timeout = '15s';
+WITH
+    cte1 AS (SELECT v FROM ss_t2 WHERE id = 1),
+    cte2 AS (SELECT v FROM ss_t2 WHERE id = 2)
+  SELECT (SELECT v FROM cte1) + (SELECT v FROM cte2) +
+         (SELECT v FROM cte1) + (SELECT v FROM cte2) AS result
+  FROM ss_t1
+  LIMIT 1;
+RESET statement_timeout;
+DROP TABLE ss_t1, ss_t2;

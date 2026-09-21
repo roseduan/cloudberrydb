@@ -9,6 +9,7 @@ import collections
 import sys
 import os
 import stat
+import time
 
 try:
     import pgdb
@@ -263,9 +264,33 @@ def connect(dburl, utility=False, verbose=False,
             connection = pgdb.connect(**conninfo)
             break
 
-        except pgdb.OperationalError as e:
+        # PyGreSQL's C extension raises InternalError, not OperationalError,
+        # for connection failures (they are sibling classes under DatabaseError,
+        # not sub/superclass) -- see pgmodule.c's set_error(InternalError, "Cannot
+        # connect", ...).  Catch both so the retry logic below actually runs.
+        except (pgdb.OperationalError, pgdb.InternalError) as e:
             if 'timeout expired' in str(e):
                 logger.warning('Timeout expired connecting to %s, attempt %d/%d' % (dburl.pgdb, i+1, retries))
+                continue
+            # Transient "come back later" FATALs the postmaster can emit while
+            # starting up, replaying WAL after a restart, or between shutdown
+            # and restart during a "gpstop -r".  pg_ctl -w only waits for the
+            # postmaster to respond at all -- it reports "started" as soon as
+            # it gets one of these rejections too -- so a caller that opted
+            # into retries by passing a timeout/retries needs us to ride out
+            # this window.  Same condition list as
+            # src/test/isolation2/sql_isolation_testcase.py's connectdb().
+            transient_messages = (
+                'the database system is starting up',
+                'the database system is resetting',
+                'the database system is in recovery mode',
+                'the database system is not yet accepting connections',
+                'the database system is not accepting connections',
+            )
+            if any(msg in str(e) for msg in transient_messages):
+                logger.warning('%s, retrying connection to %s, attempt %d/%d' %
+                                (str(e).strip().splitlines()[0], dburl.pgdb, i + 1, retries))
+                time.sleep(1)
                 continue
             raise
 

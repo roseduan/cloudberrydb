@@ -652,7 +652,7 @@ explain (costs off, timing off, summary off, analyze) select * from t, pt where 
 ---------------------------------------------------------------------------------
  Gather Motion 3:1  (slice1; segments: 3) (actual rows=18 loops=1)
    ->  Nested Loop (actual rows=8 loops=1)
-         Join Filter: (t.tid = pt.ptid)
+         Join Filter: (pt.ptid = t.tid)
          Rows Removed by Join Filter: 30
          ->  Broadcast Motion 3:3  (slice2; segments: 3) (actual rows=2 loops=1)
                ->  Seq Scan on t (actual rows=2 loops=1)
@@ -706,7 +706,7 @@ explain (costs off, timing off, summary off, analyze) select * from t, pt where 
 ------------------------------------------------------------------------------------------------------------
  Gather Motion 3:1  (slice1; segments: 3) (actual rows=1 loops=1)
    ->  Nested Loop (actual rows=1 loops=1)
-         Join Filter: (t.tid = pt.ptid)
+         Join Filter: (pt.ptid = t.tid)
          Rows Removed by Join Filter: 1
          ->  Broadcast Motion 3:3  (slice2; segments: 3) (actual rows=2 loops=1)
                ->  Seq Scan on t (actual rows=2 loops=1)
@@ -745,7 +745,7 @@ explain (costs off, timing off, summary off, analyze) select * from t, pt where 
 -----------------------------------------------------------------------------------------------------------------------------
  Gather Motion 3:1  (slice1; segments: 3) (actual rows=18 loops=1)
    ->  Nested Loop (actual rows=8 loops=1)
-         Join Filter: (t.tid = pt.ptid)
+         Join Filter: (pt.ptid = t.tid)
          Rows Removed by Join Filter: 30
          ->  Broadcast Motion 3:3  (slice2; segments: 3) (actual rows=2 loops=1)
                ->  Seq Scan on t (actual rows=2 loops=1)
@@ -1166,6 +1166,49 @@ select * from pt, pt1 where pt.ptid = pt1.ptid and pt.pt1 = 'hello0' order by pt
     0 | hello0 | world | drop this |    0 |   42 | hello42 | world | drop this |    0
     0 | hello0 | world | drop this |    0 |   48 | hello48 | world | drop this |    0
 (9 rows)
+
+explain (costs off, timing off, summary off, analyze) select count(*) from pt, pt1 where pt.ptid = pt1.ptid and pt.pt1 = 'hello0';
+                                               QUERY PLAN                                                
+---------------------------------------------------------------------------------------------------------
+ Finalize Aggregate (actual rows=1 loops=1)
+   ->  Gather Motion 3:1  (slice1; segments: 3) (actual rows=3 loops=1)
+         ->  Partial Aggregate (actual rows=1 loops=1)
+               ->  Hash Join (actual rows=5 loops=1)
+                     Hash Cond: (pt1.ptid = pt.ptid)
+                     Extra Text: (seg1)   Hash chain length 1.0 avg, 1 max, using 1 of 524288 buckets.
+                     ->  Append (actual rows=5 loops=1)
+                           Partition Selectors: $0
+                           ->  Seq Scan on pt1_1_prt_2 pt1_1 (actual rows=5 loops=1)
+                           ->  Seq Scan on pt1_1_prt_3 pt1_2 (never executed)
+                           ->  Seq Scan on pt1_1_prt_4 pt1_3 (never executed)
+                           ->  Seq Scan on pt1_1_prt_5 pt1_4 (never executed)
+                           ->  Seq Scan on pt1_1_prt_6 pt1_5 (never executed)
+                           ->  Seq Scan on pt1_1_prt_junk_data pt1_6 (never executed)
+                     ->  Hash (actual rows=1 loops=1)
+                           Buckets: 524288  Batches: 1  Memory Usage: 4097kB
+                           ->  Partition Selector (selector id: $0) (actual rows=1 loops=1)
+                                 ->  Broadcast Motion 3:3  (slice2; segments: 3) (actual rows=1 loops=1)
+                                       ->  Append (actual rows=1 loops=1)
+                                             ->  Seq Scan on pt_1_prt_2 pt_1 (actual rows=1 loops=1)
+                                                   Filter: (pt1 = 'hello0'::text)
+                                                   Rows Removed by Filter: 4
+                                             ->  Seq Scan on pt_1_prt_3 pt_2 (actual rows=0 loops=1)
+                                                   Filter: (pt1 = 'hello0'::text)
+                                                   Rows Removed by Filter: 3
+                                             ->  Seq Scan on pt_1_prt_4 pt_3 (actual rows=0 loops=1)
+                                                   Filter: (pt1 = 'hello0'::text)
+                                                   Rows Removed by Filter: 2
+                                             ->  Seq Scan on pt_1_prt_5 pt_4 (actual rows=0 loops=1)
+                                                   Filter: (pt1 = 'hello0'::text)
+                                                   Rows Removed by Filter: 5
+                                             ->  Seq Scan on pt_1_prt_6 pt_5 (actual rows=0 loops=1)
+                                                   Filter: (pt1 = 'hello0'::text)
+                                                   Rows Removed by Filter: 4
+                                             ->  Seq Scan on pt_1_prt_junk_data pt_6 (actual rows=0 loops=1)
+                                                   Filter: (pt1 = 'hello0'::text)
+                                                   Rows Removed by Filter: 3
+ Optimizer: Postgres query optimizer
+(38 rows)
 
 select count(*) from pt, pt1 where pt.ptid = pt1.ptid and pt.pt1 = 'hello0';
  count 
@@ -2966,3 +3009,115 @@ select * from pt, t where t.dist = pt.dist and t.tid = pt.ptid order by t.tid, t
  Optimizer: Postgres query optimizer
 (23 rows)
 
+-- Test: DPE must NOT be applied on anti-semi-joins (NOT EXISTS / NOT IN).
+--
+-- Anti-join semantics: return outer rows where NO inner match exists.
+-- If DPE prunes outer partitions whose range has no inner match, those
+-- partitions' rows (which should ALL appear in the result) are lost.
+reset enable_mergejoin;
+reset enable_seqscan;
+reset search_path;
+drop schema if exists dpe_anti cascade;
+NOTICE:  schema "dpe_anti" does not exist, skipping
+create schema dpe_anti;
+set search_path='dpe_anti';
+set optimizer_segments=2;
+create table pt_anti(a int, b int)
+distributed by (a)
+partition by range(a)
+(start (1) end (1001) every (250));
+create table inner_anti(a int, b int) distributed by (a);
+-- Partition layout:
+--   pt_anti_1_prt_1: a = 1..250
+--   pt_anti_1_prt_2: a = 251..500
+--   pt_anti_1_prt_3: a = 501..750
+--   pt_anti_1_prt_4: a = 751..1000
+-- Inner table after b > 500 filter only has a = 1..250
+insert into pt_anti select i, i from generate_series(1, 1000) i;
+insert into inner_anti select i, 600 from generate_series(1, 250) i;
+insert into inner_anti select i, 400 from generate_series(251, 500) i;
+analyze pt_anti;
+analyze inner_anti;
+-- NOT EXISTS: partitions 2-4 have no inner match after filter,
+-- so all their rows (750) must appear in the result.
+explain (costs off)
+select count(*) from pt_anti p
+where not exists (select 1 from inner_anti o where o.a = p.a and o.b > 500);
+                          QUERY PLAN                           
+---------------------------------------------------------------
+ Finalize Aggregate
+   ->  Gather Motion 3:1  (slice1; segments: 3)
+         ->  Partial Aggregate
+               ->  Hash Anti Join
+                     Hash Cond: (p.a = o.a)
+                     ->  Append
+                           ->  Seq Scan on pt_anti_1_prt_1 p_1
+                           ->  Seq Scan on pt_anti_1_prt_2 p_2
+                           ->  Seq Scan on pt_anti_1_prt_3 p_3
+                           ->  Seq Scan on pt_anti_1_prt_4 p_4
+                     ->  Hash
+                           ->  Seq Scan on inner_anti o
+                                 Filter: (b > 500)
+ Optimizer: Postgres query optimizer
+(14 rows)
+
+select count(*) from pt_anti p
+where not exists (select 1 from inner_anti o where o.a = p.a and o.b > 500);
+ count 
+-------
+   750
+(1 row)
+
+-- NOT IN: same semantics, different plan path.
+explain (costs off)
+select count(*) from pt_anti p
+where p.a not in (select o.a from inner_anti o where o.b > 500);
+                                QUERY PLAN                                 
+---------------------------------------------------------------------------
+ Finalize Aggregate
+   ->  Gather Motion 3:1  (slice1; segments: 3)
+         ->  Partial Aggregate
+               ->  Hash Left Anti Semi (Not-In) Join
+                     Hash Cond: (p.a = o.a)
+                     ->  Append
+                           ->  Seq Scan on pt_anti_1_prt_1 p_1
+                           ->  Seq Scan on pt_anti_1_prt_2 p_2
+                           ->  Seq Scan on pt_anti_1_prt_3 p_3
+                           ->  Seq Scan on pt_anti_1_prt_4 p_4
+                     ->  Hash
+                           ->  Broadcast Motion 3:3  (slice2; segments: 3)
+                                 ->  Seq Scan on inner_anti o
+                                       Filter: (b > 500)
+ Optimizer: Postgres query optimizer
+(15 rows)
+
+select count(*) from pt_anti p
+where p.a not in (select o.a from inner_anti o where o.b > 500);
+ count 
+-------
+   750
+(1 row)
+
+-- Verify result matches PG planner.
+set optimizer = off;
+select count(*) from pt_anti p
+where not exists (select 1 from inner_anti o where o.a = p.a and o.b > 500);
+ count 
+-------
+   750
+(1 row)
+
+select count(*) from pt_anti p
+where p.a not in (select o.a from inner_anti o where o.b > 500);
+ count 
+-------
+   750
+(1 row)
+
+reset optimizer;
+drop schema dpe_anti cascade;
+NOTICE:  drop cascades to 2 other objects
+DETAIL:  drop cascades to table pt_anti
+drop cascades to table inner_anti
+reset search_path;
+reset optimizer_segments;

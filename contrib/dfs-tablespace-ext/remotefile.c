@@ -28,9 +28,9 @@ static int remoteFilePRead(UFile *file, char *buffer, int amount, off_t offset);
 static int remoteFileWrite(UFile *file, char *buffer, int amount);
 static int remoteFilePWrite(UFile *file, char *buffer, int amount, off_t offset);
 static off_t remoteFileSize(UFile *file);
-static int remoteFileUnlink(Oid spcId, const char *fileName);
+static void remoteFileUnlink(Oid spcId, const char *fileName);
 static int remoteFileRmdir(Oid spcId, const char *dirName);
-static char *remoteFormatPathName(Oid relid, RelFileNode *relFileNode);
+static char *remoteFormatPathName(Oid relid, RelFileLocator *relFileNode);
 static bool remoteEnsurePath(Oid spcId, const char *pathName);
 static bool remoteFileExists(Oid spcId, const char *fileName);
 static const char *remoteFileName(UFile *file);
@@ -302,7 +302,7 @@ remoteFileSize(UFile *file)
     return result;
 }
 
-static int
+static void
 remoteFileUnlink(Oid spcId, const char *fileName)
 {
     int ret;
@@ -316,7 +316,7 @@ remoteFileUnlink(Oid spcId, const char *fileName)
     if (connection == NULL) 
     {
         snprintf(remoteFileErrorStr, UFILE_ERROR_SIZE, "%s", gopherGetLastError());
-        return -1;
+        return;
     }
 
     ret = gopherPrefixDelete(connection, fileName);
@@ -324,7 +324,6 @@ remoteFileUnlink(Oid spcId, const char *fileName)
         snprintf(remoteFileErrorStr, UFILE_ERROR_SIZE, "%s", gopherGetLastError());
     else
 		elog(LOG, "Successfully unlink remote file %s, tablespace is %u.", fileName, spcId);
-    return ret;
 }
 
 static int
@@ -353,12 +352,12 @@ remoteFileRmdir(Oid spcId, const char *dirName)
 }
 
 static char *
-remoteFormatPathName(Oid /*relid*/, RelFileNode *relFileNode)
+remoteFormatPathName(Oid /*relid*/, RelFileLocator *relFileNode)
 {
     char *remoteFileName;
 
     remoteFileName =
-        psprintf("/%u/%u/%u_dirtable", relFileNode->spcNode, relFileNode->dbNode, relFileNode->relNode);;
+        psprintf("/%u/%u/%u_dirtable", relFileNode->spcOid, relFileNode->dbOid, relFileNode->relNumber);;
 
     return remoteFileName;
 }

@@ -353,6 +353,12 @@ explain (costs off)
   select v.c, (select count(*) from gstest2 group by () having v.c)
     from (values (false),(true)) v(c) order by v.c;
 
+-- HAVING with constant-false predicate on an empty grouping set must emit
+-- zero rows, not the default scalar-aggregate row.
+select count(*) from gstest2 group by grouping sets (()) having false;
+explain (costs off)
+  select count(*) from gstest2 group by grouping sets (()) having false;
+
 -- HAVING with GROUPING queries
 select ten, grouping(ten) from onek
 group by grouping sets(ten) having grouping(ten) >= 0
@@ -544,7 +550,9 @@ select array(select row(v.a,s1.*) from (select two,four, count(*) from onek grou
 
 -- test the knapsack
 
+set hash_mem_multiplier = 1;
 set enable_indexscan = false;
+set hash_mem_multiplier = 1.0;
 set work_mem = '64kB';
 explain (costs off)
   select unique1,
@@ -567,6 +575,7 @@ explain (costs off)
          count(*)
     from tenk1 group by grouping sets (unique1,twothousand,thousand,hundred,ten,four,two);
 
+reset hash_mem_multiplier;
 -- check collation-sensitive matching between grouping expressions
 -- (similar to a check for aggregates, but there are additional code
 -- paths for GROUPING, so check again here)
@@ -652,6 +661,7 @@ set jit_above_cost to default;
 
 set enable_sort = true;
 set work_mem to default;
+set hash_mem_multiplier to default;
 
 -- Compare results of ORCA plan that relies on "IS NOT DISTINCT FROM" HASH Join
 
@@ -714,5 +724,15 @@ group by rollup (a) order by a;
 select a, b, rank(b) within group (order by b nulls last)
 from (values (1,1),(1,4),(1,5),(3,1),(3,2)) v(a,b)
 group by rollup (a,b) order by a;
+
+-- ORCA: rollup over a derived-expression group alias with a target-list SRF.
+select generate_series(1, a) g, a+b ab
+  from (values (1,1),(2,2)) t(a,b)
+  group by rollup(a, ab) order by 1,2;
+
+-- Same shape with cube(): exercises additional grouping-set combinations.
+select generate_series(1, a) g, a+b ab
+  from (values (1,1),(2,2)) t(a,b)
+  group by cube(a, ab) order by 1,2;
 
 -- end

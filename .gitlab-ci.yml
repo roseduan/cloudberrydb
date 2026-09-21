@@ -279,7 +279,7 @@ test_pax:
         --gtest_output=xml:${CI_PROJECT_DIR}/build/pax_gtest/pax_unit_test_results.xml
     fi
 
-    export MAKE_TEST_COMMAND="-c default_table_access_method=pax -c optimizer=off -c enable_parallel=off -c force_parallel_mode=1"
+    export MAKE_TEST_COMMAND="-c default_table_access_method=pax -c optimizer=off -c enable_parallel=off"
     make test-pax
   rules:
     - !reference [ .common-rules ]
@@ -299,7 +299,13 @@ test_vectorization:
     set -euxo pipefail
 
     export ENV=devel
-    export MAKE_TEST_COMMAND="-c vector.enable_vectorization=on -c optimizer=off -c enable_parallel=off -c force_parallel_mode=1"
+    export MAKE_TEST_COMMAND="-c vector.enable_vectorization=on -c optimizer=off -c enable_parallel=off"
+    export TEST_TYPE=installcheck
+    make test-vectorization
+    export TEST_TYPE=icw_test
+    make test-vectorization
+
+    export TEST_TYPE=icw_aocs
     make test-vectorization
   rules:
     - !reference [ .common-rules ]

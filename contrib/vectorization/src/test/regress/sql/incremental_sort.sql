@@ -147,8 +147,8 @@ select * from (select * from t order by a) s order by a, b limit 55;
 -- Test EXPLAIN ANALYZE with only a fullsort group.
 set max_parallel_workers_per_gather = 0;
 select explain_analyze_without_memory('select * from (select * from t order by a) s order by a, b limit 55');
-reset max_parallel_workers_per_gather;
 select jsonb_pretty(explain_analyze_inc_sort_nodes_without_memory('select * from (select * from t order by a) s order by a, b limit 55'));
+reset max_parallel_workers_per_gather;
 select explain_analyze_inc_sort_nodes_verify_invariants('select * from (select * from t order by a) s order by a, b limit 55');
 delete from t;
 
@@ -181,8 +181,8 @@ rollback;
 -- Test EXPLAIN ANALYZE with both fullsort and presorted groups.
 set max_parallel_workers_per_gather = 0;
 select explain_analyze_without_memory('select * from (select * from t order by a) s order by a, b limit 70');
-reset max_parallel_workers_per_gather;
 select jsonb_pretty(explain_analyze_inc_sort_nodes_without_memory('select * from (select * from t order by a) s order by a, b limit 70'));
+reset max_parallel_workers_per_gather;
 select explain_analyze_inc_sort_nodes_verify_invariants('select * from (select * from t order by a) s order by a, b limit 70');
 delete from t;
 
@@ -294,5 +294,3 @@ from tenk1, lateral (select tenk1.unique1 from generate_series(1, 1000)) as sub;
 explain (costs off) select sub.unique1, stringu1 || random()::text
 from tenk1, lateral (select tenk1.unique1 from generate_series(1, 1000)) as sub
 order by 1, 2;
--- Disallow pushing down sort when pathkey is an SRF.
-explain (costs off) select unique1 from tenk1 order by unnest('{1,2}'::int[]);

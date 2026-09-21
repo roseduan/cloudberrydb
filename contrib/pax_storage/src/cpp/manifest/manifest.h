@@ -30,7 +30,7 @@
 #include "nodes/pg_list.h"
 #include "port/atomics.h"
 #include "postgres.h"
-#include "storage/relfilenode.h"
+#include "storage/relfilelocator.h"
 #include "access/relation.h"
 #include <stdbool.h>
 #include <stdint.h>

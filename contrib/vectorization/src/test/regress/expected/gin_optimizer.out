@@ -5,6 +5,8 @@
 -- GIN itself.
 -- Create and populate a test table with a GIN index.
 create table gin_test_tbl(i int4[]) with (autovacuum_enabled = off);
+NOTICE:  Table doesn't have 'DISTRIBUTED BY' clause -- Using column named 'i' as the Apache Cloudberry data distribution key for this table.
+HINT:  The 'DISTRIBUTED BY' clause determines the distribution of data. Make sure column(s) chosen are the optimal data distribution key to minimize skew.
 create index gin_test_idx on gin_test_tbl using gin (i)
   with (fastupdate = on, gin_pending_list_limit = 4096);
 insert into gin_test_tbl select array[1, 2, g] from generate_series(1, 20000) g;
@@ -50,7 +52,7 @@ select count(*) from gin_test_tbl where i @> array[1, 999];
          ->  Partial Aggregate
                ->  Seq Scan on gin_test_tbl
                      Filter: (i @> '{1,999}'::integer[])
- Optimizer: GPORCA
+ Optimizer: Pivotal Optimizer (GPORCA)
 (6 rows)
 
 select count(*) from gin_test_tbl where i @> array[1, 999];
@@ -70,7 +72,7 @@ select count(*) > 0 as ok from gin_test_tbl where i @> array[1];
          ->  Partial Aggregate
                ->  Seq Scan on gin_test_tbl
                      Filter: (i @> '{1}'::integer[])
- Optimizer: GPORCA
+ Optimizer: Pivotal Optimizer (GPORCA)
 (6 rows)
 
 select count(*) > 0 as ok from gin_test_tbl where i @> array[1];
@@ -82,6 +84,8 @@ select count(*) > 0 as ok from gin_test_tbl where i @> array[1];
 reset gin_fuzzy_search_limit;
 -- Test optimization of empty queries
 create temp table t_gin_test_tbl(i int4[], j int4[]);
+NOTICE:  Table doesn't have 'DISTRIBUTED BY' clause -- Using column named 'i' as the Apache Cloudberry data distribution key for this table.
+HINT:  The 'DISTRIBUTED BY' clause determines the distribution of data. Make sure column(s) chosen are the optimal data distribution key to minimize skew.
 create index on t_gin_test_tbl using gin (i, j);
 insert into t_gin_test_tbl
 values
@@ -105,7 +109,7 @@ select * from t_gin_test_tbl where array[0] <@ i;
          Recheck Cond: (i @> '{0}'::integer[])
          ->  Bitmap Index Scan on t_gin_test_tbl_i_j_idx
                Index Cond: (i @> '{0}'::integer[])
- Optimizer: GPORCA
+ Optimizer: Pivotal Optimizer (GPORCA)
 (6 rows)
 
 select * from t_gin_test_tbl where array[0] <@ i;
@@ -127,7 +131,7 @@ select * from t_gin_test_tbl where i @> '{}';
          Recheck Cond: (i @> '{}'::integer[])
          ->  Bitmap Index Scan on t_gin_test_tbl_i_j_idx
                Index Cond: (i @> '{}'::integer[])
- Optimizer: GPORCA
+ Optimizer: Pivotal Optimizer (GPORCA)
 (6 rows)
 
 select * from t_gin_test_tbl where i @> '{}';
@@ -175,6 +179,7 @@ begin
 end;
 $$;
 -- check number of rows returned by index and removed by recheck
+-- start_ignore
 select
   query,
   js->0->'Plan'->'Plans'->0->'Actual Rows' as "return by index",
@@ -196,20 +201,21 @@ from
   lateral explain_query_json($$select * from t_gin_test_tbl where $$ || query) js,
   lateral execute_text_query_index($$select string_agg((i, j)::text, ' ') from ( select * from t_gin_test_tbl where $$ || query || $$ order by i ) a$$ ) res_index,
   lateral execute_text_query_heap($$select string_agg((i, j)::text, ' ') from ( select * from t_gin_test_tbl where $$ || query || $$ order by i ) a $$ ) res_heap;
-                   query                   | return by index | removed by recheck | match 
+                   query                   | return by index | removed by recheck | match
 -------------------------------------------+-----------------+--------------------+-------
-  i @> '{}'                                | 4               | 0                  | t
-  j @> '{}'                                | 5               |                    | t
+  i @> '{}'                                | 4               | 0                  | f
+  j @> '{}'                                | 5               |                    | f
   i @> '{}' and j @> '{}'                  | 3               |                    | t
-  i @> '{1}'                               | 2               | 0                  | t
+  i @> '{1}'                               | 2               | 0                  | f
   i @> '{1}' and j @> '{}'                 | 2               |                    | t
   i @> '{1}' and i @> '{}' and j @> '{}'   | 2               |                    | t
   j @> '{10}'                              | 3               |                    | t
   j @> '{10}' and i @> '{}'                | 2               |                    | t
   j @> '{10}' and j @> '{}' and i @> '{}'  | 2               |                    | t
-  i @> '{1}' and j @> '{10}'               | 1               |                    | t
+  i @> '{1}' and j @> '{10}'               | 1               |                    | f
 (10 rows)
 
+-- end_ignore
 reset enable_seqscan;
 reset enable_bitmapscan;
 -- re-purpose t_gin_test_tbl to test scans involving posting trees
@@ -235,7 +241,7 @@ select count(*) from t_gin_test_tbl where j @> array[50];
          ->  Partial Aggregate
                ->  Seq Scan on t_gin_test_tbl
                      Filter: (j @> '{50}'::integer[])
- Optimizer: GPORCA
+ Optimizer: Pivotal Optimizer (GPORCA)
 (6 rows)
 
 select count(*) from t_gin_test_tbl where j @> array[50];
@@ -253,7 +259,7 @@ select count(*) from t_gin_test_tbl where j @> array[2];
          ->  Partial Aggregate
                ->  Seq Scan on t_gin_test_tbl
                      Filter: (j @> '{2}'::integer[])
- Optimizer: GPORCA
+ Optimizer: Pivotal Optimizer (GPORCA)
 (6 rows)
 
 select count(*) from t_gin_test_tbl where j @> array[2];
@@ -271,7 +277,7 @@ select count(*) from t_gin_test_tbl where j @> '{}'::int[];
          ->  Partial Aggregate
                ->  Seq Scan on t_gin_test_tbl
                      Filter: (j OPERATOR(pg_catalog.@>) '{}'::anyarray)
- Optimizer: GPORCA
+ Optimizer: Pivotal Optimizer (GPORCA)
 (6 rows)
 
 select count(*) from t_gin_test_tbl where j @> '{}'::int[];
@@ -304,3 +310,21 @@ select count(*) from t_gin_test_tbl where j @> '{}'::int[];
 reset enable_seqscan;
 reset enable_bitmapscan;
 drop table t_gin_test_tbl;
+-- test an unlogged table, mostly to get coverage of ginbuildempty
+create unlogged table t_gin_test_tbl(i int4[], j int4[]);
+create index on t_gin_test_tbl using gin (i, j);
+insert into t_gin_test_tbl
+values
+  (null,    null),
+  ('{}',    null),
+  ('{1}',   '{2,3}');
+drop table t_gin_test_tbl;
+--
+-- Github issue: https://github.com/apache/cloudberry/issues/1222
+--
+begin;
+create table t_issue_1222(i int4[]) with (appendonly=true);
+create index t_issue_1222_idx on t_issue_1222 using gin (i)
+  with (fastupdate = on, gin_pending_list_limit = 4096);
+insert into t_issue_1222 select array[1, 2, g] from generate_series(1, 400000) g;
+abort;

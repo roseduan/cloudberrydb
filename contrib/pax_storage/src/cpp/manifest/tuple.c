@@ -27,6 +27,7 @@
 
 #include "postgres.h"
 #include "manifest.h"
+#include "varatt.h"
 #include "catalog/pax_catalog_columns.h"
 
 /*

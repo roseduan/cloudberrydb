@@ -24,9 +24,6 @@
 #include "access/hash.h"
 #include "utils/array.h"
 #include "utils/builtins.h"
-
-#include "utils/int8.h"
-
 #include "utils/numeric.h"
 
 #undef MAXINT8LEN

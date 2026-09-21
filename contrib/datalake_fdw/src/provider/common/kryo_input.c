@@ -1,3 +1,4 @@
+#include <arpa/inet.h>
 #include "postgres.h"
 #include "utils/builtins.h"
 #include "utils/memutils.h"

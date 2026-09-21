@@ -13,7 +13,7 @@ SELECT ctid FROM tidrangescan WHERE ctid < '(1, 0)';
  Gather Motion 3:1  (slice1; segments: 3)
    ->  Seq Scan on tidrangescan
          Filter: (ctid < '(1,0)'::tid)
- Optimizer: GPORCA
+ Optimizer: Pivotal Optimizer (GPORCA)
 (4 rows)
 
 SELECT ctid FROM tidrangescan WHERE ctid < '(1, 0)';
@@ -28,7 +28,7 @@ SELECT ctid FROM tidrangescan WHERE ctid > '(9, 0)';
  Gather Motion 3:1  (slice1; segments: 3)
    ->  Seq Scan on tidrangescan
          Filter: (ctid > '(9,0)'::tid)
- Optimizer: GPORCA
+ Optimizer: Pivotal Optimizer (GPORCA)
 (4 rows)
 
 SELECT ctid FROM tidrangescan WHERE ctid > '(9, 0)';
@@ -52,7 +52,7 @@ SELECT ctid FROM tidrangescan WHERE ctid < '(1,0)';
  Gather Motion 3:1  (slice1; segments: 3)
    ->  Seq Scan on tidrangescan
          Filter: (ctid < '(1,0)'::tid)
- Optimizer: GPORCA
+ Optimizer: Pivotal Optimizer (GPORCA)
 (4 rows)
 
 SELECT ctid FROM tidrangescan WHERE ctid < '(1,0)';
@@ -97,7 +97,7 @@ SELECT ctid FROM tidrangescan WHERE ctid <= '(1,5)';
  Gather Motion 3:1  (slice1; segments: 3)
    ->  Seq Scan on tidrangescan
          Filter: (ctid <= '(1,5)'::tid)
- Optimizer: GPORCA
+ Optimizer: Pivotal Optimizer (GPORCA)
 (4 rows)
 
 SELECT ctid FROM tidrangescan WHERE ctid <= '(1,5)';
@@ -157,7 +157,7 @@ SELECT ctid FROM tidrangescan WHERE ctid < '(0,0)';
  Gather Motion 3:1  (slice1; segments: 3)
    ->  Seq Scan on tidrangescan
          Filter: (ctid < '(0,0)'::tid)
- Optimizer: GPORCA
+ Optimizer: Pivotal Optimizer (GPORCA)
 (4 rows)
 
 SELECT ctid FROM tidrangescan WHERE ctid < '(0,0)';
@@ -173,7 +173,7 @@ SELECT ctid FROM tidrangescan WHERE ctid > '(2,8)';
  Gather Motion 3:1  (slice1; segments: 3)
    ->  Seq Scan on tidrangescan
          Filter: (ctid > '(2,8)'::tid)
- Optimizer: GPORCA
+ Optimizer: Pivotal Optimizer (GPORCA)
 (4 rows)
 
 SELECT ctid FROM tidrangescan WHERE ctid > '(2,8)';
@@ -194,7 +194,7 @@ SELECT ctid FROM tidrangescan WHERE '(2,8)' < ctid;
  Gather Motion 3:1  (slice1; segments: 3)
    ->  Seq Scan on tidrangescan
          Filter: (ctid > '(2,8)'::tid)
- Optimizer: GPORCA
+ Optimizer: Pivotal Optimizer (GPORCA)
 (4 rows)
 
 SELECT ctid FROM tidrangescan WHERE '(2,8)' < ctid;
@@ -215,7 +215,7 @@ SELECT ctid FROM tidrangescan WHERE ctid >= '(2,8)';
  Gather Motion 3:1  (slice1; segments: 3)
    ->  Seq Scan on tidrangescan
          Filter: (ctid >= '(2,8)'::tid)
- Optimizer: GPORCA
+ Optimizer: Pivotal Optimizer (GPORCA)
 (4 rows)
 
 SELECT ctid FROM tidrangescan WHERE ctid >= '(2,8)';
@@ -239,7 +239,7 @@ SELECT ctid FROM tidrangescan WHERE ctid >= '(100,0)';
  Gather Motion 3:1  (slice1; segments: 3)
    ->  Seq Scan on tidrangescan
          Filter: (ctid >= '(100,0)'::tid)
- Optimizer: GPORCA
+ Optimizer: Pivotal Optimizer (GPORCA)
 (4 rows)
 
 SELECT ctid FROM tidrangescan WHERE ctid >= '(100,0)';
@@ -255,7 +255,7 @@ SELECT ctid FROM tidrangescan WHERE ctid > '(1,4)' AND '(1,7)' >= ctid;
  Gather Motion 3:1  (slice1; segments: 3)
    ->  Seq Scan on tidrangescan
          Filter: ((ctid > '(1,4)'::tid) AND (ctid <= '(1,7)'::tid))
- Optimizer: GPORCA
+ Optimizer: Pivotal Optimizer (GPORCA)
 (4 rows)
 
 SELECT ctid FROM tidrangescan WHERE ctid > '(1,4)' AND '(1,7)' >= ctid;
@@ -279,7 +279,7 @@ SELECT ctid FROM tidrangescan WHERE '(1,7)' >= ctid AND ctid > '(1,4)';
  Gather Motion 3:1  (slice1; segments: 3)
    ->  Seq Scan on tidrangescan
          Filter: ((ctid <= '(1,7)'::tid) AND (ctid > '(1,4)'::tid))
- Optimizer: GPORCA
+ Optimizer: Pivotal Optimizer (GPORCA)
 (4 rows)
 
 SELECT ctid FROM tidrangescan WHERE '(1,7)' >= ctid AND ctid > '(1,4)';
@@ -403,7 +403,7 @@ HINT:  For non-partitioned tables, run analyze <table_name>(<column_list>). For 
  Gather Motion 3:1  (slice1; segments: 3)
    ->  Seq Scan on tidrangescan
          Filter: (ctid < '(1,0)'::tid)
- Optimizer: GPORCA
+ Optimizer: Pivotal Optimizer (GPORCA)
 (4 rows)
 
 BEGIN;

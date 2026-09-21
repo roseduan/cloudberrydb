@@ -105,8 +105,8 @@ select a, b, array_dims(gp_array_agg(x)) from mergeappend_test r group by a, b
 union all
 select null, null, array_dims(gp_array_agg(x)) from mergeappend_test r
 order by 1,2;
-                                        QUERY PLAN                                         
--------------------------------------------------------------------------------------------
+                                  QUERY PLAN                                  
+------------------------------------------------------------------------------
  Gather Motion 3:1  (slice1; segments: 3)
    Merge Key: r.a, r.b
    ->  Sort
@@ -120,7 +120,7 @@ order by 1,2;
                            ->  Aggregate
                                  ->  Gather Motion 3:1  (slice3; segments: 3)
                                        ->  Seq Scan on mergeappend_test r_1
- Optimizer: Pivotal Optimizer (GPORCA)
+ Optimizer: GPORCA
 (14 rows)
 
 select a, b, array_dims(gp_array_agg(x)) from mergeappend_test r group by a, b
@@ -144,32 +144,34 @@ explain analyze select a, b, array_dims(gp_array_agg(x)) from mergeappend_test r
 union all
 select null, null, array_dims(gp_array_agg(x)) from mergeappend_test r
 order by 1,2;
-                                                                                 QUERY PLAN                                                                                  
------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
- Gather Motion 3:1  (slice1; segments: 3)  (cost=0.00..862.06 rows=22 width=16) (actual time=2.204..2.206 rows=7 loops=1)
+                                                                           QUERY PLAN                                                                           
+----------------------------------------------------------------------------------------------------------------------------------------------------------------
+ Gather Motion 3:1  (slice1; segments: 3)  (cost=0.00..862.07 rows=22 width=16) (actual time=4.668..4.670 rows=7 loops=1)
    Merge Key: r.a, r.b
-   ->  Sort  (cost=0.00..862.06 rows=8 width=16) (actual time=1.839..1.855 rows=5 loops=1)
+   ->  Sort  (cost=0.00..862.06 rows=8 width=16) (actual time=1.538..1.543 rows=4 loops=1)
          Sort Key: r.a, r.b
-         Sort Method:  quicksort  Memory: 150kB
-         ->  Append  (cost=0.00..862.06 rows=8 width=16) (actual time=0.333..1.826 rows=5 loops=1)
-               ->  HashAggregate  (cost=0.00..431.05 rows=7 width=16) (actual time=0.332..0.341 rows=4 loops=1)
+         Sort Method:  quicksort  Memory: 75kB
+         ->  Append  (cost=0.00..862.06 rows=8 width=16) (actual time=0.171..1.535 rows=4 loops=1)
+               ->  HashAggregate  (cost=0.00..431.05 rows=7 width=16) (actual time=0.171..0.176 rows=4 loops=1)
                      Group Key: r.a, r.b
-                     Peak Memory Usage: 0 kB
-                     ->  Seq Scan on mergeappend_test r  (cost=0.00..431.00 rows=167 width=12) (actual time=0.103..0.144 rows=301 loops=1)
-               ->  Result  (cost=0.00..431.01 rows=1 width=16) (actual time=1.481..1.483 rows=1 loops=1)
-                     ->  Redistribute Motion 1:3  (slice2)  (cost=0.00..431.01 rows=1 width=8) (actual time=1.477..1.477 rows=1 loops=1)
-                           ->  Aggregate  (cost=0.00..431.01 rows=1 width=8) (actual time=1.579..1.579 rows=1 loops=1)
-                                 ->  Gather Motion 3:1  (slice3; segments: 3)  (cost=0.00..431.01 rows=500 width=4) (actual time=1.284..1.451 rows=500 loops=1)
-                                       ->  Seq Scan on mergeappend_test r_1  (cost=0.00..431.00 rows=167 width=4) (actual time=0.087..0.152 rows=301 loops=1)
- Planning Time: 57.856 ms
-   (slice0)    Executor memory: 56K bytes.
-   (slice1)    Executor memory: 41K bytes avg x 3 workers, 42K bytes max (seg0).  Work_mem: 26K bytes max.
-   (slice2)    Executor memory: 58K bytes (entry db).
-   (slice3)    Executor memory: 37K bytes avg x 3 workers, 37K bytes max (seg0).
+                     Extra Text: (seg0)   hash table(s): 1; chain length 1.0 avg, 1 max; using 4 of 8 buckets; total 0 expansions.
+ 
+                     ->  Seq Scan on mergeappend_test r  (cost=0.00..431.00 rows=167 width=12) (actual time=0.012..0.111 rows=301 loops=1)
+               ->  Result  (cost=0.00..431.01 rows=1 width=16) (actual time=2.283..2.284 rows=1 loops=1)
+                     ->  Redistribute Motion 1:3  (slice2)  (cost=0.00..431.01 rows=1 width=8) (actual time=2.280..2.281 rows=1 loops=1)
+                           ->  Aggregate  (cost=0.00..431.01 rows=1 width=8) (actual time=0.069..0.069 rows=1 loops=1)
+                                 ->  Gather Motion 3:1  (slice3; segments: 3)  (cost=0.00..431.01 rows=500 width=4) (actual time=0.012..0.038 rows=500 loops=1)
+                                       ->  Seq Scan on mergeappend_test r_1  (cost=0.00..431.00 rows=167 width=4) (actual time=0.007..0.078 rows=301 loops=1)
+ Planning Time: 8.248 ms
+   (slice0)    Executor memory: 117K bytes.
+ * (slice1)    Executor memory: 116K bytes avg x 3x(0) workers, 116K bytes max (seg0).  Work_mem: 24K bytes max, 24K bytes wanted.
+   (slice2)    Executor memory: 26K bytes (entry db).
+   (slice3)    Executor memory: 111K bytes avg x 3x(0) workers, 111K bytes max (seg0).
  Memory used:  128000kB
- Optimizer: Pivotal Optimizer (GPORCA)
- Execution Time: 2.943 ms
-(23 rows)
+ Memory wanted:  772kB
+ Optimizer: GPORCA
+ Execution Time: 10.203 ms
+(25 rows)
 
 -- create a view as we otherwise have to repeat this query a few times.
 create view v_pagg_test as
@@ -214,23 +216,25 @@ DETAIL:  Falling back to Postgres-based planner because GPORCA does not support 
 explain (costs off) select * from v_pagg_test order by y;
 INFO:  GPORCA failed to produce a plan, falling back to Postgres-based planner
 DETAIL:  Falling back to Postgres-based planner because GPORCA does not support the following feature: Multiple Distinct Qualified Aggregates are disabled in the optimizer
-                                     QUERY PLAN                                     
-------------------------------------------------------------------------------------
+                                                                 QUERY PLAN                                                                 
+--------------------------------------------------------------------------------------------------------------------------------------------
  Gather Motion 3:1  (slice1; segments: 3)
    Merge Key: pagg_test.y
    ->  GroupAggregate
          Group Key: pagg_test.y
          ->  Sort
-               Sort Key: pagg_test.y
+               Sort Key: pagg_test.y, (((unnest(regexp_split_to_array((string_agg((pagg_test.x)::text, ','::text)), ','::text))))::integer)
                ->  Result
                      ->  ProjectSet
-                           ->  HashAggregate
+                           ->  Finalize HashAggregate
                                  Group Key: pagg_test.y
                                  ->  Redistribute Motion 3:3  (slice2; segments: 3)
                                        Hash Key: pagg_test.y
-                                       ->  Seq Scan on pagg_test
+                                       ->  Streaming Partial HashAggregate
+                                             Group Key: pagg_test.y
+                                             ->  Seq Scan on pagg_test
  Optimizer: Postgres query optimizer
-(14 rows)
+(16 rows)
 
 -- Test array_agg(anyarray)
 create table int_array_table (a int, arr int[]);
@@ -308,7 +312,7 @@ explain (verbose, costs off) select array_dims(gp_array_agg(distinct arr)) from 
          Output: arr
          ->  Seq Scan on test_gp_array_agg.int_array_table
                Output: arr
- Optimizer: Pivotal Optimizer (GPORCA)
+ Optimizer: GPORCA
 (7 rows)
 
 CREATE TABLE arrtest (

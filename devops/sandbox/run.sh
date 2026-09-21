@@ -101,26 +101,50 @@ case "${OS_VERSION}" in
 esac
 
 # Validate CODEBASE_VERSION
-if [[ "${CODEBASE_VERSION}" != "main" && ! "${CODEBASE_VERSION}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+if [[ "${CODEBASE_VERSION}" != "main" && "${CODEBASE_VERSION}" != "local" && ! "${CODEBASE_VERSION}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
     echo "Invalid codebase version: ${CODEBASE_VERSION}"
     usage
 fi
 
-# Build image
-if [[ "${CODEBASE_VERSION}" = "main"  ]]; then
-    DOCKERFILE=Dockerfile.${CODEBASE_VERSION}.${OS_VERSION}
+# Determine sandbox directory and repository root
+SANDBOX_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "${SANDBOX_DIR}/../.." && pwd)"
 
-    # Single image build
+# Ensure submodules are initialized for local builds
+if [[ "${CODEBASE_VERSION}" = "local" ]]; then
+    if [[ -d "${REPO_ROOT}/.git" ]] && command -v git >/dev/null 2>&1; then
+        # Check if any submodules are uninitialized (-), out of sync (+), or have conflicts (U)
+        if (cd "${REPO_ROOT}" && git submodule status --recursive | grep -qE "^[+-U]"); then
+            echo "Updating git submodules for local build..."
+            (cd "${REPO_ROOT}" && git submodule update --init --recursive)
+        else
+            echo "Git submodules are already up to date. Skipping update."
+        fi
+    else
+        echo "Warning: Skipping 'git submodule update --init --recursive' for local build because either '.git' directory or 'git' command is missing in ${REPO_ROOT}."
+        echo "If your Cloudberry checkout relies on git submodules, please ensure they have been populated before running with '-c local'."
+    fi
+fi
+
+
+# Build image
+if [[ "${CODEBASE_VERSION}" = "main" || "${CODEBASE_VERSION}" = "local" ]]; then
+    DOCKERFILE="${SANDBOX_DIR}/Dockerfile.main.${OS_VERSION}"
+
+    # Single image build from main or local source
     docker build --file ${DOCKERFILE} \
                  --build-arg TIMEZONE_VAR="${TIMEZONE_VAR}" \
-                 --tag cbdb-${CODEBASE_VERSION}:${OS_VERSION} .
+                 --build-arg CODEBASE_VERSION="${CODEBASE_VERSION}" \
+                 --tag cbdb-${CODEBASE_VERSION}:${OS_VERSION} \
+                 ${REPO_ROOT}
 else
-    DOCKERFILE=Dockerfile.RELEASE.${OS_VERSION}
+    DOCKERFILE="${SANDBOX_DIR}/Dockerfile.RELEASE.${OS_VERSION}"
 
     docker build --file ${DOCKERFILE} \
                  --build-arg TIMEZONE_VAR="${TIMEZONE_VAR}" \
                  --build-arg CODEBASE_VERSION_VAR="${CODEBASE_VERSION}" \
-                 --tag cbdb-${CODEBASE_VERSION}:${OS_VERSION} .
+                 --tag cbdb-${CODEBASE_VERSION}:${OS_VERSION} \
+                 ${SANDBOX_DIR}
 fi
 
 # Check if build only flag is set

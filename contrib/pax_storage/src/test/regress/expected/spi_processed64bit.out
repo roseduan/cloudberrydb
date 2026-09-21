@@ -91,6 +91,9 @@ begin
 end;
 $$;
 ERROR:  not supported on pax relations: IndexDeleteTuples
+CONTEXT:  SQL statement "UPDATE public.spi64bittest
+     SET data = data + 1"
+PL/pgSQL function inline_code_block line 6 at SQL statement
 SELECT gp_inject_fault('executor_run_high_processed', 'reset', dbid)
   FROM pg_catalog.gp_segment_configuration
  WHERE role = 'p';

@@ -67,7 +67,7 @@ static char plasmaSocketDir[MAXPGPATH + 1];
 
 /* Module load */
 void _PG_init(void);
-void gophermeta_main(Datum main_arg);
+PGDLLEXPORT void gophermeta_main(Datum main_arg);
 static void gophermeta_start_worker(void);
 static void GetGopherMetaPath(char *dest);
 static void GetGopherSocketPath(char *dest);

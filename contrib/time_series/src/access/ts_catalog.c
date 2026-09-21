@@ -41,7 +41,6 @@
 #include "utils/builtins.h"
 #include "utils/fmgroids.h"
 #include "utils/inval.h"
-#include "utils/int8.h"
 #include "utils/resowner.h"
 #include "utils/lsyscache.h"
 #include "utils/rel.h"
@@ -1109,8 +1108,8 @@ chunk_stats_dispatch_counts(Oid relid, int *n_total, int *n_compressed)
 		if (PQntuples(pgres) != 1 || PQnfields(pgres) != 2)
 			continue;
 
-		(void) scanint8(PQgetvalue(pgres, 0, 0), false, &v_total);
-		(void) scanint8(PQgetvalue(pgres, 0, 1), false, &v_compressed);
+		v_total = pg_strtoint64(PQgetvalue(pgres, 0, 0));
+		v_compressed = pg_strtoint64(PQgetvalue(pgres, 0, 1));
 		*n_total += (int) v_total;
 		*n_compressed += (int) v_compressed;
 	}
@@ -1245,6 +1244,7 @@ ts_refresh_chunk_stats(Oid relid)
 	else
 		repl_null[Anum_pg_class_reloptions - 1] = true;
 
+	LockTuple(classRel, &oldTup->t_self, InplaceUpdateTupleLock);
 	newTup = heap_modify_tuple(oldTup, RelationGetDescr(classRel),
 							   repl_val, repl_null, repl_repl);
 
@@ -1257,7 +1257,8 @@ ts_refresh_chunk_stats(Oid relid)
 	 * on the target relation — compress_chunks's existing AccessShareLock
 	 * stays undisturbed.
 	 */
-	CatalogTupleUpdate(classRel, &newTup->t_self, newTup);
+	CatalogTupleUpdate(classRel, &oldTup->t_self, newTup);
+	UnlockTuple(classRel, &oldTup->t_self, InplaceUpdateTupleLock);
 
 	heap_freetuple(newTup);
 	heap_freetuple(oldTup);

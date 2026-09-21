@@ -7,6 +7,7 @@
 extern "C"
 {
 #include "utils/numeric.h"
+#include "varatt.h"
 }
 
 template<typename T>
@@ -121,8 +122,23 @@ inline int getPowerOf10(__int128_t n) {
 	 * Use CLZ (count leading zeros) to estimate the decimal digit count,
 	 * replacing the binary search (std::upper_bound) over 39 __int128 entries.
 	 *
-	 * bits * log10(2) approximated as bits * 77 / 256 always underestimates,
-	 * so the true answer is either 'estimate' or 'estimate + 1'.
+	 * The single fixup below (return estimate or estimate + 1) is only valid
+	 * if the estimate is never more than one short of the true digit count,
+	 * so the approximation of log10(2) must be tight enough that
+	 *     floor(bits * approx) >= digits(n) - 1
+	 * holds for every bit length up to 128.
+	 *
+	 * 77/256 = 0.30078125 is NOT tight enough: against log10(2) = 0.3010300
+	 * it loses 0.00025 per bit, which reaches a full digit by bits = 103.
+	 * At bits = 103, 113 and 123 (i.e. around 10^31, 10^34 and 10^37) the
+	 * estimate fell two short and this returned digits(n) - 1, which made
+	 * int_to_numeric_with_scale() compute a weight one NBASE digit too low
+	 * and decode e.g. DECIMAL(38,37) 1.0 as 0.0001.
+	 *
+	 * 1233/4096 = 0.30102539 is within 5e-7 of log10(2), so the shortfall
+	 * stays below 7e-5 of a digit across the whole 128-bit range.  Verified
+	 * exhaustively against every bit-length boundary and every power of ten,
+	 * plus 20M random values.
 	 */
 	int bits;
 	uint64_t hi = (uint64_t)((unsigned __int128)n >> 64);
@@ -131,7 +147,7 @@ inline int getPowerOf10(__int128_t n) {
 	else
 		bits = 64 - __builtin_clzll((uint64_t)n);
 
-	int estimate = (bits * 77) >> 8;
+	int estimate = (bits * 1233) >> 12;
 	if (estimate >= 39) return -1;
 	if (n < POWER_TABLE[estimate]) return estimate;
 	if (estimate + 1 >= 39) return -1;

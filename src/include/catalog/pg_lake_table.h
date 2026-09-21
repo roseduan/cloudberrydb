@@ -45,8 +45,7 @@ CATALOG(pg_lake_table,9901,LakeTableRelationId)
  */
 typedef FormData_pg_lake_table *Form_pg_lake_table;
 
-DECLARE_UNIQUE_INDEX_PKEY(pg_lake_table_oid_index, 9902, on pg_lake_table using btree(ltrelid oid_ops));
-#define LakeTableOidIndexId  9902
+DECLARE_UNIQUE_INDEX_PKEY(pg_lake_table_oid_index, 9902, LakeTableOidIndexId, on pg_lake_table using btree(ltrelid oid_ops));
 
 /* ----------------
  *		Lake table structure for caching

@@ -84,6 +84,7 @@ CXformInlineCTEConsumer::Transform(CXformContext *
 	// inline the consumer
 	CLogicalCTEConsumer *popConsumer =
 		CLogicalCTEConsumer::PopConvert(pexpr->Pop());
+	(void) popConsumer->ApplyInline();
 	CColRefArray *crs = popConsumer->Pdrgporigcr();
 
 	if (nullptr != crs)

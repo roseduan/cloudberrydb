@@ -40,16 +40,20 @@ CREATE TABLE test_hj_spill (i1 int, i2 int, i3 int, i4 int, i5 int, i6 int, i7 i
 insert into test_hj_spill SELECT i,i,i%1000,i,i,i,i,i from
 	(select generate_series(1, nsegments * 15000) as i from
 	(select count(*) as nsegments from gp_segment_configuration where role='p' and content >= 0) foo) bar;
+
+-- Collect statistics to ensure ORCA generates correct execution plan
+ANALYZE test_hj_spill;
+
 SET statement_mem=1024;
 set gp_resqueue_print_operator_memory_limits=on;
 
 set gp_workfile_compression = on;
-select avg(i3) from (SELECT t1.* FROM test_hj_spill AS t1 RIGHT JOIN test_hj_spill AS t2 ON t1.i1=t2.i2) foo;
+select count(i3), avg(i3::numeric) from (SELECT t1.* FROM test_hj_spill AS t1 RIGHT JOIN test_hj_spill AS t2 ON t1.i1=t2.i2) foo;
 select * from hashjoin_spill.is_workfile_created('explain (analyze, verbose) SELECT t1.* FROM test_hj_spill AS t1 RIGHT JOIN test_hj_spill AS t2 ON t1.i1=t2.i2');
 select * from hashjoin_spill.is_workfile_created('explain (analyze, verbose) SELECT t1.* FROM test_hj_spill AS t1 RIGHT JOIN test_hj_spill AS t2 ON t1.i1=t2.i2 LIMIT 15000;');
 
 set gp_workfile_compression = off;
-select avg(i3) from (SELECT t1.* FROM test_hj_spill AS t1 RIGHT JOIN test_hj_spill AS t2 ON t1.i1=t2.i2) foo;
+select count(i3), avg(i3::numeric) from (SELECT t1.* FROM test_hj_spill AS t1 RIGHT JOIN test_hj_spill AS t2 ON t1.i1=t2.i2) foo;
 select * from hashjoin_spill.is_workfile_created('explain (analyze, verbose) SELECT t1.* FROM test_hj_spill AS t1 RIGHT JOIN test_hj_spill AS t2 ON t1.i1=t2.i2');
 select * from hashjoin_spill.is_workfile_created('explain (analyze, verbose) SELECT t1.* FROM test_hj_spill AS t1 RIGHT JOIN test_hj_spill AS t2 ON t1.i1=t2.i2 LIMIT 15000;');
 

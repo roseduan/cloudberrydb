@@ -19,6 +19,7 @@
 #include "nodes/makefuncs.h"
 #include "pgstat.h"
 #include "parser/parse_func.h"
+#include "utils/guc.h"
 #include "utils/relcache.h"
 #include "utils/lsyscache.h"
 #include "utils/memutils.h"

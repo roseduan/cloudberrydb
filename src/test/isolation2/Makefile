@@ -32,7 +32,7 @@ xmax_extquery_test: xmax_extquery_test.c
 	$(CC) $(CPPFLAGS) $(rpath) -I$(top_builddir)/src/interfaces/libpq -L$(GPHOME)/lib -L$(top_builddir)/src/interfaces/libpq  -o $@ $< -lpq
 
 pg_regress.o:
-	$(MAKE) -C $(top_builddir)/src/test/regress pg_regress.o
+	$(MAKE) -C $(top_builddir)/src/test/regress install
 	rm -f $@ && $(LN_S) $(top_builddir)/src/test/regress/pg_regress.o .
 
 gpstringsubs.pl:

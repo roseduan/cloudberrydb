@@ -1,4 +1,13 @@
-SELECT name, setting FROM pg_settings WHERE name LIKE 'enable%';
+--
+-- Will run in parallel mode with enable_parallel=on and non-parallel mode.
+-- Filter this gucs to pass regression.
+--
+SELECT name, setting FROM pg_settings WHERE name LIKE 'enable%' and
+name not in ('enable_parallel',
+ 'enable_answer_query_using_materialized_views',
+ 'enable_parallel_dedup_semi_join',
+ 'enable_parallel_dedup_semi_reverse_join',
+ 'enable_parallel_semi_join');
               name              | setting 
 --------------------------------+---------
  enable_async_append            | on
@@ -11,6 +20,7 @@ SELECT name, setting FROM pg_settings WHERE name LIKE 'enable%';
  enable_incremental_sort        | off
  enable_indexonlyscan           | on
  enable_indexscan               | on
+ enable_lock_optimization       | off
  enable_material                | on
  enable_memoize                 | on
  enable_mergejoin               | off
@@ -20,10 +30,12 @@ SELECT name, setting FROM pg_settings WHERE name LIKE 'enable%';
  enable_partition_pruning       | on
  enable_partitionwise_aggregate | off
  enable_partitionwise_join      | off
+ enable_password_profile        | on
+ enable_presorted_aggregate     | on
  enable_seqscan                 | on
  enable_sort                    | on
  enable_tidscan                 | on
-(22 rows)
+(25 rows)
 
 -- start_ignore
 create schema rangefuncs_cdb;
@@ -187,7 +199,7 @@ $$  LANGUAGE plpgsql;
 -- function in select clause
 --   Fails: plpgsql does not support SFRM_Materialize
 select foor(1);
-ERROR:  set-valued function called in context that cannot accept a set
+ERROR:  materialize mode required, but it is not allowed in this context
 CONTEXT:  PL/pgSQL function foor(integer) line 6 at RETURN NEXT
 -- expanding columns in the select list
 --    Fails: record type not registered
@@ -210,7 +222,7 @@ select * from foor(1) as (fooid int, f2 int);
 -- function over function (executed on master) 
 --    Fails: plpgsql does not support SFRM_Materialize
 select foor(fooid), * from foor(3) as (fooid int, f2 int);
-ERROR:  set-valued function called in context that cannot accept a set
+ERROR:  materialize mode required, but it is not allowed in this context
 CONTEXT:  PL/pgSQL function foor(integer) line 6 at RETURN NEXT
 -- Joining with a table
 select * from foo2, foor(3) z(fooid int, f2 int) where foo2.f2 = z.f2;

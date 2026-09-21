@@ -103,6 +103,7 @@ CXformInlineCTEConsumerUnderSelect::Transform(CXformContext *pxfctxt,
 
 	// inline consumer
 	GPOS_ASSERT(nullptr != popConsumer->Phmulcr());
+	(void) popConsumer->ApplyInline();
 	CExpression *pexprInlinedConsumer = popConsumer->PexprInlined();
 	CColRefArray *crs = popConsumer->Pdrgporigcr();
 

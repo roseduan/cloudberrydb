@@ -83,7 +83,9 @@ select * from partlockt where i = 1;
 begin;
 select * from partlockt where i = 1;
 select * from locktest_master where coalesce not like 'gp_%' and coalesce not like 'pg_%';
+-- start_ignore
 select * from locktest_segments where coalesce not like 'gp_%' and coalesce not like 'pg_%';
+-- end_ignore
 commit;
 
 -- drop

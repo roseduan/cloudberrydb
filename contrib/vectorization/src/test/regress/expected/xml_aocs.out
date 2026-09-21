@@ -3,6 +3,8 @@ CREATE TABLE xmltest (
     id int,
     data xml
 );
+NOTICE:  Table doesn't have 'DISTRIBUTED BY' clause -- Using column named 'id' as the Apache Cloudberry data distribution key for this table.
+HINT:  The 'DISTRIBUTED BY' clause determines the distribution of data. Make sure column(s) chosen are the optimal data distribution key to minimize skew.
 INSERT INTO xmltest VALUES (1, '<value>one</value>');
 INSERT INTO xmltest VALUES (2, '<value>two</value>');
 INSERT INTO xmltest VALUES (3, '<wrong');
@@ -113,11 +115,11 @@ SELECT xmlelement(name employee, xmlforest(name, age, salary as pay)) FROM emp;
                               xmlelement                              
 ----------------------------------------------------------------------
  <employee><name>bill</name><age>20</age><pay>1000</pay></employee>
+ <employee><name>jeff</name><age>23</age><pay>600</pay></employee>
  <employee><name>sharon</name><age>25</age><pay>1000</pay></employee>
  <employee><name>sam</name><age>30</age><pay>2000</pay></employee>
  <employee><name>cim</name><age>30</age><pay>400</pay></employee>
  <employee><name>linda</name><age>19</age><pay>100</pay></employee>
- <employee><name>jeff</name><age>23</age><pay>600</pay></employee>
 (6 rows)
 
 SELECT xmlelement(name duplicate, xmlattributes(1 as a, 2 as b, 3 as a));
@@ -224,17 +226,11 @@ ERROR:  invalid XML content
 DETAIL:  line 1: xmlParseEntityRef: no name
 <invalidentity>&</invalidentity>
                 ^
-line 1: chunk is not well balanced
-<invalidentity>&</invalidentity>
-                                ^
 SELECT xmlparse(content '<undefinedentity>&idontexist;</undefinedentity>');
 ERROR:  invalid XML content
 DETAIL:  line 1: Entity 'idontexist' not defined
 <undefinedentity>&idontexist;</undefinedentity>
                              ^
-line 1: chunk is not well balanced
-<undefinedentity>&idontexist;</undefinedentity>
-                                               ^
 SELECT xmlparse(content '<invalidns xmlns=''&lt;''/>');
          xmlparse          
 ---------------------------
@@ -253,9 +249,6 @@ DETAIL:  line 1: Entity 'idontexist' not defined
 <twoerrors>&idontexist;</unbalanced>
                        ^
 line 1: Opening and ending tag mismatch: twoerrors line 1 and unbalanced
-<twoerrors>&idontexist;</unbalanced>
-                                    ^
-line 1: chunk is not well balanced
 <twoerrors>&idontexist;</unbalanced>
                                     ^
 SELECT xmlparse(content '<nosuchprefix:tag/>');
@@ -604,18 +597,18 @@ CREATE VIEW xmlview8 AS SELECT xmlserialize(content 'good' as char(10));
 CREATE VIEW xmlview9 AS SELECT xmlserialize(content 'good' as text);
 SELECT table_name, view_definition FROM information_schema.views
   WHERE table_name LIKE 'xmlview%' ORDER BY 1;
- table_name |                                                  view_definition                                                  
-------------+-------------------------------------------------------------------------------------------------------------------
+ table_name |                                              view_definition                                               
+------------+------------------------------------------------------------------------------------------------------------
  xmlview1   |  SELECT xmlcomment('test'::text) AS xmlcomment;
  xmlview2   |  SELECT XMLCONCAT('hello'::xml, 'you'::xml) AS "xmlconcat";
  xmlview3   |  SELECT XMLELEMENT(NAME element, XMLATTRIBUTES(1 AS ":one:", 'deuce' AS two), 'content&') AS "xmlelement";
- xmlview4   |  SELECT XMLELEMENT(NAME employee, XMLFOREST(emp.name AS name, emp.age AS age, emp.salary AS pay)) AS "xmlelement"+
+ xmlview4   |  SELECT XMLELEMENT(NAME employee, XMLFOREST(name AS name, age AS age, salary AS pay)) AS "xmlelement"     +
             |    FROM emp;
  xmlview5   |  SELECT XMLPARSE(CONTENT '<abc>x</abc>'::text STRIP WHITESPACE) AS "xmlparse";
  xmlview6   |  SELECT XMLPI(NAME foo, 'bar'::text) AS "xmlpi";
  xmlview7   |  SELECT XMLROOT('<foo/>'::xml, VERSION NO VALUE, STANDALONE YES) AS "xmlroot";
- xmlview8   |  SELECT (XMLSERIALIZE(CONTENT 'good'::xml AS character(10)))::character(10) AS "xmlserialize";
- xmlview9   |  SELECT XMLSERIALIZE(CONTENT 'good'::xml AS text) AS "xmlserialize";
+ xmlview8   |  SELECT (XMLSERIALIZE(CONTENT 'good'::xml AS character(10) NO INDENT))::character(10) AS "xmlserialize";
+ xmlview9   |  SELECT XMLSERIALIZE(CONTENT 'good'::xml AS text NO INDENT) AS "xmlserialize";
 (9 rows)
 
 -- Text XPath expressions evaluation
@@ -857,6 +850,8 @@ SELECT COUNT(id) FROM xmltest WHERE xpath_exists('/myns:menu/myns:beers/myns:nam
 (1 row)
 
 CREATE TABLE query ( expr TEXT );
+NOTICE:  Table doesn't have 'DISTRIBUTED BY' clause -- Using column named 'expr' as the Apache Cloudberry data distribution key for this table.
+HINT:  The 'DISTRIBUTED BY' clause determines the distribution of data. Make sure column(s) chosen are the optimal data distribution key to minimize skew.
 INSERT INTO query VALUES ('/menu/beers/cost[text() = ''lots'']');
 SELECT COUNT(id) FROM xmltest, query WHERE xmlexists(expr PASSING BY REF data);
  count 
@@ -1152,7 +1147,7 @@ EXPLAIN (COSTS OFF, VERBOSE) SELECT * FROM xmltableview1;
                ->  Table Function Scan on "xmltable"
                      Output: "xmltable".id, "xmltable"._id, "xmltable".country_name, "xmltable".country_id, "xmltable".region_id, "xmltable".size, "xmltable".unit, "xmltable".premier_name
                      Table Function Call: XMLTABLE(('/ROWS/ROW'::text) PASSING (xmldata.data) COLUMNS id integer PATH ('@id'::text), _id FOR ORDINALITY, country_name text PATH ('COUNTRY_NAME/text()'::text) NOT NULL, country_id text PATH ('COUNTRY_ID'::text), region_id integer PATH ('REGION_ID'::text), size double precision PATH ('SIZE'::text), unit text PATH ('SIZE/@unit'::text), premier_name text DEFAULT ('not specified'::text) PATH ('PREMIER_NAME'::text))
- Settings: optimizer = 'off'
+ Settings: optimizer = 'off', enable_parallel = 'off'
  Optimizer: Postgres query optimizer
 (13 rows)
 
@@ -1337,7 +1332,7 @@ SELECT  xmltable.*
                ->  Table Function Scan on "xmltable"
                      Output: "xmltable".id, "xmltable"._id, "xmltable".country_name, "xmltable".country_id, "xmltable".region_id, "xmltable".size, "xmltable".unit, "xmltable".premier_name
                      Table Function Call: XMLTABLE(('/ROWS/ROW'::text) PASSING (xmldata.data) COLUMNS id integer PATH ('@id'::text), _id FOR ORDINALITY, country_name text PATH ('COUNTRY_NAME'::text) NOT NULL, country_id text PATH ('COUNTRY_ID'::text), region_id integer PATH ('REGION_ID'::text), size double precision PATH ('SIZE'::text), unit text PATH ('SIZE/@unit'::text), premier_name text DEFAULT ('not specified'::text) PATH ('PREMIER_NAME'::text))
- Settings: optimizer = 'off'
+ Settings: optimizer = 'off', enable_parallel = 'off'
  Optimizer: Postgres query optimizer
 (13 rows)
 
@@ -1364,7 +1359,7 @@ SELECT xmltable.* FROM xmldata, LATERAL xmltable('/ROWS/ROW[COUNTRY_NAME="Japan"
                      Output: "xmltable"."COUNTRY_NAME", "xmltable"."REGION_ID"
                      Table Function Call: XMLTABLE(('/ROWS/ROW[COUNTRY_NAME="Japan" or COUNTRY_NAME="India"]'::text) PASSING (xmldata.data) COLUMNS "COUNTRY_NAME" text, "REGION_ID" integer)
                      Filter: ("xmltable"."COUNTRY_NAME" = 'Japan'::text)
- Settings: optimizer = 'off'
+ Settings: optimizer = 'off', enable_parallel = 'off'
  Optimizer: Postgres query optimizer
 (14 rows)
 
@@ -1412,17 +1407,17 @@ SELECT  xmltable.*
                                   premier_name text PATH 'PREMIER_NAME' DEFAULT 'not specified');
  id | _id |  country_name  | country_id | region_id | size | unit | premier_name  
 ----+-----+----------------+------------+-----------+------+------+---------------
+ 10 |   1 | Czech Republic | CZ         |         2 |      |      | Milos Zeman
+ 11 |   2 | Germany        | DE         |         2 |      |      | not specified
+ 12 |   3 | France         | FR         |         2 |      |      | not specified
+ 20 |   1 | Egypt          | EG         |         1 |      |      | not specified
+ 21 |   2 | Sudan          | SD         |         1 |      |      | not specified
   1 |   1 | Australia      | AU         |         3 |      |      | not specified
   2 |   2 | China          | CN         |         3 |      |      | not specified
   3 |   3 | HongKong       | HK         |         3 |      |      | not specified
   4 |   4 | India          | IN         |         3 |      |      | not specified
   5 |   5 | Japan          | JP         |         3 |      |      | Sinzo Abe
   6 |   6 | Singapore      | SG         |         3 |  791 | km   | not specified
- 10 |   1 | Czech Republic | CZ         |         2 |      |      | Milos Zeman
- 11 |   2 | Germany        | DE         |         2 |      |      | not specified
- 12 |   3 | France         | FR         |         2 |      |      | not specified
- 20 |   1 | Egypt          | EG         |         1 |      |      | not specified
- 21 |   2 | Sudan          | SD         |         1 |      |      | not specified
 (11 rows)
 
 SELECT  xmltable.*
@@ -1473,7 +1468,7 @@ SELECT  xmltable.*
                      Output: "xmltable".id, "xmltable"._id, "xmltable".country_name, "xmltable".country_id, "xmltable".region_id, "xmltable".size, "xmltable".unit, "xmltable".premier_name
                      Table Function Call: XMLTABLE(('/ROWS/ROW'::text) PASSING (xmldata.data) COLUMNS id integer PATH ('@id'::text), _id FOR ORDINALITY, country_name text PATH ('COUNTRY_NAME'::text) NOT NULL, country_id text PATH ('COUNTRY_ID'::text), region_id integer PATH ('REGION_ID'::text), size double precision PATH ('SIZE'::text), unit text PATH ('SIZE/@unit'::text), premier_name text DEFAULT ('not specified'::text) PATH ('PREMIER_NAME'::text))
                      Filter: ("xmltable".region_id = 2)
- Settings: optimizer = 'off'
+ Settings: optimizer = 'off', enable_parallel = 'off'
  Optimizer: Postgres query optimizer
 (14 rows)
 
@@ -1490,7 +1485,7 @@ SELECT  xmltable.*
                                   size float PATH 'SIZE' NOT NULL,
                                   unit text PATH 'SIZE/@unit',
                                   premier_name text PATH 'PREMIER_NAME' DEFAULT 'not specified');
-ERROR:  null is not allowed in column "size"  (seg0 slice1 127.0.1.1:7002 pid=32204)
+ERROR:  null is not allowed in column "size"  (seg2 slice1 172.18.0.2:7004 pid=1896602)
 -- if all is ok, then result is empty
 -- one line xml test
 WITH
@@ -1545,6 +1540,8 @@ WITH
 (0 rows)
 
 CREATE TABLE xmltest2(x xml, _path text);
+NOTICE:  Table doesn't have 'DISTRIBUTED BY' clause -- Using column named '_path' as the Apache Cloudberry data distribution key for this table.
+HINT:  The 'DISTRIBUTED BY' clause determines the distribution of data. Make sure column(s) chosen are the optimal data distribution key to minimize skew.
 INSERT INTO xmltest2 VALUES('<d><r><ac>1</ac></r></d>', 'A');
 INSERT INTO xmltest2 VALUES('<d><r><bc>2</bc></r></d>', 'B');
 INSERT INTO xmltest2 VALUES('<d><r><cc>3</cc></r></d>', 'C');

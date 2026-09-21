@@ -49,9 +49,7 @@ typedef FormData_pg_foreign_catalog *Form_pg_foreign_catalog;
 
 DECLARE_TOAST(pg_foreign_catalog, 8550, 8551);
 
-DECLARE_UNIQUE_INDEX_PKEY(pg_foreign_catalog_oid_index, 8552, on pg_foreign_catalog using btree(oid oid_ops));
-#define ForeignCatalogOidIndexId	8552
-DECLARE_UNIQUE_INDEX(pg_foreign_catalog_name_server_index, 8553, on pg_foreign_catalog using btree(fcname name_ops, fcserver oid_ops));
-#define ForeignCatalogNameServerIndexId	8553
+DECLARE_UNIQUE_INDEX_PKEY(pg_foreign_catalog_oid_index, 8552, ForeignCatalogOidIndexId, on pg_foreign_catalog using btree(oid oid_ops));
+DECLARE_UNIQUE_INDEX(pg_foreign_catalog_name_server_index, 8553, ForeignCatalogNameServerIndexId, on pg_foreign_catalog using btree(fcname name_ops, fcserver oid_ops));
 
 #endif							/* PG_FOREIGN_CATALOG_H */

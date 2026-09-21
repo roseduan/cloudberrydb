@@ -105,13 +105,13 @@ set enable_mergejoin = off;
 --
 explain (costs off)
   select * from ec0 where ff = f1 and f1 = '42'::int8;
-                     QUERY PLAN                      
------------------------------------------------------
+                      QUERY PLAN                      
+------------------------------------------------------
  Gather Motion 1:1  (slice1; segments: 1)
    ->  Index Scan using ec0_pkey on ec0
          Index Cond: (ff = '42'::bigint)
          Filter: ((f1 = '42'::bigint) AND (ff = f1))
- Optimizer: GPORCA
+ Optimizer: Pivotal Optimizer (GPORCA) version 3.9.0
 (5 rows)
 
 explain (costs off)
@@ -121,7 +121,7 @@ explain (costs off)
  Gather Motion 3:1  (slice1; segments: 3)
    ->  Seq Scan on ec0
          Filter: ((ff = f1) AND (f1 = '42'::int8alias1))
- Optimizer: GPORCA
+ Optimizer: Pivotal Optimizer (GPORCA)
 (4 rows)
 
 explain (costs off)
@@ -131,7 +131,7 @@ explain (costs off)
  Gather Motion 3:1  (slice1; segments: 3)
    ->  Seq Scan on ec1
          Filter: ((ff = f1) AND (f1 = '42'::int8alias1))
- Optimizer: GPORCA
+ Optimizer: Pivotal Optimizer (GPORCA) version 3.9.0
 (4 rows)
 
 explain (costs off)
@@ -141,7 +141,7 @@ explain (costs off)
  Gather Motion 3:1  (slice1; segments: 3)
    ->  Seq Scan on ec1
          Filter: ((ff = f1) AND (f1 = '42'::int8alias2))
- Optimizer: GPORCA
+ Optimizer: Pivotal Optimizer (GPORCA) version 3.9.0
 (4 rows)
 
 explain (costs off)
@@ -155,7 +155,7 @@ explain (costs off)
                ->  Seq Scan on ec2
          ->  Index Scan using ec1_pkey on ec1
                Index Cond: ((ff = ec2.x1) AND (ff = '42'::bigint))
- Optimizer: GPORCA
+ Optimizer: Pivotal Optimizer (GPORCA)
 (8 rows)
 
 explain (costs off)
@@ -169,7 +169,7 @@ explain (costs off)
                ->  Seq Scan on ec2
          ->  Index Scan using ec1_pkey on ec1
                Index Cond: ((ff = ec2.x1) AND (ff = '42'::int8alias1))
- Optimizer: GPORCA
+ Optimizer: Pivotal Optimizer (GPORCA)
 (8 rows)
 
 explain (costs off)
@@ -184,7 +184,7 @@ explain (costs off)
                      Filter: ('42'::bigint = x1)
          ->  Index Scan using ec1_pkey on ec1
                Index Cond: (ff = ec2.x1)
- Optimizer: GPORCA
+ Optimizer: Pivotal Optimizer (GPORCA) version 3.9.0
 (9 rows)
 
 explain (costs off)
@@ -199,7 +199,7 @@ explain (costs off)
                      Filter: (x1 = '42'::int8alias1)
          ->  Index Scan using ec1_pkey on ec1
                Index Cond: (ff = ec2.x1)
- Optimizer: GPORCA
+ Optimizer: Pivotal Optimizer (GPORCA) version 3.9.0
 (9 rows)
 
 explain (costs off)
@@ -214,7 +214,7 @@ explain (costs off)
                      Filter: (x1 = '42'::int8alias2)
          ->  Index Scan using ec1_pkey on ec1
                Index Cond: (ff = ec2.x1)
- Optimizer: GPORCA
+ Optimizer: Pivotal Optimizer (GPORCA) version 3.9.0
 (9 rows)
 
 create index ec1_expr1 on ec1((ff + 1));
@@ -245,7 +245,7 @@ explain (costs off)
                                        ->  Seq Scan on ec1
                                        ->  Seq Scan on ec1 ec1_1
                            ->  Seq Scan on ec1 ec1_2
- Optimizer: GPORCA
+ Optimizer: Pivotal Optimizer (GPORCA) version 3.83.0
 (14 rows)
 
 explain (costs off)
@@ -273,7 +273,7 @@ explain (costs off)
                                        ->  Seq Scan on ec1
                                        ->  Seq Scan on ec1 ec1_1
                            ->  Seq Scan on ec1 ec1_2
- Optimizer: GPORCA
+ Optimizer: Pivotal Optimizer (GPORCA) version 3.83.0
 (15 rows)
 
 explain (costs off)
@@ -317,7 +317,7 @@ explain (costs off)
                                        ->  Seq Scan on ec1 ec1_4
                                        ->  Seq Scan on ec1 ec1_5
                            ->  Seq Scan on ec1 ec1_6
- Optimizer: GPORCA
+ Optimizer: Pivotal Optimizer (GPORCA) version 3.83.0
 (25 rows)
 
 -- let's try that as a mergejoin
@@ -364,7 +364,7 @@ explain (costs off)
                                        ->  Seq Scan on ec1 ec1_4
                                        ->  Seq Scan on ec1 ec1_5
                            ->  Seq Scan on ec1 ec1_6
- Optimizer: GPORCA
+ Optimizer: Pivotal Optimizer (GPORCA) version 3.83.0
 (25 rows)
 
 -- check partially indexed scan
@@ -395,7 +395,7 @@ explain (costs off)
                                        ->  Seq Scan on ec1
                                        ->  Seq Scan on ec1 ec1_1
                            ->  Seq Scan on ec1 ec1_2
- Optimizer: GPORCA
+ Optimizer: Pivotal Optimizer (GPORCA) version 3.83.0
 (14 rows)
 
 -- let's try that as a mergejoin
@@ -425,7 +425,7 @@ explain (costs off)
                                        ->  Seq Scan on ec1
                                        ->  Seq Scan on ec1 ec1_1
                            ->  Seq Scan on ec1 ec1_2
- Optimizer: GPORCA
+ Optimizer: Pivotal Optimizer (GPORCA) version 3.83.0
 (14 rows)
 
 -- check effects of row-level security
@@ -440,8 +440,8 @@ grant select on ec1 to regress_user_ectest;
 explain (costs off)
   select * from ec0 a, ec1 b
   where a.ff = b.ff and a.ff = 43::bigint::int8alias1;
-                    QUERY PLAN                     
----------------------------------------------------
+                          QUERY PLAN                           
+---------------------------------------------------------------
  Gather Motion 3:1  (slice1; segments: 3)
    ->  Nested Loop
          Join Filter: true
@@ -449,7 +449,7 @@ explain (costs off)
                Index Cond: (ff = '43'::int8alias1)
          ->  Index Scan using ec1_pkey on ec1 b
                Index Cond: (ff = a.ff)
- Optimizer: GPORCA
+ Optimizer: Pivotal Optimizer (GPORCA)
 (8 rows)
 
 set session authorization regress_user_ectest;
@@ -483,7 +483,7 @@ explain (costs off)
  Gather Motion 3:1  (slice1; segments: 3)
    ->  Seq Scan on tenk1
          Filter: ((unique1 = unique1) AND (unique2 = unique2))
- Optimizer: GPORCA
+ Optimizer: Pivotal Optimizer (GPORCA)
 (4 rows)
 
 -- this could be converted, but isn't at present
@@ -494,7 +494,7 @@ explain (costs off)
  Gather Motion 3:1  (slice1; segments: 3)
    ->  Seq Scan on tenk1
          Filter: ((unique1 = unique1) OR (unique2 = unique2))
- Optimizer: GPORCA
+ Optimizer: Postgres query optimizer
 (4 rows)
 
 -- check that we recognize equivalence with dummy domains in the way

@@ -70,11 +70,11 @@ select reltuples from pg_class where relname = 'ao2_@amname@';
 select count(*)  from ao2_@amname@;
 delete from ao2_@amname@ where i < 27;
 -- make sure the pgstat msg sends out at least PGSTAT_STAT_INTERVAL msec since last one
-select pg_sleep(0.6);
+SELECT gp_stat_force_next_flush();
 analyze ao2_@amname@;
 select count(*)  from ao2_@amname@;
 -- make sure the pgstat msg sends out at least PGSTAT_STAT_INTERVAL msec since last one
-select pg_sleep(0.6);
+SELECT gp_stat_force_next_flush();
 select pg_stat_get_live_tuples(c.oid) as livetuples, pg_stat_get_dead_tuples(c.oid) as deadtuples 
 from pg_class c 
 where relname = 'ao2_@amname@';
@@ -487,7 +487,6 @@ SELECT reltuples FROM pg_class WHERE relname = 'mytab_@amname@';
 -- start_ignore
 SELECT reltuples FROM pg_class WHERE relname = 'mytab_int_idx1_@amname@';
 -- end_ignore
-
 
 -- @Description Checks that deleting works with many AO blocks.
 -- 
@@ -1016,3 +1015,13 @@ explain (costs off)
 select * from taocs where c4>5 and c3>3 and c2!=12 and c4<15 and c2!=10 and c3<15 and c2>1 and c2<15 and c2+c3!=28 and gp_segment_id=1;
 select * from taocs where c4>5 and c3>3 and c2!=12 and c4<15 and c2!=10 and c3<15 and c2>1 and c2<15 and c2+c3!=28 and gp_segment_id=1;
 
+-- @Description Tests that speculative inserts are not supported (for
+-- conflicting inserts and otherwise).
+--
+CREATE TABLE spec_insert(i int unique, j int) distributed by (i);
+INSERT INTO spec_insert VALUES(1, 2);
+INSERT INTO spec_insert VALUES(1, 3) ON CONFLICT(i) DO NOTHING;
+INSERT INTO spec_insert VALUES(1, 3) ON CONFLICT(i) DO UPDATE SET j = 3;
+
+INSERT INTO spec_insert VALUES(2, 3) ON CONFLICT(i) DO NOTHING;
+INSERT INTO spec_insert VALUES(2, 3) ON CONFLICT(i) DO UPDATE SET j = 4;

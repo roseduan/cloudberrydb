@@ -325,7 +325,7 @@ explain (costs off) execute test_mode_pp(2);
    ->  Gather Motion 1:1  (slice1; segments: 1)
          ->  Index Scan using test_mode_a_idx on test_mode
                Index Cond: (a = 2)
- Optimizer: GPORCA
+ Optimizer: Pivotal Optimizer (GPORCA)
 (5 rows)
 
 select name, generic_plans, custom_plans from pg_prepared_statements
@@ -409,7 +409,7 @@ explain (costs off) execute test_mode_pp(2);
    ->  Gather Motion 1:1  (slice1; segments: 1)
          ->  Index Scan using test_mode_a_idx on test_mode
                Index Cond: (a = 2)
- Optimizer: GPORCA
+ Optimizer: Pivotal Optimizer (GPORCA)
 (5 rows)
 
 -- but we can force a custom plan
@@ -421,7 +421,7 @@ explain (costs off) execute test_mode_pp(2);
    ->  Gather Motion 1:1  (slice1; segments: 1)
          ->  Index Scan using test_mode_a_idx on test_mode
                Index Cond: (a = 2)
- Optimizer: GPORCA
+ Optimizer: Pivotal Optimizer (GPORCA)
 (5 rows)
 
 select name, generic_plans, custom_plans from pg_prepared_statements
@@ -436,6 +436,8 @@ drop table test_mode;
 -- Test correctness of prepare/execute statement after fixing the direct dispatch issue 
 --
 create table test_prepare_sql_value_function (a int, b timestamp);
+NOTICE:  Table doesn't have 'DISTRIBUTED BY' clause -- Using column named 'a' as the Apache Cloudberry data distribution key for this table.
+HINT:  The 'DISTRIBUTED BY' clause determines the distribution of data. Make sure column(s) chosen are the optimal data distribution key to minimize skew.
 prepare test_sql_value_function as select count(*) from test_prepare_sql_value_function where b < current_timestamp and a < $1;
 execute test_sql_value_function(1); -- 1x
  count 

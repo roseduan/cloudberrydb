@@ -1227,8 +1227,8 @@ void datalakefdw_begin_foreign_modify(ModifyTableState *mtstate,
 	}
 	else
 	{
-		Value *val = lfirst(list_nth_cell(fdw_private, FdwModifyFileDir));
-		dataLakesstate->fragments = lappend(dataLakesstate->fragments, pstrdup(val->val.str));
+		String *val = lfirst(list_nth_cell(fdw_private, FdwModifyFileDir));
+		dataLakesstate->fragments = lappend(dataLakesstate->fragments, pstrdup(val->sval));
 	}
 	if (mtstate->operation == CMD_UPDATE || mtstate->operation == CMD_DELETE)
 	{

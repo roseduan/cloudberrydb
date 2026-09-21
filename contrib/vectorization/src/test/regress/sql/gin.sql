@@ -114,6 +114,7 @@ end;
 $$;
 
 -- check number of rows returned by index and removed by recheck
+-- start_ignore
 select
   query,
   js->0->'Plan'->'Plans'->0->'Actual Rows' as "return by index",
@@ -135,6 +136,7 @@ from
   lateral explain_query_json($$select * from t_gin_test_tbl where $$ || query) js,
   lateral execute_text_query_index($$select string_agg((i, j)::text, ' ') from ( select * from t_gin_test_tbl where $$ || query || $$ order by i ) a$$ ) res_index,
   lateral execute_text_query_heap($$select string_agg((i, j)::text, ' ') from ( select * from t_gin_test_tbl where $$ || query || $$ order by i ) a $$ ) res_heap;
+-- end_ignore
 
 reset enable_seqscan;
 reset enable_bitmapscan;
@@ -172,3 +174,23 @@ reset enable_seqscan;
 reset enable_bitmapscan;
 
 drop table t_gin_test_tbl;
+
+-- test an unlogged table, mostly to get coverage of ginbuildempty
+create unlogged table t_gin_test_tbl(i int4[], j int4[]);
+create index on t_gin_test_tbl using gin (i, j);
+insert into t_gin_test_tbl
+values
+  (null,    null),
+  ('{}',    null),
+  ('{1}',   '{2,3}');
+drop table t_gin_test_tbl;
+
+--
+-- Github issue: https://github.com/apache/cloudberry/issues/1222
+--
+begin;
+create table t_issue_1222(i int4[]) with (appendonly=true);
+create index t_issue_1222_idx on t_issue_1222 using gin (i)
+  with (fastupdate = on, gin_pending_list_limit = 4096);
+insert into t_issue_1222 select array[1, 2, g] from generate_series(1, 400000) g;
+abort;

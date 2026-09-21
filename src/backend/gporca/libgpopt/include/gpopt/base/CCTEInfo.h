@@ -130,6 +130,9 @@ private:
 		// logical producer expression
 		CExpression *m_pexprCTEProducer;
 
+		// logical consumer expression array
+		CExpressionArray *m_pexprCTEConsumer;
+
 		// map columns of all created consumers of current CTE to their positions in consumer output
 		ColRefToUlongMap *m_phmcrulConsumers;
 
@@ -138,7 +141,6 @@ private:
 
 		// does CTE have outer references outside CTE? If so, force inlining
 		BOOL m_hasOuterReferences;
-
 
 	public:
 		// ctors
@@ -154,6 +156,13 @@ private:
 		PexprProducer() const
 		{
 			return m_pexprCTEProducer;
+		}
+
+		// CTE consumer expressions array
+		CExpressionArray *
+		PexprsConsumer() const
+		{
+			return m_pexprCTEConsumer;
 		}
 
 		// is this CTE used?
@@ -181,7 +190,7 @@ private:
 		}
 
 		// add consumer into the entry
-		void AddConsumer(COperator *pop);
+		void AddConsumer(CExpression * consumer);
 
 		// add given columns to consumers column map
 		void AddConsumerCols(CColRefArray *colref_array);
@@ -245,6 +254,12 @@ private:
 	// consumers inside each cte/main query
 	UlongToProducerConsumerMap *m_phmulprodconsmap;
 
+	// mappings CTE consumer ColId(Not DXL id) -> CTE producer Colref
+	UlongToColRefMap *m_phmcidcrCTE;
+
+	// mappings CTE producer ColId(Not DXL id) -> CTE consumer Colref Array
+	UlongToColRefArrayMap *m_phmpidcrsCTE;
+
 	// initialize default statistics for a given CTE Producer
 	void InitDefaultStats(CExpression *pexprCTEProducer);
 
@@ -281,6 +296,9 @@ public:
 	// logical cte consumer with given id
 	COperatorArray *PopCTEConsumer(ULONG ulCTEId) const;
 
+	// logical cte consumer with given id
+	CExpressionArray *PexprCTEConsumer(ULONG ulCTEId) const;
+
 	// check if given CTE is used
 	BOOL FUsed(ULONG ulCTEId) const;
 
@@ -304,15 +322,41 @@ public:
 
 	// add cte producer to hashmap
 	void AddCTEProducer(CExpression *pexprCTEProducer);
+	
+	// add cte consumer to hashmap
+	void AddCTEConsumer(CExpression *pexprCTEProducer);
 
 	// replace cte producer with given expression
 	void ReplaceCTEProducer(CExpression *pexprCTEProducer);
+
+	// get the consumer colid -> producer colref map 
+	UlongToColRefMap *
+	GetCTEConsumerMapping() const {
+		return m_phmcidcrCTE;
+	}
+
+	// get the producer colid -> consumer colref array map 
+	UlongToColRefArrayMap *
+	GetCTEProducerMapping() const {
+		return m_phmpidcrsCTE;
+	}
+
+	// exist the CTE in global CTEInfo
+	BOOL 
+	ExistCTE() const {
+		return m_ulNextCTEId > 0;
+	}
 
 	// next available CTE id
 	ULONG
 	next_id()
 	{
 		return m_ulNextCTEId++;
+	}
+
+	ULONG
+	CTESize() {
+		return m_ulNextCTEId;
 	}
 
 	// derive the statistics on the CTE producer
@@ -343,6 +387,7 @@ public:
 
 	// mark unused CTEs
 	void MarkUnusedCTEs();
+
 
 	// walk the producer expressions and add the mapping between computed column
 	// and their corresponding used column(s)

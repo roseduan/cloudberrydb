@@ -17,6 +17,7 @@
 #include "catalog/pg_type_d.h"
 #include "catalog/namespace.h"
 #include "catalog/pg_namespace.h"
+#include "utils/array.h"
 #include "utils/arrow.h"
 #include "utils/tuptable_vec.h"
 #include "utils/guc_vec.h"
@@ -127,7 +128,10 @@ BuildAvgStructStddevType(GArrowDataType *sum_dt, GArrowDataType *square_dt)
 	int64_dt = GARROW_DATA_TYPE(garrow_int64_data_type_new());
 	count = garrow_field_new("count", int64_dt);
 	sum = garrow_field_new("sum", sum_dt);
-	stddev = garrow_field_new("square", square_dt);
+	/* "square" (sum of squares) needs the same precision as "sum": it
+	 * overflows even sooner, and Sonic's AvgTransStddevAggregate always
+	 * accumulates both in numeric128 for int4 input. */
+	stddev = garrow_field_new("square", sum_dt);
 	fields = garrow_list_append_ptr(fields, sum);
 	fields = garrow_list_append_ptr(fields, count);
 	fields = garrow_list_append_ptr(fields, stddev);
@@ -1047,7 +1051,7 @@ init_fcache(Oid foid, Oid input_collation, FuncExprState *fcache,
 	AclResult	aclresult;
 
 	/* Check permission to call function */
-	aclresult = pg_proc_aclcheck(foid, GetUserId(), ACL_EXECUTE);
+	aclresult = object_aclcheck(ProcedureRelationId, foid, GetUserId(), ACL_EXECUTE);
 	if (aclresult != ACLCHECK_OK)
 		aclcheck_error(aclresult, OBJECT_FUNCTION, get_func_name(foid));
 	InvokeFunctionExecuteHook(foid);

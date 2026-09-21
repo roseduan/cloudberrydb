@@ -1,6 +1,7 @@
 create schema orca_parallel;
 set search_path=orca_parallel, public;
 set statement_mem = '256MB';
+set optimizer=on;
 create table t1(a int, b int) with(parallel_workers=2) distributed by (a);
 create table t2(c int, d int ) with(parallel_workers=3) distributed by (c);
 insert into t1 select i, i+1 from generate_series(1, 1000)i;
@@ -791,9 +792,10 @@ reset enable_parallel;
 reset max_parallel_workers_per_gather;
 reset parallel_setup_cost;
 reset statement_mem;
+reset optimizer;
 -- start_ignore
 drop schema orca_parallel cascade;
-psql:sql/orca_parallel.sql:224: NOTICE:  drop cascades to 7 other objects
+NOTICE:  drop cascades to 7 other objects
 DETAIL:  drop cascades to table t3_null
 drop cascades to table t1
 drop cascades to table t2

@@ -2,6 +2,8 @@ CREATE TABLE xmltest (
     id int,
     data xml
 );
+NOTICE:  Table doesn't have 'DISTRIBUTED BY' clause -- Using column named 'id' as the Apache Cloudberry data distribution key for this table.
+HINT:  The 'DISTRIBUTED BY' clause determines the distribution of data. Make sure column(s) chosen are the optimal data distribution key to minimize skew.
 INSERT INTO xmltest VALUES (1, '<value>one</value>');
 INSERT INTO xmltest VALUES (2, '<value>two</value>');
 INSERT INTO xmltest VALUES (3, '<wrong');
@@ -14,8 +16,8 @@ DETAIL:  line 1: Couldn't find end of Start Tag wrong line 1
 SELECT * FROM xmltest;
  id |        data        
 ----+--------------------
-  1 | <value>one</value>
   2 | <value>two</value>
+  1 | <value>one</value>
 (2 rows)
 
 SELECT xmlcomment('test');
@@ -112,11 +114,11 @@ SELECT xmlelement(name employee, xmlforest(name, age, salary as pay)) FROM emp;
                               xmlelement                              
 ----------------------------------------------------------------------
  <employee><name>bill</name><age>20</age><pay>1000</pay></employee>
+ <employee><name>jeff</name><age>23</age><pay>600</pay></employee>
  <employee><name>sharon</name><age>25</age><pay>1000</pay></employee>
  <employee><name>sam</name><age>30</age><pay>2000</pay></employee>
  <employee><name>cim</name><age>30</age><pay>400</pay></employee>
  <employee><name>linda</name><age>19</age><pay>100</pay></employee>
- <employee><name>jeff</name><age>23</age><pay>600</pay></employee>
 (6 rows)
 
 SELECT xmlelement(name duplicate, xmlattributes(1 as a, 2 as b, 3 as a));
@@ -223,17 +225,11 @@ ERROR:  invalid XML content
 DETAIL:  line 1: xmlParseEntityRef: no name
 <invalidentity>&</invalidentity>
                 ^
-line 1: chunk is not well balanced
-<invalidentity>&</invalidentity>
-                                ^
 SELECT xmlparse(content '<undefinedentity>&idontexist;</undefinedentity>');
 ERROR:  invalid XML content
 DETAIL:  line 1: Entity 'idontexist' not defined
 <undefinedentity>&idontexist;</undefinedentity>
                              ^
-line 1: chunk is not well balanced
-<undefinedentity>&idontexist;</undefinedentity>
-                                               ^
 SELECT xmlparse(content '<invalidns xmlns=''&lt;''/>');
          xmlparse          
 ---------------------------
@@ -252,9 +248,6 @@ DETAIL:  line 1: Entity 'idontexist' not defined
 <twoerrors>&idontexist;</unbalanced>
                        ^
 line 1: Opening and ending tag mismatch: twoerrors line 1 and unbalanced
-<twoerrors>&idontexist;</unbalanced>
-                                    ^
-line 1: chunk is not well balanced
 <twoerrors>&idontexist;</unbalanced>
                                     ^
 SELECT xmlparse(content '<nosuchprefix:tag/>');
@@ -603,18 +596,18 @@ CREATE VIEW xmlview8 AS SELECT xmlserialize(content 'good' as char(10));
 CREATE VIEW xmlview9 AS SELECT xmlserialize(content 'good' as text);
 SELECT table_name, view_definition FROM information_schema.views
   WHERE table_name LIKE 'xmlview%' ORDER BY 1;
- table_name |                                                  view_definition                                                  
-------------+-------------------------------------------------------------------------------------------------------------------
+ table_name |                                              view_definition                                               
+------------+------------------------------------------------------------------------------------------------------------
  xmlview1   |  SELECT xmlcomment('test'::text) AS xmlcomment;
  xmlview2   |  SELECT XMLCONCAT('hello'::xml, 'you'::xml) AS "xmlconcat";
  xmlview3   |  SELECT XMLELEMENT(NAME element, XMLATTRIBUTES(1 AS ":one:", 'deuce' AS two), 'content&') AS "xmlelement";
- xmlview4   |  SELECT XMLELEMENT(NAME employee, XMLFOREST(emp.name AS name, emp.age AS age, emp.salary AS pay)) AS "xmlelement"+
+ xmlview4   |  SELECT XMLELEMENT(NAME employee, XMLFOREST(name AS name, age AS age, salary AS pay)) AS "xmlelement"     +
             |    FROM emp;
  xmlview5   |  SELECT XMLPARSE(CONTENT '<abc>x</abc>'::text STRIP WHITESPACE) AS "xmlparse";
  xmlview6   |  SELECT XMLPI(NAME foo, 'bar'::text) AS "xmlpi";
  xmlview7   |  SELECT XMLROOT('<foo/>'::xml, VERSION NO VALUE, STANDALONE YES) AS "xmlroot";
- xmlview8   |  SELECT (XMLSERIALIZE(CONTENT 'good'::xml AS character(10)))::character(10) AS "xmlserialize";
- xmlview9   |  SELECT XMLSERIALIZE(CONTENT 'good'::xml AS text) AS "xmlserialize";
+ xmlview8   |  SELECT (XMLSERIALIZE(CONTENT 'good'::xml AS character(10) NO INDENT))::character(10) AS "xmlserialize";
+ xmlview9   |  SELECT XMLSERIALIZE(CONTENT 'good'::xml AS text NO INDENT) AS "xmlserialize";
 (9 rows)
 
 -- Text XPath expressions evaluation
@@ -856,6 +849,8 @@ SELECT COUNT(id) FROM xmltest WHERE xpath_exists('/myns:menu/myns:beers/myns:nam
 (1 row)
 
 CREATE TABLE query ( expr TEXT );
+NOTICE:  Table doesn't have 'DISTRIBUTED BY' clause -- Using column named 'expr' as the Apache Cloudberry data distribution key for this table.
+HINT:  The 'DISTRIBUTED BY' clause determines the distribution of data. Make sure column(s) chosen are the optimal data distribution key to minimize skew.
 INSERT INTO query VALUES ('/menu/beers/cost[text() = ''lots'']');
 SELECT COUNT(id) FROM xmltest, query WHERE xmlexists(expr PASSING BY REF data);
  count 
@@ -1489,7 +1484,7 @@ SELECT  xmltable.*
                                   size float PATH 'SIZE' NOT NULL,
                                   unit text PATH 'SIZE/@unit',
                                   premier_name text PATH 'PREMIER_NAME' DEFAULT 'not specified');
-ERROR:  null is not allowed in column "size"  (seg0 slice1 127.0.1.1:7002 pid=32204)
+ERROR:  null is not allowed in column "size"  (seg0 slice1 172.18.0.2:7002 pid=141411)
 -- if all is ok, then result is empty
 -- one line xml test
 WITH
@@ -1544,6 +1539,8 @@ WITH
 (0 rows)
 
 CREATE TABLE xmltest2(x xml, _path text);
+NOTICE:  Table doesn't have 'DISTRIBUTED BY' clause -- Using column named '_path' as the Apache Cloudberry data distribution key for this table.
+HINT:  The 'DISTRIBUTED BY' clause determines the distribution of data. Make sure column(s) chosen are the optimal data distribution key to minimize skew.
 INSERT INTO xmltest2 VALUES('<d><r><ac>1</ac></r></d>', 'A');
 INSERT INTO xmltest2 VALUES('<d><r><bc>2</bc></r></d>', 'B');
 INSERT INTO xmltest2 VALUES('<d><r><cc>3</cc></r></d>', 'C');
@@ -1551,28 +1548,28 @@ INSERT INTO xmltest2 VALUES('<d><r><dc>2</dc></r></d>', 'D');
 SELECT xmltable.* FROM xmltest2, LATERAL xmltable('/d/r' PASSING x COLUMNS a int PATH '' || lower(_path) || 'c');
  a 
 ---
+ 1
  2
  3
  2
- 1
 (4 rows)
 
 SELECT xmltable.* FROM xmltest2, LATERAL xmltable(('/d/r/' || lower(_path) || 'c') PASSING x COLUMNS a int PATH '.');
  a 
 ---
+ 1
  2
  3
  2
- 1
 (4 rows)
 
 SELECT xmltable.* FROM xmltest2, LATERAL xmltable(('/d/r/' || lower(_path) || 'c') PASSING x COLUMNS a int PATH 'x' DEFAULT ascii(_path) - 54);
  a  
 ----
+ 11
  12
  13
  14
- 11
 (4 rows)
 
 -- XPath result can be boolean or number too

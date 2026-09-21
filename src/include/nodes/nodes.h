@@ -6,7 +6,7 @@
  *
  * Portions Copyright (c) 2005-2009, Greenplum inc
  * Portions Copyright (c) 2012-Present VMware, Inc. or its affiliates.
- * Portions Copyright (c) 1996-2021, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2023, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * src/include/nodes/nodes.h
@@ -37,6 +37,7 @@ typedef enum NodeTag
 	T_ProjectionInfo,
 	T_JunkFilter,
 	T_OnConflictSetState,
+	T_MergeActionState,
 	T_ResultRelInfo,
 	T_EState,
 	T_TupleTableSlot,
@@ -115,6 +116,7 @@ typedef enum NodeTag
 	T_Motion,
 	T_ShareInputScan,
 	T_SplitUpdate,
+	T_SplitMerge,
 	T_AssertOp,
 	T_PartitionSelector,
 	T_PartitionTopK,
@@ -196,6 +198,7 @@ typedef enum NodeTag
 	T_MotionState,
 	T_ShareInputScanState,
 	T_SplitUpdateState,
+	T_SplitMergeState,
 	T_AssertOpState,
 	T_PartitionSelectorState,
 	T_PartitionTopKState,
@@ -249,6 +252,11 @@ typedef enum NodeTag
 	T_MinMaxExpr,
 	T_SQLValueFunction,
 	T_XmlExpr,
+	T_JsonFormat,
+	T_JsonReturning,
+	T_JsonValueExpr,
+	T_JsonConstructorExpr,
+	T_JsonIsPredicate,
 	T_NullTest,
 	T_BooleanTest,
 	T_CoerceToDomain,
@@ -352,6 +360,7 @@ typedef enum NodeTag
 	T_IndexClause,
 	T_PlaceHolderVar,
 	T_SpecialJoinInfo,
+	T_OuterJoinClauseInfo,
 	T_AppendRelInfo,
 	T_RowIdentityVarInfo,
 	T_PlaceHolderInfo,
@@ -359,14 +368,18 @@ typedef enum NodeTag
 	T_MinMaxAggInfo,
 	T_SegfileMapNode,
 	T_PlannerParamItem,
+	T_AggInfo,
+	T_AggTransInfo,
 	T_RollupData,
 	T_GroupingSetData,
 	T_StatisticExtInfo,
+	T_JoinDomain,
 
     /* Tags for MPP planner nodes (relation.h) */
     T_CdbMotionPath = 580,
 	T_PartitionSelectorPath,
 	T_SplitUpdatePath,
+	T_SplitMergePath,
     T_CdbRelColumnInfo,
 	T_DistributionKey,
 
@@ -385,6 +398,7 @@ typedef enum NodeTag
 	T_Value,
 	T_Integer,
 	T_Float,
+	T_Boolean,
 	T_String,
 	T_BitString,
 	T_Null,
@@ -395,11 +409,13 @@ typedef enum NodeTag
 	T_List,
 	T_IntList,
 	T_OidList,
+	T_XidList,
 
 	/*
 	 * TAGS FOR EXTENSIBLE NODES (extensible.h)
 	 */
 	T_ExtensibleNode,
+	T_ErrorSaveContext,
 
 	/*
 	 * TAGS FOR STATEMENT NODES (mostly in parsenodes.h)
@@ -410,6 +426,7 @@ typedef enum NodeTag
 	T_InsertStmt,
 	T_DeleteStmt,
 	T_UpdateStmt,
+	T_MergeStmt,
 	T_SelectStmt,
 	T_ReturnStmt,
 	T_PLAssignStmt,
@@ -479,6 +496,7 @@ typedef enum NodeTag
 	T_AlterTagStmt,
 	T_DropTagStmt,
 	T_AlterDatabaseStmt,
+	T_AlterDatabaseRefreshCollStmt,
 	T_AlterDatabaseSetStmt,
 	T_AlterRoleSetStmt,
 	T_CreateConversionStmt,
@@ -505,6 +523,8 @@ typedef enum NodeTag
 	T_AlterEnumStmt,
 	T_AlterTSDictionaryStmt,
 	T_AlterTSConfigurationStmt,
+	T_PublicationTable,
+	T_PublicationObjSpec,
 	T_CreateFdwStmt,
 	T_AlterFdwStmt,
 	T_CreateForeignServerStmt,
@@ -610,6 +630,7 @@ typedef enum NodeTag
 	T_Constraint,
 	T_DefElem,
 	T_RangeTblEntry,
+	T_RTEPermissionInfo,
 	T_RangeTblFunction,
 	T_TableSampleClause,
 	T_WithCheckOption,
@@ -630,16 +651,28 @@ typedef enum NodeTag
 	T_CTESearchClause,
 	T_CTECycleClause,
 	T_CommonTableExpr,
+	T_MergeWhenClause,
+	T_MergeAction,
 	T_ColumnReferenceStorageDirective,
 	T_DistributionKeyElem,
 	T_RoleSpec,
 	T_TriggerTransition,
+	T_JsonOutput,
+	T_JsonKeyValue,
+	T_JsonObjectConstructor,
+	T_JsonArrayConstructor,
+	T_JsonArrayQueryConstructor,
+	T_JsonAggConstructor,
+	T_JsonObjectAgg,
+	T_JsonArrayAgg,
 	T_PartitionElem,
 	T_PartitionSpec,
 	T_PartitionBoundSpec,
 	T_PartitionRangeDatum,
 	T_PartitionCmd,
 	T_VacuumRelation,
+
+	T_Bitmapset,
 
 	/*
 	 * TAGS FOR REPLICATION GRAMMAR PARSE NODES (replnodes.h)
@@ -649,6 +682,7 @@ typedef enum NodeTag
 	T_CreateReplicationSlotCmd,
 	T_DropReplicationSlotCmd,
 	T_StartReplicationCmd,
+	T_ReadReplicationSlotCmd,
 	T_TimeLineHistoryCmd,
 	T_SQLCmd,
 
@@ -676,9 +710,10 @@ typedef enum NodeTag
 	T_SupportRequestSelectivity,	/* in nodes/supportnodes.h */
 	T_SupportRequestCost,		/* in nodes/supportnodes.h */
 	T_SupportRequestRows,		/* in nodes/supportnodes.h */
-	T_SupportRequestIndexCondition	/* in nodes/supportnodes.h */
+	T_SupportRequestIndexCondition,	/* in nodes/supportnodes.h */
+	T_SupportRequestWFuncMonotonic,
+	T_SupportRequestOptimizeWindowClause,
 
-	,
     T_StreamBitmap,             /* in nodes/tidbitmap.h */
 	T_FormatterData,            /* in access/formatter.h */
 	T_ExtProtocolData,          /* in access/extprotocol.h */
@@ -695,8 +730,100 @@ typedef enum NodeTag
 	T_FileFragment,
 	T_FileScanTask,
 	T_ExternalTableMetadata,
-	T_IcebergTableStatistics
+	T_IcebergTableStatistics,
+	T_CompoundUtilityStmt,
+	T_CreateForeignStmt,
+
 } NodeTag;
+
+/*
+ * pg_node_attr() - Used in node definitions to set extra information for
+ * gen_node_support.pl
+ *
+ * Attributes can be attached to a node as a whole (place the attribute
+ * specification on the first line after the struct's opening brace)
+ * or to a specific field (place it at the end of that field's line).  The
+ * argument is a comma-separated list of attributes.  Unrecognized attributes
+ * cause an error.
+ *
+ * Valid node attributes:
+ *
+ * - abstract: Abstract types are types that cannot be instantiated but that
+ *   can be supertypes of other types.  We track their fields, so that
+ *   subtypes can use them, but we don't emit a node tag, so you can't
+ *   instantiate them.
+ *
+ * - custom_copy_equal: Has custom implementations in copyfuncs.c and
+ *   equalfuncs.c.
+ *
+ * - custom_read_write: Has custom implementations in outfuncs.c and
+ *   readfuncs.c.
+ *
+ * - custom_query_jumble: Has custom implementation in queryjumblefuncs.c.
+ *
+ * - no_copy: Does not support copyObject() at all.
+ *
+ * - no_equal: Does not support equal() at all.
+ *
+ * - no_copy_equal: Shorthand for both no_copy and no_equal.
+ *
+ * - no_query_jumble: Does not support JumbleQuery() at all.
+ *
+ * - no_read: Does not support nodeRead() at all.
+ *
+ * - nodetag_only: Does not support copyObject(), equal(), jumbleQuery()
+ *   outNode() or nodeRead().
+ *
+ * - special_read_write: Has special treatment in outNode() and nodeRead().
+ *
+ * - nodetag_number(VALUE): assign the specified nodetag number instead of
+ *   an auto-generated number.  Typically this would only be used in stable
+ *   branches, to give a newly-added node type a number without breaking ABI
+ *   by changing the numbers of existing node types.
+ *
+ * Node types can be supertypes of other types whether or not they are marked
+ * abstract: if a node struct appears as the first field of another struct
+ * type, then it is the supertype of that type.  The no_copy, no_equal,
+ * no_query_jumble and no_read node attributes are automatically inherited
+ * from the supertype.  (Notice that nodetag_only does not inherit, so it's
+ * not quite equivalent to a combination of other attributes.)
+ *
+ * Valid node field attributes:
+ *
+ * - array_size(OTHERFIELD): This field is a dynamically allocated array with
+ *   size indicated by the mentioned other field.  The other field is either a
+ *   scalar or a list, in which case the length of the list is used.
+ *
+ * - copy_as(VALUE): In copyObject(), replace the field's value with VALUE.
+ *
+ * - copy_as_scalar: In copyObject(), copy the field as a scalar value
+ *   (e.g. a pointer) even if it is a node-type pointer.
+ *
+ * - equal_as_scalar: In equal(), compare the field as a scalar value
+ *   even if it is a node-type pointer.
+ *
+ * - equal_ignore: Ignore the field for equality.
+ *
+ * - equal_ignore_if_zero: Ignore the field for equality if it is zero.
+ *   (Otherwise, compare normally.)
+ *
+ * - query_jumble_ignore: Ignore the field for the query jumbling.  Note
+ *   that typmod and collation information are usually irrelevant for the
+ *   query jumbling.
+ *
+ * - query_jumble_location: Mark the field as a location to track.  This is
+ *   only allowed for integer fields that include "location" in their name.
+ *
+ * - read_as(VALUE): In nodeRead(), replace the field's value with VALUE.
+ *
+ * - read_write_ignore: Ignore the field for read/write.  This is only allowed
+ *   if the node type is marked no_read or read_as() is also specified.
+ *
+ * - write_only_relids, write_only_nondefault_pathtarget, write_only_req_outer:
+ *   Special handling for Path struct; see there.
+ *
+ */
+#define pg_node_attr(...)
 
 /*
  * The first field of a node of any type is guaranteed to be the NodeTag.
@@ -824,7 +951,7 @@ extern int16 *readAttrNumberCols(int numCols);
 /*
  * nodes/copyfuncs.c
  */
-extern void *copyObjectImpl(const void *obj);
+extern void *copyObjectImpl(const void *from);
 
 /* cast result back to argument type, if supported by compiler */
 #ifdef HAVE_TYPEOF
@@ -849,6 +976,8 @@ extern bool equal(const void *a, const void *b);
  */
 typedef double Selectivity;		/* fraction of tuples a qualifier will pass */
 typedef double Cost;			/* execution cost (in page-access units) */
+typedef double Cardinality;		/* (estimated) number of rows or other integer
+								 * count */
 
 
 /*
@@ -863,7 +992,8 @@ typedef enum CmdType
 	CMD_SELECT,					/* select stmt */
 	CMD_UPDATE,					/* update stmt */
 	CMD_INSERT,					/* insert stmt */
-	CMD_DELETE,
+	CMD_DELETE,					/* delete stmt */
+	CMD_MERGE,					/* merge stmt */
 	CMD_UTILITY,				/* cmds like create, destroy, copy, vacuum,
 								 * etc. */
 	CMD_NOTHING					/* dummy command for instead nothing rules

@@ -63,7 +63,7 @@ Distributed by: (a)
 
 -- vacuum/analyze a table with indexes
 create table vactst (i int, b bool, c char, d date);
-NOTICE:  Table doesn't have 'DISTRIBUTED BY' clause -- Using column named 'i' as the Cloudberry Database data distribution key for this table.
+NOTICE:  Table doesn't have 'DISTRIBUTED BY' clause -- Using column named 'i' as the Apache Cloudberry data distribution key for this table.
 HINT:  The 'DISTRIBUTED BY' clause determines the distribution of data. Make sure column(s) chosen are the optimal data distribution key to minimize skew.
 insert into vactst select i, (i%123 > 50), (i/11) || '', '2008/10/12'::date + (i || ' days')::interval
 from generate_series(0, 99) i;
@@ -76,7 +76,7 @@ analyze vactst;
 vacuum analyze vactst;
 drop table vactst;
 create table vactst (i int, b bool, c char, d date);
-NOTICE:  Table doesn't have 'DISTRIBUTED BY' clause -- Using column named 'i' as the Cloudberry Database data distribution key for this table.
+NOTICE:  Table doesn't have 'DISTRIBUTED BY' clause -- Using column named 'i' as the Apache Cloudberry data distribution key for this table.
 HINT:  The 'DISTRIBUTED BY' clause determines the distribution of data. Make sure column(s) chosen are the optimal data distribution key to minimize skew.
 insert into vactst select i, (i%123 > 50), (i/11) || '', '2008/10/12'::date + (i || ' days')::interval
 from generate_series(0, 99) i;
@@ -86,19 +86,19 @@ vacuum analyze vactst;
 drop table vactst;
 -- vacuum analyze a table that has dropped a column
 create table vactst (i int, b bool, c char, d date);
-NOTICE:  Table doesn't have 'DISTRIBUTED BY' clause -- Using column named 'i' as the Cloudberry Database data distribution key for this table.
+NOTICE:  Table doesn't have 'DISTRIBUTED BY' clause -- Using column named 'i' as the Apache Cloudberry data distribution key for this table.
 HINT:  The 'DISTRIBUTED BY' clause determines the distribution of data. Make sure column(s) chosen are the optimal data distribution key to minimize skew.
 insert into vactst select i, (i%123 > 50), (i/11) || '', '2008/10/12'::date + (i || ' days')::interval
 from generate_series(0, 99) i;
 alter table vactst drop column b;
 vacuum analyze vactst;
 alter table vactst drop column i;
-NOTICE:  dropping a column that is part of the distribution policy forces a NULL distribution policy
+NOTICE:  dropping a column that is part of the distribution policy forces a random distribution policy
 vacuum analyze vactst;
 drop table vactst;
 -- vacuum analyze a table whose index has pg_statistic stats
 create table vactst (i int, b bool, c char, d date);
-NOTICE:  Table doesn't have 'DISTRIBUTED BY' clause -- Using column named 'i' as the Cloudberry Database data distribution key for this table.
+NOTICE:  Table doesn't have 'DISTRIBUTED BY' clause -- Using column named 'i' as the Apache Cloudberry data distribution key for this table.
 HINT:  The 'DISTRIBUTED BY' clause determines the distribution of data. Make sure column(s) chosen are the optimal data distribution key to minimize skew.
 insert into vactst select i, (i%123 > 50), (i/11) || '', '2008/10/12'::date + (i || ' days')::interval
 from generate_series(0, 99) i;
@@ -107,7 +107,7 @@ vacuum analyze vactst;
 drop table vactst;
 -- vacuum analyze an AO table
 create table vactst (i int, b bool, c char, d date) with (appendonly=true);
-NOTICE:  Table doesn't have 'DISTRIBUTED BY' clause -- Using column named 'i' as the Cloudberry Database data distribution key for this table.
+NOTICE:  Table doesn't have 'DISTRIBUTED BY' clause -- Using column named 'i' as the Apache Cloudberry data distribution key for this table.
 HINT:  The 'DISTRIBUTED BY' clause determines the distribution of data. Make sure column(s) chosen are the optimal data distribution key to minimize skew.
 insert into vactst select i, (i%123 > 50), (i/11) || '', '2008/10/12'::date + (i || ' days')::interval
 from generate_series(0, 99) i;
@@ -273,7 +273,7 @@ CREATE ROLE r_priv_test;
 NOTICE:  resource queue required -- using default resource queue "pg_default"
 CREATE SCHEMA s_priv_test;
 CREATE TABLE s_priv_test.t_priv_table(a INT);
-NOTICE:  Table doesn't have 'DISTRIBUTED BY' clause -- Using column named 'a' as the Cloudberry Database data distribution key for this table.
+NOTICE:  Table doesn't have 'DISTRIBUTED BY' clause -- Using column named 'a' as the Apache Cloudberry data distribution key for this table.
 HINT:  The 'DISTRIBUTED BY' clause determines the distribution of data. Make sure column(s) chosen are the optimal data distribution key to minimize skew.
 INSERT INTO s_priv_test.t_priv_table SELECT i FROM generate_series(1, 10)i;
 ALTER TABLE s_priv_test.t_priv_table OWNER TO r_priv_test;
@@ -402,8 +402,66 @@ select datname, pg_column_size(datacl) > 8192 as datacl_size, age(datfrozenxid) 
 DROP DATABASE vacuum_freeze_test;
 -- start_ignore
 select clean_roles();
+ clean_roles 
+ ok
+-------------
+(1 row)
+
 drop function toast_pg_database_datacl();
 drop function clean_roles();
 -- end_ignore
 -- free pg_global space, otherwise it fails db_size_functions
 VACUUM FULL pg_authid, pg_database;
+-- Multiple VACUUM commands run on a table should not distort the values of reltuples.
+CREATE TABLE vac_reltuple_distortion(a int) DISTRIBUTED BY (a);
+INSERT INTO vac_reltuple_distortion SELECT generate_series(1, 1000000);
+ANALYZE vac_reltuple_distortion;
+SELECT reltuples, relname FROM pg_class WHERE oid='vac_reltuple_distortion'::regclass;
+ reltuples |         relname         
+-----------+-------------------------
+     1e+06 | vac_reltuple_distortion
+(1 row)
+
+VACUUM vac_reltuple_distortion;
+VACUUM vac_reltuple_distortion; -- 2nd call to VACUUM after ANALYZE
+SELECT reltuples, relname FROM pg_class WHERE oid='vac_reltuple_distortion'::regclass;
+ reltuples |         relname         
+-----------+-------------------------
+     1e+06 | vac_reltuple_distortion
+(1 row)
+
+VACUUM vac_reltuple_distortion;
+SELECT reltuples, relname FROM pg_class WHERE oid='vac_reltuple_distortion'::regclass;
+ reltuples |         relname         
+-----------+-------------------------
+     1e+06 | vac_reltuple_distortion
+(1 row)
+
+-- test wrong log relcache leak in pg_catalog.gp_acquire_sample_rows
+-- start_ignore
+drop table if exists relcache_leak_in_motion;
+NOTICE:  table "relcache_leak_in_motion" does not exist, skipping
+-- end_ignore
+create table relcache_leak_in_motion(v1 int);
+NOTICE:  Table doesn't have 'DISTRIBUTED BY' clause -- Using column named 'v1' as the Apache Cloudberry data distribution key for this table.
+HINT:  The 'DISTRIBUTED BY' clause determines the distribution of data. Make sure column(s) chosen are the optimal data distribution key to minimize skew.
+insert into relcache_leak_in_motion values(generate_series(0, 10000));
+BEGIN;
+SET LOCAL synchronous_commit = local;
+SELECT gp_inject_fault('interconnect_stop_recv_chunk', 'interrupt', dbid)
+  FROM gp_segment_configuration WHERE content = -1 and role='p';
+ gp_inject_fault 
+-----------------
+ Success:
+(1 row)
+
+-- start_ignore
+analyze relcache_leak_in_motion;
+ERROR:  canceling statement due to user request
+SELECT gp_inject_fault('interconnect_stop_recv_chunk', 'reset', dbid)
+  FROM gp_segment_configuration WHERE content = -1 and role='p';
+ERROR:  current transaction is aborted, commands ignored until end of transaction block
+COMMIT;
+-- start_ignore
+drop table if exists relcache_leak_in_motion;
+-- end_ignore

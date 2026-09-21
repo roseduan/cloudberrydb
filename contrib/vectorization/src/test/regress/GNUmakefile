@@ -59,7 +59,9 @@ icw_aocs: regress_link tablespace-setup
 
 regress_link:
 	ln -sf $(REGRESS_DIR)/twophase_pqexecparams twophase_pqexecparams
+	ln -sf $(REGRESS_DIR)/extended_protocol_resqueue extended_protocol_resqueue
 	rm -rf hooktest && mkdir hooktest
 	ln -sf $(PKGLIBDIR)/test_hook.so hooktest/test_hook.so
+	ln -sf $(PKGLIBDIR)/regress.so regress.so
 	rm -rf query_info_hook_test && mkdir query_info_hook_test
 	ln -sf $(PKGLIBDIR)/query_info_hook_test.so query_info_hook_test/query_info_hook_test.so

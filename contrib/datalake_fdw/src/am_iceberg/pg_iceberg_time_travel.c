@@ -51,6 +51,7 @@
 #include "optimizer/planner.h"
 #include "parser/analyze.h"
 #include "parser/parse_func.h"
+#include "parser/parse_relation.h"
 #include "parser/parsetree.h"
 #include "rewrite/rewriteManip.h"
 #include "utils/acl.h"
@@ -1055,7 +1056,7 @@ iceberg_snapshot_describe(PG_FUNCTION_ARGS)
 	 * rewrite) keeps a REVOKE EXECUTE effective on both the rewritten and the
 	 * FunctionScan-fallback paths rather than only the latter.
 	 */
-	aclresult = pg_proc_aclcheck(fexpr->funcid, GetUserId(), ACL_EXECUTE);
+	aclresult = object_aclcheck(ProcedureRelationId, fexpr->funcid, GetUserId(), ACL_EXECUTE);
 	if (aclresult != ACLCHECK_OK)
 		aclcheck_error(aclresult, OBJECT_FUNCTION, get_func_name(fexpr->funcid));
 
@@ -1604,7 +1605,7 @@ iceberg_tt_check_alias_schema(Relation rel, int64 snapshot_id)
 
 /* Rewrite one query level's iceberg_snapshot_scan function RTEs to relations. */
 static void
-iceberg_tt_rewrite_rtable(List *rtable)
+iceberg_tt_rewrite_rtable(List *rtable, List **rteperminfos)
 {
 	ListCell   *lc;
 
@@ -1688,8 +1689,14 @@ iceberg_tt_rewrite_rtable(List *rtable)
 		rte->lateral = false;
 		rte->functions = NIL;
 		rte->funcordinality = false;
-		rte->requiredPerms = ACL_SELECT;
-		rte->checkAsUser = InvalidOid;
+
+		{
+			RTEPermissionInfo *perminfo;
+
+			perminfo = addRTEPermissionInfo(rteperminfos, rte);
+			perminfo->requiredPerms = ACL_SELECT;
+			perminfo->checkAsUser = InvalidOid;
+		}
 
 		/* Stamp the snapshot into the alias -- the ORCA-surviving carrier. */
 		token = (char *) palloc(NAMEDATALEN);
@@ -1715,7 +1722,7 @@ iceberg_tt_query_walker(Node *node, void *context)
 		/* Do not descend into utility statements' raw parse nodes. */
 		if (q->commandType == CMD_UTILITY)
 			return false;
-		iceberg_tt_rewrite_rtable(q->rtable);
+		iceberg_tt_rewrite_rtable(q->rtable, &q->rteperminfos);
 		return query_tree_walker(q, iceberg_tt_query_walker, context, 0);
 	}
 	return expression_tree_walker(node, iceberg_tt_query_walker, context);

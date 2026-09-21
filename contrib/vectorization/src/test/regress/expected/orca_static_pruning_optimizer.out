@@ -160,15 +160,16 @@ WHERE b = 42
 $query$ AS qry \gset
 EXPLAIN (COSTS OFF, VERBOSE)
 :qry ;
-                  QUERY PLAN                  
-----------------------------------------------
+                     QUERY PLAN                     
+----------------------------------------------------
  Gather Motion 3:1  (slice1; segments: 3)
    Output: a, b
    ->  Dynamic Seq Scan on orca_static_pruning.hp
          Output: a, b
          Number of partitions to scan: 1 (out of 2)
          Filter: (hp.b = 42)
- Optimizer: Pivotal Optimizer (GPORCA)
+ Settings: optimizer = 'on'
+ Optimizer: GPORCA
 (8 rows)
 
 :qry ;

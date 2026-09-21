@@ -1,18 +1,18 @@
 
-# Copyright (c) 2021, PostgreSQL Global Development Group
+# Copyright (c) 2021-2023, PostgreSQL Global Development Group
 
 # test for archiving with hot standby
 use strict;
 use warnings;
-use PostgresNode;
-use TestLib;
-use Test::More tests => 14;
+use PostgreSQL::Test::Cluster;
+use PostgreSQL::Test::Utils;
+use Test::More;
 use File::Copy;
 
 # Initialize primary node, doing archives
-my $node_primary = get_new_node('primary');
+my $node_primary = PostgreSQL::Test::Cluster->new('primary');
 $node_primary->init(
-	has_archiving    => 1,
+	has_archiving => 1,
 	allows_streaming => 1);
 my $backup_name = 'my_backup';
 my $primary_connstr = $node_primary->connstr;
@@ -24,7 +24,7 @@ $node_primary->start;
 $node_primary->backup($backup_name);
 
 # Initialize standby node from backup, fetching WAL from archives
-my $node_standby = get_new_node('standby');
+my $node_standby = PostgreSQL::Test::Cluster->new('standby');
 # Note that this makes the standby store its contents on the archives
 # of the primary.
 $node_standby->init_from_backup($node_primary, $backup_name,
@@ -36,6 +36,11 @@ $node_standby->start;
 # Create some content on primary
 $node_primary->safe_psql('postgres',
 	"CREATE TABLE tab_int AS SELECT generate_series(1,1000) AS a");
+
+# Checkpoint before switching to a new segment.
+$node_primary->safe_psql('postgres', "CHECKPOINT");
+
+# Done after the checkpoint to ensure that it is replayed on the standby.
 my $current_lsn =
   $node_primary->safe_psql('postgres', "SELECT pg_current_wal_lsn();");
 
@@ -143,7 +148,7 @@ $node_standby->safe_psql('postgres',
 
 post_primary_stop_tests();
 
-my $tmp_check      = TestLib::tempdir;
+my $tmp_check      = PostgreSQL::Test::Utils::tempdir;
 my $primary_datadir = $node_primary->data_dir;
 # Keep a temporary postgresql.conf for primary node or it would be
 # overwritten during the rewind.
@@ -226,9 +231,14 @@ sub post_pg_rewind_tests
 	#partial wal file is still archived
 	wait_until_file_exists($archived_partial_wal_file, "latest partial wal file from the old timeline to be archived");
 
-	#assert that 0000100004 does not exist on primary
-	ok(!-f "$latest_wal_filepath_old_timeline", 'latest wal file from the old timeline should not exist on standby');
-	#assert that 0000100004.done does not exist on primary
+	# The last old-timeline segment (0000100004) is still present on the rewound
+	# primary: pg_rewind reads it during the backward scan for the last common
+	# checkpoint (the timelines fork inside it) and adds it to its keep-WAL set
+	# so recovery of the demoted primary stays possible (upstream ea1649c352f,
+	# "Avoid deleting critical WAL segments during pg_rewind").
+	ok(-f "$latest_wal_filepath_old_timeline", 'latest wal file from the old timeline is kept on the rewound primary');
+	# Its archive-status .done marker, however, is not in pg_rewind's keep set
+	# and is removed to match the source.
 	ok(!-f $node_primary->data_dir . $latest_done_old_timeline, 'latest done file from the old timeline should not exist on primary');
 
 }
@@ -250,7 +260,7 @@ sub check_history_files
 	my $primary_archive = $node_primary->archive_dir;
 	wait_until_file_exists("$primary_archive/00000002.history", "history file to be archived");
 
-	my $node_standby2 = get_new_node('standby2');
+	my $node_standby2 = PostgreSQL::Test::Cluster->new('standby2');
 	$node_standby2->init_from_backup($node_primary, $backup_name,
 		has_streaming => 1, has_restoring => 1);
 	$node_standby2->start;
@@ -274,3 +284,5 @@ sub check_history_files
 	ok( !-f "$node_standby2_data/pg_wal/RECOVERYXLOG",
 		"RECOVERYXLOG removed after promotion");
 }
+
+done_testing();

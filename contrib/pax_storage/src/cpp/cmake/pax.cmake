@@ -143,7 +143,6 @@ set(manifest_src
   manifest/manifest_wrapper.cc
 )
 
-set(pax_target_include ${pax_target_include} ${CMAKE_CURRENT_BINARY_DIR})
 if (USE_MANIFEST_API)
   set(pax_storage_src ${pax_storage_src} storage/micro_partition_iterator_manifest.cc)
   if (USE_PAX_CATALOG)
@@ -173,18 +172,55 @@ set(pax_vec_src ${pax_vec_src}
 endif()
 
 #### pax.so
-set(pax_target_src  ${pax_PROTO_SOURCES} ${pax_storage_src} ${pax_clustering_src} ${pax_exceptions_src}
+set(pax_target_src  ${PROTO_SRCS} ${pax_storage_src} ${pax_clustering_src} ${pax_exceptions_src}
   ${pax_access_src} ${pax_comm_src} ${pax_catalog_src} ${pax_vec_src})
-set(pax_target_include ${pax_target_include} ${CMAKE_CURRENT_SOURCE_DIR} ${CBDB_INCLUDE_DIR})
-set(pax_target_link_libs ${pax_target_link_libs} orc::orc protobuf::libprotobuf zstd::libzstd_static ZLIB::ZLIB tabulate::tabulate postgres uring)
+set(pax_target_include ${pax_target_include} ${ZTSD_HEADER} ${CMAKE_CURRENT_SOURCE_DIR} ${CBDB_INCLUDE_DIR})
+# tabulate is header-only; the tabulate::tabulate INTERFACE target (from
+# find_package(tabulate CONFIG) in FindDependencies.cmake) carries its
+# include path, so no separate include dir is needed here.
+set(pax_target_link_libs ${pax_target_link_libs} zstd z tabulate::tabulate)
+# On Linux, link against the libpostgres.so produced by the backend
+# (shared-postgres-backend). On macOS we must NOT do this: pax.so is
+# loaded by postgres via dlopen, and a separate libpostgres.so would
+# give pax.so its own copy of backend globals (e.g.
+# process_shared_preload_libraries_in_progress). Instead, use the
+# standard PG extension pattern: resolve symbols at load time against
+# the postgres binary itself via -bundle_loader.
+if(NOT APPLE)
+  list(APPEND pax_target_link_libs postgres)
+endif()
+# protobuf v22+ split its abseil deps into separate libs. On macOS the
+# Homebrew protobuf is built this way and the link fails for abseil
+# log_internal symbols unless we pull them via pkg-config.
+if(APPLE)
+  find_package(PkgConfig REQUIRED)
+  pkg_check_modules(PB_PC REQUIRED protobuf)
+  set(pax_target_include ${pax_target_include} ${PB_PC_INCLUDE_DIRS})
+  list(APPEND pax_target_link_directories ${PB_PC_LIBRARY_DIRS})
+  list(APPEND pax_target_link_libs ${PB_PC_LIBRARIES})
+else()
+  list(APPEND pax_target_link_libs protobuf ${PAX_PROTOBUF_ABSL_LIBS})
+endif()
+# liburing is Linux-only; PAX falls back to pread-based SyncFastIO elsewhere.
+if (CMAKE_SYSTEM_NAME STREQUAL "Linux")
+  list(APPEND pax_target_link_libs uring)
+endif()
 if (PAX_USE_LZ4)
-  list(APPEND pax_target_link_libs LZ4::lz4_static)
+  list(APPEND pax_target_link_libs lz4)
 endif()
 set(pax_target_link_directories ${PROJECT_SOURCE_DIR}/../../src/backend/)
-set(pax_target_dependencies paxformat create_sql_script)
+set(pax_target_dependencies generate_protobuf create_sql_script)
 
-add_library(pax SHARED ${pax_target_src})
-set_target_properties(pax PROPERTIES OUTPUT_NAME pax)
+# On macOS, build pax as a MODULE (bundle) so that -bundle_loader is
+# accepted and undefined PG symbols resolve at load time against the
+# postgres binary (one shared copy of backend globals).
+if(APPLE)
+  add_library(pax MODULE ${pax_target_src})
+  set_target_properties(pax PROPERTIES OUTPUT_NAME pax SUFFIX ".so")
+else()
+  add_library(pax SHARED ${pax_target_src})
+  set_target_properties(pax PROPERTIES OUTPUT_NAME pax)
+endif()
 
 if(USE_MANIFEST_API AND NOT USE_PAX_CATALOG)
   set(pax_target_link_libs ${pax_target_link_libs} yyjson::yyjson)
@@ -192,28 +228,112 @@ endif()
 
 # vec build
 if (VEC_BUILD)
+  find_package(PkgConfig REQUIRED)
+  pkg_check_modules(GLIB REQUIRED glib-2.0)
   set(pax_target_include
       ${pax_target_include}
       ${VEC_HOME}/src/include # for utils/tuptable_vec.h
+      ${INSTALL_HOME}/include  # for arrow-glib/arrow-glib.h and otehr arrow interface
       ${GLIB_INCLUDE_DIRS} # for glib-object.h
   )
+  list(GET CMAKE_PREFIX_PATH 0 PAX_THIRDPARTY_DIR)
+  set(pax_target_link_directories
+      ${pax_target_link_directories}
+      ${INSTALL_HOME}/lib
+      ${PAX_THIRDPARTY_DIR}/lib)
   set(pax_target_link_libs
       ${pax_target_link_libs}
-      Arrow::arrow_shared
-      ArrowDataset::arrow_dataset_shared
-      ${OPENTELEMETRY_LIBS}
-)
+      arrow arrow_dataset
+      orc
+      absl_log_internal_check_op
+      absl_leak_check
+      absl_die_if_null
+      absl_log_internal_conditions
+      absl_log_internal_message
+      absl_log_internal_nullguard
+      absl_examine_stack
+      absl_log_internal_format
+      absl_log_internal_proto
+      absl_log_internal_log_sink_set
+      absl_log_sink
+      absl_log_entry
+      absl_flags
+      absl_flags_internal
+      absl_flags_marshalling
+      absl_flags_reflection
+      absl_flags_config
+      absl_flags_program_name
+      absl_flags_private_handle_accessor
+      absl_flags_commandlineflag
+      absl_flags_commandlineflag_internal
+      absl_log_initialize
+      absl_log_globals
+      absl_log_internal_globals
+      absl_raw_hash_set
+      absl_hash
+      absl_city
+      absl_low_level_hash
+      absl_hashtablez_sampler
+      absl_statusor
+      absl_status
+      absl_cord
+      absl_cordz_info
+      absl_cord_internal
+      absl_cordz_functions
+      absl_exponential_biased
+      absl_cordz_handle
+      absl_crc_cord_state
+      absl_crc32c
+      absl_crc_internal
+      absl_crc_cpu_detect
+      absl_bad_optional_access
+      absl_str_format_internal
+      absl_strerror
+      absl_synchronization
+      absl_stacktrace
+      absl_symbolize
+      absl_debugging_internal
+      absl_demangle_internal
+      absl_graphcycles_internal
+      absl_kernel_timeout_internal
+      absl_malloc_internal
+      absl_time
+      absl_strings
+      absl_string_view
+      absl_throw_delegate
+      absl_strings_internal
+      absl_base
+      absl_spinlock_wait
+      absl_int128
+      absl_civil_time
+      absl_time_zone
+      absl_bad_variant_access
+      absl_raw_logging_internal
+      absl_log_severity)
 endif(VEC_BUILD)
 
 target_include_directories(pax PUBLIC ${pax_target_include})
 target_link_directories(pax PUBLIC ${pax_target_link_directories})
-target_link_libraries(pax PUBLIC ${pax_target_link_libs})
-set_target_properties(pax PROPERTIES
-  BUILD_RPATH_USE_ORIGIN ON
-  BUILD_WITH_INSTALL_RPATH ON
-  INSTALL_RPATH "$ORIGIN:$ORIGIN/.."
-  LINK_FLAGS "-Wl,--enable-new-dtags"
-)
+target_link_libraries(pax PRIVATE ${pax_target_link_libs})
+if(APPLE)
+  # macOS uses @loader_path / LC_RPATH; GNU-ld --enable-new-dtags and
+  # $ORIGIN aren't supported. We must NOT link against libpostgres.so —
+  # instead let undefined PG symbols resolve at load time against the
+  # postgres binary. That keeps a single instance of each backend global
+  # shared between postgres and pax.so.
+  set_target_properties(pax PROPERTIES
+    BUILD_WITH_INSTALL_RPATH ON
+    INSTALL_RPATH "@loader_path;@loader_path/.."
+    LINK_FLAGS "-Wl,-undefined,dynamic_lookup -Wl,-bundle_loader,${PROJECT_SOURCE_DIR}/../../src/backend/postgres"
+  )
+else()
+  set_target_properties(pax PROPERTIES
+    BUILD_RPATH_USE_ORIGIN ON
+    BUILD_WITH_INSTALL_RPATH ON
+    INSTALL_RPATH "$ORIGIN:$ORIGIN/.."
+    LINK_FLAGS "-Wl,--enable-new-dtags"
+  )
+endif()
 
 add_dependencies(pax ${pax_target_dependencies})
 add_custom_command(TARGET pax POST_BUILD
@@ -222,7 +342,6 @@ add_custom_command(TARGET pax POST_BUILD
 
 if (BUILD_GTEST)
   find_package(GTest REQUIRED)
-
   file(GLOB test_case_sources
     pax_gtest_helper.cc
     pax_gtest.cc
@@ -232,15 +351,14 @@ if (BUILD_GTEST)
   add_executable(test_main ${pax_target_src} ${test_case_sources})
   target_compile_definitions(test_main PRIVATE RUN_GTEST)
   add_dependencies(test_main ${pax_target_dependencies} GTest::gtest_main GTest::gmock)
-  target_include_directories(test_main PUBLIC ${pax_target_include} ${CMAKE_CURRENT_SOURCE_DIR} ${gtest_SOURCE_DIR}/include)
+  target_include_directories(test_main PUBLIC ${pax_target_include} ${CMAKE_CURRENT_SOURCE_DIR} cpp-stub/src/ cpp-stub/src_linux/)
 
-  target_link_directories(test_main PUBLIC ${pax_target_link_directories})
-  target_link_libraries(test_main PUBLIC ${pax_target_link_libs} GTest::gtest_main GTest::gmock postgres)
+  target_link_directories(test_main PRIVATE ${pax_target_link_directories})
+  target_link_libraries(test_main PRIVATE ${pax_target_link_libs} GTest::gtest_main GTest::gmock postgres)
 endif(BUILD_GTEST)
 
 if(BUILD_GBENCH)
   find_package(benchmark REQUIRED)
-
   file(GLOB bench_sources
       pax_gbench.cc
       ${CMAKE_CURRENT_SOURCE_DIR}/*/*_bench.cc
@@ -249,16 +367,11 @@ if(BUILD_GBENCH)
     add_executable(bench_main ${pax_target_src} ${bench_sources})
     target_compile_definitions(bench_main PRIVATE RUN_GBENCH)
     add_dependencies(bench_main ${pax_target_dependencies} GTest::gtest_main GTest::gmock)
-    target_include_directories(bench_main PUBLIC ${pax_target_include} ${CMAKE_CURRENT_SOURCE_DIR})
-    link_directories(contrib/googlebench/src)
+    target_include_directories(bench_main PUBLIC ${pax_target_include} ${CMAKE_CURRENT_SOURCE_DIR} cpp-stub/src/ cpp-stub/src_linux/)
     target_link_directories(bench_main PUBLIC ${pax_target_link_directories})
     target_link_libraries(bench_main PUBLIC ${pax_target_link_libs} GTest::gtest_main GTest::gmock benchmark::benchmark_main postgres)
     if (VEC_BUILD)
-      target_link_libraries(bench_main PRIVATE
-              Arrow::arrow_shared
-              ArrowDataset::arrow_dataset_shared
-              ${OPENTELEMETRY_LIBS}
-      )
+      target_link_libraries(bench_main PRIVATE arrow arrow_dataset)
     endif(VEC_BUILD)
 endif(BUILD_GBENCH)
 

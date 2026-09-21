@@ -140,7 +140,7 @@ extractPartitionKeyValues(char *filePath, List *partitionKeys, bool isHiveStyle)
 	int curDepth = 0;
 	List *result = NIL;
 	DatalakeKeyValue *DatalakeKeyValue;
-	Value *partitionKey;
+	String *partitionKey;
 	char **elements = splitString(filePath, '/', &size);
 
 	for (i = size - 1; i >= 0; i--)

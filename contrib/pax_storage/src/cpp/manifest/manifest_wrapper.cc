@@ -39,13 +39,13 @@ bool paxc_need_wal(Relation rel) {
   return paxc::NeedWAL(rel);
 }
 
-char *paxc_get_pax_dir(RelFileNode rnode, BackendId backend) {
+char *paxc_get_pax_dir(RelFileLocator rnode, BackendId backend) {
   return paxc::BuildPaxDirectoryPath(rnode, backend);
 }
 char *paxc_build_path(const char *filename);
 
-void paxc_create_pax_directory(Relation rel, RelFileNode newrnode) {
-  // create relfilenode file for pax table
+void paxc_create_pax_directory(Relation rel, RelFileLocator newrnode) {
+  // create RelFileLocator file for pax table
   auto srel = paxc::PaxRelationCreateStorage(newrnode, rel);
   smgrclose(srel);
 
@@ -63,7 +63,7 @@ void paxc_create_pax_directory(Relation rel, RelFileNode newrnode) {
 
   if (rc != 0)
     elog(ERROR, "create data dir failed for %u/%u/%u",
-                newrnode.dbNode, newrnode.spcNode, newrnode.relNode);
+                newrnode.dbOid, newrnode.spcOid, newrnode.relNumber);
 }
 
 void paxc_store_file(const char *filename, const void *data, size_t size) {
@@ -101,10 +101,10 @@ void paxc_read_all(const char *filename, void (*func)(const void *ptr, size_t si
 
 void paxc_wal_insert_if_required(Relation rel, const char *filename, const void *data, size_t size, int64 offset) {
   if (paxc::NeedWAL(rel)) {
-    paxc::XLogPaxInsert(rel->rd_node, filename, offset, const_cast<void*>(data), size);
+    paxc::XLogPaxInsert(rel->rd_locator, filename, offset, const_cast<void*>(data), size);
   }
 }
 
-void paxc_wal_truncate_directory(RelFileNode node) {
+void paxc_wal_truncate_directory(RelFileLocator node) {
   paxc::XLogPaxTruncate(node);
 }

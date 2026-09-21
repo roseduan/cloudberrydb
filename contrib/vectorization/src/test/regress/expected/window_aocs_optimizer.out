@@ -13,6 +13,8 @@ CREATE TEMPORARY TABLE empsalary (
     salary int,
     enroll_date date
 );
+NOTICE:  Table doesn't have 'DISTRIBUTED BY' clause -- Using column named 'depname' as the Apache Cloudberry data distribution key for this table.
+HINT:  The 'DISTRIBUTED BY' clause determines the distribution of data. Make sure column(s) chosen are the optimal data distribution key to minimize skew.
 INSERT INTO empsalary VALUES
 ('develop', 10, 5200, '2007-08-01'),
 ('sales', 1, 5000, '2006-10-01'),
@@ -29,29 +31,29 @@ SELECT depname, empno, salary, sum(salary) OVER (PARTITION BY depname) FROM emps
 -----------+-------+--------+-------
  develop   |     7 |   4200 | 25100
  develop   |     9 |   4500 | 25100
- develop   |    11 |   5200 | 25100
  develop   |    10 |   5200 | 25100
+ develop   |    11 |   5200 | 25100
  develop   |     8 |   6000 | 25100
  personnel |     5 |   3500 |  7400
  personnel |     2 |   3900 |  7400
- sales     |     3 |   4800 | 14600
  sales     |     4 |   4800 | 14600
+ sales     |     3 |   4800 | 14600
  sales     |     1 |   5000 | 14600
 (10 rows)
 
 SELECT depname, empno, salary, rank() OVER (PARTITION BY depname ORDER BY salary) FROM empsalary;
   depname  | empno | salary | rank 
 -----------+-------+--------+------
- develop   |     7 |   4200 |    1
- develop   |     9 |   4500 |    2
- develop   |    11 |   5200 |    3
- develop   |    10 |   5200 |    3
- develop   |     8 |   6000 |    5
  personnel |     5 |   3500 |    1
  personnel |     2 |   3900 |    2
- sales     |     3 |   4800 |    1
  sales     |     4 |   4800 |    1
+ sales     |     3 |   4800 |    1
  sales     |     1 |   5000 |    3
+ develop   |     7 |   4200 |    1
+ develop   |     9 |   4500 |    2
+ develop   |    10 |   5200 |    3
+ develop   |    11 |   5200 |    3
+ develop   |     8 |   6000 |    5
 (10 rows)
 
 -- with GROUP BY
@@ -84,30 +86,30 @@ GROUP BY four, ten ORDER BY four, ten;
 SELECT depname, empno, salary, sum(salary) OVER w FROM empsalary WINDOW w AS (PARTITION BY depname);
   depname  | empno | salary |  sum  
 -----------+-------+--------+-------
- develop   |    11 |   5200 | 25100
+ personnel |     5 |   3500 |  7400
+ personnel |     2 |   3900 |  7400
+ sales     |     1 |   5000 | 14600
+ sales     |     4 |   4800 | 14600
+ sales     |     3 |   4800 | 14600
+ develop   |    10 |   5200 | 25100
  develop   |     7 |   4200 | 25100
  develop   |     9 |   4500 | 25100
  develop   |     8 |   6000 | 25100
- develop   |    10 |   5200 | 25100
- personnel |     5 |   3500 |  7400
- personnel |     2 |   3900 |  7400
- sales     |     3 |   4800 | 14600
- sales     |     1 |   5000 | 14600
- sales     |     4 |   4800 | 14600
+ develop   |    11 |   5200 | 25100
 (10 rows)
 
 SELECT depname, empno, salary, rank() OVER w FROM empsalary WINDOW w AS (PARTITION BY depname ORDER BY salary) ORDER BY rank() OVER w;
   depname  | empno | salary | rank 
 -----------+-------+--------+------
- develop   |     7 |   4200 |    1
  personnel |     5 |   3500 |    1
- sales     |     3 |   4800 |    1
  sales     |     4 |   4800 |    1
+ sales     |     3 |   4800 |    1
+ develop   |     7 |   4200 |    1
  personnel |     2 |   3900 |    2
  develop   |     9 |   4500 |    2
  sales     |     1 |   5000 |    3
- develop   |    11 |   5200 |    3
  develop   |    10 |   5200 |    3
+ develop   |    11 |   5200 |    3
  develop   |     8 |   6000 |    5
 (10 rows)
 
@@ -155,13 +157,13 @@ SELECT sum(four) OVER (PARTITION BY ten ORDER BY unique2) AS sum_1, ten, four FR
      3 |   3 |    3
      0 |   4 |    0
      1 |   7 |    1
-     1 |   9 |    1
      0 |   0 |    0
      0 |   0 |    0
      2 |   0 |    2
      3 |   1 |    3
      4 |   1 |    1
      5 |   1 |    1
+     1 |   9 |    1
 (10 rows)
 
 SELECT row_number() OVER (ORDER BY unique2) FROM tenk1 WHERE unique2 < 10;
@@ -294,9 +296,6 @@ SELECT lag(ten, four) OVER (PARTITION BY four ORDER BY ten), ten, four FROM tenk
 SELECT lag(ten, four, 0) OVER (PARTITION BY four ORDER BY ten), ten, four FROM tenk1 WHERE unique2 < 10;
  lag | ten | four 
 -----+-----+------
-   0 |   0 |    2
-   0 |   1 |    3
-   0 |   3 |    3
    0 |   0 |    0
    0 |   0 |    0
    4 |   4 |    0
@@ -304,6 +303,9 @@ SELECT lag(ten, four, 0) OVER (PARTITION BY four ORDER BY ten), ten, four FROM t
    1 |   1 |    1
    1 |   7 |    1
    7 |   9 |    1
+   0 |   0 |    2
+   0 |   1 |    3
+   0 |   3 |    3
 (10 rows)
 
 SELECT lag(ten, four, 0.7) OVER (PARTITION BY four ORDER BY ten), ten, four FROM tenk1 WHERE unique2 < 10 ORDER BY four, ten;
@@ -419,6 +421,8 @@ set search_path=singleseg, public;
 SELECT last_value(ten) OVER (PARTITION BY four ORDER BY ten), ten, four FROM
 	(SELECT * FROM tenk1 WHERE unique2 < 10 ORDER BY four, ten)s
 	ORDER BY four, ten;
+NOTICE:  One or more columns in the following table(s) do not have statistics: tenk1
+HINT:  For non-partitioned tables, run analyze <table_name>(<column_list>). For partitioned tables, run analyze rootpartition <table_name>(<column_list>). See log for columns missing statistics.
  last_value | ten | four 
 ------------+-----+------
           0 |   0 |    0
@@ -435,6 +439,8 @@ SELECT last_value(ten) OVER (PARTITION BY four ORDER BY ten), ten, four FROM
 
 SELECT nth_value(ten, four + 1) OVER (PARTITION BY four ORDER BY ten), ten, four
 	FROM (SELECT * FROM tenk1 WHERE unique2 < 10 ORDER BY four, ten)s order by four,ten;
+NOTICE:  One or more columns in the following table(s) do not have statistics: tenk1
+HINT:  For non-partitioned tables, run analyze <table_name>(<column_list>). For partitioned tables, run analyze rootpartition <table_name>(<column_list>). See log for columns missing statistics.
  nth_value | ten | four 
 -----------+-----+------
          0 |   0 |    0
@@ -469,12 +475,12 @@ FROM tenk1 GROUP BY ten, two;
 SELECT count(*) OVER (PARTITION BY four), four FROM (SELECT * FROM tenk1 WHERE two = 1)s WHERE unique2 < 10;
  count | four 
 -------+------
-     4 |    1
-     4 |    1
-     4 |    1
-     4 |    1
      2 |    3
      2 |    3
+     4 |    1
+     4 |    1
+     4 |    1
+     4 |    1
 (6 rows)
 
 SELECT (count(*) OVER (PARTITION BY four ORDER BY ten) +
@@ -573,14 +579,14 @@ FROM tenk1 s WHERE unique2 < 10;
  lead 
 ------
     0
+    3
+     
+    0
     0
     4
     1
     7
     9
-     
-    0
-    3
      
 (10 rows)
 
@@ -594,16 +600,16 @@ SELECT count(*) OVER (PARTITION BY four) FROM (SELECT * FROM tenk1 WHERE FALSE)s
 SELECT sum(salary) OVER w, rank() OVER w FROM empsalary WINDOW w AS (PARTITION BY depname ORDER BY salary DESC);
   sum  | rank 
 -------+------
-  6000 |    1
- 16400 |    2
- 16400 |    2
- 20900 |    4
- 25100 |    5
   3900 |    1
   7400 |    2
   5000 |    1
  14600 |    2
  14600 |    2
+  6000 |    1
+ 16400 |    2
+ 16400 |    2
+ 20900 |    4
+ 25100 |    5
 (10 rows)
 
 -- strict aggs
@@ -681,16 +687,6 @@ SELECT four, ten,
 FROM (select distinct ten, four from tenk1) ss;
  four | ten | sum | last_value 
 ------+-----+-----+------------
-    2 |   0 |   0 |          0
-    2 |   2 |   2 |          2
-    2 |   4 |   6 |          4
-    2 |   6 |  12 |          6
-    2 |   8 |  20 |          8
-    3 |   1 |   1 |          1
-    3 |   3 |   4 |          3
-    3 |   5 |   9 |          5
-    3 |   7 |  16 |          7
-    3 |   9 |  25 |          9
     0 |   0 |   0 |          0
     0 |   2 |   2 |          2
     0 |   4 |   6 |          4
@@ -701,6 +697,16 @@ FROM (select distinct ten, four from tenk1) ss;
     1 |   5 |   9 |          5
     1 |   7 |  16 |          7
     1 |   9 |  25 |          9
+    2 |   0 |   0 |          0
+    2 |   2 |   2 |          2
+    2 |   4 |   6 |          4
+    2 |   6 |  12 |          6
+    2 |   8 |  20 |          8
+    3 |   1 |   1 |          1
+    3 |   3 |   4 |          3
+    3 |   5 |   9 |          5
+    3 |   7 |  16 |          7
+    3 |   9 |  25 |          9
 (20 rows)
 
 SELECT four, ten,
@@ -709,16 +715,6 @@ SELECT four, ten,
 FROM (select distinct ten, four from tenk1) ss;
  four | ten | sum | last_value 
 ------+-----+-----+------------
-    0 |   0 |   0 |          0
-    0 |   2 |   2 |          2
-    0 |   4 |   6 |          4
-    0 |   6 |  12 |          6
-    0 |   8 |  20 |          8
-    1 |   1 |   1 |          1
-    1 |   3 |   4 |          3
-    1 |   5 |   9 |          5
-    1 |   7 |  16 |          7
-    1 |   9 |  25 |          9
     2 |   0 |   0 |          0
     2 |   2 |   2 |          2
     2 |   4 |   6 |          4
@@ -729,6 +725,16 @@ FROM (select distinct ten, four from tenk1) ss;
     3 |   5 |   9 |          5
     3 |   7 |  16 |          7
     3 |   9 |  25 |          9
+    0 |   0 |   0 |          0
+    0 |   2 |   2 |          2
+    0 |   4 |   6 |          4
+    0 |   6 |  12 |          6
+    0 |   8 |  20 |          8
+    1 |   1 |   1 |          1
+    1 |   3 |   4 |          3
+    1 |   5 |   9 |          5
+    1 |   7 |  16 |          7
+    1 |   9 |  25 |          9
 (20 rows)
 
 SELECT four, ten,
@@ -765,16 +771,6 @@ SELECT four, ten/4 as two,
 FROM (select distinct ten, four from tenk1) ss;
  four | two | sum | last_value 
 ------+-----+-----+------------
-    0 |   0 |   0 |          0
-    0 |   0 |   0 |          0
-    0 |   1 |   2 |          1
-    0 |   1 |   2 |          1
-    0 |   2 |   4 |          2
-    1 |   0 |   0 |          0
-    1 |   0 |   0 |          0
-    1 |   1 |   2 |          1
-    1 |   1 |   2 |          1
-    1 |   2 |   4 |          2
     2 |   0 |   0 |          0
     2 |   0 |   0 |          0
     2 |   1 |   2 |          1
@@ -785,6 +781,16 @@ FROM (select distinct ten, four from tenk1) ss;
     3 |   1 |   2 |          1
     3 |   1 |   2 |          1
     3 |   2 |   4 |          2
+    0 |   0 |   0 |          0
+    0 |   0 |   0 |          0
+    0 |   1 |   2 |          1
+    0 |   1 |   2 |          1
+    0 |   2 |   4 |          2
+    1 |   0 |   0 |          0
+    1 |   0 |   0 |          0
+    1 |   1 |   2 |          1
+    1 |   1 |   2 |          1
+    1 |   2 |   4 |          2
 (20 rows)
 
 SELECT four, ten/4 as two,
@@ -793,16 +799,6 @@ SELECT four, ten/4 as two,
 FROM (select distinct ten, four from tenk1) ss;
  four | two | sum | last_value 
 ------+-----+-----+------------
-    0 |   0 |   0 |          0
-    0 |   0 |   0 |          0
-    0 |   1 |   1 |          1
-    0 |   1 |   2 |          1
-    0 |   2 |   4 |          2
-    1 |   0 |   0 |          0
-    1 |   0 |   0 |          0
-    1 |   1 |   1 |          1
-    1 |   1 |   2 |          1
-    1 |   2 |   4 |          2
     2 |   0 |   0 |          0
     2 |   0 |   0 |          0
     2 |   1 |   1 |          1
@@ -813,6 +809,16 @@ FROM (select distinct ten, four from tenk1) ss;
     3 |   1 |   1 |          1
     3 |   1 |   2 |          1
     3 |   2 |   4 |          2
+    0 |   0 |   0 |          0
+    0 |   0 |   0 |          0
+    0 |   1 |   1 |          1
+    0 |   1 |   2 |          1
+    0 |   2 |   4 |          2
+    1 |   0 |   0 |          0
+    1 |   0 |   0 |          0
+    1 |   1 |   1 |          1
+    1 |   1 |   2 |          1
+    1 |   2 |   4 |          2
 (20 rows)
 
 SELECT sum(unique1) over (order by four range between current row and unbounded following),
@@ -836,6 +842,8 @@ set search_path=singleseg, public;
 SELECT sum(unique1) over (rows between current row and unbounded following),
 	unique1, four
 FROM tenk1 WHERE unique1 < 10;
+NOTICE:  One or more columns in the following table(s) do not have statistics: tenk1
+HINT:  For non-partitioned tables, run analyze <table_name>(<column_list>). For partitioned tables, run analyze rootpartition <table_name>(<column_list>). See log for columns missing statistics.
  sum | unique1 | four 
 -----+---------+------
   45 |       4 |    0
@@ -853,6 +861,8 @@ FROM tenk1 WHERE unique1 < 10;
 SELECT sum(unique1) over (rows between 2 preceding and 2 following),
 	unique1, four
 FROM tenk1 WHERE unique1 < 10;
+NOTICE:  One or more columns in the following table(s) do not have statistics: tenk1
+HINT:  For non-partitioned tables, run analyze <table_name>(<column_list>). For partitioned tables, run analyze rootpartition <table_name>(<column_list>). See log for columns missing statistics.
  sum | unique1 | four 
 -----+---------+------
    7 |       4 |    0
@@ -870,6 +880,8 @@ FROM tenk1 WHERE unique1 < 10;
 SELECT sum(unique1) over (rows between 2 preceding and 2 following exclude no others),
 	unique1, four
 FROM tenk1 WHERE unique1 < 10;
+NOTICE:  One or more columns in the following table(s) do not have statistics: tenk1
+HINT:  For non-partitioned tables, run analyze <table_name>(<column_list>). For partitioned tables, run analyze rootpartition <table_name>(<column_list>). See log for columns missing statistics.
  sum | unique1 | four 
 -----+---------+------
    7 |       4 |    0
@@ -887,6 +899,8 @@ FROM tenk1 WHERE unique1 < 10;
 SELECT sum(unique1) over (rows between 2 preceding and 2 following exclude current row),
 	unique1, four
 FROM tenk1 WHERE unique1 < 10;
+NOTICE:  One or more columns in the following table(s) do not have statistics: tenk1
+HINT:  For non-partitioned tables, run analyze <table_name>(<column_list>). For partitioned tables, run analyze rootpartition <table_name>(<column_list>). See log for columns missing statistics.
  sum | unique1 | four 
 -----+---------+------
    3 |       4 |    0
@@ -904,6 +918,8 @@ FROM tenk1 WHERE unique1 < 10;
 SELECT sum(unique1) over (rows between 2 preceding and 2 following exclude group),
 	unique1, four
 FROM tenk1 WHERE unique1 < 10;
+NOTICE:  One or more columns in the following table(s) do not have statistics: tenk1
+HINT:  For non-partitioned tables, run analyze <table_name>(<column_list>). For partitioned tables, run analyze rootpartition <table_name>(<column_list>). See log for columns missing statistics.
  sum | unique1 | four 
 -----+---------+------
      |       4 |    0
@@ -921,6 +937,8 @@ FROM tenk1 WHERE unique1 < 10;
 SELECT sum(unique1) over (rows between 2 preceding and 2 following exclude ties),
 	unique1, four
 FROM tenk1 WHERE unique1 < 10;
+NOTICE:  One or more columns in the following table(s) do not have statistics: tenk1
+HINT:  For non-partitioned tables, run analyze <table_name>(<column_list>). For partitioned tables, run analyze rootpartition <table_name>(<column_list>). See log for columns missing statistics.
  sum | unique1 | four 
 -----+---------+------
    4 |       4 |    0
@@ -938,6 +956,10 @@ FROM tenk1 WHERE unique1 < 10;
 SELECT first_value(unique1) over (ORDER BY four rows between current row and 2 following exclude current row),
 	unique1, four
 FROM tenk1 WHERE unique1 < 10;
+NOTICE:  One or more columns in the following table(s) do not have statistics: tenk1
+HINT:  For non-partitioned tables, run analyze <table_name>(<column_list>). For partitioned tables, run analyze rootpartition <table_name>(<column_list>). See log for columns missing statistics.
+NOTICE:  One or more columns in the following table(s) do not have statistics: tenk1
+HINT:  For non-partitioned tables, run analyze <table_name>(<column_list>). For partitioned tables, run analyze rootpartition <table_name>(<column_list>). See log for columns missing statistics.
  first_value | unique1 | four 
 -------------+---------+------
            8 |       0 |    0
@@ -955,6 +977,10 @@ FROM tenk1 WHERE unique1 < 10;
 SELECT first_value(unique1) over (ORDER BY four rows between current row and 2 following exclude group),
 	unique1, four
 FROM tenk1 WHERE unique1 < 10;
+NOTICE:  One or more columns in the following table(s) do not have statistics: tenk1
+HINT:  For non-partitioned tables, run analyze <table_name>(<column_list>). For partitioned tables, run analyze rootpartition <table_name>(<column_list>). See log for columns missing statistics.
+NOTICE:  One or more columns in the following table(s) do not have statistics: tenk1
+HINT:  For non-partitioned tables, run analyze <table_name>(<column_list>). For partitioned tables, run analyze rootpartition <table_name>(<column_list>). See log for columns missing statistics.
  first_value | unique1 | four 
 -------------+---------+------
              |       0 |    0
@@ -972,6 +998,10 @@ FROM tenk1 WHERE unique1 < 10;
 SELECT first_value(unique1) over (ORDER BY four rows between current row and 2 following exclude ties),
 	unique1, four
 FROM tenk1 WHERE unique1 < 10;
+NOTICE:  One or more columns in the following table(s) do not have statistics: tenk1
+HINT:  For non-partitioned tables, run analyze <table_name>(<column_list>). For partitioned tables, run analyze rootpartition <table_name>(<column_list>). See log for columns missing statistics.
+NOTICE:  One or more columns in the following table(s) do not have statistics: tenk1
+HINT:  For non-partitioned tables, run analyze <table_name>(<column_list>). For partitioned tables, run analyze rootpartition <table_name>(<column_list>). See log for columns missing statistics.
  first_value | unique1 | four 
 -------------+---------+------
            0 |       0 |    0
@@ -989,6 +1019,10 @@ FROM tenk1 WHERE unique1 < 10;
 SELECT last_value(unique1) over (ORDER BY four rows between current row and 2 following exclude current row),
 	unique1, four
 FROM tenk1 WHERE unique1 < 10;
+NOTICE:  One or more columns in the following table(s) do not have statistics: tenk1
+HINT:  For non-partitioned tables, run analyze <table_name>(<column_list>). For partitioned tables, run analyze rootpartition <table_name>(<column_list>). See log for columns missing statistics.
+NOTICE:  One or more columns in the following table(s) do not have statistics: tenk1
+HINT:  For non-partitioned tables, run analyze <table_name>(<column_list>). For partitioned tables, run analyze rootpartition <table_name>(<column_list>). See log for columns missing statistics.
  last_value | unique1 | four 
 ------------+---------+------
           4 |       0 |    0
@@ -1006,6 +1040,10 @@ FROM tenk1 WHERE unique1 < 10;
 SELECT last_value(unique1) over (ORDER BY four rows between current row and 2 following exclude group),
 	unique1, four
 FROM tenk1 WHERE unique1 < 10;
+NOTICE:  One or more columns in the following table(s) do not have statistics: tenk1
+HINT:  For non-partitioned tables, run analyze <table_name>(<column_list>). For partitioned tables, run analyze rootpartition <table_name>(<column_list>). See log for columns missing statistics.
+NOTICE:  One or more columns in the following table(s) do not have statistics: tenk1
+HINT:  For non-partitioned tables, run analyze <table_name>(<column_list>). For partitioned tables, run analyze rootpartition <table_name>(<column_list>). See log for columns missing statistics.
  last_value | unique1 | four 
 ------------+---------+------
             |       0 |    0
@@ -1023,6 +1061,10 @@ FROM tenk1 WHERE unique1 < 10;
 SELECT last_value(unique1) over (ORDER BY four rows between current row and 2 following exclude ties),
 	unique1, four
 FROM tenk1 WHERE unique1 < 10;
+NOTICE:  One or more columns in the following table(s) do not have statistics: tenk1
+HINT:  For non-partitioned tables, run analyze <table_name>(<column_list>). For partitioned tables, run analyze rootpartition <table_name>(<column_list>). See log for columns missing statistics.
+NOTICE:  One or more columns in the following table(s) do not have statistics: tenk1
+HINT:  For non-partitioned tables, run analyze <table_name>(<column_list>). For partitioned tables, run analyze rootpartition <table_name>(<column_list>). See log for columns missing statistics.
  last_value | unique1 | four 
 ------------+---------+------
           0 |       0 |    0
@@ -1040,6 +1082,8 @@ FROM tenk1 WHERE unique1 < 10;
 SELECT sum(unique1) over (rows between 2 preceding and 1 preceding),
 	unique1, four
 FROM tenk1 WHERE unique1 < 10;
+NOTICE:  One or more columns in the following table(s) do not have statistics: tenk1
+HINT:  For non-partitioned tables, run analyze <table_name>(<column_list>). For partitioned tables, run analyze rootpartition <table_name>(<column_list>). See log for columns missing statistics.
  sum | unique1 | four 
 -----+---------+------
      |       4 |    0
@@ -1057,6 +1101,8 @@ FROM tenk1 WHERE unique1 < 10;
 SELECT sum(unique1) over (rows between 1 following and 3 following),
 	unique1, four
 FROM tenk1 WHERE unique1 < 10;
+NOTICE:  One or more columns in the following table(s) do not have statistics: tenk1
+HINT:  For non-partitioned tables, run analyze <table_name>(<column_list>). For partitioned tables, run analyze rootpartition <table_name>(<column_list>). See log for columns missing statistics.
  sum | unique1 | four 
 -----+---------+------
    9 |       4 |    0
@@ -1074,6 +1120,8 @@ FROM tenk1 WHERE unique1 < 10;
 SELECT sum(unique1) over (rows between unbounded preceding and 1 following),
 	unique1, four
 FROM tenk1 WHERE unique1 < 10;
+NOTICE:  One or more columns in the following table(s) do not have statistics: tenk1
+HINT:  For non-partitioned tables, run analyze <table_name>(<column_list>). For partitioned tables, run analyze rootpartition <table_name>(<column_list>). See log for columns missing statistics.
  sum | unique1 | four 
 -----+---------+------
    6 |       4 |    0
@@ -1091,6 +1139,10 @@ FROM tenk1 WHERE unique1 < 10;
 SELECT sum(unique1) over (w range between current row and unbounded following),
 	unique1, four
 FROM tenk1 WHERE unique1 < 10 WINDOW w AS (order by four);
+NOTICE:  One or more columns in the following table(s) do not have statistics: tenk1
+HINT:  For non-partitioned tables, run analyze <table_name>(<column_list>). For partitioned tables, run analyze rootpartition <table_name>(<column_list>). See log for columns missing statistics.
+NOTICE:  One or more columns in the following table(s) do not have statistics: tenk1
+HINT:  For non-partitioned tables, run analyze <table_name>(<column_list>). For partitioned tables, run analyze rootpartition <table_name>(<column_list>). See log for columns missing statistics.
  sum | unique1 | four 
 -----+---------+------
   45 |       0 |    0
@@ -1108,6 +1160,10 @@ FROM tenk1 WHERE unique1 < 10 WINDOW w AS (order by four);
 SELECT sum(unique1) over (w range between unbounded preceding and current row exclude current row),
 	unique1, four
 FROM tenk1 WHERE unique1 < 10 WINDOW w AS (order by four);
+NOTICE:  One or more columns in the following table(s) do not have statistics: tenk1
+HINT:  For non-partitioned tables, run analyze <table_name>(<column_list>). For partitioned tables, run analyze rootpartition <table_name>(<column_list>). See log for columns missing statistics.
+NOTICE:  One or more columns in the following table(s) do not have statistics: tenk1
+HINT:  For non-partitioned tables, run analyze <table_name>(<column_list>). For partitioned tables, run analyze rootpartition <table_name>(<column_list>). See log for columns missing statistics.
  sum | unique1 | four 
 -----+---------+------
   12 |       0 |    0
@@ -1125,6 +1181,10 @@ FROM tenk1 WHERE unique1 < 10 WINDOW w AS (order by four);
 SELECT sum(unique1) over (w range between unbounded preceding and current row exclude group),
 	unique1, four
 FROM tenk1 WHERE unique1 < 10 WINDOW w AS (order by four);
+NOTICE:  One or more columns in the following table(s) do not have statistics: tenk1
+HINT:  For non-partitioned tables, run analyze <table_name>(<column_list>). For partitioned tables, run analyze rootpartition <table_name>(<column_list>). See log for columns missing statistics.
+NOTICE:  One or more columns in the following table(s) do not have statistics: tenk1
+HINT:  For non-partitioned tables, run analyze <table_name>(<column_list>). For partitioned tables, run analyze rootpartition <table_name>(<column_list>). See log for columns missing statistics.
  sum | unique1 | four 
 -----+---------+------
      |       0 |    0
@@ -1142,6 +1202,10 @@ FROM tenk1 WHERE unique1 < 10 WINDOW w AS (order by four);
 SELECT sum(unique1) over (w range between unbounded preceding and current row exclude ties),
 	unique1, four
 FROM tenk1 WHERE unique1 < 10 WINDOW w AS (order by four);
+NOTICE:  One or more columns in the following table(s) do not have statistics: tenk1
+HINT:  For non-partitioned tables, run analyze <table_name>(<column_list>). For partitioned tables, run analyze rootpartition <table_name>(<column_list>). See log for columns missing statistics.
+NOTICE:  One or more columns in the following table(s) do not have statistics: tenk1
+HINT:  For non-partitioned tables, run analyze <table_name>(<column_list>). For partitioned tables, run analyze rootpartition <table_name>(<column_list>). See log for columns missing statistics.
  sum | unique1 | four 
 -----+---------+------
    0 |       0 |    0
@@ -1161,6 +1225,10 @@ SELECT first_value(unique1) over w,
 	last_value(unique1) over w, unique1, four
 FROM tenk1 WHERE unique1 < 10
 WINDOW w AS (order by four range between current row and unbounded following);
+NOTICE:  One or more columns in the following table(s) do not have statistics: tenk1
+HINT:  For non-partitioned tables, run analyze <table_name>(<column_list>). For partitioned tables, run analyze rootpartition <table_name>(<column_list>). See log for columns missing statistics.
+NOTICE:  One or more columns in the following table(s) do not have statistics: tenk1
+HINT:  For non-partitioned tables, run analyze <table_name>(<column_list>). For partitioned tables, run analyze rootpartition <table_name>(<column_list>). See log for columns missing statistics.
  first_value | nth_2 | last_value | unique1 | four 
 -------------+-------+------------+---------+------
            0 |     8 |          7 |       0 |    0
@@ -1180,6 +1248,10 @@ SELECT sum(unique1) over
 	 rows (SELECT unique1 FROM tenk1 ORDER BY unique1 LIMIT 1) + 1 PRECEDING),
 	unique1
 FROM tenk1 WHERE unique1 < 10;
+NOTICE:  One or more columns in the following table(s) do not have statistics: tenk1
+HINT:  For non-partitioned tables, run analyze <table_name>(<column_list>). For partitioned tables, run analyze rootpartition <table_name>(<column_list>). See log for columns missing statistics.
+NOTICE:  One or more columns in the following table(s) do not have statistics: tenk1
+HINT:  For non-partitioned tables, run analyze <table_name>(<column_list>). For partitioned tables, run analyze rootpartition <table_name>(<column_list>). See log for columns missing statistics.
  sum | unique1 
 -----+---------
    0 |       0
@@ -1213,10 +1285,10 @@ SELECT * FROM v_window;
 (10 rows)
 
 SELECT pg_get_viewdef('v_window');
-                                    pg_get_viewdef                                     
----------------------------------------------------------------------------------------
-  SELECT i.i,                                                                         +
-     sum(i.i) OVER (ORDER BY i.i ROWS BETWEEN 1 PRECEDING AND 1 FOLLOWING) AS sum_rows+
+                                  pg_get_viewdef                                   
+-----------------------------------------------------------------------------------
+  SELECT i,                                                                       +
+     sum(i) OVER (ORDER BY i ROWS BETWEEN 1 PRECEDING AND 1 FOLLOWING) AS sum_rows+
     FROM generate_series(1, 10) i(i);
 (1 row)
 
@@ -1240,10 +1312,10 @@ SELECT * FROM v_window;
 (10 rows)
 
 SELECT pg_get_viewdef('v_window');
-                                              pg_get_viewdef                                               
------------------------------------------------------------------------------------------------------------
-  SELECT i.i,                                                                                             +
-     sum(i.i) OVER (ORDER BY i.i ROWS BETWEEN 1 PRECEDING AND 1 FOLLOWING EXCLUDE CURRENT ROW) AS sum_rows+
+                                            pg_get_viewdef                                             
+-------------------------------------------------------------------------------------------------------
+  SELECT i,                                                                                           +
+     sum(i) OVER (ORDER BY i ROWS BETWEEN 1 PRECEDING AND 1 FOLLOWING EXCLUDE CURRENT ROW) AS sum_rows+
     FROM generate_series(1, 10) i(i);
 (1 row)
 
@@ -1266,10 +1338,10 @@ SELECT * FROM v_window;
 (10 rows)
 
 SELECT pg_get_viewdef('v_window');
-                                           pg_get_viewdef                                            
------------------------------------------------------------------------------------------------------
-  SELECT i.i,                                                                                       +
-     sum(i.i) OVER (ORDER BY i.i ROWS BETWEEN 1 PRECEDING AND 1 FOLLOWING EXCLUDE GROUP) AS sum_rows+
+                                         pg_get_viewdef                                          
+-------------------------------------------------------------------------------------------------
+  SELECT i,                                                                                     +
+     sum(i) OVER (ORDER BY i ROWS BETWEEN 1 PRECEDING AND 1 FOLLOWING EXCLUDE GROUP) AS sum_rows+
     FROM generate_series(1, 10) i(i);
 (1 row)
 
@@ -1292,10 +1364,10 @@ SELECT * FROM v_window;
 (10 rows)
 
 SELECT pg_get_viewdef('v_window');
-                                           pg_get_viewdef                                           
-----------------------------------------------------------------------------------------------------
-  SELECT i.i,                                                                                      +
-     sum(i.i) OVER (ORDER BY i.i ROWS BETWEEN 1 PRECEDING AND 1 FOLLOWING EXCLUDE TIES) AS sum_rows+
+                                         pg_get_viewdef                                         
+------------------------------------------------------------------------------------------------
+  SELECT i,                                                                                    +
+     sum(i) OVER (ORDER BY i ROWS BETWEEN 1 PRECEDING AND 1 FOLLOWING EXCLUDE TIES) AS sum_rows+
     FROM generate_series(1, 10) i(i);
 (1 row)
 
@@ -1318,10 +1390,10 @@ SELECT * FROM v_window;
 (10 rows)
 
 SELECT pg_get_viewdef('v_window');
-                                    pg_get_viewdef                                     
----------------------------------------------------------------------------------------
-  SELECT i.i,                                                                         +
-     sum(i.i) OVER (ORDER BY i.i ROWS BETWEEN 1 PRECEDING AND 1 FOLLOWING) AS sum_rows+
+                                  pg_get_viewdef                                   
+-----------------------------------------------------------------------------------
+  SELECT i,                                                                       +
+     sum(i) OVER (ORDER BY i ROWS BETWEEN 1 PRECEDING AND 1 FOLLOWING) AS sum_rows+
     FROM generate_series(1, 10) i(i);
 (1 row)
 
@@ -1343,10 +1415,10 @@ SELECT * FROM v_window;
 (10 rows)
 
 SELECT pg_get_viewdef('v_window');
-                                     pg_get_viewdef                                      
------------------------------------------------------------------------------------------
-  SELECT i.i,                                                                           +
-     sum(i.i) OVER (ORDER BY i.i GROUPS BETWEEN 1 PRECEDING AND 1 FOLLOWING) AS sum_rows+
+                                   pg_get_viewdef                                    
+-------------------------------------------------------------------------------------
+  SELECT i,                                                                         +
+     sum(i) OVER (ORDER BY i GROUPS BETWEEN 1 PRECEDING AND 1 FOLLOWING) AS sum_rows+
     FROM generate_series(1, 10) i(i);
 (1 row)
 
@@ -1355,10 +1427,10 @@ CREATE TEMP VIEW v_window AS
 	SELECT i, min(i) over (order by i range between '1 day' preceding and '10 days' following) as min_i
   FROM generate_series(now(), now()+'100 days'::interval, '1 hour') i;
 SELECT pg_get_viewdef('v_window');
-                                                      pg_get_viewdef                                                       
----------------------------------------------------------------------------------------------------------------------------
-  SELECT i.i,                                                                                                             +
-     min(i.i) OVER (ORDER BY i.i RANGE BETWEEN '@ 1 day'::interval PRECEDING AND '@ 10 days'::interval FOLLOWING) AS min_i+
+                                                    pg_get_viewdef                                                     
+-----------------------------------------------------------------------------------------------------------------------
+  SELECT i,                                                                                                           +
+     min(i) OVER (ORDER BY i RANGE BETWEEN '@ 1 day'::interval PRECEDING AND '@ 10 days'::interval FOLLOWING) AS min_i+
     FROM generate_series(now(), (now() + '@ 100 days'::interval), '@ 1 hour'::interval) i(i);
 (1 row)
 
@@ -1920,6 +1992,8 @@ create temp table numerics(
     f_float8 float8,
     f_numeric numeric
 );
+NOTICE:  Table doesn't have 'DISTRIBUTED BY' clause -- Using column named 'id' as the Apache Cloudberry data distribution key for this table.
+HINT:  The 'DISTRIBUTED BY' clause determines the distribution of data. Make sure column(s) chosen are the optimal data distribution key to minimize skew.
 insert into numerics values
 (0, '-infinity', '-infinity', '-infinity'),
 (1, -3, -3, -3),
@@ -2233,6 +2307,8 @@ create temp table datetimes(
     f_timestamptz timestamptz,
     f_timestamp timestamp
 );
+NOTICE:  Table doesn't have 'DISTRIBUTED BY' clause -- Using column named 'id' as the Apache Cloudberry data distribution key for this table.
+HINT:  The 'DISTRIBUTED BY' clause determines the distribution of data. Make sure column(s) chosen are the optimal data distribution key to minimize skew.
 insert into datetimes values
 (1, '11:00', '11:00 BST', '1 year', '2000-10-19 10:23:54+01', '2000-10-19 10:23:54'),
 (2, '12:00', '12:00 BST', '2 years', '2001-10-19 10:23:54+01', '2001-10-19 10:23:54'),
@@ -2671,6 +2747,9 @@ SELECT sum(unique1) over (partition by ten
 FROM tenk1 WHERE unique1 < 10;
  sum | unique1 | four | ten 
 -----+---------+------+-----
+   5 |       5 |    1 |   5
+   6 |       6 |    2 |   6
+   9 |       9 |    1 |   9
    2 |       2 |    2 |   2
    3 |       3 |    3 |   3
    4 |       4 |    0 |   4
@@ -2678,9 +2757,6 @@ FROM tenk1 WHERE unique1 < 10;
    8 |       8 |    0 |   8
    0 |       0 |    0 |   0
    1 |       1 |    1 |   1
-   5 |       5 |    1 |   5
-   6 |       6 |    2 |   6
-   9 |       9 |    1 |   9
 (10 rows)
 
 SELECT sum(unique1) over (partition by ten
@@ -2688,8 +2764,6 @@ SELECT sum(unique1) over (partition by ten
 FROM tenk1 WHERE unique1 < 10;
  sum | unique1 | four | ten 
 -----+---------+------+-----
-     |       0 |    0 |   0
-     |       1 |    1 |   1
      |       5 |    1 |   5
      |       6 |    2 |   6
      |       9 |    1 |   9
@@ -2698,6 +2772,8 @@ FROM tenk1 WHERE unique1 < 10;
      |       4 |    0 |   4
      |       7 |    3 |   7
      |       8 |    0 |   8
+     |       0 |    0 |   0
+     |       1 |    1 |   1
 (10 rows)
 
 SELECT sum(unique1) over (partition by ten
@@ -2722,6 +2798,9 @@ SELECT sum(unique1) over (partition by ten
 FROM tenk1 WHERE unique1 < 10;
  sum | unique1 | four | ten 
 -----+---------+------+-----
+   5 |       5 |    1 |   5
+   6 |       6 |    2 |   6
+   9 |       9 |    1 |   9
    2 |       2 |    2 |   2
    3 |       3 |    3 |   3
    4 |       4 |    0 |   4
@@ -2729,9 +2808,6 @@ FROM tenk1 WHERE unique1 < 10;
    8 |       8 |    0 |   8
    0 |       0 |    0 |   0
    1 |       1 |    1 |   1
-   5 |       5 |    1 |   5
-   6 |       6 |    2 |   6
-   9 |       9 |    1 |   9
 (10 rows)
 
 select first_value(salary) over(order by enroll_date groups between 1 preceding and 1 following),
@@ -3011,6 +3087,8 @@ SELECT count(*) OVER (PARTITION BY four) FROM (SELECT * FROM tenk1 UNION ALL SEL
 
 -- check some degenerate cases
 create temp table t1 (f1 int, f2 int8);
+NOTICE:  Table doesn't have 'DISTRIBUTED BY' clause -- Using column named 'f1' as the Apache Cloudberry data distribution key for this table.
+HINT:  The 'DISTRIBUTED BY' clause determines the distribution of data. Make sure column(s) chosen are the optimal data distribution key to minimize skew.
 insert into t1 values (1,1),(1,2),(2,2);
 select f1, sum(f1) over (partition by f1
                          range between 1 preceding and 1 following)
@@ -3040,8 +3118,8 @@ select f1, sum(f1) over (partition by f1 order by f2
 from t1 where f1 = f2;
  f1 | sum 
 ----+-----
-  1 |   1
   2 |   2
+  1 |   1
 (2 rows)
 
 select f1, sum(f1) over (partition by f1, f1 order by f2
@@ -3049,8 +3127,8 @@ select f1, sum(f1) over (partition by f1, f1 order by f2
 from t1 where f1 = f2;
  f1 | sum 
 ----+-----
-  2 |    
   1 |    
+  2 |    
 (2 rows)
 
 select f1, sum(f1) over (partition by f1, f2 order by f2
@@ -3099,8 +3177,8 @@ select f1, sum(f1) over (partition by f1, f1 order by f2
 from t1 where f1 = f2;
  f1 | sum 
 ----+-----
-  2 |    
   1 |    
+  2 |    
 (2 rows)
 
 select f1, sum(f1) over (partition by f1, f2 order by f2
@@ -3108,8 +3186,8 @@ select f1, sum(f1) over (partition by f1, f2 order by f2
 from t1 where f1 = f2;
  f1 | sum 
 ----+-----
-  2 |    
   1 |    
+  2 |    
 (2 rows)
 
 -- ordering by a non-integer constant is allowed
@@ -3204,8 +3282,8 @@ SELECT * FROM
           min(salary) OVER (PARTITION BY depname || 'A', depname) depminsalary
    FROM empsalary) emp
 WHERE depname = 'sales';
-                                   QUERY PLAN                                    
----------------------------------------------------------------------------------
+                           QUERY PLAN                            
+-----------------------------------------------------------------
  Vec Gather Motion 1:1  (slice1; segments: 1)
    ->  Vec WindowHashAgg
          Partition By: (((depname)::text || 'A'::text)), depname
@@ -3224,8 +3302,8 @@ SELECT * FROM
           min(salary) OVER (PARTITION BY depname) depminsalary
    FROM empsalary) emp
 WHERE depname = 'sales';
-                                          QUERY PLAN                                          
-----------------------------------------------------------------------------------------------
+                                    QUERY PLAN                                    
+----------------------------------------------------------------------------------
  Vec Gather Motion 3:1  (slice1; segments: 3)
    ->  Vec WindowHashAgg
          Partition By: depname
@@ -3274,8 +3352,8 @@ SELECT * FROM
           min(salary) OVER (PARTITION BY depname, empno order by enroll_date) depminsalary
    FROM empsalary) emp
 WHERE depname = 'sales';
-                                QUERY PLAN                                 
----------------------------------------------------------------------------
+                          QUERY PLAN                           
+---------------------------------------------------------------
  Vec Gather Motion 1:1  (slice1; segments: 1)
    ->  Vec WindowHashAgg
          Partition By: depname, empno
@@ -3335,7 +3413,7 @@ WHERE first_emp = 1 OR last_emp = 1;
                      Order By: empno
                      ->  Vec Seq Scan on empsalary
  Optimizer: GPORCA
-(10 rows)
+(11 rows)
 
 SELECT * FROM
   (SELECT depname,
@@ -3348,12 +3426,12 @@ SELECT * FROM
 WHERE first_emp = 1 OR last_emp = 1;
   depname  | empno | salary | enroll_date | first_emp | last_emp 
 -----------+-------+--------+-------------+-----------+----------
- develop   |    11 |   5200 | 08-15-2007  |         5 |        1
- develop   |     7 |   4200 | 01-01-2008  |         1 |        5
  personnel |     5 |   3500 | 12-10-2007  |         2 |        1
  personnel |     2 |   3900 | 12-23-2006  |         1 |        2
  sales     |     4 |   4800 | 08-08-2007  |         3 |        1
  sales     |     1 |   5000 | 10-01-2006  |         1 |        3
+ develop   |    11 |   5200 | 08-15-2007  |         5 |        1
+ develop   |     7 |   4200 | 01-01-2008  |         1 |        5
 (6 rows)
 
 RESET vector.partition_topk_require_topk_qual;

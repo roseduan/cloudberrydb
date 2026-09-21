@@ -73,7 +73,8 @@ class IndexUpdaterInternal {
     Assert(slot == slot_);
     Assert(HasIndex());
     auto recheck_index =
-        ExecInsertIndexTuples(relinfo_, slot_, estate_, true, false, NULL, NIL);
+        ExecInsertIndexTuples(relinfo_, slot_, estate_, true, false, NULL, NIL,
+							  false);
     list_free(recheck_index);
   }
 
@@ -143,8 +144,8 @@ TableWriter::TableWriter(Relation relation)
 
   file_system_ = Singleton<LocalFileSystem>::GetInstance();
 
-  opts->spc_oid = (unsigned int) relation->rd_node.spcNode;
-  opts->db_node = (unsigned int) relation->rd_node.dbNode;
+  opts->spc_oid = (unsigned int) relation->rd_locator.spcOid;
+  opts->db_node = (unsigned int) relation->rd_locator.dbOid;
   file_system_options_ = opts;
 }
 
@@ -199,7 +200,7 @@ std::unique_ptr<MicroPartitionWriter> TableWriter::CreateMicroPartitionWriter(
   toast_file_path = GenToastFilePath(file_path);
 
   options.rel_oid = relation_->rd_id;
-  options.node = relation_->rd_node;
+  options.node = relation_->rd_locator;
   // only permanent table should write wal
   options.need_wal =
       relation_->rd_rel->relpersistence == RELPERSISTENCE_PERMANENT;
@@ -267,8 +268,8 @@ void TableWriter::InitOptionsCaches() {
 }
 
 void TableWriter::Open() {
-  rel_path_ =
-      cbdb::BuildPaxDirectoryPath(relation_->rd_node, relation_->rd_backend);
+  rel_path_ = cbdb::BuildPaxDirectoryPath(
+      relation_->rd_locator, relation_->rd_backend);
 
   InitOptionsCaches();
 
@@ -617,8 +618,8 @@ TableDeleter::TableDeleter(
   file_system_ = Singleton<LocalFileSystem>::GetInstance();
 
   auto opts = std::make_shared<LocalFileSystemOptions>();
-  opts->spc_oid = (unsigned int) rel->rd_node.spcNode;
-  opts->db_node = (unsigned int) rel->rd_node.dbNode;
+  opts->spc_oid = (unsigned int) rel->rd_locator.spcOid;
+  opts->db_node = (unsigned int) rel->rd_locator.dbOid;
   file_system_options_ = opts;
 }
 
@@ -683,7 +684,8 @@ void TableDeleter::DeleteWithVisibilityMap(
 
   std::unique_ptr<Bitmap8> visi_bitmap;
   auto catalog_update = pax::PaxCatalogUpdater::Begin(rel_);
-  auto rel_path = cbdb::BuildPaxDirectoryPath(rel_->rd_node, rel_->rd_backend);
+  auto rel_path = cbdb::BuildPaxDirectoryPath(
+      rel_->rd_locator, rel_->rd_backend);
 
   min_max_col_idxs = cbdb::GetMinMaxColumnIndexes(rel_);
   stats_updater_projection->SetColumnProjection(min_max_col_idxs,
@@ -752,7 +754,7 @@ void TableDeleter::DeleteWithVisibilityMap(
                                              file_system_options_);
       visimap_file->WriteN(raw.bitmap, raw.size);
       if (need_wal_) {
-        cbdb::XLogPaxInsert(rel_->rd_node, visimap_file_name, 0, raw.bitmap,
+        cbdb::XLogPaxInsert(rel_->rd_locator, visimap_file_name, 0, raw.bitmap,
                             raw.size);
       }
       visimap_file->Close();
@@ -824,7 +826,7 @@ std::unique_ptr<TableReader> TableDeleter::OpenReader(
   TableReader::ReaderOptions reader_options{};
 
   reader_options.table_space_id = rel_->rd_rel->reltablespace;
-  reader_options.db_node = rel_->rd_node.dbNode;
+  reader_options.db_node = rel_->rd_locator.dbOid;
   reader_options.use_prefetch = pax::pax_enable_prefetch;
   auto reader =
       std::make_unique<TableReader>(std::move(iterator), reader_options);

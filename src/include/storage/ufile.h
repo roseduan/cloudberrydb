@@ -28,7 +28,7 @@
 #ifndef UFILE_H
 #define UFILE_H
 
-#include "storage/relfilenode.h"
+#include "storage/relfilelocator.h"
 
 #define UFILE_ERROR_SIZE	1024
 
@@ -45,9 +45,9 @@ typedef struct FileAm
 	int (*write) (struct UFile *file, char *buffer, int amount);
 	int (*pwrite) (struct UFile *file, char *buffer, int amount, off_t offset);
 	int64_t (*size) (struct UFile *file);
-	int (*unlink) (Oid spcId, const char *fileName);
+	void (*unlink) (Oid spcId, const char *fileName);
 	int (*rmdir) (Oid spcId, const char *dirName);
-	char* (*formatPathName) (Oid relid, RelFileNode *relFileNode);
+	char* (*formatPathName) (Oid relid, RelFileLocator *relFileLocator);
 	bool (*ensurePath) (Oid spcId, const char *pathName);
 	bool (*exists) (Oid spcId, const char *fileName);
 	const char *(*name) (struct UFile *file);
@@ -78,7 +78,7 @@ extern const char *UFileName(UFile *file);
 
 extern int UFileUnlink(Oid spcId, const char *fileName);
 extern int UFileRmdir(Oid spcId, const char *dirName);
-extern char* UFileFormatPathName(Oid relid, RelFileNode *relFileNode);
+extern char* UFileFormatPathName(Oid relid, RelFileLocator *relFileNode);
 extern bool UFileEnsurePath(Oid spcId, const char *pathName);
 extern bool UFileExists(Oid spcId, const char *fileName);
 

@@ -15,7 +15,7 @@ SELECT gp_inject_fault('collate_locale_os_lookup', 'error', dbid) from gp_segmen
 create schema import_collation_schema;
 CREATE
 select pg_import_system_collations( (select oid from pg_namespace where nspname = 'import_collation_schema') );
-ERROR:  fault triggered, fault name:'collate_locale_os_lookup' fault type:'error'  (seg0 127.0.1.1:25432 pid=19176)
+ERROR:  fault triggered, fault name:'collate_locale_os_lookup' fault type:'error'
 
 -- Count the number of collations in import_collation_schema. It should be
 -- zero because one of the segments failed to create a collation.

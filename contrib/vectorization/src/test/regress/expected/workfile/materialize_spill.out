@@ -41,13 +41,13 @@ language plpython3u;
 -- in memory, the Materialize will spill to disk.
 --
 CREATE TABLE test_mat_small (i1 int);
-NOTICE:  Table doesn't have 'DISTRIBUTED BY' clause -- Using column named 'i1' as the Cloudberry Database data distribution key for this table.
+NOTICE:  Table doesn't have 'DISTRIBUTED BY' clause -- Using column named 'i1' as the Apache Cloudberry data distribution key for this table.
 HINT:  The 'DISTRIBUTED BY' clause determines the distribution of data. Make sure column(s) chosen are the optimal data distribution key to minimize skew.
 INSERT INTO test_mat_small SELECT i from generate_series(1, 5) i;
 -- Scale the larger table's size with the number of segments, so that there is enough
 -- data on every segment to cause spilling.
 CREATE TABLE test_mat_large (i1 int, i2 int, i3 int, i4 int, i5 int, i6 int, i7 int, i8 int);
-NOTICE:  Table doesn't have 'DISTRIBUTED BY' clause -- Using column named 'i1' as the Cloudberry Database data distribution key for this table.
+NOTICE:  Table doesn't have 'DISTRIBUTED BY' clause -- Using column named 'i1' as the Apache Cloudberry data distribution key for this table.
 HINT:  The 'DISTRIBUTED BY' clause determines the distribution of data. Make sure column(s) chosen are the optimal data distribution key to minimize skew.
 INSERT INTO test_mat_large SELECT i,i,i,i,i,i,i,i from
 	(select generate_series(1, nsegments * 50000) as i from
@@ -59,6 +59,9 @@ set enable_nestloop = true;
 -- ORCA doesn't honor enable_nestloop/enable_hashjoin, so this won't produce
 -- the kind of plan we're looking for.
 set optimizer=off;
+-- CBDB_PARALLEL_FIXME: seems like work_mem are affected by parallel, thus more spilling
+-- happened. Temporally disable parallel in this case to pass the test.
+set enable_parallel=off;
 -- This is the actual test query.
 select * FROM test_mat_small as t1 left outer join test_mat_large AS t2 on t1.i1=t2.i2;
  i1 | i1 | i2 | i3 | i4 | i5 | i6 | i7 | i8 
@@ -106,6 +109,7 @@ $$) as n;
           0
 (1 row)
 
+reset enable_parallel;
 drop schema materialize_spill cascade;
 NOTICE:  drop cascades to 3 other objects
 DETAIL:  drop cascades to function num_workfiles_created(text)

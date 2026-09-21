@@ -2,6 +2,7 @@
 -- Tests for legacy cdbhash opclasses
 --
 drop schema if exists gpdist_legacy_opclasses;
+NOTICE:  schema "gpdist_legacy_opclasses" does not exist, skipping
 create schema gpdist_legacy_opclasses;
 set search_path to gpdist_legacy_opclasses;
 -- Basic sanity check of all the legacy hash opclasses. Create a table that
@@ -145,6 +146,7 @@ insert into all_legacy_types values (
 -- Test that CTAS honors the gp_use_legacy_hashops GUC
 -- Note: When ORCA is on, the distribution is RANDOM.
 create table legacy_hashops_ctas as select 1;
+NOTICE:  Table doesn't have 'DISTRIBUTED BY' clause. Creating a NULL policy entry.
 select gpdp.distkey, pgopc.opcname
   from gp_distribution_policy gpdp, pg_opclass pgopc
   where gpdp.localoid='legacy_hashops_ctas'::regclass and pgopc.oid::text = gpdp.distclass::text;
@@ -165,15 +167,15 @@ create table modern_text (t text) distributed by (t);
 insert into modern_text values ('foo'), ('1');
 -- Only legacy opclasses used. ORCA can deal with this
 explain (costs off) select * from legacy_int a inner join legacy_int b on a.id = b.id;
-                      QUERY PLAN                       
--------------------------------------------------------
+                 QUERY PLAN                 
+--------------------------------------------
  Gather Motion 3:1  (slice1; segments: 3)
    ->  Hash Join
          Hash Cond: (a.id = b.id)
          ->  Seq Scan on legacy_int a
          ->  Hash
                ->  Seq Scan on legacy_int b
- Optimizer: Pivotal Optimizer (GPORCA) version 3.9.0
+ Optimizer: GPORCA
 (7 rows)
 
 select * from legacy_int a inner join legacy_int b on a.id = b.id;
@@ -209,15 +211,15 @@ select * from legacy_int a inner join modern_int b on a.id = b.id;
 
 -- for the sake of completeness, modern opclasses only. No problem for ORCA.
 explain (costs off) select * from modern_int a inner join modern_int b on a.id = b.id;
-                      QUERY PLAN                       
--------------------------------------------------------
+                 QUERY PLAN                 
+--------------------------------------------
  Gather Motion 3:1  (slice1; segments: 3)
    ->  Hash Join
          Hash Cond: (a.id = b.id)
          ->  Seq Scan on modern_int a
          ->  Hash
                ->  Seq Scan on modern_int b
- Optimizer: Pivotal Optimizer (GPORCA) version 3.9.0
+ Optimizer: GPORCA
 (7 rows)
 
 select * from modern_int a inner join modern_int b on a.id = b.id;
@@ -258,27 +260,27 @@ create table legacy_domain_over_int(id intdom) distributed by(id cdbhash_int4_op
 insert into legacy_domain_over_int values (1), (2), (3);
 analyze legacy_domain_over_int;
 explain (costs off) select * from legacy_domain_over_int a inner join legacy_domain_over_int b on a.id = b.id;
-                                             QUERY PLAN                                             
-----------------------------------------------------------------------------------------------------
+                       QUERY PLAN                       
+--------------------------------------------------------
  Gather Motion 3:1  (slice1; segments: 3)
    ->  Hash Join
          Hash Cond: ((a.id)::integer = (b.id)::integer)
          ->  Seq Scan on legacy_domain_over_int a
          ->  Hash
                ->  Seq Scan on legacy_domain_over_int b
- Optimizer: Pivotal Optimizer (GPORCA) version 3.9.0
+ Optimizer: GPORCA
 (7 rows)
 
 explain (costs off) select * from legacy_int a inner join legacy_domain_over_int b on a.id = b.id;
-                                QUERY PLAN                                 
----------------------------------------------------------------------------
+                       QUERY PLAN                       
+--------------------------------------------------------
  Gather Motion 3:1  (slice1; segments: 3)
    ->  Hash Join
          Hash Cond: (a.id = (b.id)::integer)
          ->  Seq Scan on legacy_int a
          ->  Hash
                ->  Seq Scan on legacy_domain_over_int b
- Optimizer: Pivotal Optimizer (GPORCA) version 3.9.0
+ Optimizer: GPORCA
 (7 rows)
 
 explain (costs off) select * from modern_int a inner join legacy_domain_over_int b on a.id = b.id;
@@ -313,9 +315,9 @@ explain (costs off) select * from legacy_enum a inner join legacy_enum b on a.co
 select * from legacy_enum a inner join legacy_enum b on a.color = b.color;
  color | color 
 -------+-------
- blue  | blue
  red   | red
  green | green
+ blue  | blue
 (3 rows)
 
 --
@@ -426,7 +428,7 @@ explain (costs off) select distinct test_array from try_distinct_array;
    Group Key: test_array
    ->  Gather Motion 3:1  (slice1; segments: 3)
          ->  Seq Scan on try_distinct_array
- Optimizer: Pivotal Optimizer (GPORCA)
+ Optimizer: GPORCA
 (5 rows)
 
 select distinct test_array from try_distinct_array;
@@ -437,8 +439,8 @@ select distinct test_array from try_distinct_array;
 
 -- Hash join on column that does not have legacy hashop
 explain (costs off) select * from try_distinct_array a, try_distinct_array b where a.test_array=b.test_array;
-                                               QUERY PLAN                                               
---------------------------------------------------------------------------------------------------------
+                             QUERY PLAN                             
+--------------------------------------------------------------------
  Hash Join
    Hash Cond: ((a.test_array)::anyarray = (b.test_array)::anyarray)
    ->  Gather Motion 3:1  (slice1; segments: 3)
@@ -446,7 +448,7 @@ explain (costs off) select * from try_distinct_array a, try_distinct_array b whe
    ->  Hash
          ->  Gather Motion 3:1  (slice2; segments: 3)
                ->  Seq Scan on try_distinct_array b
- Optimizer: Pivotal Optimizer (GPORCA)
+ Optimizer: GPORCA
 (8 rows)
 
 select * from try_distinct_array a, try_distinct_array b where a.test_array=b.test_array;
@@ -480,12 +482,12 @@ select dp.localoid::regclass as name, opc.opcname
                        'ctas_explicit_nonlegacy'::regclass);
           name           |     opcname      
 -------------------------+------------------
- ctas_explicit_nonlegacy | int4_ops
  ctas_base_nonlegacy     | int4_ops
  ctas_from_legacy        | int4_ops
- ctas_from_nonlegacy     | cdbhash_int4_ops
- ctas_explicit_legacy    | cdbhash_int4_ops
+ ctas_explicit_nonlegacy | int4_ops
  ctas_base_legacy        | cdbhash_int4_ops
+ ctas_explicit_legacy    | cdbhash_int4_ops
+ ctas_from_nonlegacy     | cdbhash_int4_ops
 (6 rows)
 
 select * from ctas_from_legacy where col=1;

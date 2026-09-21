@@ -67,6 +67,9 @@ PRIVATE_CPP_FLAGS = -I$(top_builddir)/contrib/pax_storage/src/cpp \
 # used by other backend cdb code, e.g. cdbrelsize.c.
 PG_CPPFLAGS += -I$(libpq_srcdir)
 SHLIB_LINK += -L$(libpq_builddir) -lpq
+# ts_tableam.c uses floor(); needs libm explicitly since modern ld won't
+# resolve it transitively through another linked .so's own DT_NEEDED entry.
+SHLIB_LINK += -lm
 # PAX C++ symbols (pax::LocalFileSystem, pax::PaxFilter, pax::pax_enable_*, ...)
 # resolve at runtime from pax.so, which CBDB auto-preloads via the built-in
 # process_shared_preload_libraries_array (USE_PAX_STORAGE).  RTLD_GLOBAL on

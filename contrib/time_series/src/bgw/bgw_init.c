@@ -33,11 +33,12 @@
 #include "scheduler.h"
 
 /*
- * Chain to any previously-installed shmem_startup_hook before running
- * our own.  shared_preload_libraries are loaded in listed order so a
- * library after us could have set the hook; preserve its work.
+ * Chain to any previously-installed shmem_startup_hook/shmem_request_hook
+ * before running our own.  shared_preload_libraries are loaded in listed
+ * order so a library after us could have set the hook; preserve its work.
  */
 static shmem_startup_hook_type prev_shmem_startup_hook = NULL;
+static shmem_request_hook_type prev_shmem_request_hook = NULL;
 
 static void
 ts_shmem_startup_hook(void)
@@ -46,6 +47,21 @@ ts_shmem_startup_hook(void)
 		prev_shmem_startup_hook();
 	ts_bgw_counter_shmem_startup();
 	ts_bgw_message_queue_shmem_startup();
+}
+
+/*
+ * RequestAddinShmemSpace()/RequestNamedLWLockTranche() are only legal from
+ * within shmem_request_hook, which postgres calls once all preloaded
+ * libraries' _PG_init()s have installed their hooks -- not from _PG_init()
+ * itself.  Defer the actual requests here instead of making them eagerly.
+ */
+static void
+ts_shmem_request_hook(void)
+{
+	if (prev_shmem_request_hook)
+		prev_shmem_request_hook();
+	ts_bgw_counter_shmem_request();
+	ts_bgw_message_queue_shmem_request();
 }
 
 void
@@ -71,8 +87,8 @@ ts_bgw_init(void)
 
 	if (process_shared_preload_libraries_in_progress)
 	{
-		ts_bgw_counter_shmem_request();
-		ts_bgw_message_queue_shmem_request();
+		prev_shmem_request_hook = shmem_request_hook;
+		shmem_request_hook = ts_shmem_request_hook;
 
 		prev_shmem_startup_hook = shmem_startup_hook;
 		shmem_startup_hook = ts_shmem_startup_hook;

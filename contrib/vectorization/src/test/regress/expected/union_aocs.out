@@ -181,13 +181,13 @@ SELECT f1 FROM INT4_TBL;
           ten          
 -----------------------
                      0
+            2147483647
+           -2147483647
+                     0
                 -34.84
                -1004.3
  -1.2345678901234e+200
  -1.2345678901234e-200
-                     0
-            2147483647
-           -2147483647
                 123456
                -123456
 (10 rows)
@@ -351,8 +351,8 @@ set enable_hashagg to on;
 explain (costs off)
 select count(*) from
   ( select unique1 from tenk1 union select fivethous from tenk1 ) ss;
-                               QUERY PLAN                               
-------------------------------------------------------------------------
+                                 QUERY PLAN                                 
+----------------------------------------------------------------------------
  Vec Finalize Vec Aggregate
    ->  Vec Gather Motion 3:1  (slice1; segments: 3)
          ->  Vec Partial Vec Aggregate
@@ -965,7 +965,7 @@ SELECT q1 FROM int8_tbl EXCEPT SELECT q2 FROM int8_tbl ORDER BY q2 LIMIT 1;
 ERROR:  column "q2" does not exist
 LINE 1: ... int8_tbl EXCEPT SELECT q2 FROM int8_tbl ORDER BY q2 LIMIT 1...
                                                              ^
-HINT:  There is a column named "q2" in table "*SELECT* 2", but it cannot be referenced from this part of the query.
+DETAIL:  There is a column named "q2" in table "*SELECT* 2", but it cannot be referenced from this part of the query.
 -- But this should work:
 SELECT q1 FROM int8_tbl EXCEPT (((SELECT q2 FROM int8_tbl ORDER BY q2 LIMIT 1))) ORDER BY 1;
         q1        
@@ -980,11 +980,11 @@ SELECT q1 FROM int8_tbl EXCEPT (((SELECT q2 FROM int8_tbl ORDER BY q2 LIMIT 1)))
 (((((select * from int8_tbl)))));
         q1        |        q2         
 ------------------+-------------------
+              123 |               456
+              123 |  4567890123456789
  4567890123456789 |               123
  4567890123456789 |  4567890123456789
  4567890123456789 | -4567890123456789
-              123 |               456
-              123 |  4567890123456789
 (5 rows)
 
 --
@@ -1133,8 +1133,12 @@ LINE 1: SELECT '3.4'::numeric UNION SELECT 'foo';
 -- UNION or UNION ALL
 --
 CREATE TEMP TABLE t1 (a text, b text);
+NOTICE:  Table doesn't have 'DISTRIBUTED BY' clause -- Using column named 'a' as the Apache Cloudberry data distribution key for this table.
+HINT:  The 'DISTRIBUTED BY' clause determines the distribution of data. Make sure column(s) chosen are the optimal data distribution key to minimize skew.
 CREATE INDEX t1_ab_idx on t1 ((a || b));
 CREATE TEMP TABLE t2 (ab text);
+NOTICE:  Table doesn't have 'DISTRIBUTED BY' clause -- Using column named 'ab' as the Apache Cloudberry data distribution key for this table.
+HINT:  The 'DISTRIBUTED BY' clause determines the distribution of data. Make sure column(s) chosen are the optimal data distribution key to minimize skew.
 INSERT INTO t1 VALUES ('a', 'b'), ('x', 'y');
 INSERT INTO t2 VALUES ('ab'), ('xy');
 ANALYZE t1;
@@ -1188,6 +1192,8 @@ explain (costs off)
 -- children.
 --
 CREATE TEMP TABLE t1c (b text, a text);
+NOTICE:  Table doesn't have 'DISTRIBUTED BY' clause -- Using column named 'b' as the Apache Cloudberry data distribution key for this table.
+HINT:  The 'DISTRIBUTED BY' clause determines the distribution of data. Make sure column(s) chosen are the optimal data distribution key to minimize skew.
 ALTER TABLE t1c INHERIT t1;
 INSERT INTO t1c VALUES ('v', 'w'), ('c', 'd'), ('m', 'n'), ('e', 'f');
 CREATE INDEX t1c_ab_idx on t1c ((a || b));
@@ -1209,12 +1215,13 @@ explain (costs off)
          ->  Vec Limit
                ->  Vec Sort
                      Sort Key: ((t1.a || t1.b))
+                     Vec Sort Method:  TopK  K: 8
                      ->  Vec Append
                            ->  Vec Seq Scan on t1
                            ->  Vec Seq Scan on t1c t1_1
                            ->  Vec Seq Scan on t2
  Optimizer: Postgres query optimizer
-(11 rows)
+(12 rows)
 
   SELECT * FROM
   (SELECT a || b AS ab FROM t1
@@ -1241,7 +1248,11 @@ reset enable_sort;
 -- Coerce GPDB to produce same plan as in upstream
 set enable_seqscan=off;
 create table events (event_id int);
+NOTICE:  Table doesn't have 'DISTRIBUTED BY' clause -- Using column named 'event_id' as the Apache Cloudberry data distribution key for this table.
+HINT:  The 'DISTRIBUTED BY' clause determines the distribution of data. Make sure column(s) chosen are the optimal data distribution key to minimize skew.
 create table other_events (event_id int);
+NOTICE:  Table doesn't have 'DISTRIBUTED BY' clause -- Using column named 'event_id' as the Apache Cloudberry data distribution key for this table.
+HINT:  The 'DISTRIBUTED BY' clause determines the distribution of data. Make sure column(s) chosen are the optimal data distribution key to minimize skew.
 create table events_child () inherits (events);
 NOTICE:  table has parent, setting distribution columns to match parent table
 explain (costs off)
@@ -1250,8 +1261,8 @@ select event_id
        union all
        select event_id from other_events) ss
  order by event_id;
-                     QUERY PLAN                      
------------------------------------------------------
+                       QUERY PLAN                        
+---------------------------------------------------------
  Vec Gather Motion 3:1  (slice1; segments: 3)
    Merge Key: events.event_id
    ->  Vec Sort
@@ -1476,6 +1487,8 @@ create function expensivefunc(int) returns int
 language plpgsql immutable strict cost 10000
 as $$begin return $1; end$$;
 create temp table t3 as select generate_series(-1000,1000) as x;
+NOTICE:  Table doesn't have 'DISTRIBUTED BY' clause -- Using column(s) named 'x' as the Apache Cloudberry data distribution key for this table.
+HINT:  The 'DISTRIBUTED BY' clause determines the distribution of data. Make sure column(s) chosen are the optimal data distribution key to minimize skew.
 create index t3i on t3 (expensivefunc(x));
 analyze t3;
 explain (costs off)
@@ -1531,11 +1544,11 @@ select * from
 where (x = 0) or (q1 >= q2 and q1 <= q2);
         q1        |        q2         | x 
 ------------------+-------------------+---
-              123 |               456 | 0
-              123 |  4567890123456789 | 0
+ 4567890123456789 |  4567890123456789 | 1
  4567890123456789 |               123 | 0
  4567890123456789 |  4567890123456789 | 0
  4567890123456789 | -4567890123456789 | 0
- 4567890123456789 |  4567890123456789 | 1
+              123 |               456 | 0
+              123 |  4567890123456789 | 0
 (6 rows)
 

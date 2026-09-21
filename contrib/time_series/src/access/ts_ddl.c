@@ -412,7 +412,7 @@ ts_relation_size(Relation rel, ForkNumber forknum)
 		char			pathname[MAXPGPATH];
 		unsigned int	segcount;
 
-		relationpath = relpathbackend(rel->rd_node, rel->rd_backend, forknum);
+		relationpath = relpathbackend(rel->rd_locator, rel->rd_backend, forknum);
 
 		for (segcount = 0;; segcount++)
 		{

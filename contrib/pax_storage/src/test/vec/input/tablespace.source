@@ -5,7 +5,7 @@
 -- create a tablespace using WITH clause
 CREATE TABLESPACE regress_tblspacewith LOCATION '@testtablespace@' WITH (some_nonexistent_parameter = true); -- fail
 CREATE TABLESPACE regress_tblspacewith LOCATION '@testtablespace@' WITH (random_page_cost = 3.0); -- ok
-
+GRANT ALL ON SCHEMA public TO public;
 -- check to see the parameter was used
 SELECT spcoptions FROM pg_tablespace WHERE spcname = 'regress_tblspacewith';
 

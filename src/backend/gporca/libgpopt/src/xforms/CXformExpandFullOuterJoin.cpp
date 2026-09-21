@@ -195,11 +195,13 @@ CXformExpandFullOuterJoin::PexprLogicalJoinOverCTEs(
 		GPOS_NEW(mp) CLogicalCTEConsumer(mp, ulLeftCTEId, pdrgpcrLeft);
 	CExpression *pexprLeft = GPOS_NEW(mp) CExpression(mp, popConsumerLeft);
 	pcteinfo->IncrementConsumers(popConsumerLeft);
+	pcteinfo->AddCTEConsumer(pexprLeft);
 
 	CLogicalCTEConsumer *popConsumerRight =
 		GPOS_NEW(mp) CLogicalCTEConsumer(mp, ulRightCTEId, pdrgpcrRight);
 	CExpression *pexprRight = GPOS_NEW(mp) CExpression(mp, popConsumerRight);
 	pcteinfo->IncrementConsumers(popConsumerRight);
+	pcteinfo->AddCTEConsumer(pexprRight);
 
 	pdrgpexprChildren->Append(pexprLeft);
 	pdrgpexprChildren->Append(pexprRight);

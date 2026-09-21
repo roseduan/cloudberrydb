@@ -34,6 +34,7 @@
 #include "utils/builtins.h"
 #include "utils/date.h"
 #include "utils/datum.h"
+#include "utils/guc.h"
 #include "utils/lsyscache.h"
 #include "utils/partcache.h"
 #include "utils/rel.h"
@@ -1687,7 +1688,7 @@ generatePartitions(Oid parentrelid, GpPartitionDefinition *gpPartSpec,
 			if (elem->accessMethod && strcmp(elem->accessMethod, "ao_column") == 0)
 				elem->colencs = merge_partition_encoding(pstate, elem->colencs, penc_cls);
 			else if (!elem->colencs) {
-				/* For the aoco, used `transformColumnEncodingAocoRootPartition` to
+				/* For the aoco, used `transfromColumnEncodingAocoRootPartition` to
 				 * pass encoding clause in root partition. The logic in that method is
 				 * relate to aoco that means it only validate and pass the aoco encoding
 				 * clause options. So we have to give up pass root partition encoding

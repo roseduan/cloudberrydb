@@ -1475,8 +1475,7 @@ ts_chunk_scan_exec(CustomScanState *node)
 
 	ExecClearTuple(scanslot);
 
-	RelationOpenSmgr(state->rel);
-	smgr = state->rel->rd_smgr;
+	smgr = RelationGetSmgr(state->rel);
 
 	/*
 	 * Parallel: claim the first chunk lazily, on the executing backend.
@@ -2208,6 +2207,7 @@ ts_collect_param_pushdown_clauses(PlannerInfo *root, RelOptInfo *rel,
 									  true,		/* is_pushed_down */
 									  false,	/* outerjoin_delayed */
 									  false,	/* pseudoconstant */
+									  false,
 									  0,		/* security_level */
 									  combined,
 									  NULL,		/* outer_relids */

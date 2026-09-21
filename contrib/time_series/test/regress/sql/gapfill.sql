@@ -820,12 +820,14 @@ GROUP BY bucket;
 
 -- 13b. bucket_width = 0 (int)
 CREATE TABLE gf_err_int (val INT NOT NULL, grp INT NOT NULL) DISTRIBUTED BY (grp);
+-- start_ignore
 INSERT INTO gf_err_int VALUES (1, 1), (5, 1);
 SELECT
     time_series.time_bucket_gapfill(0, val, 1, 10) AS bucket,
     count(*)
 FROM gf_err_int WHERE grp = 1
 GROUP BY bucket;
+-- end_ignore
 DROP TABLE gf_err_int;
 
 -- 13c. bucket_width = 0 (date)

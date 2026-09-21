@@ -63,24 +63,23 @@ SELECT * FROM (
 ) t
 WHERE r <= 2
 ORDER BY category, r, id;
-                                            QUERY PLAN                                            
---------------------------------------------------------------------------------------------------
+                                         QUERY PLAN                                         
+--------------------------------------------------------------------------------------------
  Gather Motion 3:1  (slice1; segments: 3)
-   Merge Key: t.category, t.r, t.id
+   Merge Key: test_partition_topk.category, (rank() OVER (?)), test_partition_topk.id
    ->  Sort
-         Sort Key: t.category, t.r, t.id
-         ->  Subquery Scan on t
-               Filter: (t.r <= 2)
-               ->  WindowAgg
-                     Partition By: test_partition_topk.category
-                     Order By: test_partition_topk.score
-                     ->  Sort
-                           Sort Key: test_partition_topk.category, test_partition_topk.score DESC
-                           ->  Redistribute Motion 3:3  (slice2; segments: 3)
-                                 Hash Key: test_partition_topk.category
-                                 ->  Seq Scan on test_partition_topk
+         Sort Key: test_partition_topk.category, (rank() OVER (?)), test_partition_topk.id
+         ->  WindowAgg
+               Run Condition: (rank() OVER (?) <= 2)
+               Partition By: test_partition_topk.category
+               Order By: test_partition_topk.score
+               ->  Sort
+                     Sort Key: test_partition_topk.category, test_partition_topk.score DESC
+                     ->  Redistribute Motion 3:3  (slice2; segments: 3)
+                           Hash Key: test_partition_topk.category
+                           ->  Seq Scan on test_partition_topk
  Optimizer: Postgres query optimizer
-(15 rows)
+(14 rows)
 
 SELECT * FROM (
     SELECT id, category, score, name,
@@ -117,24 +116,23 @@ SELECT * FROM (
 ) t
 WHERE r <= 1
 ORDER BY category, r, id;
-                                            QUERY PLAN                                            
---------------------------------------------------------------------------------------------------
+                                         QUERY PLAN                                         
+--------------------------------------------------------------------------------------------
  Gather Motion 3:1  (slice1; segments: 3)
-   Merge Key: t.category, t.r, t.id
+   Merge Key: test_partition_topk.category, (rank() OVER (?)), test_partition_topk.id
    ->  Sort
-         Sort Key: t.category, t.r, t.id
-         ->  Subquery Scan on t
-               Filter: (t.r <= 1)
-               ->  WindowAgg
-                     Partition By: test_partition_topk.category
-                     Order By: test_partition_topk.score
-                     ->  Sort
-                           Sort Key: test_partition_topk.category, test_partition_topk.score DESC
-                           ->  Redistribute Motion 3:3  (slice2; segments: 3)
-                                 Hash Key: test_partition_topk.category
-                                 ->  Seq Scan on test_partition_topk
+         Sort Key: test_partition_topk.category, (rank() OVER (?)), test_partition_topk.id
+         ->  WindowAgg
+               Run Condition: (rank() OVER (?) <= 1)
+               Partition By: test_partition_topk.category
+               Order By: test_partition_topk.score
+               ->  Sort
+                     Sort Key: test_partition_topk.category, test_partition_topk.score DESC
+                     ->  Redistribute Motion 3:3  (slice2; segments: 3)
+                           Hash Key: test_partition_topk.category
+                           ->  Seq Scan on test_partition_topk
  Optimizer: Postgres query optimizer
-(15 rows)
+(14 rows)
 
 SELECT * FROM (
     SELECT id, category, score, name,
@@ -166,24 +164,23 @@ SELECT * FROM (
 ) t
 WHERE rn < 3
 ORDER BY category, rn, id;
-                                            QUERY PLAN                                            
---------------------------------------------------------------------------------------------------
+                                         QUERY PLAN                                         
+--------------------------------------------------------------------------------------------
  Gather Motion 3:1  (slice1; segments: 3)
-   Merge Key: t.category, t.rn, t.id
+   Merge Key: test_partition_topk.category, (rank() OVER (?)), test_partition_topk.id
    ->  Sort
-         Sort Key: t.category, t.rn, t.id
-         ->  Subquery Scan on t
-               Filter: (t.rn < 3)
-               ->  WindowAgg
-                     Partition By: test_partition_topk.category
-                     Order By: test_partition_topk.score
-                     ->  Sort
-                           Sort Key: test_partition_topk.category, test_partition_topk.score DESC
-                           ->  Redistribute Motion 3:3  (slice2; segments: 3)
-                                 Hash Key: test_partition_topk.category
-                                 ->  Seq Scan on test_partition_topk
+         Sort Key: test_partition_topk.category, (rank() OVER (?)), test_partition_topk.id
+         ->  WindowAgg
+               Run Condition: (rank() OVER (?) < 3)
+               Partition By: test_partition_topk.category
+               Order By: test_partition_topk.score
+               ->  Sort
+                     Sort Key: test_partition_topk.category, test_partition_topk.score DESC
+                     ->  Redistribute Motion 3:3  (slice2; segments: 3)
+                           Hash Key: test_partition_topk.category
+                           ->  Seq Scan on test_partition_topk
  Optimizer: Postgres query optimizer
-(15 rows)
+(14 rows)
 
 SELECT * FROM (
     SELECT id, category, score, name,
@@ -221,24 +218,23 @@ SELECT * FROM (
 ) t
 WHERE rn <= 2
 ORDER BY category, rn, id;
-                                            QUERY PLAN                                            
---------------------------------------------------------------------------------------------------
+                                           QUERY PLAN                                            
+-------------------------------------------------------------------------------------------------
  Gather Motion 3:1  (slice1; segments: 3)
-   Merge Key: t.category, t.rn, t.id
+   Merge Key: test_partition_topk.category, (row_number() OVER (?)), test_partition_topk.id
    ->  Sort
-         Sort Key: t.category, t.rn, t.id
-         ->  Subquery Scan on t
-               Filter: (t.rn <= 2)
-               ->  WindowAgg
-                     Partition By: test_partition_topk.category
-                     Order By: test_partition_topk.score
-                     ->  Sort
-                           Sort Key: test_partition_topk.category, test_partition_topk.score DESC
-                           ->  Redistribute Motion 3:3  (slice2; segments: 3)
-                                 Hash Key: test_partition_topk.category
-                                 ->  Seq Scan on test_partition_topk
+         Sort Key: test_partition_topk.category, (row_number() OVER (?)), test_partition_topk.id
+         ->  WindowAgg
+               Run Condition: (row_number() OVER (?) <= 2)
+               Partition By: test_partition_topk.category
+               Order By: test_partition_topk.score
+               ->  Sort
+                     Sort Key: test_partition_topk.category, test_partition_topk.score DESC
+                     ->  Redistribute Motion 3:3  (slice2; segments: 3)
+                           Hash Key: test_partition_topk.category
+                           ->  Seq Scan on test_partition_topk
  Optimizer: Postgres query optimizer
-(15 rows)
+(14 rows)
 
 -- ===================================================================
 -- Test 4: DENSE_RANK() with dr <= 2 → SHOULD NOT use PartitionTopK
@@ -255,24 +251,23 @@ SELECT * FROM (
 ) t
 WHERE dr <= 2
 ORDER BY category, dr, id;
-                                            QUERY PLAN                                            
---------------------------------------------------------------------------------------------------
+                                           QUERY PLAN                                            
+-------------------------------------------------------------------------------------------------
  Gather Motion 3:1  (slice1; segments: 3)
-   Merge Key: t.category, t.dr, t.id
+   Merge Key: test_partition_topk.category, (dense_rank() OVER (?)), test_partition_topk.id
    ->  Sort
-         Sort Key: t.category, t.dr, t.id
-         ->  Subquery Scan on t
-               Filter: (t.dr <= 2)
-               ->  WindowAgg
-                     Partition By: test_partition_topk.category
-                     Order By: test_partition_topk.score
-                     ->  Sort
-                           Sort Key: test_partition_topk.category, test_partition_topk.score DESC
-                           ->  Redistribute Motion 3:3  (slice2; segments: 3)
-                                 Hash Key: test_partition_topk.category
-                                 ->  Seq Scan on test_partition_topk
+         Sort Key: test_partition_topk.category, (dense_rank() OVER (?)), test_partition_topk.id
+         ->  WindowAgg
+               Run Condition: (dense_rank() OVER (?) <= 2)
+               Partition By: test_partition_topk.category
+               Order By: test_partition_topk.score
+               ->  Sort
+                     Sort Key: test_partition_topk.category, test_partition_topk.score DESC
+                     ->  Redistribute Motion 3:3  (slice2; segments: 3)
+                           Hash Key: test_partition_topk.category
+                           ->  Seq Scan on test_partition_topk
  Optimizer: Postgres query optimizer
-(15 rows)
+(14 rows)
 
 SELECT * FROM (
     SELECT id, category, score, name,
@@ -310,24 +305,23 @@ SELECT * FROM (
 ) t
 WHERE r <= 2
 ORDER BY category, r, id;
-                                            QUERY PLAN                                            
---------------------------------------------------------------------------------------------------
+                                         QUERY PLAN                                         
+--------------------------------------------------------------------------------------------
  Gather Motion 3:1  (slice1; segments: 3)
-   Merge Key: t.category, t.r, t.id
+   Merge Key: test_partition_topk.category, (rank() OVER (?)), test_partition_topk.id
    ->  Sort
-         Sort Key: t.category, t.r, t.id
-         ->  Subquery Scan on t
-               Filter: (t.r <= 2)
-               ->  WindowAgg
-                     Partition By: test_partition_topk.category
-                     Order By: test_partition_topk.score
-                     ->  Sort
-                           Sort Key: test_partition_topk.category, test_partition_topk.score DESC
-                           ->  Redistribute Motion 3:3  (slice2; segments: 3)
-                                 Hash Key: test_partition_topk.category
-                                 ->  Seq Scan on test_partition_topk
+         Sort Key: test_partition_topk.category, (rank() OVER (?)), test_partition_topk.id
+         ->  WindowAgg
+               Run Condition: (rank() OVER (?) <= 2)
+               Partition By: test_partition_topk.category
+               Order By: test_partition_topk.score
+               ->  Sort
+                     Sort Key: test_partition_topk.category, test_partition_topk.score DESC
+                     ->  Redistribute Motion 3:3  (slice2; segments: 3)
+                           Hash Key: test_partition_topk.category
+                           ->  Seq Scan on test_partition_topk
  Optimizer: Postgres query optimizer
-(15 rows)
+(14 rows)
 
 SELECT * FROM (
     SELECT id, category, score, name,
@@ -365,24 +359,23 @@ SELECT * FROM (
 ) t
 WHERE r <= 2
 ORDER BY category, r, id;
-                                                         QUERY PLAN                                                         
-----------------------------------------------------------------------------------------------------------------------------
+                                                      QUERY PLAN                                                      
+----------------------------------------------------------------------------------------------------------------------
  Gather Motion 3:1  (slice1; segments: 3)
-   Merge Key: t.category, t.r, t.id
+   Merge Key: test_partition_topk.category, (rank() OVER (?)), test_partition_topk.id
    ->  Sort
-         Sort Key: t.category, t.r, t.id
-         ->  Subquery Scan on t
-               Filter: (t.r <= 2)
-               ->  WindowAgg
-                     Partition By: test_partition_topk.category
-                     Order By: test_partition_topk.score, test_partition_topk.name
-                     ->  Sort
-                           Sort Key: test_partition_topk.category, test_partition_topk.score DESC, test_partition_topk.name
-                           ->  Redistribute Motion 3:3  (slice2; segments: 3)
-                                 Hash Key: test_partition_topk.category
-                                 ->  Seq Scan on test_partition_topk
+         Sort Key: test_partition_topk.category, (rank() OVER (?)), test_partition_topk.id
+         ->  WindowAgg
+               Run Condition: (rank() OVER (?) <= 2)
+               Partition By: test_partition_topk.category
+               Order By: test_partition_topk.score, test_partition_topk.name
+               ->  Sort
+                     Sort Key: test_partition_topk.category, test_partition_topk.score DESC, test_partition_topk.name
+                     ->  Redistribute Motion 3:3  (slice2; segments: 3)
+                           Hash Key: test_partition_topk.category
+                           ->  Seq Scan on test_partition_topk
  Optimizer: Postgres query optimizer
-(15 rows)
+(14 rows)
 
 SELECT * FROM (
     SELECT id, category, score, name,
@@ -430,24 +423,23 @@ SELECT * FROM (
 ) t
 WHERE r <= 2
 ORDER BY category NULLS FIRST, r, id;
-                                        QUERY PLAN                                        
-------------------------------------------------------------------------------------------
+                                          QUERY PLAN                                           
+-----------------------------------------------------------------------------------------------
  Gather Motion 3:1  (slice1; segments: 3)
-   Merge Key: t.category, t.r, t.id
+   Merge Key: test_topk_nulls.category, (rank() OVER (?)), test_topk_nulls.id
    ->  Sort
-         Sort Key: t.category NULLS FIRST, t.r, t.id
-         ->  Subquery Scan on t
-               Filter: (t.r <= 2)
-               ->  WindowAgg
-                     Partition By: test_topk_nulls.category
-                     Order By: test_topk_nulls.score
-                     ->  Sort
-                           Sort Key: test_topk_nulls.category, test_topk_nulls.score DESC
-                           ->  Redistribute Motion 3:3  (slice2; segments: 3)
-                                 Hash Key: test_topk_nulls.category
-                                 ->  Seq Scan on test_topk_nulls
+         Sort Key: test_topk_nulls.category NULLS FIRST, (rank() OVER (?)), test_topk_nulls.id
+         ->  WindowAgg
+               Run Condition: (rank() OVER (?) <= 2)
+               Partition By: test_topk_nulls.category
+               Order By: test_topk_nulls.score
+               ->  Sort
+                     Sort Key: test_topk_nulls.category, test_topk_nulls.score DESC
+                     ->  Redistribute Motion 3:3  (slice2; segments: 3)
+                           Hash Key: test_topk_nulls.category
+                           ->  Seq Scan on test_topk_nulls
  Optimizer: Postgres query optimizer
-(15 rows)
+(14 rows)
 
 SELECT * FROM (
     SELECT id, category, score,
@@ -482,24 +474,23 @@ SELECT * FROM (
 ) t
 WHERE r <= 2
 ORDER BY category, r, id;
-                                         QUERY PLAN                                          
----------------------------------------------------------------------------------------------
+                                        QUERY PLAN                                         
+-------------------------------------------------------------------------------------------
  Gather Motion 3:1  (slice1; segments: 3)
-   Merge Key: t.category, t.r, t.id
+   Merge Key: test_partition_topk.category, (rank() OVER (?)), test_partition_topk.id
    ->  Sort
-         Sort Key: t.category, t.r, t.id
-         ->  Subquery Scan on t
-               Filter: (t.r <= 2)
-               ->  WindowAgg
-                     Partition By: test_partition_topk.category
-                     Order By: test_partition_topk.score
-                     ->  Sort
-                           Sort Key: test_partition_topk.category, test_partition_topk.score
-                           ->  Redistribute Motion 3:3  (slice2; segments: 3)
-                                 Hash Key: test_partition_topk.category
-                                 ->  Seq Scan on test_partition_topk
+         Sort Key: test_partition_topk.category, (rank() OVER (?)), test_partition_topk.id
+         ->  WindowAgg
+               Run Condition: (rank() OVER (?) <= 2)
+               Partition By: test_partition_topk.category
+               Order By: test_partition_topk.score
+               ->  Sort
+                     Sort Key: test_partition_topk.category, test_partition_topk.score
+                     ->  Redistribute Motion 3:3  (slice2; segments: 3)
+                           Hash Key: test_partition_topk.category
+                           ->  Seq Scan on test_partition_topk
  Optimizer: Postgres query optimizer
-(15 rows)
+(14 rows)
 
 SELECT * FROM (
     SELECT id, category, score, name,
@@ -540,24 +531,23 @@ SELECT * FROM (
 ) t
 WHERE r <= 2
 ORDER BY category, r, id;
-                                        QUERY PLAN                                        
-------------------------------------------------------------------------------------------
+                                     QUERY PLAN                                     
+------------------------------------------------------------------------------------
  Gather Motion 3:1  (slice1; segments: 3)
-   Merge Key: t.category, t.r, t.id
+   Merge Key: test_topk_empty.category, (rank() OVER (?)), test_topk_empty.id
    ->  Sort
-         Sort Key: t.category, t.r, t.id
-         ->  Subquery Scan on t
-               Filter: (t.r <= 2)
-               ->  WindowAgg
-                     Partition By: test_topk_empty.category
-                     Order By: test_topk_empty.score
-                     ->  Sort
-                           Sort Key: test_topk_empty.category, test_topk_empty.score DESC
-                           ->  Redistribute Motion 3:3  (slice2; segments: 3)
-                                 Hash Key: test_topk_empty.category
-                                 ->  Seq Scan on test_topk_empty
+         Sort Key: test_topk_empty.category, (rank() OVER (?)), test_topk_empty.id
+         ->  WindowAgg
+               Run Condition: (rank() OVER (?) <= 2)
+               Partition By: test_topk_empty.category
+               Order By: test_topk_empty.score
+               ->  Sort
+                     Sort Key: test_topk_empty.category, test_topk_empty.score DESC
+                     ->  Redistribute Motion 3:3  (slice2; segments: 3)
+                           Hash Key: test_topk_empty.category
+                           ->  Seq Scan on test_topk_empty
  Optimizer: Postgres query optimizer
-(15 rows)
+(14 rows)
 
 SELECT * FROM (
     SELECT id, category, score,
@@ -587,24 +577,23 @@ SELECT * FROM (
 ) t
 WHERE r <= 0
 ORDER BY category, r, id;
-                                            QUERY PLAN                                            
---------------------------------------------------------------------------------------------------
+                                         QUERY PLAN                                         
+--------------------------------------------------------------------------------------------
  Gather Motion 3:1  (slice1; segments: 3)
-   Merge Key: t.category, t.r, t.id
+   Merge Key: test_partition_topk.category, (rank() OVER (?)), test_partition_topk.id
    ->  Sort
-         Sort Key: t.category, t.r, t.id
-         ->  Subquery Scan on t
-               Filter: (t.r <= 0)
-               ->  WindowAgg
-                     Partition By: test_partition_topk.category
-                     Order By: test_partition_topk.score
-                     ->  Sort
-                           Sort Key: test_partition_topk.category, test_partition_topk.score DESC
-                           ->  Redistribute Motion 3:3  (slice2; segments: 3)
-                                 Hash Key: test_partition_topk.category
-                                 ->  Seq Scan on test_partition_topk
+         Sort Key: test_partition_topk.category, (rank() OVER (?)), test_partition_topk.id
+         ->  WindowAgg
+               Run Condition: (rank() OVER (?) <= 0)
+               Partition By: test_partition_topk.category
+               Order By: test_partition_topk.score
+               ->  Sort
+                     Sort Key: test_partition_topk.category, test_partition_topk.score DESC
+                     ->  Redistribute Motion 3:3  (slice2; segments: 3)
+                           Hash Key: test_partition_topk.category
+                           ->  Seq Scan on test_partition_topk
  Optimizer: Postgres query optimizer
-(15 rows)
+(14 rows)
 
 SELECT * FROM (
     SELECT id, category, score, name,
@@ -626,24 +615,23 @@ SELECT * FROM (
 ) t
 WHERE r < 1
 ORDER BY category, r, id;
-                                            QUERY PLAN                                            
---------------------------------------------------------------------------------------------------
+                                         QUERY PLAN                                         
+--------------------------------------------------------------------------------------------
  Gather Motion 3:1  (slice1; segments: 3)
-   Merge Key: t.category, t.r, t.id
+   Merge Key: test_partition_topk.category, (rank() OVER (?)), test_partition_topk.id
    ->  Sort
-         Sort Key: t.category, t.r, t.id
-         ->  Subquery Scan on t
-               Filter: (t.r < 1)
-               ->  WindowAgg
-                     Partition By: test_partition_topk.category
-                     Order By: test_partition_topk.score
-                     ->  Sort
-                           Sort Key: test_partition_topk.category, test_partition_topk.score DESC
-                           ->  Redistribute Motion 3:3  (slice2; segments: 3)
-                                 Hash Key: test_partition_topk.category
-                                 ->  Seq Scan on test_partition_topk
+         Sort Key: test_partition_topk.category, (rank() OVER (?)), test_partition_topk.id
+         ->  WindowAgg
+               Run Condition: (rank() OVER (?) < 1)
+               Partition By: test_partition_topk.category
+               Order By: test_partition_topk.score
+               ->  Sort
+                     Sort Key: test_partition_topk.category, test_partition_topk.score DESC
+                     ->  Redistribute Motion 3:3  (slice2; segments: 3)
+                           Hash Key: test_partition_topk.category
+                           ->  Seq Scan on test_partition_topk
  Optimizer: Postgres query optimizer
-(15 rows)
+(14 rows)
 
 SELECT * FROM (
     SELECT id, category, score, name,
@@ -671,24 +659,23 @@ SELECT * FROM (
 ) t
 WHERE r <= 100
 ORDER BY category, r, id;
-                                            QUERY PLAN                                            
---------------------------------------------------------------------------------------------------
+                                         QUERY PLAN                                         
+--------------------------------------------------------------------------------------------
  Gather Motion 3:1  (slice1; segments: 3)
-   Merge Key: t.category, t.r, t.id
+   Merge Key: test_partition_topk.category, (rank() OVER (?)), test_partition_topk.id
    ->  Sort
-         Sort Key: t.category, t.r, t.id
-         ->  Subquery Scan on t
-               Filter: (t.r <= 100)
-               ->  WindowAgg
-                     Partition By: test_partition_topk.category
-                     Order By: test_partition_topk.score
-                     ->  Sort
-                           Sort Key: test_partition_topk.category, test_partition_topk.score DESC
-                           ->  Redistribute Motion 3:3  (slice2; segments: 3)
-                                 Hash Key: test_partition_topk.category
-                                 ->  Seq Scan on test_partition_topk
+         Sort Key: test_partition_topk.category, (rank() OVER (?)), test_partition_topk.id
+         ->  WindowAgg
+               Run Condition: (rank() OVER (?) <= 100)
+               Partition By: test_partition_topk.category
+               Order By: test_partition_topk.score
+               ->  Sort
+                     Sort Key: test_partition_topk.category, test_partition_topk.score DESC
+                     ->  Redistribute Motion 3:3  (slice2; segments: 3)
+                           Hash Key: test_partition_topk.category
+                           ->  Seq Scan on test_partition_topk
  Optimizer: Postgres query optimizer
-(15 rows)
+(14 rows)
 
 SELECT * FROM (
     SELECT id, category, score, name,
@@ -734,27 +721,26 @@ SELECT * FROM (
 ) t
 WHERE r <= 2
 ORDER BY category, r, id;
-                                                           QUERY PLAN                                                           
---------------------------------------------------------------------------------------------------------------------------------
+                                                        QUERY PLAN                                                        
+--------------------------------------------------------------------------------------------------------------------------
  Gather Motion 3:1  (slice1; segments: 3)
-   Merge Key: t.category, t.r, t.id
+   Merge Key: test_partition_topk.category, (rank() OVER (?)), test_partition_topk.id
    ->  Sort
-         Sort Key: t.category, t.r, t.id
-         ->  Subquery Scan on t
-               Filter: (t.r <= 2)
+         Sort Key: test_partition_topk.category, (rank() OVER (?)), test_partition_topk.id
+         ->  WindowAgg
+               Run Condition: (rank() OVER (?) <= 2)
+               Partition By: test_partition_topk.category
+               Order By: test_partition_topk.score
                ->  WindowAgg
                      Partition By: test_partition_topk.category
-                     Order By: test_partition_topk.score
-                     ->  WindowAgg
-                           Partition By: test_partition_topk.category
-                           Order By: test_partition_topk.score, test_partition_topk.id
-                           ->  Sort
-                                 Sort Key: test_partition_topk.category, test_partition_topk.score DESC, test_partition_topk.id
-                                 ->  Redistribute Motion 3:3  (slice2; segments: 3)
-                                       Hash Key: test_partition_topk.category
-                                       ->  Seq Scan on test_partition_topk
+                     Order By: test_partition_topk.score, test_partition_topk.id
+                     ->  Sort
+                           Sort Key: test_partition_topk.category, test_partition_topk.score DESC, test_partition_topk.id
+                           ->  Redistribute Motion 3:3  (slice2; segments: 3)
+                                 Hash Key: test_partition_topk.category
+                                 ->  Seq Scan on test_partition_topk
  Optimizer: Postgres query optimizer
-(18 rows)
+(17 rows)
 
 SELECT * FROM (
     SELECT id, category, score, name,
@@ -792,21 +778,20 @@ SELECT * FROM (
 ) t
 WHERE r <= 1
 ORDER BY r, id;
-                             QUERY PLAN                             
---------------------------------------------------------------------
+                          QUERY PLAN                          
+--------------------------------------------------------------
  Sort
-   Sort Key: t.r, t.id
-   ->  Subquery Scan on t
-         Filter: (t.r <= 1)
-         ->  WindowAgg
-               Order By: test_partition_topk.score
-               ->  Gather Motion 3:1  (slice1; segments: 3)
-                     Merge Key: test_partition_topk.score
-                     ->  Sort
-                           Sort Key: test_partition_topk.score DESC
-                           ->  Seq Scan on test_partition_topk
+   Sort Key: (rank() OVER (?)), test_partition_topk.id
+   ->  WindowAgg
+         Run Condition: (rank() OVER (?) <= 1)
+         Order By: test_partition_topk.score
+         ->  Gather Motion 3:1  (slice1; segments: 3)
+               Merge Key: test_partition_topk.score
+               ->  Sort
+                     Sort Key: test_partition_topk.score DESC
+                     ->  Seq Scan on test_partition_topk
  Optimizer: Postgres query optimizer
-(12 rows)
+(11 rows)
 
 SELECT * FROM (
     SELECT id, category, score, name,
@@ -886,24 +871,23 @@ SELECT * FROM (
 ) t
 WHERE r <= 2
 ORDER BY category, r, id;
-                                         QUERY PLAN                                         
---------------------------------------------------------------------------------------------
+                                        QUERY PLAN                                         
+-------------------------------------------------------------------------------------------
  Gather Motion 3:1  (slice1; segments: 3)
-   Merge Key: t.category, t.r, t.id
+   Merge Key: test_partition_topk.category, (rank() OVER (?)), test_partition_topk.id
    ->  Sort
-         Sort Key: t.category, t.r, t.id
-         ->  Subquery Scan on t
-               Filter: (t.r <= 2)
-               ->  WindowAgg
-                     Partition By: test_partition_topk.category
-                     Order By: test_partition_topk.name
-                     ->  Sort
-                           Sort Key: test_partition_topk.category, test_partition_topk.name
-                           ->  Redistribute Motion 3:3  (slice2; segments: 3)
-                                 Hash Key: test_partition_topk.category
-                                 ->  Seq Scan on test_partition_topk
+         Sort Key: test_partition_topk.category, (rank() OVER (?)), test_partition_topk.id
+         ->  WindowAgg
+               Run Condition: (rank() OVER (?) <= 2)
+               Partition By: test_partition_topk.category
+               Order By: test_partition_topk.name
+               ->  Sort
+                     Sort Key: test_partition_topk.category, test_partition_topk.name
+                     ->  Redistribute Motion 3:3  (slice2; segments: 3)
+                           Hash Key: test_partition_topk.category
+                           ->  Seq Scan on test_partition_topk
  Optimizer: Postgres query optimizer
-(15 rows)
+(14 rows)
 
 SELECT * FROM (
     SELECT id, category, score, name,
@@ -960,8 +944,8 @@ ORDER BY id;
    ->  Sort
          Sort Key: t.id
          ->  Subquery Scan on t
-               Filter: (t.r <= 2)
                ->  WindowAgg
+                     Run Condition: (rank() OVER (?) <= 2)
                      Partition By: test_topk_toast.category
                      Order By: test_topk_toast.score
                      ->  Sort
@@ -1004,24 +988,23 @@ SELECT * FROM (
 ) t
 WHERE r <= 2
 ORDER BY category, r, id;
-                                            QUERY PLAN                                            
---------------------------------------------------------------------------------------------------
+                                         QUERY PLAN                                         
+--------------------------------------------------------------------------------------------
  Gather Motion 3:1  (slice1; segments: 3)
-   Merge Key: t.category, t.r, t.id
+   Merge Key: test_partition_topk.category, (rank() OVER (?)), test_partition_topk.id
    ->  Sort
-         Sort Key: t.category, t.r, t.id
-         ->  Subquery Scan on t
-               Filter: (t.r <= 2)
-               ->  WindowAgg
-                     Partition By: test_partition_topk.category
-                     Order By: test_partition_topk.score
-                     ->  Sort
-                           Sort Key: test_partition_topk.category, test_partition_topk.score DESC
-                           ->  Redistribute Motion 3:3  (slice2; segments: 3)
-                                 Hash Key: test_partition_topk.category
-                                 ->  Seq Scan on test_partition_topk
+         Sort Key: test_partition_topk.category, (rank() OVER (?)), test_partition_topk.id
+         ->  WindowAgg
+               Run Condition: (rank() OVER (?) <= 2)
+               Partition By: test_partition_topk.category
+               Order By: test_partition_topk.score
+               ->  Sort
+                     Sort Key: test_partition_topk.category, test_partition_topk.score DESC
+                     ->  Redistribute Motion 3:3  (slice2; segments: 3)
+                           Hash Key: test_partition_topk.category
+                           ->  Seq Scan on test_partition_topk
  Optimizer: Postgres query optimizer
-(15 rows)
+(14 rows)
 
 SELECT * FROM (
     SELECT id, category, score, name,
@@ -1058,24 +1041,23 @@ SELECT * FROM (
 ) t
 WHERE rn < 3
 ORDER BY category, rn, id;
-                                            QUERY PLAN                                            
---------------------------------------------------------------------------------------------------
+                                         QUERY PLAN                                         
+--------------------------------------------------------------------------------------------
  Gather Motion 3:1  (slice1; segments: 3)
-   Merge Key: t.category, t.rn, t.id
+   Merge Key: test_partition_topk.category, (rank() OVER (?)), test_partition_topk.id
    ->  Sort
-         Sort Key: t.category, t.rn, t.id
-         ->  Subquery Scan on t
-               Filter: (t.rn < 3)
-               ->  WindowAgg
-                     Partition By: test_partition_topk.category
-                     Order By: test_partition_topk.score
-                     ->  Sort
-                           Sort Key: test_partition_topk.category, test_partition_topk.score DESC
-                           ->  Redistribute Motion 3:3  (slice2; segments: 3)
-                                 Hash Key: test_partition_topk.category
-                                 ->  Seq Scan on test_partition_topk
+         Sort Key: test_partition_topk.category, (rank() OVER (?)), test_partition_topk.id
+         ->  WindowAgg
+               Run Condition: (rank() OVER (?) < 3)
+               Partition By: test_partition_topk.category
+               Order By: test_partition_topk.score
+               ->  Sort
+                     Sort Key: test_partition_topk.category, test_partition_topk.score DESC
+                     ->  Redistribute Motion 3:3  (slice2; segments: 3)
+                           Hash Key: test_partition_topk.category
+                           ->  Seq Scan on test_partition_topk
  Optimizer: Postgres query optimizer
-(15 rows)
+(14 rows)
 
 SELECT * FROM (
     SELECT id, category, score, name,
@@ -1112,24 +1094,23 @@ SELECT * FROM (
 ) t
 WHERE r <= 2
 ORDER BY category, r, id;
-                                         QUERY PLAN                                          
----------------------------------------------------------------------------------------------
+                                        QUERY PLAN                                         
+-------------------------------------------------------------------------------------------
  Gather Motion 3:1  (slice1; segments: 3)
-   Merge Key: t.category, t.r, t.id
+   Merge Key: test_partition_topk.category, (rank() OVER (?)), test_partition_topk.id
    ->  Sort
-         Sort Key: t.category, t.r, t.id
-         ->  Subquery Scan on t
-               Filter: (t.r <= 2)
-               ->  WindowAgg
-                     Partition By: test_partition_topk.category
-                     Order By: test_partition_topk.score
-                     ->  Sort
-                           Sort Key: test_partition_topk.category, test_partition_topk.score
-                           ->  Redistribute Motion 3:3  (slice2; segments: 3)
-                                 Hash Key: test_partition_topk.category
-                                 ->  Seq Scan on test_partition_topk
+         Sort Key: test_partition_topk.category, (rank() OVER (?)), test_partition_topk.id
+         ->  WindowAgg
+               Run Condition: (rank() OVER (?) <= 2)
+               Partition By: test_partition_topk.category
+               Order By: test_partition_topk.score
+               ->  Sort
+                     Sort Key: test_partition_topk.category, test_partition_topk.score
+                     ->  Redistribute Motion 3:3  (slice2; segments: 3)
+                           Hash Key: test_partition_topk.category
+                           ->  Seq Scan on test_partition_topk
  Optimizer: Postgres query optimizer
-(15 rows)
+(14 rows)
 
 SELECT * FROM (
     SELECT id, category, score, name,
@@ -1182,24 +1163,23 @@ SELECT * FROM (
 ) t
 WHERE r <= 2
 ORDER BY region, dept, r, id;
-                                                         QUERY PLAN                                                          
------------------------------------------------------------------------------------------------------------------------------
+                                                      QUERY PLAN                                                       
+-----------------------------------------------------------------------------------------------------------------------
  Gather Motion 3:1  (slice1; segments: 3)
-   Merge Key: t.region, t.dept, t.r, t.id
+   Merge Key: test_topk_multi_part.region, test_topk_multi_part.dept, (rank() OVER (?)), test_topk_multi_part.id
    ->  Sort
-         Sort Key: t.region, t.dept, t.r, t.id
-         ->  Subquery Scan on t
-               Filter: (t.r <= 2)
-               ->  WindowAgg
-                     Partition By: test_topk_multi_part.region, test_topk_multi_part.dept
-                     Order By: test_topk_multi_part.score
-                     ->  Sort
-                           Sort Key: test_topk_multi_part.region, test_topk_multi_part.dept, test_topk_multi_part.score DESC
-                           ->  Redistribute Motion 3:3  (slice2; segments: 3)
-                                 Hash Key: test_topk_multi_part.region, test_topk_multi_part.dept
-                                 ->  Seq Scan on test_topk_multi_part
+         Sort Key: test_topk_multi_part.region, test_topk_multi_part.dept, (rank() OVER (?)), test_topk_multi_part.id
+         ->  WindowAgg
+               Run Condition: (rank() OVER (?) <= 2)
+               Partition By: test_topk_multi_part.region, test_topk_multi_part.dept
+               Order By: test_topk_multi_part.score
+               ->  Sort
+                     Sort Key: test_topk_multi_part.region, test_topk_multi_part.dept, test_topk_multi_part.score DESC
+                     ->  Redistribute Motion 3:3  (slice2; segments: 3)
+                           Hash Key: test_topk_multi_part.region, test_topk_multi_part.dept
+                           ->  Seq Scan on test_topk_multi_part
  Optimizer: Postgres query optimizer
-(15 rows)
+(14 rows)
 
 -- ORCA with PartitionTopK
 SET optimizer TO on;

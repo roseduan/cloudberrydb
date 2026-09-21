@@ -30,8 +30,8 @@ typedef struct gpmon_query_seginfo_t gpmon_query_seginfo_t;
 #define GPMON_UNKNOWN "Unknown"
 
 /* global guc variables */
-extern int perfmon_port; 
-extern bool perfmon_enabled;
+extern PGDLLIMPORT int perfmon_port; 
+extern PGDLLIMPORT bool perfmon_enabled;
 //extern bool perfmon_enable_query_metric;
 
 /*

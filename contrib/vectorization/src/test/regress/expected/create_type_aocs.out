@@ -190,6 +190,7 @@ ERROR:  invalid NUMERIC type modifier
 LINE 1: CREATE TEMP TABLE mytab (foo widget(42,13,7));
                                      ^
 CREATE TEMP TABLE mytab (foo widget(42,13));
+NOTICE:  Table doesn't have 'DISTRIBUTED BY' clause, and no column type is suitable for a distribution key. Creating a NULL policy entry.
 SELECT format_type(atttypid,atttypmod) FROM pg_attribute
 WHERE attrelid = 'mytab'::regclass AND attnum > 0;
   format_type  
@@ -202,8 +203,8 @@ INSERT INTO mytab VALUES ('(1,2,3)'), ('(-44,5.5,12)');
 TABLE mytab;
      foo      
 --------------
- (1,2,3)
  (-44,5.5,12)
+ (1,2,3)
 (2 rows)
 
 -- and test format_type() a bit more, too

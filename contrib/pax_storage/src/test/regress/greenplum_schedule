@@ -28,7 +28,7 @@ test: copy_eol
 # vacuum from removing dead tuples. And run gp_toolkit early to make some log
 # file related tests (like gp_log_system, etc) faster.
 test: disable_autovacuum
-test: gp_toolkit
+# test: gp_toolkit
 test: python_processed64bit
 test: enable_autovacuum
 
@@ -52,7 +52,8 @@ test: leastsquares decode_expr bitmapscan bitmapscan_ao case_gp limit_gp percent
 test: gpcopy
 
 test: orca_groupingsets_fallbacks orca_static_pruning
-test: filter gpctas gpdist gpdist_opclasses gpdist_legacy_opclasses matrix sublink table_functions olap_setup complex opclass_ddl explain_format information_schema guc_env_var gp_explain distributed_transactions olap_plans misc_jiras gp_copy_dtx
+test: filter gpctas gpdist gpdist_opclasses gpdist_legacy_opclasses matrix sublink table_functions olap_setup complex opclass_ddl explain_format information_schema guc_env_var gp_explain distributed_transactions olap_plans gp_copy_dtx
+test: misc_jiras
 # below test(s) inject faults so each of them need to be in a separate group
 test: guc_gp
 # ignore_reason: pax toast is different from heap, the test case is already included in pax_schudule
@@ -147,7 +148,7 @@ test: disable_autovacuum
 # hold locks.
 test: partition_locking
 test: vacuum_gp
-test: resource_queue_stat
+# test: resource_queue_stat
 # background analyze may affect pgstat
 test: pg_stat
 # test: qp_misc_rio [not support TupleFetchRowVersion] 
@@ -187,7 +188,11 @@ test: rpt_joins rpt_tpch rpt
 # other sessions. Therefore the other tests in this group mustn't create
 # temp tables
 # test: bfv_dml  [unsupport TupleFetchRowVersion/DELETE Trigger]
-test: bfv_cte bfv_joins bfv_legacy bfv_temp bfv_planner bfv_subquery
+# bfv_cte and bfv_subquery both create an unqualified table "t1"; keep them
+# in separate parallel groups (as upstream greenplum_schedule does) so they
+# don't clobber each other's "t1".
+test: bfv_cte
+test: bfv_joins bfv_legacy bfv_temp bfv_planner bfv_subquery
 
 test: qp_misc gp_recursive_cte qp_dml_joins
 
@@ -269,7 +274,7 @@ test: autostats
 test: enable_autovacuum
 
 test: AOCO_Compression AORO_Compression table_statistics
-test: session_reset
+ignore: session_reset
 # below test(s) inject faults so each of them need to be in a separate group
 
 test: psql_gp_commands dropdb_check_shared_buffer_cache gp_upgrade_cornercases

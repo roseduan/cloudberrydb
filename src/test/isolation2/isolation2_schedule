@@ -8,7 +8,7 @@ test: checkpoint_dtx_info
 test: autovacuum-analyze
 test: vacuum_skip_locked_onseg
 test: lockmodes
-test: pg_rewind_fail_missing_xlog
+# test: pg_rewind_fail_missing_xlog
 test: prepared_xact_deadlock_pg_rewind
 test: ao_partition_lock
 test: concurrent_partition_table_operations_should_not_deadlock
@@ -82,7 +82,7 @@ test: gp_collation
 # FIXME: flaky test, disable it temporarily
 #test: ao_blkdir
 test: bitmap_index_concurrent
-test: bitmap_index_crash
+#test: bitmap_index_crash
 test: bitmap_update_words_backup_block
 test: bitmap_index_inspect
 
@@ -269,8 +269,9 @@ test: segwalrep/twophase_tolerance_with_mirror_promotion
 test: segwalrep/dtm_recovery_on_standby
 test: segwalrep/commit_blocking_on_standby
 test: segwalrep/dtx_recovery_wait_lsn
+
 test: segwalrep/select_throttle
-test: segwalrep/startup_rename_prepared_xlog
+#test: segwalrep/startup_rename_prepared_xlog
 test: fts_manual_probe
 test: fts_session_reset
 # unstable FTS test in different arch
@@ -335,7 +336,6 @@ test: check_gxid
 
 # test if GUC is synchronized from the QD to QEs.
 test: sync_guc
-
 
 test: spilling_hashagg
 

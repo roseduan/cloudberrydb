@@ -285,11 +285,11 @@ select * from int4_tbl o where exists
                   QUERY PLAN                  
 ----------------------------------------------
  Vec Gather Motion 3:1  (slice1; segments: 3)
-   ->  Vec Hash Semi Join
-         Hash Cond: (o.f1 = i.f1)
-         ->  Vec Seq Scan on int4_tbl o
+   ->  Vec Hash Right Semi Join
+         Hash Cond: (i.f1 = o.f1)
+         ->  Vec Seq Scan on int4_tbl i
          ->  Vec Hash
-               ->  Vec Seq Scan on int4_tbl i
+               ->  Vec Seq Scan on int4_tbl o
  Optimizer: Postgres query optimizer
 (7 rows)
 
@@ -299,11 +299,11 @@ select * from int4_tbl o where not exists
                   QUERY PLAN                  
 ----------------------------------------------
  Vec Gather Motion 3:1  (slice1; segments: 3)
-   ->  Vec Hash Anti Join
-         Hash Cond: (o.f1 = i.f1)
-         ->  Vec Seq Scan on int4_tbl o
+   ->  Vec Hash Right Anti Join
+         Hash Cond: (i.f1 = o.f1)
+         ->  Vec Seq Scan on int4_tbl i
          ->  Vec Hash
-               ->  Vec Seq Scan on int4_tbl i
+               ->  Vec Seq Scan on int4_tbl o
  Optimizer: Postgres query optimizer
 (7 rows)
 
@@ -1107,7 +1107,7 @@ where o.ten = 0;
                      SubPlan 1
                        ->  Result
                              Output: int4_tbl.f1
-                             Filter: (int4_tbl.f1 <= $0)
+                             Filter: (int4_tbl.f1 <= o.hundred)
                              ->  Materialize
                                    Output: int4_tbl.f1
                                    ->  Gather Motion 3:1  (slice2; segments: 3)
@@ -1342,26 +1342,27 @@ select * from int4_tbl where
 explain (verbose, costs off)
 select * from int4_tbl o where (f1, f1) in
   (select f1, generate_series(1,50) / 10 g from int4_tbl i group by f1);
-                               QUERY PLAN                                
--------------------------------------------------------------------------
+                            QUERY PLAN                             
+-------------------------------------------------------------------
  Gather Motion 3:1  (slice1; segments: 3)
    Output: o.f1
-   ->  Hash Semi Join
+   ->  Hash Right Semi Join
          Output: o.f1
-         Hash Cond: (o.f1 = "ANY_subquery".f1)
-         ->  Seq Scan on public.int4_tbl o
-               Output: o.f1
-         ->  Hash
+         Hash Cond: ("ANY_subquery".f1 = o.f1)
+         ->  Subquery Scan on "ANY_subquery"
                Output: "ANY_subquery".f1, "ANY_subquery".g
-               ->  Subquery Scan on "ANY_subquery"
-                     Output: "ANY_subquery".f1, "ANY_subquery".g
-                     Filter: ("ANY_subquery".f1 = "ANY_subquery".g)
-                     ->  Result
-                           Output: i.f1, ((generate_series(1, 50)) / 10)
-                           ->  ProjectSet
-                                 Output: generate_series(1, 50), i.f1
-                                 ->  Seq Scan on public.int4_tbl i
-                                       Output: i.f1
+               Filter: ("ANY_subquery".f1 = "ANY_subquery".g)
+               ->  Result
+                     Output: i.f1, ((generate_series(1, 50)) / 10)
+                     ->  ProjectSet
+                           Output: generate_series(1, 50), i.f1
+                           ->  Seq Scan on public.int4_tbl i
+                                 Output: i.f1
+         ->  Hash
+               Output: o.f1
+               ->  Seq Scan on public.int4_tbl o
+                     Output: o.f1
+ Settings: optimizer = 'off', enable_parallel = 'off'
  Optimizer: Postgres query optimizer
 (20 rows)
 
@@ -1427,7 +1428,9 @@ where b and f1 >= 0;
                                          Output: random()
                      ->  Result
                            Output: true, 2
-(21 rows)
+ Settings: optimizer = 'off', enable_parallel = 'off'
+ Optimizer: Postgres query optimizer
+(22 rows)
 
 select * from
     int4_tbl i4,
@@ -1622,18 +1625,23 @@ $$;
 -- end_matchignore
 -- start_ignore
 select * from explain_sq_limit();
-                                explain_sq_limit                                
---------------------------------------------------------------------------------
+                                    explain_sq_limit                                     
+-----------------------------------------------------------------------------------------
  Vec Limit (actual rows=3 loops=1)
-   ->  Vec Gather Motion 3:1  (slice1; segments: 3) (actual rows=5 loops=1)
+   Executor Memory: xxx  Segments: 1  Max: 1kB (segment -1)
+   ->  Vec Gather Motion 3:1  (slice1; segments: 3) (actual rows=6 loops=1)
+         Executor Memory: xxx  Segments: 1  Max: 1kB (segment -1)
          ->  Vec Limit (actual rows=3 loops=1)
+               Executor Memory: xxx  Segments: 3  Max: 1kB (segment 0)
                ->  Vec Subquery Scan on x (actual rows=3 loops=1)
+                     Executor Memory: xxx  Segments: 3  Max: 1kB (segment 0)
                      ->  Vec Sort (actual rows=3 loops=1)
                            Sort Key: sq_limit.c1, sq_limit.pk
-                           Sort Method:  top-N heapsort  Memory: xxx
+                           Executor Memory: xxx  Segments: 3  Max: 1kB (segment 0)
                            ->  Vec Seq Scan on sq_limit (actual rows=5 loops=1)
+                                 Executor Memory: xxx  Segments: 3  Max: 1kB (segment 0)
  Optimizer: Postgres query optimizer
-(9 rows)
+(14 rows)
 
 -- end_ignore
 -- a subpath is sorted under a subqueryscan. however, the subqueryscan is not.
@@ -1697,13 +1705,15 @@ select * from x where f1 = 1;
    ->  Vec Subquery Scan on x
          Output: x.f1
          Filter: (x.f1 = 1)
+         Vec Plan Merge:  1 child
          ->  Vec Shared Scan (share slice:id 1:0)
-               Output: f1
+               Output: share0_ref1.f1
+               Vec Plan Merge:  1 child
                ->  Vec Seq Scan on public.subselect_tbl
                      Output: subselect_tbl.f1
- Settings: enable_parallel = 'off', optimizer = 'off'
+ Settings: optimizer = 'off', enable_parallel = 'off', gp_cte_sharing = 'on'
  Optimizer: Postgres query optimizer
-(11 rows)
+(13 rows)
 
 -- Stable functions are safe to inline
 explain (verbose, costs off)
@@ -1756,12 +1766,13 @@ select * from x where f1 = 1;
    Output: ss.f1
    ->  Vec Subquery Scan on ss
          Output: ss.f1
+         Vec Plan Merge:  1 child
          ->  Vec Seq Scan on public.subselect_tbl
                Output: subselect_tbl.f1, subselect_tbl.ctid
                Filter: (subselect_tbl.f1 = 1)
- Settings: optimizer = 'off'
+ Settings: optimizer = 'off', enable_parallel = 'off', gp_cte_sharing = 'on'
  Optimizer: Postgres query optimizer
-(9 rows)
+(10 rows)
 
 -- Multiply-referenced CTEs are inlined only when requested
 explain (verbose, costs off)
@@ -1944,14 +1955,15 @@ select * from (with y as (select * from x) select * from y) ss;
                       QUERY PLAN                      
 ------------------------------------------------------
  Vec Gather Motion 3:1  (slice1; segments: 3)
-   Output: f1
+   Output: share0_ref1.f1
    ->  Vec Shared Scan (share slice:id 1:0)
-         Output: f1
+         Output: share0_ref1.f1
+         Vec Plan Merge:  1 child
          ->  Vec Seq Scan on public.int4_tbl
                Output: int4_tbl.f1
- Settings: enable_parallel = 'off', optimizer = 'off'
+ Settings: optimizer = 'off', enable_parallel = 'off', gp_cte_sharing = 'on'
  Optimizer: Postgres query optimizer
-(8 rows)
+(9 rows)
 
 -- Ensure that we inline the currect CTE when there are
 -- multiple CTEs with the same name

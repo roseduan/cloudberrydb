@@ -1,21 +1,22 @@
-
 # Copyright (c) 2024-2024, MDB, Mother Russia
 
-# Minimal test testing streaming replication
+# Test the mdb_admin exception in pg_signal_backend(): a member of the
+# mdb_admin role may terminate a superuser-owned backend, but only when that
+# backend is an autovacuum worker or has application_name = 'MDB'.  A role that
+# merely holds pg_signal_backend (and is not an mdb_admin member) may not.
+
 use strict;
 use warnings;
 use PostgreSQL::Test::Cluster;
 use PostgreSQL::Test::Utils;
 use Test::More;
 
-# Initialize primary node
-my $node_primary = PostgreSQL::Test::Cluster->new('primary');
-$node_primary->init();
-$node_primary->start;
+my $node = PostgreSQL::Test::Cluster->new('primary');
+$node->init();
+$node->start;
 
-# Create some content on primary and check its presence in standby nodes
-$node_primary->safe_psql('postgres',
-	"
+$node->safe_psql(
+	'postgres', "
     CREATE DATABASE regress;
     CREATE ROLE mdb_admin;
     CREATE ROLE mdb_reg_lh_1;
@@ -25,32 +26,42 @@ $node_primary->safe_psql('postgres',
     GRANT mdb_admin TO mdb_reg_lh_2;
 ");
 
-# Create some content on primary and check its presence in standby nodes
-$node_primary->safe_psql('regress',
-	"
-    CREATE TABLE tab_int(i int);
-    INSERT INTO tab_int SELECT * FROm generate_series(1, 1000000);
-    ALTER SYSTEM SET autovacuum_vacuum_cost_limit TO 1;
-    ALTER SYSTEM SET autovacuum_vacuum_cost_delay TO 100;
-    ALTER SYSTEM SET autovacuum_naptime TO 1;    
-");
+# A long-lived, superuser-owned backend tagged as an MDB service connection.
+my $bg = $node->background_psql('regress');
+$bg->query_safe("SET application_name = 'MDB'");
 
-$node_primary->restart;
+my $target_pid = $node->safe_psql('regress',
+	"SELECT pid FROM pg_stat_activity WHERE application_name = 'MDB'");
+like($target_pid, qr/^\d+$/, "found the MDB superuser backend (pid $target_pid)");
 
-sleep 1;
+# 1. A pg_signal_backend member that is NOT an mdb_admin member cannot
+#    terminate a superuser-owned backend.
+my ($rc1, $stdout1, $stderr1) = $node->psql('regress',
+	"SET ROLE mdb_reg_lh_1; SELECT pg_terminate_backend($target_pid);");
+isnt($rc1, 0, "non-mdb_admin pg_signal_backend member is refused");
+like(
+	$stderr1,
+	qr/permission denied to terminate process/,
+	"refusal is the superuser-process error");
 
-my $res_pid = $node_primary->safe_psql('regress',
-	"
-    select pg_backend_pid();
-");
+# The target must still be alive.
+is( $node->safe_psql(
+		'regress', "SELECT count(*) FROM pg_stat_activity WHERE pid = $target_pid"),
+	'1',
+	"target backend survived the refused termination");
 
-my ($res_reg_lh_1, $stdout_reg_lh_1, $stderr_reg_lh_1)  = $node_primary->psql('regress',
-	"
-    SET ROLE mdb_reg_lh_1;
-    SELECT pg_terminate_backend($res_pid);
-");
+# 2. An mdb_admin member CAN terminate the MDB-tagged superuser backend.
+my ($rc2, $stdout2, $stderr2) = $node->psql('regress',
+	"SET ROLE mdb_reg_lh_2; SELECT pg_terminate_backend($target_pid);");
+is($rc2, 0, "mdb_admin member is allowed");
+is($stdout2, 't', "pg_terminate_backend reports success");
 
+$node->poll_query_until('regress',
+	"SELECT NOT EXISTS (SELECT 1 FROM pg_stat_activity WHERE pid = $target_pid)")
+  or die "target backend did not terminate";
+pass("target backend was terminated by the mdb_admin member");
 
-like($stderr_reg_lh_1, qr/WARNING:.*not a PostgreSQL server process/, "matches expected warning");
+eval { $bg->quit; };
+$node->stop;
 
 done_testing();

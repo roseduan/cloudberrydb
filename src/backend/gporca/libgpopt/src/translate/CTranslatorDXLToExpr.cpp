@@ -1035,6 +1035,23 @@ CTranslatorDXLToExpr::FCastingUnknownType(IMDId *pmdidSource, IMDId *mdid_dest)
 
 //---------------------------------------------------------------------------
 //	@function:
+//		CTranslatorDXLToExpr::MarkCTEConsumerColAsUsed
+//
+//	@doc:
+//		after the colref in CTE consumer marked used, the producer should marked
+//		the relatived colref as used.
+//---------------------------------------------------------------------------
+void
+CTranslatorDXLToExpr::MarkCTEConsumerColAsUsed(UlongToColRefMap *mcidcrCTE, ULONG colid) {
+	CColRef *producer_colref = nullptr;
+	producer_colref = mcidcrCTE->Find(&colid);
+	if (producer_colref) {
+		producer_colref->MarkAsUsed();
+	}
+}
+
+//---------------------------------------------------------------------------
+//	@function:
 //		CTranslatorDXLToExpr::LookupColRef
 //
 //	@doc:
@@ -1042,19 +1059,25 @@ CTranslatorDXLToExpr::FCastingUnknownType(IMDId *pmdidSource, IMDId *mdid_dest)
 //		the column is not found
 //---------------------------------------------------------------------------
 CColRef *
-CTranslatorDXLToExpr::LookupColRef(ULONG colid)
+CTranslatorDXLToExpr::LookupColRef(ULONG colid, BOOL mark_used)
 {
-	GPOS_ASSERT(nullptr != m_phmulcr);
+	CColRef *colref = nullptr;
 	GPOS_ASSERT(gpos::ulong_max != colid);
- 
-	CColRef *colref = m_phmulcr->Find(&colid);
+
+	colref = m_phmulcr->Find(&colid);
 	if (nullptr == colref)
 	{
 		GPOS_RAISE(gpdxl::ExmaDXL, gpdxl::ExmiDXL2ExprAttributeNotFound, colid);
 	}
 
-	colref->MarkAsUsed();
+	auto pcteinfo = COptCtxt::PoctxtFromTLS()->Pcteinfo();
 
+	if (pcteinfo->ExistCTE()) {
+		MarkCTEConsumerColAsUsed(pcteinfo->GetCTEConsumerMapping(), colref->Id());
+	}
+
+	if (mark_used)
+		colref->MarkAsUsed();
 	return colref;
 }
 
@@ -1284,6 +1307,7 @@ CTranslatorDXLToExpr::PexprLogicalCTEProducer(const CDXLNode *dxlnode)
 	CDXLLogicalCTEProducer *pdxlopCTEProducer =
 		CDXLLogicalCTEProducer::Cast(dxlnode->GetOperator());
 	ULONG id = UlMapCTEId(pdxlopCTEProducer->Id());
+	BOOL cbp = pdxlopCTEProducer->CouldBePruned();
 
 	// translate the child dxl node
 	CExpression *pexprChild = PexprLogical((*dxlnode)[0]);
@@ -1311,7 +1335,7 @@ CTranslatorDXLToExpr::PexprLogicalCTEProducer(const CDXLNode *dxlnode)
 	for (ULONG ul = 0; ul < length; ul++)
 	{
 		ULONG *pulColId = (*pdrgpulCols)[ul];
-		CColRef *colref = LookupColRef(*pulColId);
+		CColRef *colref = LookupColRef(*pulColId, !cbp /* mark_used */);
 		GPOS_ASSERT(nullptr != colref);
 
 #ifdef GPOS_DEBUG
@@ -1355,7 +1379,7 @@ CTranslatorDXLToExpr::PexprLogicalCTEProducer(const CDXLNode *dxlnode)
 	pcrsProducer->Release();
 
 	return GPOS_NEW(m_mp) CExpression(
-		m_mp, GPOS_NEW(m_mp) CLogicalCTEProducer(m_mp, id, colref_array),
+		m_mp, GPOS_NEW(m_mp) CLogicalCTEProducer(m_mp, id, colref_array, cbp),
 		pexprChild);
 }
 
@@ -1382,10 +1406,12 @@ CTranslatorDXLToExpr::PexprLogicalCTEConsumer(const CDXLNode *dxlnode)
 	CCTEInfo *pcteinfo = COptCtxt::PoctxtFromTLS()->Pcteinfo();
 	CExpression *pexprProducer = pcteinfo->PexprCTEProducer(id);
 	GPOS_ASSERT(nullptr != pexprProducer);
+	CLogicalCTEProducer *popProducer= CLogicalCTEProducer::PopConvert(pexprProducer->Pop());
 
-	CColRefArray *pdrgpcrProducer =
-		CLogicalCTEProducer::PopConvert(pexprProducer->Pop())->Pdrgpcr();
-	CColRefArray *pdrgpcrConsumer = CUtils::PdrgpcrCopy(m_mp, pdrgpcrProducer);
+	CColRefArray *pdrgpcrProducer = popProducer->Pdrgpcr();
+	BOOL can_pruned = popProducer->CanBePruned();
+	CColRefArray *pdrgpcrConsumer = CUtils::PdrgpcrCopy(m_mp, pdrgpcrProducer, 
+		false, nullptr, pcteinfo->GetCTEConsumerMapping(), nullptr, can_pruned);
 
 	// add new colrefs to mapping
 	const ULONG num_cols = pdrgpcrConsumer->Size();
@@ -1395,19 +1421,41 @@ CTranslatorDXLToExpr::PexprLogicalCTEConsumer(const CDXLNode *dxlnode)
 		ULONG *pulColId = GPOS_NEW(m_mp) ULONG(*(*pdrgpulCols)[ul]);
 		CColRef *colref = (*pdrgpcrConsumer)[ul];
 
-		// reset colref to Unknown, If the column is used by upper op, the
-		// colref will mark as Used again. After the whole dxl trans done,
-		// these consumer's unknown colref can be pruned on both consumer and
-		// producer
-		colref->MarkAsUnknown();
+		// reset consumer col array to unknown. If the column is used by
+		// upper op, the colref will mark as Used again. After the whole dxl
+		// trans done, these consumer's unknown colref can be pruned on both
+		// consumer and producer
+		if (can_pruned)
+			colref->MarkAsUnknown();
 
 		BOOL result GPOS_ASSERTS_ONLY = m_phmulcr->Insert(pulColId, colref);
 		GPOS_ASSERT(result);
+
+#ifdef GPOS_DEBUG
+		CAutoTrace at(m_mp);
+		auto & io_stream = at.Os();
+		if (GPOS_FTRACE(EopttraceDebugCTE)) {
+		
+			io_stream << "m_phmulcr->Insert: " << *pulColId << ",";
+			colref->OsPrint(io_stream);
+			io_stream << std::endl;
+			io_stream << "PexprLogicalCTEConsumer m_phmulcr: " << std::endl;
+			UlongToColRefMapIter iter(m_phmulcr);
+			while (iter.Advance())
+			{
+				CColRef *colref = m_phmulcr->Find(iter.Key());
+				io_stream << "key: " << *iter.Key() << ", value: ";
+				colref->OsPrint(io_stream);
+				io_stream << " .";
+			}
+		}
+#endif
 	}
 
 	CExpression *pexprcs =  GPOS_NEW(m_mp) CExpression(
 		m_mp, GPOS_NEW(m_mp) CLogicalCTEConsumer(m_mp, id, pdrgpcrConsumer));
 	pcteinfo->IncrementConsumers(pexprcs->Pop(), m_ulCTEId);
+	pcteinfo->AddCTEConsumer(pexprcs);
 
 	return pexprcs;
 }

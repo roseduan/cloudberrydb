@@ -260,7 +260,11 @@ SendCdbComponents(void)
 		if (!send_cdbComponents_pre_check(mqh, params->reqid, pre_check_msg))
 		{
 			success = false;
+#if PG_VERSION_NUM < 150000
 			shm_mq_send(mqh, pre_check_msg->length, pre_check_msg, false);
+#else
+			shm_mq_send(mqh, pre_check_msg->length, pre_check_msg, false, true);
+#endif
 		}
 		else
 		{

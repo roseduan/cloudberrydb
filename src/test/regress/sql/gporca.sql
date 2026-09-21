@@ -3473,6 +3473,7 @@ INNER JOIN (
   WHERE t.tradingday BETWEEN'20190715'AND '20190715'
   GROUP BY t.tradingday)t2
 ON t1.tradingday = t2.tradingday;
+RESET optimizer_enable_hashjoin;
 
 SELECT * FROM(
   SELECT tradingday, 1 AS ins_SpanInsArbitrageRatio

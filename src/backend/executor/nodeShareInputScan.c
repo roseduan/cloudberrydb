@@ -282,6 +282,9 @@ init_tuplestore_state(ShareInputScanState *node)
 					dsm_segment *seg;
 					SharedTuplestore *shared_ts;
 
+					elog((Debug_shareinput_xslice ? LOG : DEBUG1), "SISC WRITER (shareid=%d, slice=%d): No tuplestore yet, creating tuplestore",
+						 sisc->share_id, currentSliceId);
+
 					PG_TRY();
 					{
 						shareinput_create_bufname_prefix(sts_name, sizeof(sts_name),

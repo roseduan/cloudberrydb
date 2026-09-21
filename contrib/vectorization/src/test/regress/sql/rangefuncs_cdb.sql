@@ -1,4 +1,13 @@
-SELECT name, setting FROM pg_settings WHERE name LIKE 'enable%';
+--
+-- Will run in parallel mode with enable_parallel=on and non-parallel mode.
+-- Filter this gucs to pass regression.
+--
+SELECT name, setting FROM pg_settings WHERE name LIKE 'enable%' and
+name not in ('enable_parallel',
+ 'enable_answer_query_using_materialized_views',
+ 'enable_parallel_dedup_semi_join',
+ 'enable_parallel_dedup_semi_reverse_join',
+ 'enable_parallel_semi_join');
 -- start_ignore
 create schema rangefuncs_cdb;
 set search_path to rangefuncs_cdb, public;

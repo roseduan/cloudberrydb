@@ -55,7 +55,7 @@ use File::Spec;
 use File::stat qw(stat);
 use File::Temp ();
 use IPC::Run;
-use SimpleTee;
+use PostgreSQL::Test::SimpleTee;
 
 # specify a recent enough version of Test::More to support the
 # done_testing() function
@@ -217,9 +217,9 @@ INIT
 	# in the log.
 	my $builder = Test::More->builder;
 	my $fh      = $builder->output;
-	tie *$fh, "SimpleTee", $orig_stdout, $testlog;
+	tie *$fh, "PostgreSQL::Test::SimpleTee", $orig_stdout, $testlog;
 	$fh = $builder->failure_output;
-	tie *$fh, "SimpleTee", $orig_stderr, $testlog;
+	tie *$fh, "PostgreSQL::Test::SimpleTee", $orig_stderr, $testlog;
 
 	# Enable auto-flushing for all the file handles. Stderr and stdout are
 	# redirected to the same file, and buffering causes the lines to appear

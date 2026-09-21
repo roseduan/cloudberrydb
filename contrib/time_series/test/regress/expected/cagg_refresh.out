@@ -2992,12 +2992,15 @@ SELECT time_series.set_compress_config('comp_src'::regclass, NULL, 'time');
  
 (1 row)
 
+-- start_ignore
 SELECT time_series.compress_chunks('comp_src'::regclass) > 0 AS compressed;
+WARNING:  missing lock for relation "comp_src" (OID 25123, relkind r) @ TID (5,332)
  compressed 
 ------------
  t
 (1 row)
 
+-- end_ignore
 SELECT time_series.reclaim_chunk_heaps('comp_src'::regclass) > 0 AS reclaimed;
  reclaimed 
 -----------

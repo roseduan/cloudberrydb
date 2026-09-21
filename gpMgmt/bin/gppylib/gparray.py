@@ -810,6 +810,7 @@ class GpArray:
         self.__version = None
         self.__segmentsAsLoadedFromDb = segmentsAsLoadedFromDb
         self.hasMirrors = False
+        self.is_singlenode = False
 
         for segdb in segments:
 

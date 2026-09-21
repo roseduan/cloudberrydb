@@ -64,6 +64,7 @@ OBJS = \
 	typecmds.o \
 	user.o \
 	vacuum.o \
+	vacuumparallel.o \
 	variable.o \
 	view.o \
 	pg_profile.o \

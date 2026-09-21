@@ -1,16 +1,21 @@
+# Copyright (c) 2021-2023, PostgreSQL Global Development Group
 
-# Copyright (c) 2021, PostgreSQL Global Development Group
+# GPDB writes a single CSV-format server log file; it does not implement the
+# upstream "csvlog"/"jsonlog" log destinations as separate rotating files,
+# and its default log_filename already carries the ".csv" suffix.  This test
+# is therefore the GPDB-adapted variant: it only exercises the "stderr"
+# (== the CSV file) destination.
 
 use strict;
 use warnings;
 
-use PostgresNode;
-use TestLib;
-use Test::More tests => 5;
+use PostgreSQL::Test::Cluster;
+use PostgreSQL::Test::Utils;
+use Test::More;
 use Time::HiRes qw(usleep);
 
 # Set up node with logging collector
-my $node = get_new_node('primary');
+my $node = PostgreSQL::Test::Cluster->new('primary');
 $node->init();
 $node->append_conf(
 	'postgresql.conf', qq(
@@ -27,7 +32,7 @@ $node->start();
 $node->psql('postgres', 'SELECT 1/0');
 
 # might need to retry if logging collector process is slow...
-my $max_attempts = 10 * $TestLib::timeout_default;
+my $max_attempts = 10 * $PostgreSQL::Test::Utils::timeout_default;
 
 my $current_logfiles;
 for (my $attempts = 0; $attempts < $max_attempts; $attempts++)
@@ -109,3 +114,5 @@ like(
 	'found expected log file content in new log file');
 
 $node->stop();
+
+done_testing();

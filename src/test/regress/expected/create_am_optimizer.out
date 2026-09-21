@@ -55,7 +55,7 @@ SELECT * FROM fast_emp4000
                Sort Key: ((home_base[0])[0])
                ->  Seq Scan on fast_emp4000
                      Filter: (home_base <@ '(2000,1000),(200,200)'::box)
- Optimizer: Pivotal Optimizer (GPORCA)
+ Optimizer: GPORCA
 (8 rows)
 
 SELECT * FROM fast_emp4000
@@ -76,7 +76,7 @@ SELECT count(*) FROM fast_emp4000 WHERE home_base && '(1000,1000,0,0)'::box;
          ->  Partial Aggregate
                ->  Seq Scan on fast_emp4000
                      Filter: (home_base && '(1000,1000),(0,0)'::box)
- Optimizer: Pivotal Optimizer (GPORCA)
+ Optimizer: GPORCA
 (6 rows)
 
 SELECT count(*) FROM fast_emp4000 WHERE home_base && '(1000,1000,0,0)'::box;
@@ -94,7 +94,7 @@ SELECT count(*) FROM fast_emp4000 WHERE home_base IS NULL;
          ->  Partial Aggregate
                ->  Seq Scan on fast_emp4000
                      Filter: (home_base IS NULL)
- Optimizer: Pivotal Optimizer (GPORCA)
+ Optimizer: GPORCA
 (6 rows)
 
 SELECT count(*) FROM fast_emp4000 WHERE home_base IS NULL;
@@ -151,6 +151,8 @@ SELECT amname, amhandler, amtype FROM pg_am where amtype = 't' and amname not in
 -- First create tables employing the new AM using USING
 -- plain CREATE TABLE
 CREATE TABLE tableam_tbl_heap2(f1 int) USING heap2;
+NOTICE:  Table doesn't have 'DISTRIBUTED BY' clause -- Using column named 'f1' as the Apache Cloudberry data distribution key for this table.
+HINT:  The 'DISTRIBUTED BY' clause determines the distribution of data. Make sure column(s) chosen are the optimal data distribution key to minimize skew.
 INSERT INTO tableam_tbl_heap2 VALUES(1);
 SELECT f1 FROM tableam_tbl_heap2 ORDER BY f1;
  f1 
@@ -160,6 +162,8 @@ SELECT f1 FROM tableam_tbl_heap2 ORDER BY f1;
 
 -- CREATE TABLE AS
 CREATE TABLE tableam_tblas_heap2 USING heap2 AS SELECT * FROM tableam_tbl_heap2;
+NOTICE:  Table doesn't have 'DISTRIBUTED BY' clause -- Using column(s) named 'f1' as the Apache Cloudberry data distribution key for this table.
+HINT:  The 'DISTRIBUTED BY' clause determines the distribution of data. Make sure column(s) chosen are the optimal data distribution key to minimize skew.
 SELECT f1 FROM tableam_tbl_heap2 ORDER BY f1;
  f1 
 ----
@@ -183,6 +187,8 @@ LINE 1: CREATE SEQUENCE tableam_seq_heap2 USING heap2;
                                           ^
 -- CREATE MATERIALIZED VIEW does support USING
 CREATE MATERIALIZED VIEW tableam_tblmv_heap2 USING heap2 AS SELECT * FROM tableam_tbl_heap2;
+NOTICE:  Table doesn't have 'DISTRIBUTED BY' clause -- Using column(s) named 'f1' as the Apache Cloudberry data distribution key for this table.
+HINT:  The 'DISTRIBUTED BY' clause determines the distribution of data. Make sure column(s) chosen are the optimal data distribution key to minimize skew.
 SELECT f1 FROM tableam_tblmv_heap2 ORDER BY f1;
  f1 
 ----
@@ -193,15 +199,21 @@ SELECT f1 FROM tableam_tblmv_heap2 ORDER BY f1;
 -- CBDB ignore: allow table access method
 -- CREATE TABLE tableam_parted_heap2 (a text, b int) PARTITION BY list (a) USING heap2;
 CREATE TABLE tableam_parted_heap2 (a text, b int) PARTITION BY list (a);
+NOTICE:  Table doesn't have 'DISTRIBUTED BY' clause -- Using column named 'a' as the Apache Cloudberry data distribution key for this table.
+HINT:  The 'DISTRIBUTED BY' clause determines the distribution of data. Make sure column(s) chosen are the optimal data distribution key to minimize skew.
 -- new partitions will inherit from the current default, rather the partition root
 SET default_table_access_method = 'heap';
 CREATE TABLE tableam_parted_a_heap2 PARTITION OF tableam_parted_heap2 FOR VALUES IN ('a');
+NOTICE:  table has parent, setting distribution columns to match parent table
 SET default_table_access_method = 'heap2';
 CREATE TABLE tableam_parted_b_heap2 PARTITION OF tableam_parted_heap2 FOR VALUES IN ('b');
+NOTICE:  table has parent, setting distribution columns to match parent table
 RESET default_table_access_method;
 -- but the method can be explicitly specified
 CREATE TABLE tableam_parted_c_heap2 PARTITION OF tableam_parted_heap2 FOR VALUES IN ('c') USING heap;
+NOTICE:  table has parent, setting distribution columns to match parent table
 CREATE TABLE tableam_parted_d_heap2 PARTITION OF tableam_parted_heap2 FOR VALUES IN ('d') USING heap2;
+NOTICE:  table has parent, setting distribution columns to match parent table
 -- List all objects in AM
 SELECT
     pc.relkind,
@@ -246,11 +258,41 @@ ORDER BY classid, objid, objsubid;
 -- ALTER TABLE SET ACCESS METHOD
 CREATE TABLE heaptable USING heap AS
   SELECT a, repeat(a::text, 100) FROM generate_series(1,9) AS a;
+NOTICE:  Table doesn't have 'DISTRIBUTED BY' clause. Creating a NULL policy entry.
 SELECT amname FROM pg_class c, pg_am am
   WHERE c.relam = am.oid AND c.oid = 'heaptable'::regclass;
  amname 
 --------
  heap
+(1 row)
+
+-- Switching to heap2 adds new dependency entry to the AM.
+ALTER TABLE heaptable SET ACCESS METHOD heap2;
+SELECT pg_describe_object(classid, objid, objsubid) as obj,
+       pg_describe_object(refclassid, refobjid, refobjsubid) as objref,
+       deptype
+  FROM pg_depend
+  WHERE classid = 'pg_class'::regclass AND
+        objid = 'heaptable'::regclass
+  ORDER BY 1, 2;
+       obj       |       objref        | deptype 
+-----------------+---------------------+---------
+ table heaptable | access method heap2 | n
+ table heaptable | schema public       | n
+(2 rows)
+
+-- Switching to heap should not have a dependency entry to the AM.
+ALTER TABLE heaptable SET ACCESS METHOD heap;
+SELECT pg_describe_object(classid, objid, objsubid) as obj,
+       pg_describe_object(refclassid, refobjid, refobjsubid) as objref,
+       deptype
+  FROM pg_depend
+  WHERE classid = 'pg_class'::regclass AND
+        objid = 'heaptable'::regclass
+  ORDER BY 1, 2;
+       obj       |    objref     | deptype 
+-----------------+---------------+---------
+ table heaptable | schema public | n
 (1 row)
 
 ALTER TABLE heaptable SET ACCESS METHOD heap2;
@@ -267,13 +309,43 @@ SELECT COUNT(a), COUNT(1) FILTER(WHERE a=1) FROM heaptable;
      9 |     1
 (1 row)
 
+-- ALTER MATERIALIZED VIEW SET ACCESS METHOD
+CREATE MATERIALIZED VIEW heapmv USING heap AS SELECT * FROM heaptable;
+NOTICE:  Table doesn't have 'DISTRIBUTED BY' clause -- Using column(s) named 'a' as the Apache Cloudberry data distribution key for this table.
+HINT:  The 'DISTRIBUTED BY' clause determines the distribution of data. Make sure column(s) chosen are the optimal data distribution key to minimize skew.
+SELECT amname FROM pg_class c, pg_am am
+  WHERE c.relam = am.oid AND c.oid = 'heapmv'::regclass;
+ amname 
+--------
+ heap
+(1 row)
+
+ALTER MATERIALIZED VIEW heapmv SET ACCESS METHOD heap2;
+SELECT amname FROM pg_class c, pg_am am
+  WHERE c.relam = am.oid AND c.oid = 'heapmv'::regclass;
+ amname 
+--------
+ heap2
+(1 row)
+
+SELECT COUNT(a), COUNT(1) FILTER(WHERE a=1) FROM heapmv;
+ count | count 
+-------+-------
+     9 |     1
+(1 row)
+
 -- No support for multiple subcommands
 ALTER TABLE heaptable SET ACCESS METHOD heap, SET ACCESS METHOD heap2;
 ERROR:  cannot have multiple SET ACCESS METHOD subcommands
+ALTER MATERIALIZED VIEW heapmv SET ACCESS METHOD heap, SET ACCESS METHOD heap2;
+ERROR:  cannot have multiple SET ACCESS METHOD subcommands
+DROP MATERIALIZED VIEW heapmv;
 DROP TABLE heaptable;
 -- No support for partitioned tables.
 CREATE TABLE am_partitioned(x INT, y INT)
   PARTITION BY hash (x);
+NOTICE:  Table doesn't have 'DISTRIBUTED BY' clause -- Using column named 'x' as the Apache Cloudberry data distribution key for this table.
+HINT:  The 'DISTRIBUTED BY' clause determines the distribution of data. Make sure column(s) chosen are the optimal data distribution key to minimize skew.
 ALTER TABLE am_partitioned SET ACCESS METHOD heap2;
 ERROR:  cannot change access method of a partitioned table
 DROP TABLE am_partitioned;
@@ -282,13 +354,25 @@ BEGIN;
 SET LOCAL default_table_access_method = 'heap2';
 -- following tests should all respect the default AM
 CREATE TABLE tableam_tbl_heapx(f1 int);
+NOTICE:  Table doesn't have 'DISTRIBUTED BY' clause -- Using column named 'f1' as the Apache Cloudberry data distribution key for this table.
+HINT:  The 'DISTRIBUTED BY' clause determines the distribution of data. Make sure column(s) chosen are the optimal data distribution key to minimize skew.
 CREATE TABLE tableam_tblas_heapx AS SELECT * FROM tableam_tbl_heapx;
+NOTICE:  Table doesn't have 'DISTRIBUTED BY' clause -- Using column(s) named 'f1' as the Apache Cloudberry data distribution key for this table.
+HINT:  The 'DISTRIBUTED BY' clause determines the distribution of data. Make sure column(s) chosen are the optimal data distribution key to minimize skew.
 SELECT INTO tableam_tblselectinto_heapx FROM tableam_tbl_heapx;
+NOTICE:  Table doesn't have 'DISTRIBUTED BY' clause -- Using column(s) named '' as the Apache Cloudberry data distribution key for this table.
+HINT:  The 'DISTRIBUTED BY' clause determines the distribution of data. Make sure column(s) chosen are the optimal data distribution key to minimize skew.
 CREATE MATERIALIZED VIEW tableam_tblmv_heapx USING heap2 AS SELECT * FROM tableam_tbl_heapx;
+NOTICE:  Table doesn't have 'DISTRIBUTED BY' clause -- Using column(s) named 'f1' as the Apache Cloudberry data distribution key for this table.
+HINT:  The 'DISTRIBUTED BY' clause determines the distribution of data. Make sure column(s) chosen are the optimal data distribution key to minimize skew.
 CREATE TABLE tableam_parted_heapx (a text, b int) PARTITION BY list (a);
+NOTICE:  Table doesn't have 'DISTRIBUTED BY' clause -- Using column named 'a' as the Apache Cloudberry data distribution key for this table.
+HINT:  The 'DISTRIBUTED BY' clause determines the distribution of data. Make sure column(s) chosen are the optimal data distribution key to minimize skew.
 CREATE TABLE tableam_parted_1_heapx PARTITION OF tableam_parted_heapx FOR VALUES IN ('a', 'b');
+NOTICE:  table has parent, setting distribution columns to match parent table
 -- but an explicitly set AM overrides it
 CREATE TABLE tableam_parted_2_heapx PARTITION OF tableam_parted_heapx FOR VALUES IN ('c', 'd') USING heap;
+NOTICE:  table has parent, setting distribution columns to match parent table
 -- sequences, views and foreign servers shouldn't have an AM
 CREATE VIEW tableam_view_heapx AS SELECT * FROM tableam_tbl_heapx;
 CREATE SEQUENCE tableam_seq_heapx;
@@ -331,10 +415,13 @@ ERROR:  zero-length delimited identifier at or near """"
 LINE 1: CREATE TABLE i_am_a_failure() USING "";
                                             ^
 CREATE TABLE i_am_a_failure() USING i_do_not_exist_am;
+NOTICE:  Table doesn't have 'DISTRIBUTED BY' clause, and no column type is suitable for a distribution key. Creating a NULL policy entry.
 ERROR:  access method "i_do_not_exist_am" does not exist
 CREATE TABLE i_am_a_failure() USING "I do not exist AM";
+NOTICE:  Table doesn't have 'DISTRIBUTED BY' clause, and no column type is suitable for a distribution key. Creating a NULL policy entry.
 ERROR:  access method "I do not exist AM" does not exist
 CREATE TABLE i_am_a_failure() USING "btree";
+NOTICE:  Table doesn't have 'DISTRIBUTED BY' clause, and no column type is suitable for a distribution key. Creating a NULL policy entry.
 ERROR:  access method "btree" is not of type TABLE
 -- Drop table access method, which fails as objects depends on it
 DROP ACCESS METHOD heap2;

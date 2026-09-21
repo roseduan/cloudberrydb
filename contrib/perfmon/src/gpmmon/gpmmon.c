@@ -45,8 +45,8 @@ void _PG_init(void);
 void _PG_fini(void);
 
 /* global guc variables */
-int perfmon_port = 8888;
-bool perfmon_enabled = false;
+PGDLLEXPORT int perfmon_port = 8888;
+PGDLLEXPORT bool perfmon_enabled = false;
 //bool perfmon_enable_query_metric;
 
 
@@ -72,7 +72,7 @@ static const apr_uint64_t recv_timeout_factor = 30;
 // it simply kill itself to restart.
 static apr_uint64_t smon_terminate_timeout = 0;
 static apr_uint64_t recv_timeout = 0;
-int perfmon_main(Datum arg);
+PGDLLEXPORT int perfmon_main(Datum arg);
 
 /* gpmmon host */
 static struct
@@ -1091,11 +1091,6 @@ static void gpmmon_main(void)
 	}
 }
 
-static void print_version(void)
-{
-	fprintf(stdout, GPMMON_PACKET_VERSION_STRING);
-}
-
 static int read_conf_file(char *conffile)
 {
 	char buffer[1024] = { 0 };
@@ -1357,7 +1352,7 @@ void interuptable_sleep(unsigned int seconds)
 		exit(0);
 }
 
-int perfmon_main(Datum arg)
+PGDLLEXPORT int perfmon_main(Datum arg)
 {
 	int db_check_count = 0;
 	char port[6];
@@ -1779,9 +1774,13 @@ _PG_init(void)
 	}
 	else
 	{
-		/* add version info */
-		ereport(INFO, (errmsg("booting gpmmon")));
-		print_version();
+		/*
+		 * Do NOT write to stdout here: _PG_init runs during
+		 * process_shared_preload_libraries, and "postgres -C <guc>" and
+		 * similar utility invocations expect clean stdout.  (The version
+		 * string is for the standalone gpmmon -V path.)
+		 */
+		ereport(DEBUG1, (errmsg("booting gpmmon")));
 	}
 
 	BackgroundWorker worker;

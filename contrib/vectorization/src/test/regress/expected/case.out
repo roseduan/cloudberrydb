@@ -269,8 +269,7 @@ SELECT * FROM CASE_TBL WHERE NULLIF(1, 2) = 2;
 --------------------------
  Result
    One-Time Filter: false
- Optimizer: GPORCA
-(3 rows)
+(2 rows)
 
 explain (costs off)
 SELECT * FROM CASE_TBL WHERE NULLIF(1, 1) IS NOT NULL;
@@ -278,8 +277,7 @@ SELECT * FROM CASE_TBL WHERE NULLIF(1, 1) IS NOT NULL;
 --------------------------
  Result
    One-Time Filter: false
- Optimizer: GPORCA
-(3 rows)
+(2 rows)
 
 explain (costs off)
 SELECT * FROM CASE_TBL WHERE NULLIF(1, null) = 2;
@@ -287,8 +285,7 @@ SELECT * FROM CASE_TBL WHERE NULLIF(1, null) = 2;
 --------------------------
  Result
    One-Time Filter: false
- Optimizer: GPORCA
-(3 rows)
+(2 rows)
 
 --
 -- Examples of updates involving tables
@@ -397,6 +394,14 @@ SELECT CASE make_ad(1,2)
  case  
 -------
  right
+(1 row)
+
+-- While we're here, also test handling of a NULLIF arg that is a read/write
+-- object (bug #18722)
+SELECT NULLIF(make_ad(1,2), array[2,3]::arrdomain);
+ nullif 
+--------
+ {1,2}
 (1 row)
 
 ROLLBACK;

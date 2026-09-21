@@ -4,15 +4,15 @@
 #ifdef USE_VECTORIZATION
 		"vectorization",
 #endif
-#ifdef ENABLE_PRELOAD_IC_MODULE
-  		"interconnect",
-#endif
 /* dfs_tablespace should be loaded before pax_storage,
 * dfs_tablespace should be loaded before other extensions that
 * hook the ProcessUtility_hook function
 */
 #ifdef USE_DFS_TABLESPACE
 		"dfs_tablespace",
+#endif
+#ifdef ENABLE_PRELOAD_IC_MODULE
+  "interconnect",
 #endif
 #ifdef ENABLE_IC_UDP2
   		"udp2",

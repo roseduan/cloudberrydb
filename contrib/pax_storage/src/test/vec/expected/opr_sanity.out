@@ -128,14 +128,15 @@ WHERE p1.oid < p2.oid AND
      p1.proretset != p2.proretset OR
      p1.provolatile != p2.provolatile OR
      p1.pronargs != p2.pronargs);
- oid  |            proname             | oid  |            proname             
-------+--------------------------------+------+--------------------------------
- 7203 | gp_log_backend_memory_contexts | 7204 | gp_log_backend_memory_contexts
- 6212 | int2_matrix_accum              | 6215 | float8_matrix_accum
- 6212 | int2_matrix_accum              | 6214 | int8_matrix_accum
- 6213 | int4_matrix_accum              | 6215 | float8_matrix_accum
- 6213 | int4_matrix_accum              | 6214 | int8_matrix_accum
-(5 rows)
+ oid  |                  proname                  | oid  |                  proname                  
+------+-------------------------------------------+------+-------------------------------------------
+ 7203 | gp_log_backend_memory_contexts            | 7204 | gp_log_backend_memory_contexts
+ 4548 | binary_upgrade_set_next_pg_tablespace_oid | 4549 | binary_upgrade_set_next_pg_tablespace_oid
+ 6405 | int2_matrix_accum                         | 6414 | float8_matrix_accum
+ 6405 | int2_matrix_accum                         | 6406 | int8_matrix_accum
+ 6407 | int4_matrix_accum                         | 6414 | float8_matrix_accum
+ 6406 | int8_matrix_accum                         | 6407 | int4_matrix_accum
+(6 rows)
 
 -- Look for uses of different type OIDs in the argument/result type fields
 -- for different aliases of the same built-in function.
@@ -217,7 +218,8 @@ ORDER BY 1, 2;
  timestamp without time zone | timestamp with time zone
  bit                         | bit varying
  txid_snapshot               | pg_snapshot
-(4 rows)
+ anyrange                    | anymultirange
+(5 rows)
 
 SELECT DISTINCT p1.proargtypes[2]::regtype, p2.proargtypes[2]::regtype
 FROM pg_proc AS p1, pg_proc AS p2
@@ -854,7 +856,6 @@ macaddr8_ge(macaddr8,macaddr8)
 macaddr8_ne(macaddr8,macaddr8)
 macaddr8_cmp(macaddr8,macaddr8)
 macaddr8(macaddr)
-sm3(bytea)
 xid8lt(xid8,xid8)
 xid8gt(xid8,xid8)
 xid8le(xid8,xid8)
@@ -862,6 +863,7 @@ xid8ge(xid8,xid8)
 xid8eq(xid8,xid8)
 xid8ne(xid8,xid8)
 xid8cmp(xid8,xid8)
+sm3(bytea)
 -- restore normal output mode
 \a\t
 -- List of functions used by libpq's fe-lobj.c
@@ -909,9 +911,107 @@ SELECT p1.oid, p1.proname
 FROM pg_proc AS p1
 WHERE provolatile = 'i' AND proparallel = 'u'
     AND pronamespace not in (select oid from pg_namespace where nspname='pg_ext_aux');
- oid | proname 
------+---------
-(0 rows)
+  oid  |         proname          
+-------+--------------------------
+ 13128 | fixeddecimalin
+ 13129 | fixeddecimalout
+ 13130 | fixeddecimalrecv
+ 13131 | fixeddecimalsend
+ 13132 | fixeddecimaltypmodin
+ 13133 | fixeddecimaltypmodout
+ 13135 | fixeddecimaleq
+ 13136 | fixeddecimalne
+ 13137 | fixeddecimallt
+ 13138 | fixeddecimalle
+ 13139 | fixeddecimalgt
+ 13140 | fixeddecimalge
+ 13141 | fixeddecimalum
+ 13142 | fixeddecimalpl
+ 13143 | fixeddecimalmi
+ 13144 | fixeddecimalmul
+ 13145 | fixeddecimaldiv
+ 13146 | abs
+ 13147 | fixeddecimallarger
+ 13148 | fixeddecimalsmaller
+ 13149 | fixeddecimal_cmp
+ 13150 | fixeddecimal_hash
+ 13162 | fixeddecimal_numeric_cmp
+ 13163 | numeric_fixeddecimal_cmp
+ 13164 | fixeddecimal_numeric_eq
+ 13165 | fixeddecimal_numeric_ne
+ 13166 | fixeddecimal_numeric_lt
+ 13167 | fixeddecimal_numeric_le
+ 13168 | fixeddecimal_numeric_gt
+ 13169 | fixeddecimal_numeric_ge
+ 13182 | numeric_fixeddecimal_eq
+ 13183 | numeric_fixeddecimal_ne
+ 13184 | numeric_fixeddecimal_lt
+ 13185 | numeric_fixeddecimal_le
+ 13186 | numeric_fixeddecimal_gt
+ 13187 | numeric_fixeddecimal_ge
+ 13188 | fixeddecimal_int4_cmp
+ 13189 | fixeddecimal_int4_eq
+ 13190 | fixeddecimal_int4_ne
+ 13191 | fixeddecimal_int4_lt
+ 13192 | fixeddecimal_int4_le
+ 13193 | fixeddecimal_int4_gt
+ 13194 | fixeddecimal_int4_ge
+ 13195 | fixeddecimalint4pl
+ 13196 | fixeddecimalint4mi
+ 13197 | fixeddecimalint4mul
+ 13198 | fixeddecimalint4div
+ 13217 | int4_fixeddecimal_cmp
+ 13218 | int4_fixeddecimal_eq
+ 13219 | int4_fixeddecimal_ne
+ 13220 | int4_fixeddecimal_lt
+ 13221 | int4_fixeddecimal_le
+ 13222 | int4_fixeddecimal_gt
+ 13223 | int4_fixeddecimal_ge
+ 13224 | int4fixeddecimalpl
+ 13225 | int4fixeddecimalmi
+ 13226 | int4fixeddecimalmul
+ 13227 | int4fixeddecimaldiv
+ 13230 | fixeddecimal_int2_cmp
+ 13231 | fixeddecimal_int2_eq
+ 13232 | fixeddecimal_int2_ne
+ 13233 | fixeddecimal_int2_lt
+ 13234 | fixeddecimal_int2_le
+ 13235 | fixeddecimal_int2_gt
+ 13236 | fixeddecimal_int2_ge
+ 13237 | fixeddecimalint2pl
+ 13238 | fixeddecimalint2mi
+ 13239 | fixeddecimalint2mul
+ 13240 | fixeddecimalint2div
+ 13259 | int2_fixeddecimal_cmp
+ 13260 | int2_fixeddecimal_eq
+ 13261 | int2_fixeddecimal_ne
+ 13262 | int2_fixeddecimal_lt
+ 13263 | int2_fixeddecimal_le
+ 13264 | int2_fixeddecimal_gt
+ 13265 | int2_fixeddecimal_ge
+ 13266 | int2fixeddecimalpl
+ 13267 | int2fixeddecimalmi
+ 13268 | int2fixeddecimalmul
+ 13269 | int2fixeddecimaldiv
+ 13272 | fixeddecimal
+ 13273 | int4fixeddecimal
+ 13274 | fixeddecimalint4
+ 13275 | int2fixeddecimal
+ 13276 | fixeddecimalint2
+ 13277 | fixeddecimaltod
+ 13278 | dtofixeddecimal
+ 13279 | fixeddecimaltof
+ 13280 | ftofixeddecimal
+ 13281 | fixeddecimal_numeric
+ 13282 | numeric_fixeddecimal
+ 13294 | fixeddecimal_avg_accum
+ 13295 | fixeddecimal_sum
+ 13296 | fixeddecimal_avg
+ 13297 | min
+ 13298 | max
+ 13299 | sum
+ 13300 | avg
+(98 rows)
 
 -- **************** pg_cast ****************
 -- Catch bogus values in pg_cast columns (other than cases detected by
@@ -1532,10 +1632,10 @@ WHERE a.aggfnoid = p.oid AND
     );
  aggfnoid |      proname       | oid  |       proname       
 ----------+--------------------+------+---------------------
-     9189 | gp_percentile_cont | 9188 | gp_percentile_final
-     9190 | gp_percentile_cont | 9188 | gp_percentile_final
-     9191 | gp_percentile_cont | 9188 | gp_percentile_final
      9192 | gp_percentile_cont | 9188 | gp_percentile_final
+     9191 | gp_percentile_cont | 9188 | gp_percentile_final
+     9190 | gp_percentile_cont | 9188 | gp_percentile_final
+     9189 | gp_percentile_cont | 9188 | gp_percentile_final
 (4 rows)
 
 -- If transfn is strict then either initval should be non-NULL, or
@@ -2233,6 +2333,7 @@ ORDER BY 1, 2, 3;
                     | complex_ops      | complex_ops      | complex
                     | float_ops        | float4_ops       | real
                     | float_ops        | float8_ops       | double precision
+                    | interval_ops     | interval_ops     | interval
                     | jsonb_ops        | jsonb_ops        | jsonb
                     | multirange_ops   | multirange_ops   | anymultirange
                     | numeric_ops      | numeric_ops      | numeric
@@ -2241,7 +2342,7 @@ ORDER BY 1, 2, 3;
                     | record_ops       | record_ops       | record
                     | tsquery_ops      | tsquery_ops      | tsquery
                     | tsvector_ops     | tsvector_ops     | tsvector
-(16 rows)
+(17 rows)
 
 -- **************** pg_index ****************
 -- Look for illegal values in pg_index fields.

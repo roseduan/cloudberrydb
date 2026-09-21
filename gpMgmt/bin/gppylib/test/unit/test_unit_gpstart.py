@@ -377,8 +377,11 @@ class GpStart(GpTestCase):
         up, down = gpstart._prepare_segment_start()
 
         # The coordinator and standby should not be accounted for in these lists.
-        self.assertCountEqual(up, [primary1, mirror0])
-        self.assertCountEqual(down, [primary0, mirror1])
+        # Segment.valid is always True now (FTS keeps gp_segment_configuration
+        # status current, so gpstart no longer skips segments marked down
+        # there); every QE segment is therefore returned as one to start.
+        self.assertCountEqual(up, [primary0, primary1, mirror0, mirror1])
+        self.assertCountEqual(down, [])
 
     @patch("gppylib.commands.pg.PgControlData.run")
     @patch("gppylib.commands.pg.PgControlData.get_value", return_value="2")

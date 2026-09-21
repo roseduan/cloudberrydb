@@ -280,3 +280,33 @@ drop function clean_roles();
 -- end_ignore
 -- free pg_global space, otherwise it fails db_size_functions
 VACUUM FULL pg_authid, pg_database;
+
+-- Multiple VACUUM commands run on a table should not distort the values of reltuples.
+CREATE TABLE vac_reltuple_distortion(a int) DISTRIBUTED BY (a);
+INSERT INTO vac_reltuple_distortion SELECT generate_series(1, 1000000);
+ANALYZE vac_reltuple_distortion;
+SELECT reltuples, relname FROM pg_class WHERE oid='vac_reltuple_distortion'::regclass;
+VACUUM vac_reltuple_distortion;
+VACUUM vac_reltuple_distortion; -- 2nd call to VACUUM after ANALYZE
+SELECT reltuples, relname FROM pg_class WHERE oid='vac_reltuple_distortion'::regclass;
+VACUUM vac_reltuple_distortion;
+SELECT reltuples, relname FROM pg_class WHERE oid='vac_reltuple_distortion'::regclass;
+
+-- test wrong log relcache leak in pg_catalog.gp_acquire_sample_rows
+-- start_ignore
+drop table if exists relcache_leak_in_motion;
+-- end_ignore
+create table relcache_leak_in_motion(v1 int);
+insert into relcache_leak_in_motion values(generate_series(0, 10000));
+BEGIN;
+SET LOCAL synchronous_commit = local;
+SELECT gp_inject_fault('interconnect_stop_recv_chunk', 'interrupt', dbid)
+  FROM gp_segment_configuration WHERE content = -1 and role='p';
+-- start_ignore
+analyze relcache_leak_in_motion;
+SELECT gp_inject_fault('interconnect_stop_recv_chunk', 'reset', dbid)
+  FROM gp_segment_configuration WHERE content = -1 and role='p';
+COMMIT;
+-- start_ignore
+drop table if exists relcache_leak_in_motion;
+-- end_ignore

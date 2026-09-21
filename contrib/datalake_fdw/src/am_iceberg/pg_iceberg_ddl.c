@@ -480,7 +480,7 @@ pg_iceberg_alter_column_type_local(PG_FUNCTION_ARGS)
 	newtypid = PG_GETARG_OID(2);
 	newtypmod = PG_GETARG_INT32(3);
 
-	if (!pg_class_ownercheck(relid, GetUserId()))
+	if (!object_ownercheck(RelationRelationId, relid, GetUserId()))
 		aclcheck_error(ACLCHECK_NOT_OWNER, OBJECT_TABLE, get_rel_name(relid));
 
 	pg_iceberg_alter_column_type_local_internal(relid, colname, newtypid, newtypmod);

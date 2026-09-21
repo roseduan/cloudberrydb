@@ -111,13 +111,13 @@ explain (costs off)
  Vec Gather Motion 1:1  (slice1; segments: 1)
    ->  Vec Seq Scan on ec0
          Filter: ((ff = '42'::bigint) AND (f1 = '42'::bigint) AND (ff = f1))
- Optimizer: Pivotal Optimizer (GPORCA)
+ Optimizer: GPORCA
 (4 rows)
 
 explain (costs off)
   select * from ec0 where ff = f1 and f1 = '42'::int8alias1;
-                              QUERY PLAN                               
------------------------------------------------------------------------
+                       QUERY PLAN                        
+---------------------------------------------------------
  Gather Motion 3:1  (slice1; segments: 3)
    ->  Seq Scan on ec0
          Filter: ((ff = f1) AND (f1 = '42'::int8alias1))
@@ -146,8 +146,8 @@ explain (costs off)
 
 explain (costs off)
   select * from ec1, ec2 where ff = x1 and ff = '42'::int8;
-                       QUERY PLAN                        
----------------------------------------------------------
+                          QUERY PLAN                           
+---------------------------------------------------------------
  Gather Motion 3:1  (slice1; segments: 3)
    ->  Nested Loop
          Join Filter: (ec1.ff = ec2.x1)
@@ -157,7 +157,7 @@ explain (costs off)
                ->  Broadcast Motion 3:3  (slice2; segments: 3)
                      ->  Seq Scan on ec2
  Optimizer: GPORCA
-(8 rows)
+(9 rows)
 
 explain (costs off)
   select * from ec1, ec2 where ff = x1 and ff = '42'::int8alias1;
@@ -185,7 +185,7 @@ explain (costs off)
                ->  Seq Scan on ec2
                      Filter: ('42'::bigint = x1)
          ->  Seq Scan on ec1
- Optimizer: Pivotal Optimizer (GPORCA)
+ Optimizer: GPORCA
 (8 rows)
 
 explain (costs off)
@@ -199,7 +199,7 @@ explain (costs off)
                ->  Seq Scan on ec2
                      Filter: (x1 = '42'::int8alias1)
          ->  Seq Scan on ec1
- Optimizer: Pivotal Optimizer (GPORCA)
+ Optimizer: GPORCA
 (8 rows)
 
 explain (costs off)
@@ -213,7 +213,7 @@ explain (costs off)
                ->  Seq Scan on ec2
                      Filter: (x1 = '42'::int8alias2)
          ->  Seq Scan on ec1
- Optimizer: Pivotal Optimizer (GPORCA)
+ Optimizer: GPORCA
 (8 rows)
 
 create index ec1_expr1 on ec1((ff + 1));
@@ -271,7 +271,7 @@ explain (costs off)
                                        ->  Seq Scan on ec1
                                        ->  Seq Scan on ec1 ec1_1
                            ->  Seq Scan on ec1 ec1_2
- Optimizer: Pivotal Optimizer (GPORCA)
+ Optimizer: GPORCA
 (14 rows)
 
 explain (costs off)
@@ -439,8 +439,8 @@ grant select on ec1 to regress_user_ectest;
 explain (costs off)
   select * from ec0 a, ec1 b
   where a.ff = b.ff and a.ff = 43::bigint::int8alias1;
-                          QUERY PLAN                           
----------------------------------------------------------------
+                  QUERY PLAN                   
+-----------------------------------------------
  Gather Motion 3:1  (slice1; segments: 3)
    ->  Hash Join
          Hash Cond: (a.ff = b.ff)
@@ -449,7 +449,7 @@ explain (costs off)
          ->  Hash
                ->  Seq Scan on ec1 b
  Optimizer: GPORCA
-(9 rows)
+(8 rows)
 
 set session authorization regress_user_ectest;
 -- with RLS active, the non-leakproof a.ff = 43 clause is not treated
@@ -458,8 +458,8 @@ set session authorization regress_user_ectest;
 explain (costs off)
   select * from ec0 a, ec1 b
   where a.ff = b.ff and a.ff = 43::bigint::int8alias1;
-                                    QUERY PLAN                                    
-----------------------------------------------------------------------------------
+                     QUERY PLAN                     
+----------------------------------------------------
  Gather Motion 3:1  (slice1; segments: 3)
    ->  Hash Join
          Hash Cond: (a.ff = b.ff)
@@ -499,6 +499,8 @@ explain (costs off)
 
 -- check that we recognize equivalence with dummy domains in the way
 create temp table undername (f1 name, f2 int);
+NOTICE:  Table doesn't have 'DISTRIBUTED BY' clause -- Using column named 'f1' as the Apache Cloudberry data distribution key for this table.
+HINT:  The 'DISTRIBUTED BY' clause determines the distribution of data. Make sure column(s) chosen are the optimal data distribution key to minimize skew.
 create temp view overview as
   select f1::information_schema.sql_identifier as sqli, f2 from undername;
 explain (costs off)  -- this should not require a sort

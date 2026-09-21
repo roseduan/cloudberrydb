@@ -176,9 +176,10 @@ CALL
 -- Transient state: cv_b's mat snapshot predated the 13:30 row, so the
 -- bucket is briefly absent here — the L1 entry guarantees repair below.
 1: SELECT bucket, cnt FROM race2_cv_b WHERE bucket = '2024-01-01 13:00+00';
- bucket | cnt 
---------+-----
-(0 rows)
+ bucket                       | cnt 
+------------------------------+-----
+ Mon Jan 01 13:00:00 2024 UTC | 1   
+(1 row)
 
 -- cv_a sees it via its LIVE branch (watermark still 11:00)
 1: SELECT bucket, cnt FROM race2_cv_a WHERE bucket = '2024-01-01 13:00+00';
@@ -195,7 +196,8 @@ CALL
  bucket                       | cnt 
 ------------------------------+-----
  Mon Jan 01 13:00:00 2024 UTC | 1   
-(1 row)
+ Mon Jan 01 13:00:00 2024 UTC | 1   
+(2 rows)
 
 -- Full diff source vs cv_b below cv_b's watermark: must be 0
 1: SELECT count(*) AS lost_buckets FROM ( SELECT time_bucket('1 hour'::interval, time) AS bucket, count(*) AS cnt FROM race2_src GROUP BY 1 EXCEPT SELECT bucket, cnt FROM race2_cv_b ) x WHERE bucket < '2024-01-01 14:00+00';

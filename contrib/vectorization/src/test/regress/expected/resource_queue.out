@@ -1,4 +1,15 @@
 -- SQL coverage of RESOURCE QUEUE
+-- start_ignore
+create extension if not exists gp_inject_fault;
+-- end_ignore
+-- check we have correct initial state of the default resource queue
+SELECT rqc.* FROM pg_resqueuecapability rqc JOIN pg_resqueue rq ON rqc.resqueueid = rq.oid WHERE rq.rsqname = 'pg_default';
+ resqueueid | restypid | ressetting 
+------------+----------+------------
+       6055 |        5 | medium
+       6055 |        6 | -1
+(2 rows)
+
 CREATE RESOURCE QUEUE regressq ACTIVE THRESHOLD 1;
 SELECT rsqname, rsqcountlimit, rsqcostlimit, rsqovercommit, rsqignorecostlimit FROM pg_resqueue WHERE rsqname='regressq';
  rsqname  | rsqcountlimit | rsqcostlimit | rsqovercommit | rsqignorecostlimit 
@@ -261,6 +272,7 @@ DECLARE c1 CURSOR FOR SELECT 1 FROM tenk1;
 DECLARE c2 CURSOR FOR SELECT 2 FROM tenk1;
 DECLARE c3 CURSOR FOR SELECT 3 FROM tenk1; -- should detect deadlock
 ERROR:  deadlock detected, locking against self
+DETAIL:  resource queue id: 117479, portal id: 3
 END;
 -- track cursor open/close count (should not deadlock)
 BEGIN;
@@ -327,6 +339,7 @@ SELECT rsqname, rsqcostlimit, rsqwaiters, rsqholders FROM pg_resqueue_status WHE
 
 DECLARE c3 CURSOR FOR SELECT * FROM tenk1 a, tenk1 b;
 ERROR:  statement requires more resources than resource queue allows
+DETAIL:  resource queue id: 117480, portal id: 3
 SELECT rsqname, rsqcostlimit, rsqwaiters, rsqholders FROM pg_resqueue_status WHERE rsqcostvalue > 0;
 ERROR:  current transaction is aborted, commands ignored until end of transaction block
 DECLARE c4 CURSOR FOR SELECT * FROM tenk1 a, tenk1 b, tenk1 c;
@@ -437,6 +450,7 @@ fetch c0;
 
 select * from rq_product;
 ERROR:  deadlock detected, locking against self
+DETAIL:  resource queue id: 117483, portal id: 0
 fetch c0;
 ERROR:  current transaction is aborted, commands ignored until end of transaction block
 abort;
@@ -468,6 +482,7 @@ fetch c0;
 
 select * from rq_product;
 ERROR:  deadlock detected, locking against self
+DETAIL:  resource queue id: 117483, portal id: 0
 fetch c0;
 ERROR:  current transaction is aborted, commands ignored until end of transaction block
 abort;
@@ -518,6 +533,7 @@ fetch c0;
 
 select * from rq_product;
 ERROR:  deadlock detected, locking against self
+DETAIL:  resource queue id: 117483, portal id: 0
 fetch c0;
 ERROR:  current transaction is aborted, commands ignored until end of transaction block
 abort;
@@ -569,6 +585,7 @@ fetch c0;
 
 select * from rq_product;
 ERROR:  deadlock detected, locking against self
+DETAIL:  resource queue id: 117483, portal id: 0
 fetch c0;
 ERROR:  current transaction is aborted, commands ignored until end of transaction block
 abort;
@@ -582,7 +599,7 @@ CREATE ROLE rq_test_oosm_role;
 NOTICE:  resource queue required -- using default resource queue "pg_default"
 SET ROLE rq_test_oosm_role;
 CREATE TABLE rq_test_oosm_table(i int);
-NOTICE:  Table doesn't have 'DISTRIBUTED BY' clause -- Using column named 'i' as the Cloudberry Database data distribution key for this table.
+NOTICE:  Table doesn't have 'DISTRIBUTED BY' clause -- Using column named 'i' as the Apache Cloudberry data distribution key for this table.
 HINT:  The 'DISTRIBUTED BY' clause determines the distribution of data. Make sure column(s) chosen are the optimal data distribution key to minimize skew.
 INSERT INTO rq_test_oosm_table VALUES(1);
 -- Simulate an out-of-shared-memory condition during the course of grabbing a
@@ -613,3 +630,22 @@ SELECT * FROM rq_test_oosm_table;
 DROP TABLE rq_test_oosm_table;
 RESET ROLE;
 DROP ROLE rq_test_oosm_role;
+-- test for extended queries
+-- create a role that only use in this test will drop it later
+-- later we will use username to identify the backend process
+create role extend_protocol_requeue_role with login;
+NOTICE:  resource queue required -- using default resource queue "pg_default"
+-- start_matchsubs
+--
+-- m/NOTICE:  query requested \d+/
+-- s/NOTICE:  query requested \d+/NOTICE:  query requested XXX/g
+--
+-- m/NOTICE:  SPI memory reservation \d+/
+-- s/NOTICE:  SPI memory reservation \d+/NOTICE:  SPI memory reservation /g
+--
+-- end_matchsubs
+-- run query using non_superuser role so that it can be
+-- controled by resource queue
+\! ./extended_protocol_resqueue dbname=regression extend_protocol_requeue_role;
+sh: ./extended_protocol_resqueue: No such file or directory
+drop role extend_protocol_requeue_role;

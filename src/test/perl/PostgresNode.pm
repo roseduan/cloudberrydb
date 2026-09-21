@@ -99,8 +99,8 @@ use File::Spec;
 use File::stat qw(stat);
 use File::Temp ();
 use IPC::Run;
-use PostgresVersion;
-use RecursiveCopy;
+use PostgreSQL::Version;
+use PostgreSQL::Test::RecursiveCopy;
 use Socket;
 use Test::More;
 use TestLib ();
@@ -517,10 +517,6 @@ sub init
 	print $conf TestLib::slurp_file($ENV{TEMP_CONFIG})
 	  if defined $ENV{TEMP_CONFIG};
 
-	# XXX Neutralize any stats_temp_directory in TEMP_CONFIG.  Nodes running
-	# concurrently must not share a stats_temp_directory.
-	print $conf "stats_temp_directory = 'pg_stat_tmp'\n";
-
 	if ($params{allows_streaming})
 	{
 		if ($params{allows_streaming} eq "logical")
@@ -750,7 +746,7 @@ sub _backup_fs
 		print "# pg_start_backup: $stdout\n";
 	}
 
-	RecursiveCopy::copypath(
+	PostgreSQL::Test::RecursiveCopy::copypath(
 		$self->data_dir,
 		$backup_path,
 		filterfn => sub {
@@ -841,7 +837,7 @@ sub init_from_backup
 	else
 	{
 		rmdir($data_path);
-		RecursiveCopy::copypath($backup_path, $data_path);
+		PostgreSQL::Test::RecursiveCopy::copypath($backup_path, $data_path);
 	}
 	chmod(0700, $data_path);
 
@@ -1409,7 +1405,7 @@ sub _set_pg_version
 	my $version_line = qx{$pg_config --version};
 	BAIL_OUT("$pg_config failed: $!") if $?;
 
-	$self->{_pg_version} = PostgresVersion->new($version_line);
+	$self->{_pg_version} = PostgreSQL::Version->new($version_line);
 
 	BAIL_OUT("could not parse pg_config --version output: $version_line")
 	  unless defined $self->{_pg_version};

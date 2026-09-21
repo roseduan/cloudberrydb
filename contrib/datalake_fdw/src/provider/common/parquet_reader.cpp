@@ -756,7 +756,7 @@ ParquetReader::readDecimal(std::shared_ptr<parquet::Scanner> &scanner, const Typ
 			if (isNull)
 				PG_RETURN_DATUM(0);
 			int_to_numeric_with_scale(d.int32Value, scale, (Numeric) out_buf);
-			return NumericGetDatum(out_buf);
+			return NumericGetDatum((Numeric) out_buf);
 		}
 		case INT8OID:
 		{
@@ -764,7 +764,7 @@ ParquetReader::readDecimal(std::shared_ptr<parquet::Scanner> &scanner, const Typ
 			if (isNull)
 				PG_RETURN_DATUM(0);
 			int_to_numeric_with_scale(d.int64Value, scale, (Numeric) out_buf);
-			return NumericGetDatum(out_buf);
+			return NumericGetDatum((Numeric) out_buf);
 		}
 		default:
 		{
@@ -780,7 +780,7 @@ ParquetReader::readDecimal(std::shared_ptr<parquet::Scanner> &scanner, const Typ
 				int_to_numeric_with_scale(FLBA_to_int64(value.ptr, typInfo.typeLength_), scale, (Numeric) out_buf);
 			else
 				int_to_numeric_with_scale(FLBA_to_int128(value.ptr, typInfo.typeLength_), scale, (Numeric) out_buf);
-			return NumericGetDatum(out_buf);
+			return NumericGetDatum((Numeric) out_buf);
 		}
 	}
 
@@ -1292,7 +1292,7 @@ ParquetReader::refillColumnBatch(int idx)
 					return;
 				EXPAND(vals,
 					   (int_to_numeric_with_scale(v, scale, (Numeric)(base + (size_t) i * numSz)),
-						NumericGetDatum(base + (size_t) i * numSz)));
+						NumericGetDatum((Numeric)(base + (size_t) i * numSz))));
 			}
 			else
 			{
@@ -1305,7 +1305,7 @@ ParquetReader::refillColumnBatch(int idx)
 					return;
 				EXPAND(vals,
 					   (int_to_numeric_with_scale(v, scale, (Numeric)(base + (size_t) i * numSz)),
-						NumericGetDatum(base + (size_t) i * numSz)));
+						NumericGetDatum((Numeric)(base + (size_t) i * numSz))));
 			}
 			break;
 		}
@@ -1329,12 +1329,12 @@ ParquetReader::refillColumnBatch(int idx)
 				EXPAND(vals,
 					   (int_to_numeric_with_scale(FLBA_to_int64(v.ptr, typeLen), scale,
 												  (Numeric)(base + (size_t) i * numSz)),
-						NumericGetDatum(base + (size_t) i * numSz)));
+						NumericGetDatum((Numeric)(base + (size_t) i * numSz))));
 			else
 				EXPAND(vals,
 					   (int_to_numeric_with_scale(FLBA_to_int128(v.ptr, typeLen), scale,
 												  (Numeric)(base + (size_t) i * numSz)),
-						NumericGetDatum(base + (size_t) i * numSz)));
+						NumericGetDatum((Numeric)(base + (size_t) i * numSz))));
 			break;
 		}
 		case FILL_TEXT:
@@ -1493,7 +1493,7 @@ ParquetReader::convertDict(ColumnBatch &b, const TypeInfo &ti,
 					char *out = base + (size_t) k * numSz;
 
 					int_to_numeric_with_scale(vals[k], scale, (Numeric) out);
-					b.dictDatums[k] = NumericGetDatum(out);
+					b.dictDatums[k] = NumericGetDatum((Numeric) out);
 				}
 			}
 			else
@@ -1505,7 +1505,7 @@ ParquetReader::convertDict(ColumnBatch &b, const TypeInfo &ti,
 					char *out = base + (size_t) k * numSz;
 
 					int_to_numeric_with_scale(vals[k], scale, (Numeric) out);
-					b.dictDatums[k] = NumericGetDatum(out);
+					b.dictDatums[k] = NumericGetDatum((Numeric) out);
 				}
 			}
 			break;
@@ -1528,7 +1528,7 @@ ParquetReader::convertDict(ColumnBatch &b, const TypeInfo &ti,
 					int_to_numeric_with_scale(FLBA_to_int64(vals[k].ptr, typeLen), scale, (Numeric) out);
 				else
 					int_to_numeric_with_scale(FLBA_to_int128(vals[k].ptr, typeLen), scale, (Numeric) out);
-				b.dictDatums[k] = NumericGetDatum(out);
+				b.dictDatums[k] = NumericGetDatum((Numeric) out);
 			}
 			break;
 		}

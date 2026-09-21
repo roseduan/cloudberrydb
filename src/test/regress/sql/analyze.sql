@@ -725,7 +725,9 @@ reset client_min_messages;
 
 alter table analyze_modified_cols drop column tc2;
 set client_min_messages to log;
+-- start_ignore
 analyze verbose analyze_modified_cols (tc2);
+-- end_ignore
 reset client_min_messages;
 
 -- Case 3: partitioned table

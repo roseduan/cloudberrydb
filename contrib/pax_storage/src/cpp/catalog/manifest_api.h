@@ -123,7 +123,7 @@ ManifestDesc manifest_init();
  *   relnode - the relnode of the pax table which is composed with
  *             tablespaceId, ReiFileNodeId, databaseId
  */
-void manifest_create(Relation rel, RelFileNode newrelnode);
+void manifest_create(Relation rel, RelFileLocator newrelnode);
 
 /**
  * Clear all micro partitions in the current version in non-transaction

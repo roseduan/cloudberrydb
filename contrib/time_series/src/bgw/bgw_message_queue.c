@@ -352,7 +352,7 @@ send_ack(dsm_segment *seg, bool success)
 
 	for (n = 1; n <= BGW_ACK_RETRIES; n++)
 	{
-		ack_res = shm_mq_send(ack_queue_handle, sizeof(bool), &success, true);
+		ack_res = shm_mq_send(ack_queue_handle, sizeof(bool), &success, true, true);
 		if (ack_res != SHM_MQ_WOULD_BLOCK)
 			break;
 		ereport(DEBUG1, (errmsg("time_series bgw ack send failure, retrying")));

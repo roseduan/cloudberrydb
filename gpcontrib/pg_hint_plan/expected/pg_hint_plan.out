@@ -10,6 +10,7 @@ set optimizer to off;
 SET client_min_messages TO log;
 \set SHOW_CONTEXT always
 EXPLAIN (COSTS false) SELECT * FROM t1, t2 WHERE t1.id = t2.id;
+LOG:  statement: EXPLAIN (COSTS false) SELECT * FROM t1, t2 WHERE t1.id = t2.id;
                 QUERY PLAN                
 ------------------------------------------
  Gather Motion 3:1  (slice1; segments: 3)
@@ -22,6 +23,7 @@ EXPLAIN (COSTS false) SELECT * FROM t1, t2 WHERE t1.id = t2.id;
 (7 rows)
 
 EXPLAIN (COSTS false) SELECT * FROM t1, t2 WHERE t1.val = t2.val;
+LOG:  statement: EXPLAIN (COSTS false) SELECT * FROM t1, t2 WHERE t1.val = t2.val;
                           QUERY PLAN                           
 ---------------------------------------------------------------
  Gather Motion 3:1  (slice1; segments: 3)
@@ -35,8 +37,11 @@ EXPLAIN (COSTS false) SELECT * FROM t1, t2 WHERE t1.val = t2.val;
 (8 rows)
 
 LOAD 'pg_hint_plan';
+LOG:  statement: LOAD 'pg_hint_plan';
 SET pg_hint_plan.debug_print TO on;
+LOG:  statement: SET pg_hint_plan.debug_print TO on;
 EXPLAIN (COSTS false) SELECT * FROM t1, t2 WHERE t1.id = t2.id;
+LOG:  statement: EXPLAIN (COSTS false) SELECT * FROM t1, t2 WHERE t1.id = t2.id;
                 QUERY PLAN                
 ------------------------------------------
  Gather Motion 3:1  (slice1; segments: 3)
@@ -49,6 +54,7 @@ EXPLAIN (COSTS false) SELECT * FROM t1, t2 WHERE t1.id = t2.id;
 (7 rows)
 
 EXPLAIN (COSTS false) SELECT * FROM t1, t2 WHERE t1.val = t2.val;
+LOG:  statement: EXPLAIN (COSTS false) SELECT * FROM t1, t2 WHERE t1.val = t2.val;
                           QUERY PLAN                           
 ---------------------------------------------------------------
  Gather Motion 3:1  (slice1; segments: 3)
@@ -79,6 +85,7 @@ DETAIL:  Unrecognized hint keyword "Test".
 (7 rows)
 
 SET pg_hint_plan.enable_hint TO off;
+LOG:  statement: SET pg_hint_plan.enable_hint TO off;
 /*+ Test (t1 t2) */
 EXPLAIN (COSTS false) SELECT * FROM t1, t2 WHERE t1.id = t2.id;
 LOG:  statement: /*+ Test (t1 t2) */
@@ -113,6 +120,7 @@ EXPLAIN (COSTS false) SELECT * FROM t1, t2 WHERE t1.id = t2.id;
 
 --+Set(enable_seqscan off)
 EXPLAIN (COSTS false) SELECT * FROM t1, t2 WHERE t1.id = t2.id;
+LOG:  statement: EXPLAIN (COSTS false) SELECT * FROM t1, t2 WHERE t1.id = t2.id;
                 QUERY PLAN                
 ------------------------------------------
  Gather Motion 3:1  (slice1; segments: 3)
@@ -361,6 +369,7 @@ Set(work_mem TO 1MB)
 (7 rows)
 
 /*+IndexScan() */ SELECT 1;
+LOG:  statement: /*+IndexScan() */ SELECT 1;
 INFO:  pg_hint_plan: hint syntax error at or near " "
 DETAIL:  IndexScan hint requires a relation.
 LOG:  pg_hint_plan:
@@ -385,12 +394,12 @@ IndexScan(t1 t2)
 not used hint:
 duplication hint:
 error hint:
-                 QUERY PLAN                 
---------------------------------------------
+                QUERY PLAN                
+------------------------------------------
  Gather Motion 3:1  (slice1; segments: 3)
    ->  Hash Join
          Hash Cond: (t1.id = t2.id)
-         ->  Index Scan using t1_pkey on t1
+         ->  Seq Scan on t1
          ->  Hash
                ->  Seq Scan on t2
  Optimizer: Postgres query optimizer
@@ -577,6 +586,7 @@ error hint:
 (8 rows)
 
 /*+ NestLoop() */ SELECT 1;
+LOG:  statement: /*+ NestLoop() */ SELECT 1;
 INFO:  pg_hint_plan: hint syntax error at or near " "
 DETAIL:  NestLoop hint requires at least two relations.
 LOG:  pg_hint_plan:
@@ -591,6 +601,7 @@ NestLoop()
 (1 row)
 
 /*+ NestLoop(x) */ SELECT 1;
+LOG:  statement: /*+ NestLoop(x) */ SELECT 1;
 INFO:  pg_hint_plan: hint syntax error at or near " "
 DETAIL:  NestLoop hint requires at least two relations.
 LOG:  pg_hint_plan:
@@ -5512,9 +5523,17 @@ error hint:
 
 -- IndexScan is safe for unordered indexes
 CREATE TABLE ischk (a text, b tsvector) PARTITION BY LIST(a);
+LOG:  statement: CREATE TABLE ischk (a text, b tsvector) PARTITION BY LIST(a);
+NOTICE:  Table doesn't have 'DISTRIBUTED BY' clause -- Using column named 'a' as the Apache Cloudberry data distribution key for this table.
+HINT:  The 'DISTRIBUTED BY' clause determines the distribution of data. Make sure column(s) chosen are the optimal data distribution key to minimize skew.
 CREATE TABLE ischk_d1 PARTITION OF ischk FOR VALUES IN (0);
+LOG:  statement: CREATE TABLE ischk_d1 PARTITION OF ischk FOR VALUES IN (0);
+NOTICE:  table has parent, setting distribution columns to match parent table
 CREATE TABLE ischk_d2 PARTITION OF ischk FOR VALUES IN (1);
+LOG:  statement: CREATE TABLE ischk_d2 PARTITION OF ischk FOR VALUES IN (1);
+NOTICE:  table has parent, setting distribution columns to match parent table
 CREATE INDEX ischk_idx ON ischk USING gin (b);
+LOG:  statement: CREATE INDEX ischk_idx ON ischk USING gin (b);
 /*+ IndexScan(ischk ischk_idx) */
 EXPLAIN (COSTS false) SELECT * FROM ischk WHERE b = 'x';
 LOG:  statement: /*+ IndexScan(ischk ischk_idx) */
@@ -5539,6 +5558,7 @@ error hint:
 (7 rows)
 
 DROP TABLE ischk;
+LOG:  statement: DROP TABLE ischk;
 -- quote test
 /*+SeqScan("""t1 )	")IndexScan("t	2 """)HashJoin("""t1 )	"T3"t	2 """)Leading("""t1 )	"T3"t	2 """)Set(application_name"a	a	a""	a	A")*/
 EXPLAIN (COSTS false) SELECT * FROM t1 """t1 )	", t2 "t	2 """, t3 "T3" WHERE """t1 )	".id = "t	2 """.id AND """t1 )	".id = "T3".id;
@@ -6201,8 +6221,8 @@ Set(123456789012345678901234567890123456789012345678901234567890123 1)
 
 SET "123456789012345678901234567890123456789012345678901234567890123" TO 1;
 LOG:  statement: SET "123456789012345678901234567890123456789012345678901234567890123" TO 1;
-LOG:  An exception was encountered during the execution of statement: SET "123456789012345678901234567890123456789012345678901234567890123" TO 1;
 ERROR:  unrecognized configuration parameter "123456789012345678901234567890123456789012345678901234567890123"
+LOG:  An exception was encountered during the execution of statement: SET "123456789012345678901234567890123456789012345678901234567890123" TO 1;
 SET "1234567890123456789012345678901234567890123456789012345678901234" TO 1;
 NOTICE:  identifier "1234567890123456789012345678901234567890123456789012345678901234" will be truncated to "123456789012345678901234567890123456789012345678901234567890123"
 LOG:  statement: SET "1234567890123456789012345678901234567890123456789012345678901234" TO 1;
@@ -6210,8 +6230,8 @@ LOG:  An exception was encountered during the execution of statement: SET "12345
 ERROR:  unrecognized configuration parameter "123456789012345678901234567890123456789012345678901234567890123"
 SET cursor_tuple_fraction TO 1234567890123456789012345678901234567890123456789012345678901234;
 LOG:  statement: SET cursor_tuple_fraction TO 1234567890123456789012345678901234567890123456789012345678901234;
-LOG:  An exception was encountered during the execution of statement: SET cursor_tuple_fraction TO 1234567890123456789012345678901234567890123456789012345678901234;
 ERROR:  1.23457e+63 is outside the valid range for parameter "cursor_tuple_fraction" (0 .. 1)
+LOG:  An exception was encountered during the execution of statement: SET cursor_tuple_fraction TO 1234567890123456789012345678901234567890123456789012345678901234;
 -- multi error
 /*+ Set(enable_seqscan 100)Set(seq_page_cost on)*/
 EXPLAIN (COSTS false) SELECT * FROM t1, t2 WHERE t1.id = t2.id;
@@ -6252,7 +6272,7 @@ LOG:  statement: EXPLAIN (COSTS false) SELECT * FROM t5 WHERE t5.id = 1;
 EXPLAIN (COSTS false) SELECT * FROM t5 WHERE t5.id = 1;
 LOG:  statement: /*+IndexScan(t5 t5_id2)*/
 EXPLAIN (COSTS false) SELECT * FROM t5 WHERE t5.id = 1;
-LOG:  available indexes for IndexScan(t5):
+LOG:  available indexes for IndexScan(t5): t5_id2
 LOG:  pg_hint_plan:
 used hint:
 IndexScan(t5 t5_id2)
@@ -6281,8 +6301,8 @@ error hint:
                 QUERY PLAN                
 ------------------------------------------
  Gather Motion 1:1  (slice1; segments: 1)
-   ->  Index Scan using t5_id2 on t5
-         Index Cond: (id = 1)
+   ->  Seq Scan on t5
+         Filter: (id = 1)
  Optimizer: Postgres query optimizer
 (4 rows)
 
@@ -6290,7 +6310,7 @@ error hint:
 EXPLAIN (COSTS false) SELECT * FROM t5 WHERE t5.id = 1;
 LOG:  statement: /*+IndexScan(t5 t5_id1 t5_id2)*/
 EXPLAIN (COSTS false) SELECT * FROM t5 WHERE t5.id = 1;
-LOG:  available indexes for IndexScan(t5): t5_id1
+LOG:  available indexes for IndexScan(t5): t5_id2 t5_id1
 LOG:  pg_hint_plan:
 used hint:
 IndexScan(t5 t5_id1 t5_id2)
@@ -6309,7 +6329,7 @@ error hint:
 EXPLAIN (COSTS false) SELECT * FROM t5 WHERE t5.id = 1;
 LOG:  statement: /*+IndexScan(t5 no_exist t5_id2)*/
 EXPLAIN (COSTS false) SELECT * FROM t5 WHERE t5.id = 1;
-LOG:  available indexes for IndexScan(t5):
+LOG:  available indexes for IndexScan(t5): t5_id2
 LOG:  pg_hint_plan:
 used hint:
 IndexScan(t5 no_exist t5_id2)
@@ -6338,8 +6358,8 @@ error hint:
                 QUERY PLAN                
 ------------------------------------------
  Gather Motion 1:1  (slice1; segments: 1)
-   ->  Index Scan using t5_id2 on t5
-         Index Cond: (id = 1)
+   ->  Seq Scan on t5
+         Filter: (id = 1)
  Optimizer: Postgres query optimizer
 (4 rows)
 

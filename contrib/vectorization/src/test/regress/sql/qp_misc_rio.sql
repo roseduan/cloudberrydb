@@ -40,13 +40,11 @@ select sum((select count(*) from t11_t group by b having b = s.b)) as sum_col fr
 -- Test: 15
 -- ----------------------------------------------------------------------
 -- aggregate over partition by
--- GPDB_10_MERGE_FIXME: Here we cast the unknown typed literal to text. After
--- we move past postgres 10 we can drop the cast.
 select state,
        sum(revenue) over (partition by state)
 from
-   (select 'A'::text as enc_email, 1 as revenue) b
-   join (select 'A'::text as enc_email, 'B'::text as state ) c using(enc_email)
+   (select 'A' as enc_email, 1 as revenue) b
+   join (select 'A' as enc_email, 'B' as state ) c using(enc_email)
 group by 1,b.revenue;
 
 -- ----------------------------------------------------------------------
@@ -54,6 +52,7 @@ group by 1,b.revenue;
 -- ----------------------------------------------------------------------
 
 
+set enable_parallel = off;
 
 CREATE TABLE testtable0000 AS SELECT spend, row_number() OVER (PARTITION BY 0) AS i, (spend % 2) AS r
 FROM (select generate_series(1,10) as spend) x DISTRIBUTED RANDOMLY;
@@ -179,7 +178,6 @@ SELECT s4,
        COUNT(*)
 FROM testtable0005 GROUP BY s4 order by s4;
 
-
 CREATE VIEW testtable0006
 AS SELECT testtable0005.*,
           miro_foo.s5_xform
@@ -192,6 +190,7 @@ JOIN (SELECT s5,
 ON testtable0005.s5 = miro_foo.s5;
 
 SELECT MIN(s5_xform), MIN(s5_xform) FROM testtable0006;
+reset enable_parallel;
 
 
 

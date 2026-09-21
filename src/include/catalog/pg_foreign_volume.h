@@ -49,9 +49,7 @@ typedef FormData_pg_foreign_volume *Form_pg_foreign_volume;
 
 DECLARE_TOAST(pg_foreign_volume, 8555, 8556);
 
-DECLARE_UNIQUE_INDEX_PKEY(pg_foreign_volume_oid_index, 8557, on pg_foreign_volume using btree(oid oid_ops));
-#define ForeignVolumeOidIndexId	8557
-DECLARE_UNIQUE_INDEX(pg_foreign_volume_name_server_index, 8558, on pg_foreign_volume using btree(fvname name_ops, fvserver oid_ops));
-#define ForeignVolumeNameServerIndexId	8558
+DECLARE_UNIQUE_INDEX_PKEY(pg_foreign_volume_oid_index, 8557, ForeignVolumeOidIndexId, on pg_foreign_volume using btree(oid oid_ops));
+DECLARE_UNIQUE_INDEX(pg_foreign_volume_name_server_index, 8558, ForeignVolumeNameServerIndexId, on pg_foreign_volume using btree(fvname name_ops, fvserver oid_ops));
 
 #endif							/* PG_FOREIGN_VOLUME_H */

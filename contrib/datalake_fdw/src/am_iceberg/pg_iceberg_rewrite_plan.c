@@ -46,21 +46,25 @@ typedef struct
 
 /* --- Parser callbacks --- */
 
-static void
+static JsonParseErrorType
 rw_helper_object_start(void *state)
 {
 	RewriteHelperParseState *s = (RewriteHelperParseState *) state;
 	s->depth++;
+
+	return JSON_SUCCESS;
 }
 
-static void
+static JsonParseErrorType
 rw_helper_object_end(void *state)
 {
 	RewriteHelperParseState *s = (RewriteHelperParseState *) state;
 	s->depth--;
+
+	return JSON_SUCCESS;
 }
 
-static void
+static JsonParseErrorType
 rw_helper_array_start(void *state)
 {
 	RewriteHelperParseState *s = (RewriteHelperParseState *) state;
@@ -79,9 +83,11 @@ rw_helper_array_start(void *state)
 	}
 
 	s->depth++;
+
+	return JSON_SUCCESS;
 }
 
-static void
+static JsonParseErrorType
 rw_helper_array_end(void *state)
 {
 	RewriteHelperParseState *s = (RewriteHelperParseState *) state;
@@ -106,9 +112,11 @@ rw_helper_array_end(void *state)
 		s->rewritten_fragments_end = s->lex->prev_token_terminator;
 		s->current_field = RW_HELPER_PARSE_NONE;
 	}
+
+	return JSON_SUCCESS;
 }
 
-static void
+static JsonParseErrorType
 rw_helper_object_field_start(void *state, char *fname, bool isnull)
 {
 	RewriteHelperParseState *s = (RewriteHelperParseState *) state;
@@ -123,12 +131,15 @@ rw_helper_object_field_start(void *state, char *fname, bool isnull)
 		else
 			s->current_field = RW_HELPER_PARSE_NONE;
 	}
+
+	return JSON_SUCCESS;
 }
 
-static void
+static JsonParseErrorType
 rw_helper_scalar(void *state, char *token, JsonTokenType tokentype)
 {
 	/* No scalars needed for now */
+	return JSON_SUCCESS;
 }
 
 static char *

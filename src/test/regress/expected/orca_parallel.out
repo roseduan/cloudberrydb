@@ -1,6 +1,7 @@
 create schema orca_parallel;
 set search_path=orca_parallel, public;
 set statement_mem = '256MB';
+set optimizer=on;
 create table t1(a int, b int) with(parallel_workers=2) distributed by (a);
 create table t2(c int, d int ) with(parallel_workers=3) distributed by (c);
 insert into t1 select i, i+1 from generate_series(1, 1000)i;
@@ -11,95 +12,107 @@ set parallel_setup_cost=0;
 set max_parallel_workers_per_gather=4;
 set enable_parallel = on;
 explain (verbose, costs off) select * from t1  join t2  on t1.a = t2.c;
-                                   QUERY PLAN                                   
---------------------------------------------------------------------------------
- Gather Motion 9:1  (slice1; segments: 9)
+                                  QUERY PLAN                                   
+-------------------------------------------------------------------------------
+ Gather Motion 6:1  (slice1; segments: 6)
    Output: t1.a, t1.b, t2.c, t2.d
    ->  Parallel Hash Join
          Output: t1.a, t1.b, t2.c, t2.d
          Hash Cond: (t2.c = t1.a)
-         ->  Parallel Seq Scan on orca_parallel.t2
+         ->  Redistribute Motion 9:6  (slice2; segments: 9)
                Output: t2.c, t2.d
+               Hash Key: t2.c
+               Hash Module: 3
+               ->  Parallel Seq Scan on orca_parallel.t2
+                     Output: t2.c, t2.d
          ->  Parallel Hash
                Output: t1.a, t1.b
-               ->  Redistribute Motion 6:9  (slice2; segments: 6)
+               ->  Parallel Seq Scan on orca_parallel.t1
                      Output: t1.a, t1.b
-                     Hash Key: t1.a
-                     Hash Module: 3
-                     ->  Parallel Seq Scan on orca_parallel.t1
-                           Output: t1.a, t1.b
- Settings: enable_parallel = 'on', optimizer = 'off', parallel_setup_cost = '0'
- Optimizer: Postgres query optimizer
+ Settings: optimizer = 'on', parallel_setup_cost = '0', enable_parallel = 'on'
+ Optimizer: GPORCA
 (17 rows)
 
 explain (verbose, costs off) select * from t1  join t2  on t1.a = t2.d;
-                                   QUERY PLAN                                   
---------------------------------------------------------------------------------
- Gather Motion 9:1  (slice1; segments: 9)
+                                  QUERY PLAN                                   
+-------------------------------------------------------------------------------
+ Gather Motion 6:1  (slice1; segments: 6)
    Output: t1.a, t1.b, t2.c, t2.d
    ->  Parallel Hash Join
          Output: t1.a, t1.b, t2.c, t2.d
          Hash Cond: (t2.d = t1.a)
-         ->  Parallel Seq Scan on orca_parallel.t2
+         ->  Redistribute Motion 9:6  (slice2; segments: 9)
                Output: t2.c, t2.d
+               Hash Key: t2.d
+               Hash Module: 3
+               ->  Parallel Seq Scan on orca_parallel.t2
+                     Output: t2.c, t2.d
          ->  Parallel Hash
                Output: t1.a, t1.b
-               ->  Broadcast Workers Motion 6:9  (slice2; segments: 6)
+               ->  Parallel Seq Scan on orca_parallel.t1
                      Output: t1.a, t1.b
-                     ->  Parallel Seq Scan on orca_parallel.t1
-                           Output: t1.a, t1.b
- Settings: enable_parallel = 'on', optimizer = 'off', parallel_setup_cost = '0'
- Optimizer: Postgres query optimizer
-(15 rows)
+ Settings: optimizer = 'on', parallel_setup_cost = '0', enable_parallel = 'on'
+ Optimizer: GPORCA
+(17 rows)
 
 explain (verbose, costs off) select * from t1  join t2  on t1.b = t2.c;
-                                   QUERY PLAN                                   
---------------------------------------------------------------------------------
- Gather Motion 9:1  (slice1; segments: 9)
+                                  QUERY PLAN                                   
+-------------------------------------------------------------------------------
+ Gather Motion 6:1  (slice1; segments: 6)
    Output: t1.a, t1.b, t2.c, t2.d
    ->  Parallel Hash Join
          Output: t1.a, t1.b, t2.c, t2.d
          Hash Cond: (t2.c = t1.b)
-         ->  Parallel Seq Scan on orca_parallel.t2
+         ->  Redistribute Motion 9:6  (slice2; segments: 9)
                Output: t2.c, t2.d
+               Hash Key: t2.c
+               Hash Module: 3
+               ->  Parallel Seq Scan on orca_parallel.t2
+                     Output: t2.c, t2.d
          ->  Parallel Hash
                Output: t1.a, t1.b
-               ->  Redistribute Motion 6:9  (slice2; segments: 6)
+               ->  Redistribute Motion 6:6  (slice3; segments: 6)
                      Output: t1.a, t1.b
                      Hash Key: t1.b
                      Hash Module: 3
                      ->  Parallel Seq Scan on orca_parallel.t1
                            Output: t1.a, t1.b
- Settings: enable_parallel = 'on', optimizer = 'off', parallel_setup_cost = '0'
- Optimizer: Postgres query optimizer
-(17 rows)
+ Settings: optimizer = 'on', parallel_setup_cost = '0', enable_parallel = 'on'
+ Optimizer: GPORCA
+(21 rows)
 
 explain (verbose, costs off) select * from t1  join t2  on t1.b = t2.d;
-                                   QUERY PLAN                                   
---------------------------------------------------------------------------------
- Gather Motion 9:1  (slice1; segments: 9)
+                                  QUERY PLAN                                   
+-------------------------------------------------------------------------------
+ Gather Motion 6:1  (slice1; segments: 6)
    Output: t1.a, t1.b, t2.c, t2.d
    ->  Parallel Hash Join
          Output: t1.a, t1.b, t2.c, t2.d
          Hash Cond: (t2.d = t1.b)
-         ->  Parallel Seq Scan on orca_parallel.t2
+         ->  Redistribute Motion 9:6  (slice2; segments: 9)
                Output: t2.c, t2.d
+               Hash Key: t2.d
+               Hash Module: 3
+               ->  Parallel Seq Scan on orca_parallel.t2
+                     Output: t2.c, t2.d
          ->  Parallel Hash
                Output: t1.a, t1.b
-               ->  Broadcast Workers Motion 6:9  (slice2; segments: 6)
+               ->  Redistribute Motion 6:6  (slice3; segments: 6)
                      Output: t1.a, t1.b
+                     Hash Key: t1.b
+                     Hash Module: 3
                      ->  Parallel Seq Scan on orca_parallel.t1
                            Output: t1.a, t1.b
- Settings: enable_parallel = 'on', optimizer = 'off', parallel_setup_cost = '0'
- Optimizer: Postgres query optimizer
-(15 rows)
+ Settings: optimizer = 'on', parallel_setup_cost = '0', enable_parallel = 'on'
+ Optimizer: GPORCA
+(21 rows)
 
 -- Redistribute Motion
 alter table t2 set (parallel_workers=2);
 set max_parallel_workers_per_gather=2;
 explain (verbose, costs off) select * from t1  join t2  on t1.a = t2.c;
-                                   QUERY PLAN                                   
---------------------------------------------------------------------------------
+                         QUERY PLAN                          
+-------------------------------------------------------------
  Gather Motion 6:1  (slice1; segments: 6)
    Output: t1.a, t1.b, t2.c, t2.d
    ->  Parallel Hash Join
@@ -111,33 +124,35 @@ explain (verbose, costs off) select * from t1  join t2  on t1.a = t2.c;
                Output: t1.a, t1.b
                ->  Parallel Seq Scan on orca_parallel.t1
                      Output: t1.a, t1.b
- Settings: enable_parallel = 'on', optimizer = 'off', parallel_setup_cost = '0'
+ Settings: parallel_setup_cost = '0', enable_parallel = 'on'
  Optimizer: Postgres query optimizer
 (13 rows)
 
 explain (verbose, costs off) select * from t1  join t2  on t1.a = t2.d;
-                                   QUERY PLAN                                   
---------------------------------------------------------------------------------
+                              QUERY PLAN                               
+-----------------------------------------------------------------------
  Gather Motion 6:1  (slice1; segments: 6)
    Output: t1.a, t1.b, t2.c, t2.d
    ->  Parallel Hash Join
          Output: t1.a, t1.b, t2.c, t2.d
          Hash Cond: (t2.d = t1.a)
-         ->  Parallel Seq Scan on orca_parallel.t2
+         ->  Redistribute Motion 6:6  (slice2; segments: 6)
                Output: t2.c, t2.d
+               Hash Key: t2.d
+               Hash Module: 3
+               ->  Parallel Seq Scan on orca_parallel.t2
+                     Output: t2.c, t2.d
          ->  Parallel Hash
                Output: t1.a, t1.b
-               ->  Broadcast Workers Motion 6:6  (slice2; segments: 6)
+               ->  Parallel Seq Scan on orca_parallel.t1
                      Output: t1.a, t1.b
-                     ->  Parallel Seq Scan on orca_parallel.t1
-                           Output: t1.a, t1.b
- Settings: enable_parallel = 'on', optimizer = 'off', parallel_setup_cost = '0'
- Optimizer: Postgres query optimizer
-(15 rows)
+ Settings: optimizer = 'on', parallel_setup_cost = '0', enable_parallel = 'on'
+ Optimizer: GPORCA
+(17 rows)
 
 explain (verbose, costs off) select * from t1  join t2  on t1.b = t2.c;
-                                   QUERY PLAN                                   
---------------------------------------------------------------------------------
+                            QUERY PLAN                            
+------------------------------------------------------------------
  Gather Motion 6:1  (slice1; segments: 6)
    Output: t1.a, t1.b, t2.c, t2.d
    ->  Parallel Hash Join
@@ -153,34 +168,40 @@ explain (verbose, costs off) select * from t1  join t2  on t1.b = t2.c;
                      Hash Module: 3
                      ->  Parallel Seq Scan on orca_parallel.t1
                            Output: t1.a, t1.b
- Settings: enable_parallel = 'on', optimizer = 'off', parallel_setup_cost = '0'
+ Settings: parallel_setup_cost = '0', enable_parallel = 'on'
  Optimizer: Postgres query optimizer
 (17 rows)
 
 explain (verbose, costs off) select * from t1  join t2  on t1.b = t2.d;
-                                   QUERY PLAN                                   
---------------------------------------------------------------------------------
+                              QUERY PLAN                               
+-----------------------------------------------------------------------
  Gather Motion 6:1  (slice1; segments: 6)
    Output: t1.a, t1.b, t2.c, t2.d
    ->  Parallel Hash Join
          Output: t1.a, t1.b, t2.c, t2.d
          Hash Cond: (t2.d = t1.b)
-         ->  Parallel Seq Scan on orca_parallel.t2
+         ->  Redistribute Motion 6:6  (slice2; segments: 6)
                Output: t2.c, t2.d
+               Hash Key: t2.d
+               Hash Module: 3
+               ->  Parallel Seq Scan on orca_parallel.t2
+                     Output: t2.c, t2.d
          ->  Parallel Hash
                Output: t1.a, t1.b
-               ->  Broadcast Workers Motion 6:6  (slice2; segments: 6)
+               ->  Redistribute Motion 6:6  (slice3; segments: 6)
                      Output: t1.a, t1.b
+                     Hash Key: t1.b
+                     Hash Module: 3
                      ->  Parallel Seq Scan on orca_parallel.t1
                            Output: t1.a, t1.b
- Settings: enable_parallel = 'on', optimizer = 'off', parallel_setup_cost = '0'
- Optimizer: Postgres query optimizer
-(15 rows)
+ Settings: optimizer = 'on', parallel_setup_cost = '0', enable_parallel = 'on'
+ Optimizer: GPORCA
+(21 rows)
 
 -- Left Join
 explain (verbose, costs off) select * from t1 left join t2  on t1.a = t2.c;
-                                   QUERY PLAN                                   
---------------------------------------------------------------------------------
+                         QUERY PLAN                          
+-------------------------------------------------------------
  Gather Motion 6:1  (slice1; segments: 6)
    Output: t1.a, t1.b, t2.c, t2.d
    ->  Parallel Hash Right Join
@@ -192,14 +213,14 @@ explain (verbose, costs off) select * from t1 left join t2  on t1.a = t2.c;
                Output: t1.a, t1.b
                ->  Parallel Seq Scan on orca_parallel.t1
                      Output: t1.a, t1.b
- Settings: enable_parallel = 'on', optimizer = 'off', parallel_setup_cost = '0'
+ Settings: parallel_setup_cost = '0', enable_parallel = 'on'
  Optimizer: Postgres query optimizer
 (13 rows)
 
 -- Right Join
 explain (verbose, costs off) select * from t1 right join t2 on t1.a = t2.c;
-                                   QUERY PLAN                                   
---------------------------------------------------------------------------------
+                         QUERY PLAN                          
+-------------------------------------------------------------
  Gather Motion 6:1  (slice1; segments: 6)
    Output: t1.a, t1.b, t2.c, t2.d
    ->  Parallel Hash Left Join
@@ -211,14 +232,14 @@ explain (verbose, costs off) select * from t1 right join t2 on t1.a = t2.c;
                Output: t1.a, t1.b
                ->  Parallel Seq Scan on orca_parallel.t1
                      Output: t1.a, t1.b
- Settings: enable_parallel = 'on', optimizer = 'off', parallel_setup_cost = '0'
+ Settings: parallel_setup_cost = '0', enable_parallel = 'on'
  Optimizer: Postgres query optimizer
 (13 rows)
 
 -- Full Join
 explain (verbose, costs off) select * from t1 full join t2  on t1.a = t2.c;
-                                   QUERY PLAN                                   
---------------------------------------------------------------------------------
+                         QUERY PLAN                          
+-------------------------------------------------------------
  Gather Motion 6:1  (slice1; segments: 6)
    Output: t1.a, t1.b, t2.c, t2.d
    ->  Parallel Hash Full Join
@@ -230,28 +251,29 @@ explain (verbose, costs off) select * from t1 full join t2  on t1.a = t2.c;
                Output: t1.a, t1.b
                ->  Parallel Seq Scan on orca_parallel.t1
                      Output: t1.a, t1.b
- Settings: enable_parallel = 'on', optimizer = 'off', parallel_setup_cost = '0'
+ Settings: parallel_setup_cost = '0', enable_parallel = 'on'
  Optimizer: Postgres query optimizer
 (13 rows)
 
 -- Semi Join
 explain (verbose, costs off) select *  from t1 where exists (select 1 from t2 where t2.c = t1.a);
-                                   QUERY PLAN                                   
---------------------------------------------------------------------------------
+                         QUERY PLAN                          
+-------------------------------------------------------------
  Gather Motion 6:1  (slice1; segments: 6)
    Output: t1.a, t1.b
-   ->  Parallel Hash Right Semi Join
+   ->  Parallel Hash Semi Join
          Output: t1.a, t1.b
-         Hash Cond: (t2.c = t1.a)
-         ->  Parallel Seq Scan on orca_parallel.t2
-               Output: t2.c, t2.d
-         ->  Parallel Hash
+         Hash Cond: (t1.a = t2.c)
+         ->  Parallel Seq Scan on orca_parallel.t1
                Output: t1.a, t1.b
-               ->  Parallel Seq Scan on orca_parallel.t1
-                     Output: t1.a, t1.b
- Settings: enable_parallel = 'on', optimizer = 'off', parallel_setup_cost = '0'
- Optimizer: Postgres query optimizer
-(13 rows)
+               Filter: (NOT (t1.a IS NULL))
+         ->  Parallel Hash
+               Output: (1), t2.c
+               ->  Parallel Seq Scan on orca_parallel.t2
+                     Output: 1, t2.c
+ Settings: optimizer = 'on', parallel_setup_cost = '0', enable_parallel = 'on'
+ Optimizer: GPORCA
+(14 rows)
 
 create table t3_null(c2 int) distributed randomly;
 insert into t3_null values (1), (2), (3), (null), (5), (null), (10), (20);
@@ -261,13 +283,13 @@ explain (costs off) select * from t1 where a not in (select c2 from t3_null);
                           QUERY PLAN                           
 ---------------------------------------------------------------
  Gather Motion 6:1  (slice1; segments: 6)
-   ->  Hash Left Anti Semi (Not-In) Join
+   ->  Parallel Hash Left Anti Semi (Not-In) Join
          Hash Cond: (t1.a = t3_null.c2)
          ->  Parallel Seq Scan on t1
-         ->  Hash
-               ->  Broadcast Motion 3:6  (slice2; segments: 3)
-                     ->  Seq Scan on t3_null
- Optimizer: Postgres query optimizer
+         ->  Parallel Hash
+               ->  Broadcast Workers Motion 6:6  (slice2; segments: 6)
+                     ->  Parallel Seq Scan on t3_null
+ Optimizer: GPORCA
 (8 rows)
 
 -- Broadcast Motion
@@ -280,8 +302,8 @@ insert into t2 select i, i+2 from generate_series(1, 30000)i;
 analyze t1;
 analyze t2;
 explain (verbose, costs off) select * from t1  join t2  on t1.a = t2.c;
-                                   QUERY PLAN                                   
---------------------------------------------------------------------------------
+                         QUERY PLAN                          
+-------------------------------------------------------------
  Gather Motion 6:1  (slice1; segments: 6)
    Output: t1.a, t1.b, t2.c, t2.d
    ->  Parallel Hash Join
@@ -293,13 +315,13 @@ explain (verbose, costs off) select * from t1  join t2  on t1.a = t2.c;
                Output: t1.a, t1.b
                ->  Parallel Seq Scan on orca_parallel.t1
                      Output: t1.a, t1.b
- Settings: enable_parallel = 'on', optimizer = 'off', parallel_setup_cost = '0'
+ Settings: parallel_setup_cost = '0', enable_parallel = 'on'
  Optimizer: Postgres query optimizer
 (13 rows)
 
 explain (verbose, costs off) select * from t1  join t2  on t1.a = t2.d;
-                                   QUERY PLAN                                   
---------------------------------------------------------------------------------
+                              QUERY PLAN                               
+-----------------------------------------------------------------------
  Gather Motion 6:1  (slice1; segments: 6)
    Output: t1.a, t1.b, t2.c, t2.d
    ->  Parallel Hash Join
@@ -313,13 +335,13 @@ explain (verbose, costs off) select * from t1  join t2  on t1.a = t2.d;
                      Output: t1.a, t1.b
                      ->  Parallel Seq Scan on orca_parallel.t1
                            Output: t1.a, t1.b
- Settings: enable_parallel = 'on', optimizer = 'off', parallel_setup_cost = '0'
+ Settings: parallel_setup_cost = '0', enable_parallel = 'on'
  Optimizer: Postgres query optimizer
 (15 rows)
 
 explain (verbose, costs off) select * from t1  join t2  on t1.b = t2.c;
-                                   QUERY PLAN                                   
---------------------------------------------------------------------------------
+                            QUERY PLAN                            
+------------------------------------------------------------------
  Gather Motion 6:1  (slice1; segments: 6)
    Output: t1.a, t1.b, t2.c, t2.d
    ->  Parallel Hash Join
@@ -335,13 +357,13 @@ explain (verbose, costs off) select * from t1  join t2  on t1.b = t2.c;
                      Hash Module: 3
                      ->  Parallel Seq Scan on orca_parallel.t1
                            Output: t1.a, t1.b
- Settings: enable_parallel = 'on', optimizer = 'off', parallel_setup_cost = '0'
+ Settings: parallel_setup_cost = '0', enable_parallel = 'on'
  Optimizer: Postgres query optimizer
 (17 rows)
 
 explain (verbose, costs off) select * from t1  join t2  on t1.b = t2.d;
-                                   QUERY PLAN                                   
---------------------------------------------------------------------------------
+                              QUERY PLAN                               
+-----------------------------------------------------------------------
  Gather Motion 6:1  (slice1; segments: 6)
    Output: t1.a, t1.b, t2.c, t2.d
    ->  Parallel Hash Join
@@ -355,7 +377,7 @@ explain (verbose, costs off) select * from t1  join t2  on t1.b = t2.d;
                      Output: t1.a, t1.b
                      ->  Parallel Seq Scan on orca_parallel.t1
                            Output: t1.a, t1.b
- Settings: enable_parallel = 'on', optimizer = 'off', parallel_setup_cost = '0'
+ Settings: parallel_setup_cost = '0', enable_parallel = 'on'
  Optimizer: Postgres query optimizer
 (15 rows)
 
@@ -379,7 +401,7 @@ explain (costs off) select a, count(*) from t0 group by a;
          ->  Redistribute Motion 6:6  (slice2; segments: 6)
                Hash Key: a
                Hash Module: 3
-               ->  Partial HashAggregate
+               ->  Streaming Partial HashAggregate
                      Group Key: a
                      ->  Parallel Seq Scan on t0
  Optimizer: Postgres query optimizer
@@ -404,29 +426,35 @@ explain (costs off) select a, count(*) from t0 group by a;
                          QUERY PLAN                         
 ------------------------------------------------------------
  Gather Motion 6:1  (slice1; segments: 6)
-   ->  Finalize HashAggregate
+   ->  Finalize GroupAggregate
          Group Key: a
-         ->  Redistribute Motion 6:6  (slice2; segments: 6)
-               Hash Key: a
-               Hash Module: 3
-               ->  Partial HashAggregate
-                     Group Key: a
-                     ->  Parallel Seq Scan on t0
- Optimizer: Postgres query optimizer
-(10 rows)
+         ->  Sort
+               Sort Key: a
+               ->  Redistribute Motion 6:6  (slice2; segments: 6)
+                     Hash Key: a
+                     Hash Module: 3
+                     ->  Partial GroupAggregate
+                           Group Key: a
+                           ->  Sort
+                                 Sort Key: a
+                                 ->  Parallel Seq Scan on t0
+ Optimizer: GPORCA
+(14 rows)
 
 explain (costs off) select b, count(*) from t0 group by b;
                          QUERY PLAN                         
 ------------------------------------------------------------
  Gather Motion 6:1  (slice1; segments: 6)
-   ->  HashAggregate
+   ->  GroupAggregate
          Group Key: b
-         ->  Redistribute Motion 6:6  (slice2; segments: 6)
-               Hash Key: b
-               Hash Module: 3
-               ->  Parallel Seq Scan on t0
- Optimizer: Postgres query optimizer
-(8 rows)
+         ->  Sort
+               Sort Key: b
+               ->  Redistribute Motion 6:6  (slice2; segments: 6)
+                     Hash Key: b
+                     Hash Module: 3
+                     ->  Parallel Seq Scan on t0
+ Optimizer: GPORCA
+(10 rows)
 
 reset optimizer_enable_hashagg;
 -- DQA
@@ -463,18 +491,27 @@ select * from t1 where a in (
                                QUERY PLAN                               
 ------------------------------------------------------------------------
  Gather Motion 3:1  (slice1; segments: 3)
-   ->  Hash Semi Join
+   ->  Hash Join
          Hash Cond: (t1.a = t2.c)
          ->  Seq Scan on t1
          ->  Hash
-               ->  Redistribute Motion 1:3  (slice2; segments: 1)
-                     Hash Key: t2.c
-                     ->  Limit
-                           ->  Gather Motion 3:1  (slice3; segments: 3)
-                                 ->  Limit
-                                       ->  Seq Scan on t2
- Optimizer: Postgres query optimizer
-(12 rows)
+               ->  GroupAggregate
+                     Group Key: t2.c
+                     ->  Sort
+                           Sort Key: t2.c
+                           ->  Redistribute Motion 3:3  (slice2; segments: 3)
+                                 Hash Key: t2.c
+                                 ->  GroupAggregate
+                                       Group Key: t2.c
+                                       ->  Sort
+                                             Sort Key: t2.c
+                                             ->  Redistribute Motion 1:3  (slice3)
+                                                   ->  Limit
+                                                         ->  Gather Motion 3:1  (slice4; segments: 3)
+                                                               ->  Limit
+                                                                     ->  Seq Scan on t2
+ Optimizer: GPORCA
+(21 rows)
 
 -- Subquery with LIMIT and ORDER BY should NOT use parallel scan
 explain (costs off)
@@ -488,8 +525,7 @@ select * from t1 where a in (
          Hash Cond: (t1.a = t2.c)
          ->  Seq Scan on t1
          ->  Hash
-               ->  Redistribute Motion 1:3  (slice2; segments: 1)
-                     Hash Key: t2.c
+               ->  Broadcast Motion 1:3  (slice2)
                      ->  Limit
                            ->  Gather Motion 3:1  (slice3; segments: 3)
                                  Merge Key: t2.c
@@ -497,8 +533,8 @@ select * from t1 where a in (
                                        ->  Sort
                                              Sort Key: t2.c
                                              ->  Seq Scan on t2
- Optimizer: Postgres query optimizer
-(15 rows)
+ Optimizer: GPORCA
+(14 rows)
 
 -- Top-level LIMIT should still allow parallel scan (query_level = 0)
 explain (costs off) select * from t2 limit 100;
@@ -508,7 +544,7 @@ explain (costs off) select * from t2 limit 100;
    ->  Gather Motion 6:1  (slice1; segments: 6)
          ->  Limit
                ->  Parallel Seq Scan on t2
- Optimizer: Postgres query optimizer
+ Optimizer: GPORCA
 (5 rows)
 
 -- Nested subquery with LIMIT - inner limit should prevent parallel scan
@@ -521,21 +557,32 @@ select * from t1 where a in (
                                   QUERY PLAN                                  
 ------------------------------------------------------------------------------
  Gather Motion 3:1  (slice1; segments: 3)
-   ->  Hash Right Semi Join
-         Hash Cond: (t2.c = t1.a)
-         ->  Hash Semi Join
-               Hash Cond: (t2.d = t1_1.a)
-               ->  Seq Scan on t2
-               ->  Hash
-                     ->  Broadcast Motion 1:3  (slice2; segments: 1)
-                           ->  Limit
-                                 ->  Gather Motion 3:1  (slice3; segments: 3)
-                                       ->  Limit
-                                             ->  Seq Scan on t1 t1_1
+   ->  Hash Semi Join
+         Hash Cond: (t1.a = t2.c)
+         ->  Seq Scan on t1
          ->  Hash
-               ->  Seq Scan on t1
- Optimizer: Postgres query optimizer
-(15 rows)
+               ->  Hash Join
+                     Hash Cond: (t2.d = t1_1.a)
+                     ->  Seq Scan on t2
+                     ->  Hash
+                           ->  Broadcast Motion 3:3  (slice2; segments: 3)
+                                 ->  GroupAggregate
+                                       Group Key: t1_1.a
+                                       ->  Sort
+                                             Sort Key: t1_1.a
+                                             ->  Redistribute Motion 3:3  (slice3; segments: 3)
+                                                   Hash Key: t1_1.a
+                                                   ->  GroupAggregate
+                                                         Group Key: t1_1.a
+                                                         ->  Sort
+                                                               Sort Key: t1_1.a
+                                                               ->  Redistribute Motion 1:3  (slice4)
+                                                                     ->  Limit
+                                                                           ->  Gather Motion 3:1  (slice5; segments: 3)
+                                                                                 ->  Limit
+                                                                                       ->  Seq Scan on t1 t1_1
+ Optimizer: GPORCA
+(26 rows)
 
 -- =============================================================
 -- Test: Non-parallel operators should NOT sit above Parallel Append
@@ -572,13 +619,16 @@ join pu_t3 on u.k = pu_t3.e;
  Gather Motion 6:1  (slice1; segments: 6)
    ->  Parallel Hash Join
          Hash Cond: (pu_t1.a = pu_t3.e)
-         ->  Parallel Append
-               ->  Parallel Seq Scan on pu_t1
-               ->  Parallel Seq Scan on pu_t2
+         ->  Redistribute Motion 6:6  (slice2; segments: 6)
+               Hash Key: pu_t1.a
+               Hash Module: 3
+               ->  Parallel Append
+                     ->  Parallel Seq Scan on pu_t1
+                     ->  Parallel Seq Scan on pu_t2
          ->  Parallel Hash
                ->  Parallel Seq Scan on pu_t3
- Optimizer: Postgres query optimizer
-(9 rows)
+ Optimizer: GPORCA
+(12 rows)
 
 -- Test 2: Aggregation over UNION ALL
 -- The aggregate over the union all result should use parallel aggregation.
@@ -591,18 +641,16 @@ group by k;
                          QUERY PLAN                         
 ------------------------------------------------------------
  Gather Motion 6:1  (slice1; segments: 6)
-   ->  Finalize HashAggregate
+   ->  HashAggregate
          Group Key: pu_t1.a
          ->  Redistribute Motion 6:6  (slice2; segments: 6)
                Hash Key: pu_t1.a
                Hash Module: 3
-               ->  Partial HashAggregate
-                     Group Key: pu_t1.a
-                     ->  Parallel Append
-                           ->  Parallel Seq Scan on pu_t1
-                           ->  Parallel Seq Scan on pu_t2
- Optimizer: Postgres query optimizer
-(12 rows)
+               ->  Parallel Append
+                     ->  Parallel Seq Scan on pu_t1
+                     ->  Parallel Seq Scan on pu_t2
+ Optimizer: GPORCA
+(10 rows)
 
 -- Test 3: Window function over UNION ALL
 -- The window function should not be a non-parallel SequenceProject above
@@ -615,7 +663,7 @@ from (select a as k, b as v from pu_t1
                             QUERY PLAN                            
 ------------------------------------------------------------------
  Gather Motion 6:1  (slice1; segments: 6)
-   ->  WindowAgg
+   ->  Parallel WindowAgg
          Partition By: pu_t1.a
          Order By: pu_t1.b
          ->  Sort
@@ -645,16 +693,22 @@ on u1.k = u2.k;
 ------------------------------------------------------------
  Gather Motion 6:1  (slice1; segments: 6)
    ->  Parallel Hash Join
-         Hash Cond: (pu_t1.a = pu_t3.e)
-         ->  Parallel Append
-               ->  Parallel Seq Scan on pu_t1
-               ->  Parallel Seq Scan on pu_t2
-         ->  Parallel Hash
+         Hash Cond: (pu_t1.a = pu_t1_1.a)
+         ->  Redistribute Motion 6:6  (slice2; segments: 6)
+               Hash Key: pu_t1.a
+               Hash Module: 3
                ->  Parallel Append
-                     ->  Parallel Seq Scan on pu_t3
-                     ->  Parallel Seq Scan on pu_t1 pu_t1_1
- Optimizer: Postgres query optimizer
-(11 rows)
+                     ->  Parallel Seq Scan on pu_t1
+                     ->  Parallel Seq Scan on pu_t2
+         ->  Parallel Hash
+               ->  Redistribute Motion 6:6  (slice3; segments: 6)
+                     Hash Key: pu_t1_1.a
+                     Hash Module: 3
+                     ->  Parallel Append
+                           ->  Parallel Seq Scan on pu_t1 pu_t1_1
+                           ->  Parallel Seq Scan on pu_t3
+ Optimizer: GPORCA
+(17 rows)
 
 -- Test 5: Multi-level: Agg over Join over UNION ALL
 -- Both join and agg should use parallel variants.
@@ -668,22 +722,23 @@ group by u.k;
                            QUERY PLAN                           
 ----------------------------------------------------------------
  Gather Motion 6:1  (slice1; segments: 6)
-   ->  Finalize HashAggregate
+   ->  HashAggregate
          Group Key: pu_t1.a
          ->  Redistribute Motion 6:6  (slice2; segments: 6)
                Hash Key: pu_t1.a
                Hash Module: 3
-               ->  Partial HashAggregate
-                     Group Key: pu_t1.a
-                     ->  Parallel Hash Join
-                           Hash Cond: (pu_t1.a = pu_t3.e)
+               ->  Parallel Hash Join
+                     Hash Cond: (pu_t1.a = pu_t3.e)
+                     ->  Redistribute Motion 6:6  (slice3; segments: 6)
+                           Hash Key: pu_t1.a
+                           Hash Module: 3
                            ->  Parallel Append
                                  ->  Parallel Seq Scan on pu_t1
                                  ->  Parallel Seq Scan on pu_t2
-                           ->  Parallel Hash
-                                 ->  Parallel Seq Scan on pu_t3
- Optimizer: Postgres query optimizer
-(16 rows)
+                     ->  Parallel Hash
+                           ->  Parallel Seq Scan on pu_t3
+ Optimizer: GPORCA
+(17 rows)
 
 -- Test 6: Correctness check - verify results match serial execution
 -- Run the actual query and compare counts to ensure correct results.
@@ -740,6 +795,7 @@ reset enable_parallel;
 reset max_parallel_workers_per_gather;
 reset parallel_setup_cost;
 reset statement_mem;
+reset optimizer;
 -- start_ignore
 drop schema orca_parallel cascade;
 NOTICE:  drop cascades to 7 other objects

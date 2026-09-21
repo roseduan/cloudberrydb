@@ -90,7 +90,7 @@
  */
 typedef struct xl_ts_insert
 {
-	RelFileNode  rnode;			/* relation that owns the chunk page */
+	RelFileLocator  rnode;			/* relation that owns the chunk page */
 	uint32		chunk_number;	/* fork number = chunk identity (in body) */
 	BlockNumber blkno;			/* block within the chunk fork */
 	OffsetNumber offnum;		/* offset within page */
@@ -113,7 +113,7 @@ typedef struct xl_ts_insert
  */
 typedef struct xl_ts_multi_insert
 {
-	RelFileNode  rnode;
+	RelFileLocator  rnode;
 	uint32		chunk_number;
 	BlockNumber blkno;
 	uint16		ntuples;
@@ -147,7 +147,7 @@ typedef struct xl_ts_multi_tuple
  */
 typedef struct xl_ts_fork_truncate
 {
-	RelFileNode	rnode;
+	RelFileLocator	rnode;
 	int32		forknum;	/* the extension fork being truncated */
 	BlockNumber	nblocks;	/* target length, typically 0 */
 } xl_ts_fork_truncate;
@@ -455,7 +455,7 @@ ts_wal_fork_truncate(Relation rel, ForkNumber forknum, BlockNumber nblocks)
 	xl_ts_fork_truncate	xlrec;
 	XLogRecPtr			recptr;
 
-	xlrec.rnode = rel->rd_node;
+	xlrec.rnode = rel->rd_locator;
 	xlrec.forknum = (int32) forknum;
 	xlrec.nblocks = nblocks;
 
@@ -635,7 +635,25 @@ ts_wal_redo_multi_insert(XLogReaderState *record)
 	Page			page;
 	int				ntuples = xlrec->ntuples;
 	bool			init_page = (XLogRecGetInfo(record) & XLOG_TS_INIT_PAGE) != 0;
-	bool			has_fpi   = XLogRecHasBlockImage(record, 0);
+	/*
+	 * Block 0 is only ever registered by the writer when
+	 * need_fpi = !init_page && XLogCheckBufferNeedsBackup(buf) was true --
+	 * i.e. NOT for an init_page record, and NOT for the common case where
+	 * the page just didn't need a fresh full-page image.  In every other
+	 * case no block is registered at all, so we must check block 0 is
+	 * actually present with XLogRecHasBlockRef() before trusting
+	 * XLogRecHasBlockImage(), which is a raw macro
+	 * ((decoder)->record->blocks[block_id].has_image) with no in_use
+	 * check of its own.  Reading it for a block that was never registered
+	 * returns whatever leftover bytes happen to sit at that offset in the
+	 * reused XLogReaderState decode buffer (observed in practice to be
+	 * either stale state from a previous record's real image, or an
+	 * aliased reinterpretation of this record's own main-data bytes) --
+	 * sending us into RestoreBlockImage() for a block that was never
+	 * here, which correctly fails and PANICs.
+	 */
+	bool			has_fpi   = XLogRecHasBlockRef(record, 0) &&
+								XLogRecHasBlockImage(record, 0);
 	ForkNumber		forkno = (ForkNumber) xlrec->chunk_number;
 	OffsetNumber   *offnums = NULL;
 	TransactionId	xid = XLogRecGetXid(record);
@@ -653,13 +671,14 @@ ts_wal_redo_multi_insert(XLogReaderState *record)
 	 */
 	buf = XLogReadBufferExtended(xlrec->rnode, forkno, xlrec->blkno,
 								 (init_page || has_fpi)
-								 ? RBM_ZERO_AND_LOCK : RBM_NORMAL);
+								 ? RBM_ZERO_AND_LOCK : RBM_NORMAL,
+								 InvalidBuffer);
 	if (!BufferIsValid(buf))
 	{
 		if (init_page || has_fpi)
 			elog(PANIC, "ts_wal_redo_multi_insert: cannot init buffer "
 				 "(rel=%u fork=%u blk=%u)",
-				 xlrec->rnode.relNode, forkno, xlrec->blkno);
+				 xlrec->rnode.relNumber, forkno, xlrec->blkno);
 		return;					/* fork truncated past blk — nothing to do */
 	}
 	if (!(init_page || has_fpi))
@@ -671,7 +690,7 @@ ts_wal_redo_multi_insert(XLogReaderState *record)
 		if (!RestoreBlockImage(record, 0, (char *) page))
 			elog(PANIC, "ts_wal_redo_multi_insert: RestoreBlockImage failed "
 				 "(rel=%u fork=%u blk=%u)",
-				 xlrec->rnode.relNode, forkno, xlrec->blkno);
+				 xlrec->rnode.relNumber, forkno, xlrec->blkno);
 		PageSetLSN(page, record->EndRecPtr);
 		MarkBufferDirty(buf);
 		UnlockReleaseBuffer(buf);
@@ -750,7 +769,9 @@ ts_wal_redo_insert(XLogReaderState *record)
 	Buffer			buf;
 	Page			page;
 	bool			init_page = (XLogRecGetInfo(record) & XLOG_TS_INIT_PAGE) != 0;
-	bool			has_fpi   = XLogRecHasBlockImage(record, 0);
+	/* See the matching comment in ts_wal_redo_multi_insert. */
+	bool			has_fpi   = XLogRecHasBlockRef(record, 0) &&
+								XLogRecHasBlockImage(record, 0);
 	ForkNumber		forkno = (ForkNumber) xlrec->chunk_number;
 	TransactionId	xid = XLogRecGetXid(record);
 
@@ -762,13 +783,14 @@ ts_wal_redo_insert(XLogReaderState *record)
 	 */
 	buf = XLogReadBufferExtended(xlrec->rnode, forkno, xlrec->blkno,
 								 (init_page || has_fpi)
-								 ? RBM_ZERO_AND_LOCK : RBM_NORMAL);
+								 ? RBM_ZERO_AND_LOCK : RBM_NORMAL,
+								 InvalidBuffer);
 	if (!BufferIsValid(buf))
 	{
 		if (init_page || has_fpi)
 			elog(PANIC, "ts_wal_redo_insert: cannot init buffer "
 				 "(rel=%u fork=%u blk=%u)",
-				 xlrec->rnode.relNode, forkno, xlrec->blkno);
+				 xlrec->rnode.relNumber, forkno, xlrec->blkno);
 		return;					/* fork truncated past blk — nothing to do */
 	}
 	if (!(init_page || has_fpi))
@@ -780,7 +802,7 @@ ts_wal_redo_insert(XLogReaderState *record)
 		if (!RestoreBlockImage(record, 0, (char *) page))
 			elog(PANIC, "ts_wal_redo_insert: RestoreBlockImage failed "
 				 "(rel=%u fork=%u blk=%u)",
-				 xlrec->rnode.relNode, forkno, xlrec->blkno);
+				 xlrec->rnode.relNumber, forkno, xlrec->blkno);
 	}
 	else
 	{
@@ -872,7 +894,7 @@ ts_wal_redo_fork_truncate(XLogReaderState *record)
 	 * subsequent smgrtruncate doesn't leave dirty buffers pointing at
 	 * blocks that no longer exist on disk.
 	 */
-	DropRelFileNodeBuffers(smgr, forks, 1, blocks);
+	DropRelationBuffers(smgr, forks, 1, blocks);
 
 	if (smgrexists(smgr, forks[0]))
 		smgrtruncate(smgr, forks, 1, blocks);
@@ -1179,8 +1201,8 @@ ts_wal_desc(StringInfo buf, XLogReaderState *record)
 			xl_ts_insert *xlrec = (xl_ts_insert *) XLogRecGetData(record);
 
 			appendStringInfo(buf, "insert: rel=%u/%u/%u chunk=%u blk=%u off=%u%s",
-							 xlrec->rnode.spcNode, xlrec->rnode.dbNode,
-							 xlrec->rnode.relNode, xlrec->chunk_number,
+							 xlrec->rnode.spcOid, xlrec->rnode.dbOid,
+							 xlrec->rnode.relNumber, xlrec->chunk_number,
 							 xlrec->blkno, xlrec->offnum,
 							 init_page ? " INIT_PAGE" : "");
 			break;
@@ -1190,8 +1212,8 @@ ts_wal_desc(StringInfo buf, XLogReaderState *record)
 			xl_ts_multi_insert *xlrec = (xl_ts_multi_insert *) XLogRecGetData(record);
 
 			appendStringInfo(buf, "multi-insert: rel=%u/%u/%u chunk=%u blk=%u ntuples=%u%s",
-							 xlrec->rnode.spcNode, xlrec->rnode.dbNode,
-							 xlrec->rnode.relNode, xlrec->chunk_number,
+							 xlrec->rnode.spcOid, xlrec->rnode.dbOid,
+							 xlrec->rnode.relNumber, xlrec->chunk_number,
 							 xlrec->blkno, xlrec->ntuples,
 							 init_page ? " INIT_PAGE" : "");
 			break;

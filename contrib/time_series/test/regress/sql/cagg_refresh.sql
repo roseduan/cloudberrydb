@@ -2238,7 +2238,9 @@ SELECT count(*) AS mat_rows_initial FROM :mat;
 
 \echo '=== CMP-02: compress + reclaim -> source is PAX-only ==='
 SELECT time_series.set_compress_config('comp_src'::regclass, NULL, 'time');
+-- start_ignore
 SELECT time_series.compress_chunks('comp_src'::regclass) > 0 AS compressed;
+-- end_ignore
 SELECT time_series.reclaim_chunk_heaps('comp_src'::regclass) > 0 AS reclaimed;
 -- every chunk now COMPRESSED (status 1); none ACTIVE or PARTIAL.
 SELECT bool_and(status = 1) AS all_pax

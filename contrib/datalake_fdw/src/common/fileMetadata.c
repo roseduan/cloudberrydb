@@ -176,7 +176,14 @@ advance_and_error:
 	return 0;
 }
 
-int	(*FDWRecvProtocol) (PGconn *conn, int msgLength) = RecvMetaMethod;
+/*
+ * FDWRecvProtocol is defined by the backend-linked libpq (fe-protocol3.c);
+ * declared extern in libpq-fe.h.  Do NOT redefine it here -- a second
+ * definition in this -fvisibility=hidden module gets its own private copy,
+ * so _PG_init s assignment never reaches the copy fe-protocol3.c reads and
+ * every QE->QD iceberg metadata message fails with "no primary message
+ * received".  _PG_init assigns the hook (FDWRecvProtocol = RecvMetaMethod).
+ */
 
 /*
  * MemoryContext reset callback: clear global pointers to avoid dangling refs
@@ -270,12 +277,12 @@ FDW_FreeMetaList(List *meta_list)
 		 */
 		foreach(pv, meta->partitionValues)
 		{
-			Value	   *v = (Value *) lfirst(pv);
+			String	   *v = (String *) lfirst(pv);
 
 			if (v)
 			{
-				if (v->val.str)
-					pfree(v->val.str);
+				if (v->sval)
+					pfree(v->sval);
 				pfree(v);
 			}
 		}

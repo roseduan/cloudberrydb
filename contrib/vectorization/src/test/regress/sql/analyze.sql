@@ -1,3 +1,9 @@
+-- start_matchsubs
+-- m/Executing SQL: select pg_catalog.gp_acquire_sample_rows\(\d+, \d+, \'t\'\);/
+-- s/Executing SQL: select pg_catalog.gp_acquire_sample_rows\(\d+, \d+, \'t\'\);/Executing SQL: select pg_catalog.gp_acquire_sample_rows\(XXX, XXX, \'t\'\)/;
+-- m/Executing SQL: select pg_catalog.gp_acquire_sample_rows\(\d+, \d+, \'f\'\);/
+-- s/Executing SQL: select pg_catalog.gp_acquire_sample_rows\(\d+, \d+, \'f\'\);/Executing SQL: select pg_catalog.gp_acquire_sample_rows\(XXX, XXX, \'f\'\)/;
+-- end_matchsubs
 DROP DATABASE IF EXISTS testanalyze;
 CREATE DATABASE testanalyze;
 \c testanalyze
@@ -503,3 +509,325 @@ SELECT relpages, reltuples FROM pg_class WHERE relname = 'ana_c2';
 SELECT * FROM pg_stats WHERE tablename = 'ana_parent';
 SELECT * FROM pg_stats WHERE tablename = 'ana_c1';
 SELECT * FROM pg_stats WHERE tablename = 'ana_c2';
+
+-- test correlation of the table
+-- test1: there is no data
+drop table analyze_test;
+create table analyze_test(tc1 int,tc2 int);
+analyze analyze_test;
+SELECT correlation FROM pg_stats WHERE tablename ='analyze_test';
+
+-- test2: there is only 1 tuple in the table
+drop table analyze_table;
+create table analyze_table(tc1 int,tc2 int);
+insert into analyze_table values(1,1);
+analyze analyze_table;
+SELECT correlation FROM pg_stats WHERE tablename ='analyze_table';
+
+-- test3: there are 2 tuples in the table but on different segemnts
+drop table analyze_table;
+create table analyze_table(tc1 int,tc2 int);
+insert into analyze_table values(1,1);
+insert into analyze_table values(2,0);
+analyze analyze_table;
+SELECT correlation FROM pg_stats WHERE tablename ='analyze_table';
+
+-- test4: some columns have no value
+drop table analyze_table;
+create table analyze_table(tc1 int,tc2 int);
+insert into analyze_table(tc2) values(1);
+analyze analyze_table;
+SELECT correlation FROM pg_stats WHERE tablename ='analyze_table';
+
+drop table analyze_table;
+create table analyze_table(tc1 int,tc2 int);
+insert into analyze_table(tc2) values(1);
+insert into analyze_table values(2,0);
+analyze analyze_table;
+SELECT correlation FROM pg_stats WHERE tablename ='analyze_table';
+
+-- test5: some columns are dropped for a table
+drop table analyze_table;
+create table analyze_table(tc1 int,tc2 int,tc3 int);
+insert into analyze_table values(1,1,1);
+alter table analyze_table drop column tc2;
+insert into analyze_table(tc1) values(1);
+insert into analyze_table values(2,0);
+analyze analyze_table;
+SELECT correlation FROM pg_stats WHERE tablename ='analyze_table';
+
+-- test6: randomly table
+-- we use weighted mean algorithm to calculate correlations.
+-- the formula for calculating the weighted mean is:
+-- sum(correlationOnSeg[i] * (totalRowsOnSeg[i] / totalRows))
+-- i is from 0 to N. N is the number of segments.
+-- however, for randomly table the data in each segment may diff each time.
+-- it will affect the value of correlation.
+-- So ignore the results
+drop table analyze_table;
+create table analyze_table(tc1 int,tc2 int) distributed randomly;
+insert into analyze_table select i,i from generate_series(1,100) i;
+analyze analyze_table;
+-- start_ignore
+SELECT correlation FROM pg_stats WHERE tablename ='analyze_table';
+-- end_ignore
+alter table analyze_table drop column tc1;
+analyze analyze_table;
+-- start_ignore
+SELECT correlation FROM pg_stats WHERE tablename ='analyze_table';
+-- end_ignore
+
+-- test7: replicated table
+drop table analyze_table;
+create table analyze_table(tc1 int,tc2 int) distributed replicated;
+insert into analyze_table select i,i from generate_series(1,100) i;
+analyze analyze_table;
+SELECT correlation FROM pg_stats WHERE tablename ='analyze_table';
+analyze analyze_table;
+SELECT correlation FROM pg_stats WHERE tablename ='analyze_table';
+
+-- test8: inherit table
+drop table analyze_parent cascade;
+create table analyze_parent (tc1 int,tc2 int);
+create table analyze_child(tc3 int,tc4 int)inherits (analyze_parent);
+insert into analyze_parent values(5,5);
+insert into analyze_child values (4,4,4,4);
+insert into analyze_parent select * from analyze_parent;
+analyze analyze_parent;
+SELECT correlation,attname,inherited FROM pg_stats WHERE tablename ='analyze_parent';
+SELECT correlation,attname,inherited FROM pg_stats WHERE tablename ='analyze_child';
+
+-- test9: partition table test
+CREATE TABLE partition_table (
+    tc1 int,
+    tc2 int
+)
+PARTITION BY RANGE (tc2)
+(
+    start (1) end (100) every(20)
+);
+
+insert into partition_table select i,i from generate_series(1,99) i;
+analyze partition_table;
+SELECT correlation,attname,inherited FROM pg_stats WHERE tablename ='partition_table';
+SELECT correlation,attname,inherited FROM pg_stats WHERE tablename ='partition_table_1_prt_1';
+SELECT correlation,attname,inherited FROM pg_stats WHERE tablename ='partition_table_1_prt_2';
+SELECT correlation,attname,inherited FROM pg_stats WHERE tablename ='partition_table_1_prt_3';
+SELECT correlation,attname,inherited FROM pg_stats WHERE tablename ='partition_table_1_prt_4';
+SELECT correlation,attname,inherited FROM pg_stats WHERE tablename ='partition_table_1_prt_5';
+--
+-- Test analyze for table with maximum float8 value 1.7976931348623157e+308
+-- There should be no "ERROR:  value out of range: overflow"
+--
+set extra_float_digits to 0;
+create table test_max_float8(a double precision);
+insert into test_max_float8 values(1.7976931348623157e+308);
+analyze test_max_float8;
+drop table test_max_float8;
+reset extra_float_digits;
+
+-- test analyze when table has large column
+create table ttt_large_column(tc1 int,tc2 char(1500),tc3 char(1500));
+insert into ttt_large_column select i,repeat('wwweereeer',150),repeat('ssddbbbbbb',150) from generate_series(1,5) i;
+analyze ttt_large_column;
+drop table ttt_large_column;
+
+--test analyze replicated table
+create table analyze_replicated(tc1 int,tc2 int) distributed replicated;
+insert into analyze_replicated select i, i from generate_series(1,1000) i;
+analyze analyze_replicated;
+drop table analyze_replicated;
+-- Issue 14644 keep catalog inconsistency of relhassubclass after analyze
+CREATE TYPE test_type_14644 AS (a int, b text);
+CREATE TABLE test_tb_14644 OF test_type_14644;
+CREATE TABLE test_tb_14644_subclass () INHERITS (test_tb_14644);
+DROP TABLE test_tb_14644_subclass;
+select relhassubclass from pg_class where relname = 'test_tb_14644';
+select relhassubclass from gp_dist_random('pg_class') where relname = 'test_tb_14644';
+ANALYZE;
+select relhassubclass from pg_class where relname = 'test_tb_14644';
+select relhassubclass from gp_dist_random('pg_class') where relname = 'test_tb_14644';
+
+--
+-- Analyzing a leaf partition should not sample midlevel partition unless
+-- optimizer_analyze_midlevel_partition is set to On.
+--
+create table multipart(a int)  partition by range(a);
+create table part2(a int) partition by range(a);
+create table part3(a int) partition by range(a);
+create table p1(a int);
+create table p2(a int);
+create table p3(a int);
+create table p4(a int);
+alter table multipart attach partition part2 for values from (0) to (10);
+alter table multipart attach partition part3 for values from (10) to (20);
+alter table part2 attach partition p1 for values from (0) to (5);
+alter table part2 attach partition p2 for values from (5) to (10);
+alter table part3 attach partition p3 for values from (10) to (15);
+alter table part3 attach partition p4 for values from (15) to (20);
+insert into multipart select i%20 from generate_series(1,20)i;
+set optimizer_analyze_root_partition=on;
+set optimizer_analyze_midlevel_partition=off;
+analyze verbose p1;
+analyze verbose p2;
+select * from pg_stats where tablename like 'part2';
+
+set optimizer_analyze_midlevel_partition=on;
+analyze verbose p2;
+select * from pg_stats where tablename like 'part2';
+
+drop table multipart cascade;
+
+--
+-- analyze_only_modified_relations
+-- skip relations that have not been modified since the last ANALYZE.
+--
+-- start_ignore
+set analyze_only_modified_relations to on;
+alter system set autovacuum = off;
+select gp_segment_id, pg_reload_conf() from gp_id union select gp_segment_id, pg_reload_conf() from gp_dist_random('gp_id');
+-- end_ignore
+
+-- Case 1: regular table
+CREATE TABLE analyze_modified_0 (
+    tc1 int,
+    tc2 int
+) DISTRIBUTED BY (tc1);
+
+-- no modfications, analyze skipping
+set client_min_messages to log;
+analyze verbose analyze_modified_0;
+reset client_min_messages;
+
+-- do analyze
+insert into analyze_modified_0 select i,i from generate_series(1,100) i;
+select pg_sleep(1);
+set client_min_messages to log;
+analyze verbose analyze_modified_0;
+reset client_min_messages;
+
+-- vacuum analyze
+insert into analyze_modified_0 select i,i from generate_series(1,100) i;
+select pg_sleep(1);
+set client_min_messages to log;
+vacuum (analyze) analyze_modified_0;
+reset client_min_messages;
+
+-- Case 2: analyze table columns
+CREATE TABLE analyze_modified_cols (
+    tc1 int,
+    tc2 int
+) DISTRIBUTED BY (tc1);
+
+set client_min_messages to log;
+analyze verbose analyze_modified_cols (tc1, tc2);
+reset client_min_messages;
+
+alter table analyze_modified_cols drop column tc2;
+set client_min_messages to log;
+-- start_ignore
+analyze verbose analyze_modified_cols (tc2);
+-- end_ignore
+reset client_min_messages;
+
+-- Case 3: partitioned table
+CREATE TABLE analyze_modified (
+    tc1 int,
+    tc2 int
+) WITH (appendonly=true, compresstype=zstd, compresslevel=7)
+PARTITION BY RANGE (tc2)
+(
+    start (1) end (100) every(20)
+);
+
+-- no modfications, analyze skipping
+set client_min_messages to log;
+analyze verbose analyze_modified;
+reset client_min_messages;
+
+-- do analyze
+insert into analyze_modified select i,i from generate_series(1,99) i;
+select pg_sleep(1);
+set client_min_messages to log;
+analyze verbose analyze_modified;
+reset client_min_messages;
+
+update analyze_modified set tc2 = tc2 + 1 where tc2 between 10 and 20;
+select pg_sleep(1);
+set client_min_messages to log;
+analyze verbose analyze_modified;
+reset client_min_messages;
+
+delete from analyze_modified where tc1 between 30 and 50;
+select pg_sleep(1);
+set client_min_messages to log;
+analyze verbose analyze_modified;
+reset client_min_messages;
+
+-- do analyze every time
+set analyze_only_modified_relations to off;
+set client_min_messages to log;
+analyze verbose analyze_modified;
+analyze verbose analyze_modified;
+reset client_min_messages;
+set analyze_only_modified_relations to on;
+
+-- sub partition
+CREATE TABLE analyze_modified_sub (id int,y  int,m  int)
+DISTRIBUTED BY (id)
+PARTITION BY RANGE (y)
+    SUBPARTITION BY RANGE (m)
+(
+    PARTITION p1 START (2023) END (2024)
+    (
+        SUBPARTITION sp1 START (1) END (13)
+    )
+);
+INSERT INTO analyze_modified_sub VALUES (1, 2023, 1);
+select pg_sleep(1);
+set client_min_messages to log;
+analyze verbose analyze_modified_sub;
+reset client_min_messages;
+
+-- Case 4: inherit tables
+create table analyze_modified_base (i integer);
+create table analyze_modified_derived () inherits (analyze_modified_base);
+create table analyze_modified_more_derived (like analyze_modified_derived, b int) inherits (analyze_modified_derived);
+
+-- should analyze inheritance tree
+insert into analyze_modified_base (i) values (0);
+insert into analyze_modified_derived (i) values (1);
+select pg_sleep(1);
+
+set client_min_messages to log;
+analyze verbose analyze_modified_base;
+reset client_min_messages;
+
+-- start_ignore
+reset analyze_only_modified_relations;
+alter system set autovacuum = on;
+select gp_segment_id, pg_reload_conf() from gp_id union select gp_segment_id, pg_reload_conf() from gp_dist_random('gp_id');
+-- end_ignore
+
+--
+-- Test column-specific ANALYZE correctly uses attnum-based NDV index (not loop index).
+-- When ANALYZE t(b) is run, the QD loop has i=0 for column b (attnum=2),
+-- so attnum-1=1 != i=0. Without the fix, colNDVBySeg[i=0] reads column a's NDV
+-- instead of column b's NDV.
+--
+CREATE TABLE analyze_col_ndv_drop (a int, b int, c int) DISTRIBUTED BY (a);
+INSERT INTO analyze_col_ndv_drop SELECT i%5, i, i%50 FROM generate_series(1, 100) i;
+-- ANALYZE specific column b: QD loop has i=0, b.attnum=2, so attnum-1=1 != i=0
+ANALYZE analyze_col_ndv_drop (b);
+-- stadistinctbyseg for b should be 100 (all distinct), not ~5 (NDV of column a at index 0)
+SELECT a.attname,
+       CASE WHEN s.stakind1 = 8 THEN array_to_string(s.stavalues1, ',')
+            WHEN s.stakind2 = 8 THEN array_to_string(s.stavalues2, ',')
+            WHEN s.stakind3 = 8 THEN array_to_string(s.stavalues3, ',')
+            WHEN s.stakind4 = 8 THEN array_to_string(s.stavalues4, ',')
+            WHEN s.stakind5 = 8 THEN array_to_string(s.stavalues5, ',')
+       END AS stadistinctbyseg
+FROM pg_statistic s
+JOIN pg_attribute a ON a.attrelid = s.starelid AND a.attnum = s.staattnum
+WHERE s.starelid = 'analyze_col_ndv_drop'::regclass AND a.attname = 'b';
+DROP TABLE analyze_col_ndv_drop;

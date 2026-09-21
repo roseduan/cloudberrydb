@@ -18,15 +18,18 @@ CREATE SEQUENCE sequence_testx CACHE 0;
 ERROR:  CACHE (0) must be greater than zero
 -- OWNED BY errors
 CREATE SEQUENCE sequence_testx OWNED BY nobody;  -- nonsense word
-ERROR:  invalid OWNED BY option
+ERROR:  invalid OWNED BY option  (seg2 172.18.0.2:7004 pid=141408)
 HINT:  Specify OWNED BY table.column or OWNED BY NONE.
 CREATE SEQUENCE sequence_testx OWNED BY pg_class_oid_index.oid;  -- not a table
-ERROR:  referenced relation "pg_class_oid_index" is not a table or foreign table
+ERROR:  sequence cannot be owned by relation "pg_class_oid_index"  (seg2 172.18.0.2:7004 pid=141408)
+DETAIL:  This operation is not supported for indexes.
 CREATE SEQUENCE sequence_testx OWNED BY pg_class.relname;  -- not same schema
-ERROR:  sequence must be in same schema as table it is linked to
+ERROR:  sequence must be in same schema as table it is linked to  (seg1 172.18.0.2:7003 pid=141407)
 CREATE TABLE sequence_test_table (a int);
+NOTICE:  Table doesn't have 'DISTRIBUTED BY' clause -- Using column named 'a' as the Apache Cloudberry data distribution key for this table.
+HINT:  The 'DISTRIBUTED BY' clause determines the distribution of data. Make sure column(s) chosen are the optimal data distribution key to minimize skew.
 CREATE SEQUENCE sequence_testx OWNED BY sequence_test_table.b;  -- wrong column
-ERROR:  column "b" of relation "sequence_test_table" does not exist
+ERROR:  column "b" of relation "sequence_test_table" does not exist  (seg0 172.18.0.2:7002 pid=141403)
 DROP TABLE sequence_test_table;
 -- sequence data types
 CREATE SEQUENCE sequence_test5 AS integer;
@@ -65,18 +68,20 @@ ALTER SEQUENCE sequence_test14 AS int;  -- min and max will be adjusted
 --- test creation of SERIAL column
 ---
 CREATE TABLE serialTest1 (f1 text, f2 serial);
+NOTICE:  Table doesn't have 'DISTRIBUTED BY' clause -- Using column named 'f1' as the Apache Cloudberry data distribution key for this table.
+HINT:  The 'DISTRIBUTED BY' clause determines the distribution of data. Make sure column(s) chosen are the optimal data distribution key to minimize skew.
 INSERT INTO serialTest1 VALUES ('foo');
 INSERT INTO serialTest1 VALUES ('bar');
 INSERT INTO serialTest1 VALUES ('force', 100);
 INSERT INTO serialTest1 VALUES ('wrong', NULL);
-ERROR:  null value in column "f2" of relation "serialtest1" violates not-null constraint
+ERROR:  null value in column "f2" of relation "serialtest1" violates not-null constraint  (seg1 172.18.0.2:7003 pid=141407)
 DETAIL:  Failing row contains (wrong, null).
 SELECT * FROM serialTest1;
   f1   | f2  
 -------+-----
- foo   |   1
  bar   |   2
  force | 100
+ foo   |   1
 (3 rows)
 
 SELECT pg_get_serial_sequence('serialTest1', 'f2');
@@ -88,6 +93,8 @@ SELECT pg_get_serial_sequence('serialTest1', 'f2');
 -- test smallserial / bigserial
 CREATE TABLE serialTest2 (f1 text, f2 serial, f3 smallserial, f4 serial2,
   f5 bigserial, f6 serial8);
+NOTICE:  Table doesn't have 'DISTRIBUTED BY' clause -- Using column named 'f1' as the Apache Cloudberry data distribution key for this table.
+HINT:  The 'DISTRIBUTED BY' clause determines the distribution of data. Make sure column(s) chosen are the optimal data distribution key to minimize skew.
 INSERT INTO serialTest2 (f1)
   VALUES ('test_defaults');
 INSERT INTO serialTest2 (f1, f2, f3, f4, f5, f6)
@@ -264,10 +271,10 @@ INSERT INTO serialTest1 VALUES ('more');
 SELECT * FROM serialTest1;
   f1   | f2  
 -------+-----
- foo   |   1
+ more  |   3
  bar   |   2
  force | 100
- more  |   3
+ foo   |   1
 (4 rows)
 
 --
@@ -280,6 +287,8 @@ CREATE TEMP TABLE t1 (
   f2 int DEFAULT nextval('myseq2'),
   f3 int DEFAULT nextval('myseq3'::text)
 );
+NOTICE:  Table doesn't have 'DISTRIBUTED BY' clause -- Using column named 'f1' as the Apache Cloudberry data distribution key for this table.
+HINT:  The 'DISTRIBUTED BY' clause determines the distribution of data. Make sure column(s) chosen are the optimal data distribution key to minimize skew.
 -- Both drops should fail, but with different error messages:
 DROP SEQUENCE t1_f1_seq;
 ERROR:  cannot drop sequence t1_f1_seq because other objects depend on it
@@ -600,6 +609,7 @@ ERROR:  cannot execute setval() in a read-only transaction
 ROLLBACK;
 -- privileges tests
 CREATE USER regress_seq_user;
+NOTICE:  resource queue required -- using default resource queue "pg_default"
 -- nextval
 BEGIN;
 SET LOCAL SESSION AUTHORIZATION regress_seq_user;

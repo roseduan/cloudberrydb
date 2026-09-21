@@ -5,7 +5,7 @@
  *
  * Portions Copyright (c) 2005-2008, Greenplum inc
  * Portions Copyright (c) 2012-Present VMware, Inc. or its affiliates.
- * Portions Copyright (c) 1996-2021, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2023, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  *
@@ -1243,7 +1243,7 @@ ExecMergeJoin_guts(PlanState *pstate)
 				break;
 
 				/*----------------------------------------------------------
-				 * EXEC_MJ_SKIP means compare tuples and if they do not
+				 * EXEC_MJ_SKIP_TEST means compare tuples and if they do not
 				 * match, skip whichever is lesser.
 				 *
 				 * For example:
@@ -1299,8 +1299,8 @@ ExecMergeJoin_guts(PlanState *pstate)
 				break;
 
 				/*
-				 * SKIPOUTER_ADVANCE: advance over an outer tuple that is
-				 * known not to join to any inner tuple.
+				 * EXEC_MJ_SKIPOUTER_ADVANCE: advance over an outer tuple that
+				 * is known not to join to any inner tuple.
 				 *
 				 * Before advancing, we check to see if we must emit an
 				 * outer-join fill tuple for this outer tuple.
@@ -1361,8 +1361,8 @@ ExecMergeJoin_guts(PlanState *pstate)
 				break;
 
 				/*
-				 * SKIPINNER_ADVANCE: advance over an inner tuple that is
-				 * known not to join to any outer tuple.
+				 * EXEC_MJ_SKIPINNER_ADVANCE: advance over an inner tuple that
+				 * is known not to join to any outer tuple.
 				 *
 				 * Before advancing, we check to see if we must emit an
 				 * outer-join fill tuple for this inner tuple.
@@ -1805,6 +1805,9 @@ ExecEndMergeJoin(MergeJoinState *node)
 void
 ExecReScanMergeJoin(MergeJoinState *node)
 {
+	PlanState  *outerPlan = outerPlanState(node);
+	PlanState  *innerPlan = innerPlanState(node);
+
 	ExecClearTuple(node->mj_MarkedTupleSlot);
 
 	node->mj_JoinState = EXEC_MJ_INITIALIZE_OUTER;
@@ -1817,9 +1820,8 @@ ExecReScanMergeJoin(MergeJoinState *node)
 	 * if chgParam of subnodes is not null then plans will be re-scanned by
 	 * first ExecProcNode.
 	 */
-	if (node->js.ps.lefttree->chgParam == NULL)
-		ExecReScan(node->js.ps.lefttree);
-	if (node->js.ps.righttree->chgParam == NULL)
-		ExecReScan(node->js.ps.righttree);
-
+	if (outerPlan->chgParam == NULL)
+		ExecReScan(outerPlan);
+	if (innerPlan->chgParam == NULL)
+		ExecReScan(innerPlan);
 }

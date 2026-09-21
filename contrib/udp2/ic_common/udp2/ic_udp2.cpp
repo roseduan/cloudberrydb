@@ -39,7 +39,7 @@
  *            +----------------------+
  *-------------------------------------------------------------------------
  */
-#include <arpa/inet.h> 
+#include <arpa/inet.h>
 #include <chrono>
 #include <condition_variable>
 #include <mutex>
@@ -4949,6 +4949,8 @@ UDPConn::checkExpiration(ICChunkTransportState *transportStates, uint64 now)
 	int	retransmits = 0;
 	UDPConn *currBuffConn = NULL;
 
+	Assert(unack_queue_ring.currentTime != 0);
+
 	if (unlikely(session_param.Gp_interconnect_fc_method == INTERCONNECT_FC_METHOD_LOSS_TIMER_IC))
 	{
 		checkRtmTimeout(&mudp, now, 500, transportStates, this->entry_, this);
@@ -5192,6 +5194,7 @@ void
 UDPConn::checkDeadlock()
 {
 	uint64		deadlockCheckTime;
+
 	if (this->unackQueue.length() == 0 && this->capacity == 0 && this->sndQueue.length() > 0)
 	{
 		/* we must have received some acks before deadlock occurs. */
@@ -6731,6 +6734,10 @@ CChunkTransportStateImpl::CreateSendEntries(ICSliceTable *sliceTable)
 	std::unique_ptr<TransportEntry> pEntry =
 		TransportEntry::MakeSendEntry(this, sliceTable->ic_instance_id, sendSlice, recvSlice);
 
+	pEntry->txfd   = ICSenderSocket;
+	pEntry->txport = ICSenderPort;
+	pEntry->txfd_family = ICSenderFamily;
+
 	snd_control_info.minCwnd = snd_control_info.cwnd;
 	snd_control_info.ssthresh = snd_buffer_pool.maxCount;
 
@@ -6922,9 +6929,7 @@ CChunkTransportStateImpl::DestroySendEntries()
 			ic_free(conn->curBuff);
 			conn->curBuff = NULL;
 		}
-		conn = NULL;
 	}
-
 	avgRtt = avgRtt / pEntry->numConns;
 	avgDev = avgDev / pEntry->numConns;
 
@@ -7178,6 +7183,7 @@ CChunkTransportStateImpl::SendEOS(int motNodeID, DataBlock *data)
 			{
 				retry = 0;
 				ic_control_info.lastPacketSendTime = 0;
+
 				/* wait until this queue is emptied */
 				while (conn->unackQueue.length() > 0 ||
 					   conn->sndQueue.length() > 0)

@@ -139,10 +139,10 @@ select c1 from t1 where c1 not in
   3
   7
   8
-  1
   6
   9
  10
+  1
 (8 rows)
 
 	
@@ -181,12 +181,12 @@ select c1 from t1 where c1 not in
 			(select c4 from t4)));
  c1 
 ----
-  6
-  9
- 10
   3
   7
   8
+  6
+  9
+ 10
 (6 rows)
 
 --
@@ -218,8 +218,8 @@ select c1 from t1,
 	where c1 = foo.c2;
  c1 
 ----
-  4
   5
+  4
 (2 rows)
 
 --
@@ -278,11 +278,11 @@ select c1 from t1 where c1 not in
 	(select c2 from t2) and c1 > 1;
  c1 
 ----
+  7
+  8
   6
   9
  10
-  7
-  8
 (5 rows)
 
 --
@@ -348,14 +348,14 @@ select c1 from t1 where c1 not in
 	(select c2 from t2 where c2 > 2 and c2 < 5);
  c1 
 ----
+  2
+  7
+  8
   1
   5
   6
   9
  10
-  2
-  7
-  8
 (8 rows)
 
 --
@@ -375,14 +375,14 @@ select c1 from t1 where c1 not in
 	(select count(*) from t1);
  c1 
 ----
+  5
+  6
+  9
   2
   3
   4
   7
   8
-  5
-  6
-  9
   1
 (9 rows)
 
@@ -455,12 +455,12 @@ select * from g1 where (a,b,c) not in
 	(select x,y,z from l1);
  a | b | c 
 ---+---+---
+ 1 | 1 | 2
+ 1 | 2 | 2
  2 | 2 | 3
  2 | 3 | 3
  3 | 3 | 4
  3 | 4 | 4
- 1 | 1 | 2
- 1 | 2 | 2
 (6 rows)
 
 --
@@ -493,8 +493,8 @@ select c1 from t1, t2 where c1 not in
 	(select c3 from t3 where c3 = c1) and c1 = c2;
  c1 
 ----
-  4
   5
+  4
 (2 rows)
 
 --
@@ -531,8 +531,8 @@ select c1 from t1 join t2 on c1 = c2 where c1 not in
 	(select c3 from t3);
  c1 
 ----
-  5
   4
+  5
 (2 rows)
 
 --
@@ -580,11 +580,11 @@ select c1 from t1 where c1 not in
 	(select c3 from t3);
  c1 
 ----
+  7
+  8
   6
   9
  10
-  7
-  8
 (5 rows)
 
 --
@@ -634,10 +634,10 @@ select c1 from t1 where c1 not in
 	(select (case when c1n is null then 1 else c1n end) as c1n from t1n);
  c1 
 ----
-  4
-  8
   9
  10
+  4
+  8
 (4 rows)
 
 --
@@ -684,12 +684,12 @@ select (case when c1%2 = 0
  else (select sum(c3) from t3 where c3 not in (select c4 from t4)) end) as foo from t1;
  foo 
 -----
-   9
    3
    9
    3
    9
    3
+   9
    3
    9
    3
@@ -744,8 +744,8 @@ select c2 from t2 where not c2 < all (select c2 from t2);
   2
   3
   4
-  1
   5
+  1
 (5 rows)
 
 --
@@ -893,16 +893,16 @@ explain select c1 from t1 where c1 <=all (select c2 from t2 where c2 not in (sel
 select c1 from t1 where c1 <=all (select c2 from t2 where c2 not in (select c1n from t1n));
  c1 
 ----
-  2
-  3
-  4
-  7
-  8
   1
   5
   6
   9
  10
+  2
+  3
+  4
+  7
+  8
 (10 rows)
 
 --
@@ -929,16 +929,16 @@ explain select c1 from t1 where not c1 =all (select c2 from t2 where not c2 >all
 select c1 from t1 where not c1 =all (select c2 from t2 where not c2 >all (select c3 from t3));
  c1 
 ----
-  2
-  3
-  4
-  7
-  8
   1
   5
   6
   9
  10
+  2
+  3
+  4
+  7
+  8
 (10 rows)
 
 --
@@ -969,9 +969,9 @@ explain select c1 from t1 where not c1 <>all (select c1n from t1n where c1n <all
 select c1 from t1 where not c1 <>all (select c1n from t1n where c1n <all (select c3 from t3 where c3 = c1n));
  c1 
 ----
-  7
   5
   6
+  7
 (3 rows)
 
 --
@@ -1014,11 +1014,11 @@ explain select c1 from t1 where not exists (select c2 from t2 where c2 = c1);
 select c1 from t1 where not exists (select c2 from t2 where c2 = c1);
  c1 
 ----
+  7
+  8
   6
   9
  10
-  7
-  8
 (5 rows)
 
 --
@@ -1086,13 +1086,13 @@ explain select c1 from t1 where not exists (select c2 from t2 where exists (sele
 select c1 from t1 where not exists (select c2 from t2 where exists (select c3 from t3) and c2 <>all (select c3 from t3) and c2 = c1);
  c1 
 ----
+  6
+  9
+ 10
   2
   3
   7
   8
-  6
-  9
- 10
   1
 (8 rows)
 
@@ -1115,11 +1115,11 @@ select c1 from t1 where c1 not in (select c2 from t2) or c1 = 49;
 select c1 from t1 where not not not c1 in (select c2 from t2);
  c1 
 ----
+  7
+  8
   6
   9
  10
-  7
-  8
 (5 rows)
 
 --

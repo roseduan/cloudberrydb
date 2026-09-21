@@ -305,7 +305,8 @@ void sm4_ctx_real_init(struct sm4_init_ctx *cx, bool enc)
 }
 
 static int
-sm4_ctx_encrypt(PX_Cipher *c, const uint8 *data, unsigned dlen, uint8 *res)
+sm4_ctx_encrypt(PX_Cipher *c, int padding, const uint8 *data, unsigned dlen,
+				uint8 *res, unsigned *rlen)
 {
 	struct sm4_init_ctx *cx = (struct sm4_init_ctx *) c->ptr;
 
@@ -313,10 +314,13 @@ sm4_ctx_encrypt(PX_Cipher *c, const uint8 *data, unsigned dlen, uint8 *res)
 		sm4_ctx_real_init(cx, true);
 
 	if (dlen == 0)
+	{
+		*rlen = 0;
 		return 0;
+	}
 
 	if (dlen & 15)
-		return PXE_NOTBLOCKSIZE;
+		return PXE_ENCRYPT_FAILED;
 
 	memcpy(res, data, dlen);
 
@@ -329,11 +333,14 @@ sm4_ctx_encrypt(PX_Cipher *c, const uint8 *data, unsigned dlen, uint8 *res)
 		sm4_ecb_encrypt(&cx->ctx.sm4, res, dlen);
 	}
 
+	*rlen = dlen;
+
 	return 0;
 }
 
 static int
-sm4_ctx_decrypt(PX_Cipher *c, const uint8 *data, unsigned dlen, uint8 *res)
+sm4_ctx_decrypt(PX_Cipher *c, int padding, const uint8 *data, unsigned dlen,
+				uint8 *res, unsigned *rlen)
 {
 	struct sm4_init_ctx *cx = (struct sm4_init_ctx *) c->ptr;
 
@@ -341,10 +348,13 @@ sm4_ctx_decrypt(PX_Cipher *c, const uint8 *data, unsigned dlen, uint8 *res)
 		sm4_ctx_real_init(cx, false);
 
 	if (dlen == 0)
+	{
+		*rlen = 0;
 		return 0;
+	}
 
 	if (dlen & 15)
-		return PXE_NOTBLOCKSIZE;
+		return PXE_DECRYPT_FAILED;
 
 	memcpy(res, data, dlen);
 
@@ -355,6 +365,8 @@ sm4_ctx_decrypt(PX_Cipher *c, const uint8 *data, unsigned dlen, uint8 *res)
 	}
 	else
 		sm4_ecb_decrypt(&cx->ctx.sm4, res, dlen);
+
+	*rlen = dlen;
 
 	return 0;
 }

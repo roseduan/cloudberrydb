@@ -776,8 +776,8 @@ cagg_process_utility(PlannedStmt *pstmt,
 								 * could flip another user's CAGG
 								 * mode.
 								 */
-								if (!pg_class_ownercheck(view_oid,
-														 GetUserId()))
+								if (!object_ownercheck(RelationRelationId, view_oid,
+													   GetUserId()))
 									aclcheck_error(ACLCHECK_NOT_OWNER,
 												   OBJECT_VIEW,
 												   view_name);

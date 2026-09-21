@@ -14,6 +14,7 @@
 #include <sys/time.h>
 
 #include "postgres.h"
+#include "common/relpath.h"
 #include "libpq-fe.h"
 #include "pqexpbuffer.h"
 #include "common/kmgr_utils.h"
@@ -27,7 +28,7 @@
 #define MAX_STRING			1024
 #define QUERY_ALLOC			8192
 
-#define MESSAGE_WIDTH		60
+#define MESSAGE_WIDTH		62
 
 #define GET_MAJOR_VERSION(v)	((v) / 100)
 
@@ -96,8 +97,9 @@ extern char *output_files[];
 #define pg_mv_file			pgrename
 #define PATH_SEPARATOR		'\\'
 #define PATH_QUOTE	'"'
-#define RM_CMD				"DEL /q"
-#define RMDIR_CMD			"RMDIR /s/q"
+/* @ prefix disables command echo in .bat files */
+#define RM_CMD				"@DEL /q"
+#define RMDIR_CMD			"@RMDIR /s/q"
 #define SCRIPT_PREFIX		""
 #define SCRIPT_EXT			"bat"
 #define EXE_EXT				".exe"
@@ -109,7 +111,7 @@ extern char *output_files[];
 #define atooid(x)  ((Oid) strtoul((x), NULL, 10))
 
 /*
- * The format of visibility map is changed with this 9.6 commit,
+ * The format of visibility map was changed with this 9.6 commit.
  */
 #define VISIBILITY_MAP_FROZEN_BIT_CAT_VER 201603011
 
@@ -221,7 +223,7 @@ typedef struct relinfo
 	Oid			reloid;			/* relation OID */
 	char		relstorage;
 	char		relpersistence;
-	Oid 		relfilenode;	/* relation file node */
+	RelFileNumber relfilenumber;	/* relation file number */
 	Oid			indtable;		/* if index, OID of its table, else 0 */
 	Oid			toastheap;		/* if toast table, OID of base table, else 0 */
 	char	   *tablespace;		/* tablespace path; "" for cluster default */
@@ -301,10 +303,10 @@ typedef struct
 	char	   *db_name;		/* database name */
 	char		db_tablespace[MAXPGPATH];	/* database default tablespace
 											 * path */
+	RelInfoArr	rel_arr;		/* array of all user relinfos */
 	char	   *db_collate;
 	char	   *db_ctype;
 	int			db_encoding;
-	RelInfoArr	rel_arr;		/* array of all user relinfos */
 
 	uint32 		datfrozenxid;	/* GPDB */
 	uint32 		datminmxid;		/* GPDB */
@@ -313,6 +315,18 @@ typedef struct
 								 * that iterate dbarr must skip them or
 								 * temporarily ALTER DATABASE ALLOW_CONNECTIONS */
 } DbInfo;
+
+/*
+ * Locale information about a database.
+ */
+typedef struct
+{
+	char	   *db_collate;
+	char	   *db_ctype;
+	char		db_collprovider;
+	char	   *db_iculocale;
+	int			db_encoding;
+} DbLocaleInfo;
 
 typedef struct
 {
@@ -378,7 +392,8 @@ typedef enum
 typedef enum
 {
 	PG_VERBOSE,
-	PG_STATUS,
+	PG_STATUS,					/* these messages do not get a newline added */
+	PG_REPORT_NONL,				/* these too */
 	PG_REPORT,
 	PG_WARNING,
 	PG_FATAL
@@ -407,6 +422,7 @@ typedef struct
 typedef struct
 {
 	ControlData controldata;	/* pg_control information */
+	DbLocaleInfo *template0;	/* template0 locale info */
 	DbInfoArr	dbarr;			/* dbinfos array */
 	char	   *pgdata;			/* pathname for cluster's $PGDATA directory */
 	char	   *pgconfig;		/* pathname for cluster's config file
@@ -449,6 +465,7 @@ typedef struct
 {
 	bool		check;			/* true -> ask user for permission to make
 								 * changes */
+	bool		do_sync;		/* flush changes to disk */
 	transferMode transfer_mode; /* copy files or link them? */
 	int			jobs;			/* number of processes/threads to use */
 	char	   *socketdir;		/* directory to use for Unix sockets */
@@ -518,7 +535,7 @@ void		generate_old_dump(void);
 
 #define EXEC_PSQL_ARGS "--echo-queries --set ON_ERROR_STOP=on --no-psqlrc --dbname=template1"
 
-bool		exec_prog(const char *log_file, const char *opt_log_file,
+bool		exec_prog(const char *log_filename, const char *opt_log_file,
 					  bool report_error, bool exit_on_error, const char *fmt,...) pg_attribute_printf(5, 6);
 void		verify_directories(void);
 bool		pid_lock_file_exists(const char *datadir);
@@ -551,8 +568,6 @@ FileNameMap *gen_db_file_maps(DbInfo *old_db,
 							  DbInfo *new_db, int *nmaps, const char *old_pgdata,
 							  const char *new_pgdata);
 void		get_db_and_rel_infos(ClusterInfo *cluster);
-void		print_maps(FileNameMap *maps, int n,
-					   const char *db_name);
 
 /* option.c */
 
@@ -560,7 +575,7 @@ void		parseCommandLine(int argc, char *argv[]);
 void		adjust_data_dir(ClusterInfo *cluster);
 void		get_sock_dir(ClusterInfo *cluster, bool live_check);
 
-/* relfilenode.c */
+/* relfilenumber.c */
 
 void		transfer_all_new_tablespaces(DbInfoArr *old_db_arr,
 										 DbInfoArr *new_db_arr, char *old_pgdata, char *new_pgdata);

@@ -62,7 +62,7 @@ foreach my $rspfile (@rspfiles)
 				my @testargs;
 
 				# Set up the command to run
-				push(@testargs, ("$ENV{TESTDIR}/testcrypto", '-a', $algo));
+				push(@testargs, ("testcrypto", '-a', $algo));
 
 				if ($testrun{'Key'})
 				{

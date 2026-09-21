@@ -47,3 +47,36 @@ set gp_eager_two_phase_agg = on;
 explain (costs off) select b, sum(a) from t_planner_force_multi_stage group by b;
 reset gp_eager_two_phase_agg;
 drop table t_planner_force_multi_stage;
+
+-- test operatorMem
+begin;
+create table test_operator_mem (i int, j int) distributed by (i);
+insert into test_operator_mem select i, i+1 from generate_series(1, 100)i;
+analyze test_operator_mem;
+set local statement_mem=1024;
+set local gp_resqueue_print_operator_memory_limits=on;
+explain(costs off)
+select count(*) from test_operator_mem;
+
+abort;
+
+-- Test user-defined aggregate marked safe to execute on replicated slices without motion
+CREATE AGGREGATE my_unsafe_avg (float8)
+(
+    sfunc = float8_accum,
+    stype = float8[],
+    finalfunc = float8_avg,
+    initcond = '{0,0,0}'
+);
+CREATE AGGREGATE my_safe_avg (float8)
+(
+    sfunc = float8_accum,
+    stype = float8[],
+    finalfunc = float8_avg,
+    initcond = '{0,0,0}',
+    repsafe = true
+);
+CREATE TABLE a_reptable (a int) DISTRIBUTED REPLICATED;
+CREATE TABLE b_reptable (b int) DISTRIBUTED REPLICATED;
+EXPLAIN INSERT INTO a_reptable(a) SELECT my_unsafe_avg(b) FROM b_reptable;
+EXPLAIN INSERT INTO a_reptable(a) SELECT my_safe_avg(b) FROM b_reptable;

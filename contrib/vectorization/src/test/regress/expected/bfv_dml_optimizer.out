@@ -186,7 +186,7 @@ explain update update_pk_test set b = 5;
                                        QUERY PLAN                                       
 ----------------------------------------------------------------------------------------
  Update on update_pk_test  (cost=0.00..431.03 rows=1 width=1)
-   ->  Seq Scan on update_pk_test update_pk_test_1  (cost=0.00..431.00 rows=1 width=14)
+   ->  Seq Scan on update_pk_test  (cost=0.00..431.00 rows=1 width=14)
  Optimizer: Pivotal Optimizer (GPORCA)
 (3 rows)
 
@@ -198,18 +198,18 @@ select * from update_pk_test order by 1,2;
 (1 row)
 
 explain update update_pk_test set a = 5;
-                                                   QUERY PLAN                                                   
-----------------------------------------------------------------------------------------------------------------
- Update on update_pk_test  (cost=0.00..431.07 rows=1 width=1)
+                                                 QUERY PLAN                                                  
+-------------------------------------------------------------------------------------------------------------
+ Update on update_pk_test  (cost=0.00..431.06 rows=1 width=1)
    ->  Result  (cost=0.00..0.00 rows=0 width=0)
          One-Time Filter: true
-         ->  Result  (cost=0.00..431.00 rows=2 width=26)
+         ->  Result  (cost=0.00..0.00 rows=0 width=0)
                ->  Sort  (cost=0.00..431.00 rows=2 width=22)
                      Sort Key: (DMLAction)
                      ->  Redistribute Motion 3:3  (slice1; segments: 3)  (cost=0.00..431.00 rows=2 width=22)
-                           Hash Key: update_pk_test_1.a
-                           ->  Split  (cost=0.00..431.00 rows=1 width=22)
-                                 ->  Seq Scan on update_pk_test update_pk_test_1  (cost=0.00..431.00 rows=1 width=18)
+                           Hash Key: a
+                           ->  Split Update  (cost=0.00..431.00 rows=1 width=22)
+                                 ->  Seq Scan on update_pk_test  (cost=0.00..431.00 rows=1 width=18)
  Optimizer: Pivotal Optimizer (GPORCA)
 (11 rows)
 
@@ -233,7 +233,7 @@ set optimizer_trace_fallback = on;
 -- Subquery that returns a row rather than a single scalar isn't supported
 -- in ORCA currently, so we can use that to trigger fallback.
 update update_pk_test set a=1 where row(1,2) = (SELECT 1, 2);
-INFO:  GPORCA failed to produce a plan, falling back to planner
+INFO:  GPORCA failed to produce a plan, falling back to Postgres-based planner
 select * from update_pk_test order by 1,2;
  a | b 
 ---+---
@@ -308,9 +308,9 @@ NOTICE:  table "foo" does not exist, skipping
 drop table if exists bar;
 NOTICE:  table "bar" does not exist, skipping
 create table foo (a int, b int);
-NOTICE:  Table doesn't have 'DISTRIBUTED BY' clause -- Using column named 'a' as the Cloudberry Database data distribution key for this table.
+NOTICE:  Table doesn't have 'DISTRIBUTED BY' clause -- Using column named 'a' as the Apache Cloudberry data distribution key for this table.
 create table bar(a int, b int);
-NOTICE:  Table doesn't have 'DISTRIBUTED BY' clause -- Using column named 'a' as the Cloudberry Database data distribution key for this table.
+NOTICE:  Table doesn't have 'DISTRIBUTED BY' clause -- Using column named 'a' as the Apache Cloudberry data distribution key for this table.
 insert into foo select generate_series(1,10);
 insert into bar select generate_series(1,10);
 -- Previously, table foo is defined as  randomly distributed and 
@@ -331,8 +331,8 @@ explain delete from foo using bar where foo.a=bar.a;
                ->  Hash Join  (cost=0.00..862.00 rows=1 width=18)
                      Hash Cond: (foo_1.a = bar.a)
                      ->  Redistribute Motion 3:3  (slice2; segments: 3)  (cost=0.00..431.00 rows=1 width=18)
-                           Hash Key: foo_1.a
-                           ->  Seq Scan on foo foo_1  (cost=0.00..431.00 rows=1 width=18)
+                           Hash Key: foo.a
+                           ->  Seq Scan on foo  (cost=0.00..431.00 rows=1 width=18)
                      ->  Hash  (cost=431.00..431.00 rows=1 width=4)
                            ->  Seq Scan on bar  (cost=0.00..431.00 rows=1 width=4)
  Optimizer: Pivotal Optimizer (GPORCA)
@@ -347,9 +347,9 @@ select * from foo;
 drop table foo;
 drop table bar;
 create table foo (a int, b int);
-NOTICE:  Table doesn't have 'DISTRIBUTED BY' clause -- Using column named 'a' as the Cloudberry Database data distribution key for this table.
+NOTICE:  Table doesn't have 'DISTRIBUTED BY' clause -- Using column named 'a' as the Apache Cloudberry data distribution key for this table.
 create table bar(a int, b int);
-NOTICE:  Table doesn't have 'DISTRIBUTED BY' clause -- Using column named 'a' as the Cloudberry Database data distribution key for this table.
+NOTICE:  Table doesn't have 'DISTRIBUTED BY' clause -- Using column named 'a' as the Apache Cloudberry data distribution key for this table.
 insert into foo select generate_series(1,10);
 insert into bar select generate_series(1,10);
 alter table foo set with(REORGANIZE=false) distributed randomly;
@@ -394,7 +394,7 @@ select * from foo;
 drop table foo;
 drop table bar;
 create table foo (a int, b int);
-NOTICE:  Table doesn't have 'DISTRIBUTED BY' clause -- Using column named 'a' as the Cloudberry Database data distribution key for this table.
+NOTICE:  Table doesn't have 'DISTRIBUTED BY' clause -- Using column named 'a' as the Apache Cloudberry data distribution key for this table.
 insert into foo select generate_series(1,10);
 alter table foo set with(REORGANIZE=false) distributed randomly;
 analyze foo;
@@ -402,7 +402,7 @@ explain delete from foo where foo.a=1;
                             QUERY PLAN                            
 ------------------------------------------------------------------
  Delete on foo  (cost=0.00..431.03 rows=1 width=1)
-   ->  Seq Scan on foo foo_1  (cost=0.00..431.00 rows=1 width=18)
+   ->  Seq Scan on foo  (cost=0.00..431.00 rows=1 width=18)
          Filter: (a = 1)
  Optimizer: Pivotal Optimizer (GPORCA)
 (4 rows)
@@ -410,9 +410,9 @@ explain delete from foo where foo.a=1;
 delete from foo where foo.a=1;
 drop table foo;
 create table foo (a int, b int);
-NOTICE:  Table doesn't have 'DISTRIBUTED BY' clause -- Using column named 'a' as the Cloudberry Database data distribution key for this table.
+NOTICE:  Table doesn't have 'DISTRIBUTED BY' clause -- Using column named 'a' as the Apache Cloudberry data distribution key for this table.
 create table bar(a int, b int);
-NOTICE:  Table doesn't have 'DISTRIBUTED BY' clause -- Using column named 'a' as the Cloudberry Database data distribution key for this table.
+NOTICE:  Table doesn't have 'DISTRIBUTED BY' clause -- Using column named 'a' as the Apache Cloudberry data distribution key for this table.
 insert into foo select generate_series(1,10);
 insert into bar select generate_series(1,10);
 alter table foo set with(REORGANIZE=false) distributed randomly;
@@ -423,8 +423,8 @@ explain delete from foo using bar where foo.a=bar.b;
 ---------------------------------------------------------------------------------------------------
  Delete on foo  (cost=0.00..862.03 rows=1 width=1)
    ->  Hash Join  (cost=0.00..862.00 rows=1 width=18)
-         Hash Cond: (foo_1.a = bar.b)
-         ->  Seq Scan on foo foo_1  (cost=0.00..431.00 rows=1 width=18)
+         Hash Cond: (foo.a = bar.b)
+         ->  Seq Scan on foo  (cost=0.00..431.00 rows=1 width=18)
          ->  Hash  (cost=431.00..431.00 rows=3 width=4)
                ->  Broadcast Motion 3:3  (slice1; segments: 3)  (cost=0.00..431.00 rows=3 width=4)
                      ->  Seq Scan on bar  (cost=0.00..431.00 rows=1 width=4)
@@ -435,7 +435,7 @@ delete from foo using bar where foo.a=bar.b;
 drop table foo;
 drop table bar;
 create table foo (a int, b int);
-NOTICE:  Table doesn't have 'DISTRIBUTED BY' clause -- Using column named 'a' as the Cloudberry Database data distribution key for this table.
+NOTICE:  Table doesn't have 'DISTRIBUTED BY' clause -- Using column named 'a' as the Apache Cloudberry data distribution key for this table.
 insert into foo select generate_series(1,10);
 alter table foo set with(REORGANIZE=false) distributed randomly;
 analyze foo;
@@ -448,11 +448,11 @@ explain delete from foo using foo foo_1 where foo_1.a=foo.a;
 ----------------------------------------------------------------------------------------------------
  Delete on foo  (cost=0.00..862.29 rows=4 width=1)
    ->  Hash Join  (cost=0.00..862.00 rows=10 width=18)
-         Hash Cond: (foo_1.a = foo_2.a)
-         ->  Seq Scan on foo foo_1  (cost=0.00..431.00 rows=10 width=18)
+         Hash Cond: (foo.a = foo_1.a)
+         ->  Seq Scan on foo  (cost=0.00..431.00 rows=10 width=18)
          ->  Hash  (cost=431.00..431.00 rows=30 width=4)
                ->  Broadcast Motion 3:3  (slice1; segments: 3)  (cost=0.00..431.00 rows=30 width=4)
-                     ->  Seq Scan on foo foo_2  (cost=0.00..431.00 rows=4 width=4)
+                     ->  Seq Scan on foo foo_1  (cost=0.00..431.00 rows=4 width=4)
  Optimizer: Pivotal Optimizer (GPORCA)
 (8 rows)
 
@@ -460,7 +460,7 @@ delete from foo using foo foo_1 where foo_1.a=foo.a;
 reset optimizer_enable_motion_redistribute;
 drop table foo;
 create table foo (a int, b int);
-NOTICE:  Table doesn't have 'DISTRIBUTED BY' clause -- Using column named 'a' as the Cloudberry Database data distribution key for this table.
+NOTICE:  Table doesn't have 'DISTRIBUTED BY' clause -- Using column named 'a' as the Apache Cloudberry data distribution key for this table.
 insert into foo select generate_series(1,10);
 alter table foo set with(REORGANIZE=false) distributed randomly;
 analyze foo;
@@ -468,16 +468,16 @@ explain delete from foo;
                             QUERY PLAN                            
 ------------------------------------------------------------------
  Delete on foo  (cost=0.00..431.03 rows=1 width=1)
-   ->  Seq Scan on foo foo_1  (cost=0.00..431.00 rows=1 width=18)
+   ->  Seq Scan on foo  (cost=0.00..431.00 rows=1 width=18)
  Optimizer: Pivotal Optimizer (GPORCA)
 (3 rows)
 
 delete from foo;
 drop table foo;
 create table foo (a int, b int);
-NOTICE:  Table doesn't have 'DISTRIBUTED BY' clause -- Using column named 'a' as the Cloudberry Database data distribution key for this table.
+NOTICE:  Table doesn't have 'DISTRIBUTED BY' clause -- Using column named 'a' as the Apache Cloudberry data distribution key for this table.
 create table bar(a int, b int);
-NOTICE:  Table doesn't have 'DISTRIBUTED BY' clause -- Using column named 'a' as the Cloudberry Database data distribution key for this table.
+NOTICE:  Table doesn't have 'DISTRIBUTED BY' clause -- Using column named 'a' as the Apache Cloudberry data distribution key for this table.
 insert into foo select generate_series(1,10);
 insert into bar select generate_series(1,10);
 alter table foo set with(REORGANIZE=false) distributed randomly;
@@ -490,7 +490,7 @@ explain delete from foo using bar;
  Delete on foo  (cost=0.00..1324032.10 rows=1 width=1)
    ->  Nested Loop  (cost=0.00..1324032.07 rows=1 width=18)
          Join Filter: true
-         ->  Seq Scan on foo foo_1  (cost=0.00..431.00 rows=1 width=18)
+         ->  Seq Scan on foo  (cost=0.00..431.00 rows=1 width=18)
          ->  Materialize  (cost=0.00..431.00 rows=3 width=1)
                ->  Broadcast Motion 3:3  (slice1; segments: 3)  (cost=0.00..431.00 rows=3 width=1)
                      ->  Seq Scan on bar  (cost=0.00..431.00 rows=1 width=1)
@@ -501,9 +501,9 @@ delete from foo using bar;
 drop table foo;
 drop table bar;
 create table foo (a int, b int);
-NOTICE:  Table doesn't have 'DISTRIBUTED BY' clause -- Using column named 'a' as the Cloudberry Database data distribution key for this table.
+NOTICE:  Table doesn't have 'DISTRIBUTED BY' clause -- Using column named 'a' as the Apache Cloudberry data distribution key for this table.
 create table bar(a int, b int);
-NOTICE:  Table doesn't have 'DISTRIBUTED BY' clause -- Using column named 'a' as the Cloudberry Database data distribution key for this table.
+NOTICE:  Table doesn't have 'DISTRIBUTED BY' clause -- Using column named 'a' as the Apache Cloudberry data distribution key for this table.
 insert into bar select i, i from generate_series(1, 1000)i;
 insert into foo select i,i from generate_series(1, 10)i;
 alter table foo set with(REORGANIZE=false) distributed randomly;
@@ -516,8 +516,8 @@ explain delete from foo using bar where foo.b=bar.b;
 ------------------------------------------------------------------------------------------------------
  Delete on foo  (cost=0.00..862.56 rows=4 width=1)
    ->  Hash Join  (cost=0.00..862.27 rows=10 width=18)
-         Hash Cond: (foo_1.b = bar.b)
-         ->  Seq Scan on foo foo_1  (cost=0.00..431.00 rows=10 width=18)
+         Hash Cond: (foo.b = bar.b)
+         ->  Seq Scan on foo  (cost=0.00..431.00 rows=10 width=18)
          ->  Hash  (cost=431.08..431.08 rows=3000 width=4)
                ->  Broadcast Motion 3:3  (slice1; segments: 3)  (cost=0.00..431.08 rows=3000 width=4)
                      ->  Seq Scan on bar  (cost=0.00..431.01 rows=334 width=4)
@@ -559,8 +559,8 @@ explain update foo set a=4 from bar where foo.a=bar.a;
 ---------------------------------------------------------------------------------------------------
  Update on foo  (cost=0.00..862.03 rows=1 width=1)
    ->  Hash Join  (cost=0.00..862.00 rows=1 width=14)
-         Hash Cond: (foo_1.a = bar.a)
-         ->  Seq Scan on foo foo_1  (cost=0.00..431.00 rows=1 width=18)
+         Hash Cond: (foo.a = bar.a)
+         ->  Seq Scan on foo  (cost=0.00..431.00 rows=1 width=18)
          ->  Hash  (cost=431.00..431.00 rows=3 width=4)
                ->  Broadcast Motion 3:3  (slice1; segments: 3)  (cost=0.00..431.00 rows=3 width=4)
                      ->  Seq Scan on bar  (cost=0.00..431.00 rows=1 width=4)
@@ -609,9 +609,9 @@ drop table foo;
 drop table bar;
 drop table jazz;
 create table foo (a int);
-NOTICE:  Table doesn't have 'DISTRIBUTED BY' clause -- Using column named 'a' as the Cloudberry Database data distribution key for this table.
+NOTICE:  Table doesn't have 'DISTRIBUTED BY' clause -- Using column named 'a' as the Apache Cloudberry data distribution key for this table.
 create table bar (b int);
-NOTICE:  Table doesn't have 'DISTRIBUTED BY' clause -- Using column named 'b' as the Cloudberry Database data distribution key for this table.
+NOTICE:  Table doesn't have 'DISTRIBUTED BY' clause -- Using column named 'b' as the Apache Cloudberry data distribution key for this table.
 insert into foo select i from generate_series(1, 10)i;
 insert into bar select i from generate_series(1, 10)i;
 alter table foo set with(REORGANIZE=false) distributed randomly;
@@ -624,7 +624,7 @@ explain delete from foo using (select a from foo union all select b from bar) v;
  Delete on foo  (cost=0.00..1765376.09 rows=1 width=1)
    ->  Nested Loop  (cost=0.00..1765376.07 rows=1 width=14)
          Join Filter: true
-         ->  Seq Scan on foo foo_2  (cost=0.00..431.00 rows=1 width=14)
+         ->  Seq Scan on foo  (cost=0.00..431.00 rows=1 width=14)
          ->  Materialize  (cost=0.00..862.00 rows=3 width=1)
                ->  Broadcast Motion 3:3  (slice1; segments: 3)  (cost=0.00..862.00 rows=3 width=1)
                      ->  Append  (cost=0.00..862.00 rows=1 width=1)
@@ -641,3 +641,179 @@ select * from foo;
 
 drop table foo;
 drop table bar;
+-- This test is to verify ORCA can generate plans with empty
+-- target lists. This can happen when inserting rows with no
+-- columns into a table with no columns
+create table test();
+NOTICE:  Table doesn't have 'DISTRIBUTED BY' clause, and no column type is suitable for a distribution key. Creating a NULL policy entry.
+explain (analyze, costs off, timing off, summary off) insert into test default values;
+                                     QUERY PLAN                                     
+------------------------------------------------------------------------------------
+ Insert on test (actual rows=0 loops=1)
+   ->  Result (actual rows=1 loops=1)
+         ->  Redistribute Motion 3:3  (slice1; segments: 3) (actual rows=1 loops=1)
+               ->  Result (actual rows=1 loops=1)
+                     One-Time Filter: (gp_execution_segment() = 2)
+                     ->  Result (actual rows=1 loops=1)
+ Optimizer: Pivotal Optimizer (GPORCA)
+(7 rows)
+
+-- Test delete on partition table with dropped/added columns
+CREATE TABLE part (
+    a int,
+    b int,
+    c text,
+    d numeric)
+DISTRIBUTED BY (b)
+partition by range(a) (
+    start(1) end(6) every(2),
+    default partition def);
+alter table part add column e int;
+insert into part select i, i, 'abc', i*1.01,i from generate_series(1,10)i;
+alter table part drop column b;
+NOTICE:  dropping a column that is part of the distribution policy forces a random distribution policy
+NOTICE:  dropping a column that is part of the distribution policy forces a random distribution policy
+NOTICE:  dropping a column that is part of the distribution policy forces a random distribution policy
+NOTICE:  dropping a column that is part of the distribution policy forces a random distribution policy
+NOTICE:  dropping a column that is part of the distribution policy forces a random distribution policy
+alter table part set WITH (reorganize=true) distributed by (e);
+-- test delete with dropped column
+explain delete from part where d>9;
+                                      QUERY PLAN                                       
+---------------------------------------------------------------------------------------
+ Delete on part  (cost=0.00..742.33 rows=0 width=0)
+   Delete on part_1_prt_2 part_1
+   Delete on part_1_prt_3 part_2
+   Delete on part_1_prt_4 part_3
+   Delete on part_1_prt_def part_4
+   ->  Append  (cost=0.00..742.33 rows=14267 width=14)
+         ->  Seq Scan on part_1_prt_2 part_1  (cost=0.00..167.75 rows=3567 width=14)
+               Filter: (d > '9'::numeric)
+         ->  Seq Scan on part_1_prt_3 part_2  (cost=0.00..167.75 rows=3567 width=14)
+               Filter: (d > '9'::numeric)
+         ->  Seq Scan on part_1_prt_4 part_3  (cost=0.00..167.75 rows=3567 width=14)
+               Filter: (d > '9'::numeric)
+         ->  Seq Scan on part_1_prt_def part_4  (cost=0.00..167.75 rows=3567 width=14)
+               Filter: (d > '9'::numeric)
+ Optimizer: Postgres query optimizer
+(15 rows)
+
+delete from part where d>9;
+select count(*) from part;
+ count 
+-------
+     8
+(1 row)
+
+-- test delete with added partition key
+explain delete from part where e=3;
+                                     QUERY PLAN                                      
+-------------------------------------------------------------------------------------
+ Delete on part  (cost=0.00..671.21 rows=0 width=0)
+   Delete on part_1_prt_2 part_1
+   Delete on part_1_prt_3 part_2
+   Delete on part_1_prt_4 part_3
+   Delete on part_1_prt_def part_4
+   ->  Append  (cost=0.00..671.21 rows=43 width=14)
+         ->  Seq Scan on part_1_prt_2 part_1  (cost=0.00..167.75 rows=11 width=14)
+               Filter: (e = 3)
+         ->  Seq Scan on part_1_prt_3 part_2  (cost=0.00..167.75 rows=11 width=14)
+               Filter: (e = 3)
+         ->  Seq Scan on part_1_prt_4 part_3  (cost=0.00..167.75 rows=11 width=14)
+               Filter: (e = 3)
+         ->  Seq Scan on part_1_prt_def part_4  (cost=0.00..167.75 rows=11 width=14)
+               Filter: (e = 3)
+ Optimizer: Postgres query optimizer
+(15 rows)
+
+delete from part where e=3;
+select count(*) from part;
+ count 
+-------
+     7
+(1 row)
+
+-- test delete from default partition
+explain delete from part where a=8;
+                                  QUERY PLAN                                   
+-------------------------------------------------------------------------------
+ Delete on part  (cost=0.00..167.75 rows=0 width=0)
+   Delete on part_1_prt_def part_1
+   ->  Seq Scan on part_1_prt_def part_1  (cost=0.00..167.75 rows=11 width=14)
+         Filter: (a = 8)
+ Optimizer: Postgres query optimizer
+(5 rows)
+
+delete from part where a=8;
+select count(*) from part;
+ count 
+-------
+     6
+(1 row)
+
+DROP TABLE IF EXISTS part;
+CREATE TABLE part (
+    a int,
+    b int,
+    partkey int,
+    c text,
+    d numeric)
+DISTRIBUTED BY (b)
+partition by range(partkey) (
+    start(1) end(6) every(2),
+    default partition def);
+alter table part add column e int;
+insert into part select i, i, i, 'abc', i*1.01,i from generate_series(1,10)i;
+alter table part drop column b;
+NOTICE:  dropping a column that is part of the distribution policy forces a random distribution policy
+NOTICE:  dropping a column that is part of the distribution policy forces a random distribution policy
+NOTICE:  dropping a column that is part of the distribution policy forces a random distribution policy
+NOTICE:  dropping a column that is part of the distribution policy forces a random distribution policy
+NOTICE:  dropping a column that is part of the distribution policy forces a random distribution policy
+alter table part set WITH (reorganize=true) distributed by (e);
+-- test delete with column order change
+explain delete from part where d>9;
+                                      QUERY PLAN                                       
+---------------------------------------------------------------------------------------
+ Delete on part  (cost=0.00..717.78 rows=0 width=0)
+   Delete on part_1_prt_2 part_1
+   Delete on part_1_prt_3 part_2
+   Delete on part_1_prt_4 part_3
+   Delete on part_1_prt_def part_4
+   ->  Append  (cost=0.00..717.78 rows=13689 width=14)
+         ->  Seq Scan on part_1_prt_2 part_1  (cost=0.00..162.33 rows=3422 width=14)
+               Filter: (d > '9'::numeric)
+         ->  Seq Scan on part_1_prt_3 part_2  (cost=0.00..162.33 rows=3422 width=14)
+               Filter: (d > '9'::numeric)
+         ->  Seq Scan on part_1_prt_4 part_3  (cost=0.00..162.33 rows=3422 width=14)
+               Filter: (d > '9'::numeric)
+         ->  Seq Scan on part_1_prt_def part_4  (cost=0.00..162.33 rows=3422 width=14)
+               Filter: (d > '9'::numeric)
+ Optimizer: Postgres query optimizer
+(15 rows)
+
+delete from part where d>9;
+select count(*) from part;
+ count 
+-------
+     8
+(1 row)
+
+-- Test delete on mid-level partitions. Ensure Orca properly handles tuple routing
+create table deep_part (
+  i int,
+  j int,
+  k int,
+  s char(5)
+) distributed by (i) partition by list(s) subpartition by range (j) subpartition template (
+  start(1) end(3) every(1)
+) (
+  partition p1
+  values
+    ('A'),
+    partition p2
+  values
+    ('B')
+);
+insert into deep_part values (1,1,1,'A');
+delete from deep_part_1_prt_p1 where j=1;

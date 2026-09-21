@@ -216,7 +216,7 @@ extern void pg_iceberg_tuple_insert(IcebergModifyDesc *insertDesc, TupleTableSlo
 
 extern TM_Result pg_iceberg_tuple_update(IcebergModifyDesc *updateDesc, ItemPointer otid, TupleTableSlot *slot, CommandId cid,
 										 Snapshot snapshot, Snapshot crosscheck, bool wait, TM_FailureData *tmfd,
-										 LockTupleMode *lockmode, bool *update_indexes);
+										 LockTupleMode *lockmode, TU_UpdateIndexes *update_indexes);
 
 extern TM_Result pg_iceberg_tuple_delete(IcebergModifyDesc *deleteDesc, ItemPointer tid, CommandId cid, Snapshot snapshot,
 					 Snapshot crosscheck, bool wait, TM_FailureData *tmfd, bool changingPart);

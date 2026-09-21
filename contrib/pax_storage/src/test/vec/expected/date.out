@@ -2,6 +2,8 @@
 -- DATE
 --
 CREATE TABLE DATE_TBL (f1 date);
+NOTICE:  Table doesn't have 'DISTRIBUTED BY' clause -- Using column named 'f1' as the Apache Cloudberry data distribution key for this table.
+HINT:  The 'DISTRIBUTED BY' clause determines the distribution of data. Make sure column(s) chosen are the optimal data distribution key to minimize skew.
 INSERT INTO DATE_TBL VALUES ('1957-04-09');
 INSERT INTO DATE_TBL VALUES ('1957-06-13');
 INSERT INTO DATE_TBL VALUES ('1996-02-28');
@@ -26,36 +28,36 @@ SELECT f1 FROM DATE_TBL;
       f1       
 ---------------
  04-09-1957
- 06-13-1957
- 02-28-1996
- 02-29-1996
  03-01-1996
- 03-02-1996
  02-28-1997
- 03-01-1997
- 03-02-1997
  04-01-2000
+ 04-08-2038
+ 06-13-1957
+ 02-29-1996
+ 03-02-1997
  04-02-2000
  04-03-2000
- 04-08-2038
  04-09-2039
- 04-10-2040
  04-10-2040 BC
+ 02-28-1996
+ 03-02-1996
+ 03-01-1997
+ 04-10-2040
 (16 rows)
 
 SELECT f1 FROM DATE_TBL WHERE f1 < '2000-01-01';
       f1       
 ---------------
- 04-09-1957
  06-13-1957
- 02-28-1996
  02-29-1996
- 03-01-1996
- 03-02-1996
- 02-28-1997
- 03-01-1997
  03-02-1997
  04-10-2040 BC
+ 02-28-1996
+ 03-02-1996
+ 03-01-1997
+ 04-09-1957
+ 03-01-1996
+ 02-28-1997
 (10 rows)
 
 SELECT f1 FROM DATE_TBL
@@ -851,20 +853,20 @@ SELECT f1 - date '2000-01-01' AS "Days From 2K" FROM DATE_TBL;
  Days From 2K 
 --------------
        -15607
-       -15542
-        -1403
-        -1402
         -1401
-        -1400
         -1037
-        -1036
-        -1035
            91
+        13977
+        -1403
+        -1400
+        -1036
+        14710
+       -15542
+        -1402
+        -1035
            92
            93
-        13977
         14343
-        14710
      -1475115
 (16 rows)
 
@@ -872,20 +874,20 @@ SELECT f1 - date 'epoch' AS "Days From Epoch" FROM DATE_TBL;
  Days From Epoch 
 -----------------
            -4650
-           -4585
-            9554
-            9555
             9556
-            9557
             9920
-            9921
-            9922
            11048
+           24934
+            9554
+            9557
+            9921
+           25667
+           -4585
+            9555
+            9922
            11049
            11050
-           24934
            25300
-           25667
         -1464158
 (16 rows)
 
@@ -950,20 +952,20 @@ SELECT f1 as "date",
      date      | year  | month | day | quarter | decade | century | millennium | isoyear | week | dow | isodow | doy | julian  |     epoch     
 ---------------+-------+-------+-----+---------+--------+---------+------------+---------+------+-----+--------+-----+---------+---------------
  04-09-1957    |  1957 |     4 |   9 |       2 |    195 |      20 |          2 |    1957 |   15 |   2 |      2 |  99 | 2435938 |    -401760000
- 06-13-1957    |  1957 |     6 |  13 |       2 |    195 |      20 |          2 |    1957 |   24 |   4 |      4 | 164 | 2436003 |    -396144000
- 02-28-1996    |  1996 |     2 |  28 |       1 |    199 |      20 |          2 |    1996 |    9 |   3 |      3 |  59 | 2450142 |     825465600
- 02-29-1996    |  1996 |     2 |  29 |       1 |    199 |      20 |          2 |    1996 |    9 |   4 |      4 |  60 | 2450143 |     825552000
  03-01-1996    |  1996 |     3 |   1 |       1 |    199 |      20 |          2 |    1996 |    9 |   5 |      5 |  61 | 2450144 |     825638400
- 03-02-1996    |  1996 |     3 |   2 |       1 |    199 |      20 |          2 |    1996 |    9 |   6 |      6 |  62 | 2450145 |     825724800
  02-28-1997    |  1997 |     2 |  28 |       1 |    199 |      20 |          2 |    1997 |    9 |   5 |      5 |  59 | 2450508 |     857088000
- 03-01-1997    |  1997 |     3 |   1 |       1 |    199 |      20 |          2 |    1997 |    9 |   6 |      6 |  60 | 2450509 |     857174400
- 03-02-1997    |  1997 |     3 |   2 |       1 |    199 |      20 |          2 |    1997 |    9 |   0 |      7 |  61 | 2450510 |     857260800
  04-01-2000    |  2000 |     4 |   1 |       2 |    200 |      20 |          2 |    2000 |   13 |   6 |      6 |  92 | 2451636 |     954547200
+ 04-08-2038    |  2038 |     4 |   8 |       2 |    203 |      21 |          3 |    2038 |   14 |   4 |      4 |  98 | 2465522 |    2154297600
+ 02-28-1996    |  1996 |     2 |  28 |       1 |    199 |      20 |          2 |    1996 |    9 |   3 |      3 |  59 | 2450142 |     825465600
+ 03-02-1996    |  1996 |     3 |   2 |       1 |    199 |      20 |          2 |    1996 |    9 |   6 |      6 |  62 | 2450145 |     825724800
+ 03-01-1997    |  1997 |     3 |   1 |       1 |    199 |      20 |          2 |    1997 |    9 |   6 |      6 |  60 | 2450509 |     857174400
+ 04-10-2040    |  2040 |     4 |  10 |       2 |    204 |      21 |          3 |    2040 |   15 |   2 |      2 | 101 | 2466255 |    2217628800
+ 06-13-1957    |  1957 |     6 |  13 |       2 |    195 |      20 |          2 |    1957 |   24 |   4 |      4 | 164 | 2436003 |    -396144000
+ 02-29-1996    |  1996 |     2 |  29 |       1 |    199 |      20 |          2 |    1996 |    9 |   4 |      4 |  60 | 2450143 |     825552000
+ 03-02-1997    |  1997 |     3 |   2 |       1 |    199 |      20 |          2 |    1997 |    9 |   0 |      7 |  61 | 2450510 |     857260800
  04-02-2000    |  2000 |     4 |   2 |       2 |    200 |      20 |          2 |    2000 |   13 |   0 |      7 |  93 | 2451637 |     954633600
  04-03-2000    |  2000 |     4 |   3 |       2 |    200 |      20 |          2 |    2000 |   14 |   1 |      1 |  94 | 2451638 |     954720000
- 04-08-2038    |  2038 |     4 |   8 |       2 |    203 |      21 |          3 |    2038 |   14 |   4 |      4 |  98 | 2465522 |    2154297600
  04-09-2039    |  2039 |     4 |   9 |       2 |    203 |      21 |          3 |    2039 |   14 |   6 |      6 |  99 | 2465888 |    2185920000
- 04-10-2040    |  2040 |     4 |  10 |       2 |    204 |      21 |          3 |    2040 |   15 |   2 |      2 | 101 | 2466255 |    2217628800
  04-10-2040 BC | -2040 |     4 |  10 |       2 |   -204 |     -21 |         -3 |   -2040 |   15 |   1 |      1 | 100 |  976430 | -126503251200
 (16 rows)
 
@@ -1135,15 +1137,15 @@ SELECT EXTRACT(DECADE FROM DATE '0012-12-31 BC'); --  -2
 -- all possible fields
 --
 SELECT EXTRACT(MICROSECONDS  FROM DATE '2020-08-11');
-ERROR:  date units "microseconds" not supported
+ERROR:  unit "microseconds" not supported for type date
 SELECT EXTRACT(MILLISECONDS  FROM DATE '2020-08-11');
-ERROR:  date units "milliseconds" not supported
+ERROR:  unit "milliseconds" not supported for type date
 SELECT EXTRACT(SECOND        FROM DATE '2020-08-11');
-ERROR:  date units "second" not supported
+ERROR:  unit "second" not supported for type date
 SELECT EXTRACT(MINUTE        FROM DATE '2020-08-11');
-ERROR:  date units "minute" not supported
+ERROR:  unit "minute" not supported for type date
 SELECT EXTRACT(HOUR          FROM DATE '2020-08-11');
-ERROR:  date units "hour" not supported
+ERROR:  unit "hour" not supported for type date
 SELECT EXTRACT(DAY           FROM DATE '2020-08-11');
  extract 
 ---------
@@ -1241,11 +1243,11 @@ SELECT EXTRACT(DOY           FROM DATE '2020-08-11');
 (1 row)
 
 SELECT EXTRACT(TIMEZONE      FROM DATE '2020-08-11');
-ERROR:  date units "timezone" not supported
+ERROR:  unit "timezone" not supported for type date
 SELECT EXTRACT(TIMEZONE_M    FROM DATE '2020-08-11');
-ERROR:  date units "timezone_m" not supported
+ERROR:  unit "timezone_m" not supported for type date
 SELECT EXTRACT(TIMEZONE_H    FROM DATE '2020-08-11');
-ERROR:  date units "timezone_h" not supported
+ERROR:  unit "timezone_h" not supported for type date
 SELECT EXTRACT(EPOCH         FROM DATE '2020-08-11');
   extract   
 ------------
@@ -1270,7 +1272,7 @@ SELECT DATE_TRUNC('MILLENNIUM', TIMESTAMP '1970-03-20 04:30:00.00000'); -- 1001
 SELECT DATE_TRUNC('MILLENNIUM', DATE '1970-03-20'); -- 1001-01-01
           date_trunc          
 ------------------------------
- Thu Jan 01 00:00:00 1001 PST
+ Thu Jan 01 00:00:00 1001 LMT
 (1 row)
 
 SELECT DATE_TRUNC('CENTURY', TIMESTAMP '1970-03-20 04:30:00.00000'); -- 1901
@@ -1294,13 +1296,13 @@ SELECT DATE_TRUNC('CENTURY', DATE '2004-08-10'); -- 2001-01-01
 SELECT DATE_TRUNC('CENTURY', DATE '0002-02-04'); -- 0001-01-01
           date_trunc          
 ------------------------------
- Mon Jan 01 00:00:00 0001 PST
+ Mon Jan 01 00:00:00 0001 LMT
 (1 row)
 
 SELECT DATE_TRUNC('CENTURY', DATE '0055-08-10 BC'); -- 0100-01-01 BC
            date_trunc            
 ---------------------------------
- Tue Jan 01 00:00:00 0100 PST BC
+ Tue Jan 01 00:00:00 0100 LMT BC
 (1 row)
 
 SELECT DATE_TRUNC('DECADE', DATE '1993-12-25'); -- 1990-01-01
@@ -1312,13 +1314,13 @@ SELECT DATE_TRUNC('DECADE', DATE '1993-12-25'); -- 1990-01-01
 SELECT DATE_TRUNC('DECADE', DATE '0004-12-25'); -- 0001-01-01 BC
            date_trunc            
 ---------------------------------
- Sat Jan 01 00:00:00 0001 PST BC
+ Sat Jan 01 00:00:00 0001 LMT BC
 (1 row)
 
 SELECT DATE_TRUNC('DECADE', DATE '0002-12-31 BC'); -- 0011-01-01 BC
            date_trunc            
 ---------------------------------
- Mon Jan 01 00:00:00 0011 PST BC
+ Mon Jan 01 00:00:00 0011 LMT BC
 (1 row)
 
 --
@@ -1468,7 +1470,7 @@ SELECT EXTRACT(EPOCH      FROM DATE 'infinity');    --  Infinity
 -- wrong fields from non-finite date:
 --
 SELECT EXTRACT(MICROSEC  FROM DATE 'infinity');     -- error
-ERROR:  date units "microsec" not recognized
+ERROR:  unit "microsec" not recognized for type date
 -- test constructors
 select make_date(2013, 7, 15);
  make_date  

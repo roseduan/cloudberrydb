@@ -6,6 +6,7 @@
 2018-07-20 09:06:30|ERROR|ERROR:  column "n8" does not exist
 LINE 1: ..."s2","s3","dt","n1","n2","n3","n4","n5","n6","n7","n8" FROM ...
                                                              ^
+DETAIL:  There is a column named "n8" in table "staging_gpload_reusable_9faa546d615fa55cc3e9e2cee6f130b0", but it cannot be referenced from this part of the query.
  encountered while running INSERT INTO staging_gpload_reusable_9faa546d615fa55cc3e9e2cee6f130b0 ("s1","s2","s3","dt","n1","n2","n3","n4","n5","n6","n7","n8") SELECT "s1","s2","s3","dt","n1","n2","n3","n4","n5","n6","n7","n8" FROM ext_gpload_reusable_30024be2_8bfc_11e8_83d4_0242ac110002
 2018-07-20 09:06:30|INFO|rows Inserted          = 0
 2018-07-20 09:06:30|INFO|rows Updated           = 0
@@ -19,6 +20,7 @@ LINE 1: ..."s2","s3","dt","n1","n2","n3","n4","n5","n6","n7","n8" FROM ...
 2018-07-20 09:06:30|ERROR|ERROR:  column "n8" does not exist
 LINE 1: ..."s2","s3","dt","n1","n2","n3","n4","n5","n6","n7","n8" FROM ...
                                                              ^
+DETAIL:  There is a column named "n8" in table "staging_gpload_reusable_9faa546d615fa55cc3e9e2cee6f130b0", but it cannot be referenced from this part of the query.
  encountered while running INSERT INTO staging_gpload_reusable_9faa546d615fa55cc3e9e2cee6f130b0 ("s1","s2","s3","dt","n1","n2","n3","n4","n5","n6","n7","n8") SELECT "s1","s2","s3","dt","n1","n2","n3","n4","n5","n6","n7","n8" FROM ext_gpload_reusable_30024be2_8bfc_11e8_83d4_0242ac110002
 2018-07-20 09:06:30|INFO|rows Inserted          = 0
 2018-07-20 09:06:30|INFO|rows Updated           = 0

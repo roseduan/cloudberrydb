@@ -123,11 +123,12 @@ SELECT ''::text AS ten, unique1, unique2
          ->  Vec Sort
                Output: ''::text, unique1, unique2
                Sort Key: onek.unique1
+               Vec Plan Merge:  1 child
                ->  Vec Seq Scan on public.onek
                      Output: ''::text, unique1, unique2
- Settings: optimizer = 'off'
+ Settings: optimizer = 'off', enable_parallel = 'off'
  Optimizer: Postgres query optimizer
-(12 rows)
+(13 rows)
 
 SELECT ''::text AS ten, unique1, unique2
 		FROM onek
@@ -157,21 +158,21 @@ select count() from onek;
 select * from int8_tbl limit (case when random() < 0.5 then null::bigint end);
         q1        |        q2         
 ------------------+-------------------
-              123 |               456
-              123 |  4567890123456789
  4567890123456789 |               123
  4567890123456789 |  4567890123456789
  4567890123456789 | -4567890123456789
+              123 |               456
+              123 |  4567890123456789
 (5 rows)
 
 select * from int8_tbl offset (case when random() < 0.5 then null::bigint end);
         q1        |        q2         
 ------------------+-------------------
-              123 |               456
-              123 |  4567890123456789
  4567890123456789 |               123
  4567890123456789 |  4567890123456789
  4567890123456789 | -4567890123456789
+              123 |               456
+              123 |  4567890123456789
 (5 rows)
 
 -- Test assorted cases involving backwards fetch from a LIMIT plan node
@@ -179,212 +180,49 @@ select * from int8_tbl offset (case when random() < 0.5 then null::bigint end);
 --start_ignore
 /*
  * begin;
+ * 
  * declare c1 cursor for select * from int8_tbl limit 10;
  * fetch all in c1;
- *         q1        |        q2         
- * ------------------+-------------------
- *               123 |               456
- *               123 |  4567890123456789
- *  4567890123456789 |               123
- *  4567890123456789 |  4567890123456789
- *  4567890123456789 | -4567890123456789
- * (5 rows)
- * 
  * fetch 1 in c1;
- *  q1 | q2 
- * ----+----
- * (0 rows)
- * 
  * fetch backward 1 in c1;
- *         q1        |        q2         
- * ------------------+-------------------
- *  4567890123456789 | -4567890123456789
- * (1 row)
- * 
  * fetch backward all in c1;
- *         q1        |        q2        
- * ------------------+------------------
- *  4567890123456789 | 4567890123456789
- *  4567890123456789 |              123
- *               123 | 4567890123456789
- *               123 |              456
- * (4 rows)
- * 
  * fetch backward 1 in c1;
- *  q1 | q2 
- * ----+----
- * (0 rows)
- * 
  * fetch all in c1;
- *         q1        |        q2         
- * ------------------+-------------------
- *               123 |               456
- *               123 |  4567890123456789
- *  4567890123456789 |               123
- *  4567890123456789 |  4567890123456789
- *  4567890123456789 | -4567890123456789
- * (5 rows)
  * 
  * declare c2 cursor for select * from int8_tbl limit 3;
  * fetch all in c2;
- *         q1        |        q2        
- * ------------------+------------------
- *               123 |              456
- *               123 | 4567890123456789
- *  4567890123456789 |              123
- * (3 rows)
- * 
  * fetch 1 in c2;
- *  q1 | q2 
- * ----+----
- * (0 rows)
- * 
  * fetch backward 1 in c2;
- *         q1        | q2  
- * ------------------+-----
- *  4567890123456789 | 123
- * (1 row)
- * 
  * fetch backward all in c2;
- *  q1  |        q2        
- * -----+------------------
- *  123 | 4567890123456789
- *  123 |              456
- * (2 rows)
- * 
  * fetch backward 1 in c2;
- *  q1 | q2 
- * ----+----
- * (0 rows)
- * 
  * fetch all in c2;
- *         q1        |        q2        
- * ------------------+------------------
- *               123 |              456
- *               123 | 4567890123456789
- *  4567890123456789 |              123
- * (3 rows)
  * 
  * declare c3 cursor for select * from int8_tbl offset 3;
  * fetch all in c3;
- *         q1        |        q2         
- * ------------------+-------------------
- *  4567890123456789 |  4567890123456789
- *  4567890123456789 | -4567890123456789
- * (2 rows)
- * 
  * fetch 1 in c3;
- *  q1 | q2 
- * ----+----
- * (0 rows)
- * 
  * fetch backward 1 in c3;
- *         q1        |        q2         
- * ------------------+-------------------
- *  4567890123456789 | -4567890123456789
- * (1 row)
- * 
  * fetch backward all in c3;
- *         q1        |        q2        
- * ------------------+------------------
- *  4567890123456789 | 4567890123456789
- * (1 row)
- * 
  * fetch backward 1 in c3;
- *  q1 | q2 
- * ----+----
- * (0 rows)
- * 
  * fetch all in c3;
- *         q1        |        q2         
- * ------------------+-------------------
- *  4567890123456789 |  4567890123456789
- *  4567890123456789 | -4567890123456789
- * (2 rows)
  * 
  * declare c4 cursor for select * from int8_tbl offset 10;
  * fetch all in c4;
- *  q1 | q2 
- * ----+----
- * (0 rows)
- * 
  * fetch 1 in c4;
- *  q1 | q2 
- * ----+----
- * (0 rows)
- * 
  * fetch backward 1 in c4;
- *  q1 | q2 
- * ----+----
- * (0 rows)
- * 
  * fetch backward all in c4;
- *  q1 | q2 
- * ----+----
- * (0 rows)
- * 
  * fetch backward 1 in c4;
- *  q1 | q2 
- * ----+----
- * (0 rows)
- * 
  * fetch all in c4;
- *  q1 | q2 
- * ----+----
- * (0 rows)
  * 
  * declare c5 cursor for select * from int8_tbl order by q1 fetch first 2 rows with ties;
  * fetch all in c5;
- *  q1  |        q2        
- * -----+------------------
- *  123 |              456
- *  123 | 4567890123456789
- * (2 rows)
- * 
  * fetch 1 in c5;
- *  q1 | q2 
- * ----+----
- * (0 rows)
- * 
  * fetch backward 1 in c5;
- *  q1  |        q2        
- * -----+------------------
- *  123 | 4567890123456789
- * (1 row)
- * 
  * fetch backward 1 in c5;
- *  q1  | q2  
- * -----+-----
- *  123 | 456
- * (1 row)
- * 
  * fetch all in c5;
- *  q1  |        q2        
- * -----+------------------
- *  123 | 4567890123456789
- * (1 row)
- * 
  * fetch backward all in c5;
- *  q1  |        q2        
- * -----+------------------
- *  123 | 4567890123456789
- *  123 |              456
- * (2 rows)
- * 
  * fetch all in c5;
- *  q1  |        q2        
- * -----+------------------
- *  123 |              456
- *  123 | 4567890123456789
- * (2 rows)
- * 
  * fetch backward all in c5;
- *  q1  |        q2        
- * -----+------------------
- *  123 | 4567890123456789
- *  123 |              456
- * (2 rows)
- * 
+ *
  * rollback;
  */
 --end_ignore
@@ -433,7 +271,7 @@ select unique1, unique2, nextval('testseq')
                            Sort Key: tenk1.unique2
                            ->  Seq Scan on public.tenk1
                                  Output: unique1, unique2
- Settings: optimizer = 'off'
+ Settings: optimizer = 'off', enable_parallel = 'off'
  Optimizer: Postgres query optimizer
 (16 rows)
 
@@ -473,7 +311,7 @@ select unique1, unique2, generate_series(1,10)
                            Sort Key: tenk1.unique2
                            ->  Seq Scan on public.tenk1
                                  Output: unique1, unique2
- Settings: optimizer = 'off'
+ Settings: optimizer = 'off', enable_parallel = 'off'
  Optimizer: Postgres query optimizer
 (16 rows)
 
@@ -509,8 +347,8 @@ select unique1, unique2, generate_series(1,10)
                            Sort Key: tenk1.tenthous
                            ->  Seq Scan on public.tenk1
                                  Output: unique1, unique2, tenthous
+ Settings: optimizer = 'off', enable_parallel = 'off'
  Optimizer: Postgres query optimizer
- Settings: optimizer=off
 (16 rows)
 
 select unique1, unique2, generate_series(1,10)
@@ -534,7 +372,9 @@ select generate_series(0,2) as s1, generate_series((random()*.1)::int,2) as s2;
  ProjectSet
    Output: generate_series(0, 2), generate_series(((random() * '0.1'::double precision))::integer, 2)
    ->  Result
-(3 rows)
+ Settings: optimizer = 'off', enable_parallel = 'off'
+ Optimizer: Postgres query optimizer
+(5 rows)
 
 select generate_series(0,2) as s1, generate_series((random()*.1)::int,2) as s2;
  s1 | s2 
@@ -555,7 +395,9 @@ order by s2 desc;
    ->  ProjectSet
          Output: generate_series(0, 2), generate_series(((random() * '0.1'::double precision))::integer, 2)
          ->  Result
-(6 rows)
+ Settings: optimizer = 'off', enable_parallel = 'off'
+ Optimizer: Postgres query optimizer
+(8 rows)
 
 select generate_series(0,2) as s1, generate_series((random()*.1)::int,2) as s2
 order by s2 desc;
@@ -595,7 +437,7 @@ select sum(tenthous) as s1, sum(tenthous) + random()*0 as s2
                                              Group Key: tenk1.thousand
                                              ->  Seq Scan on public.tenk1
                                                    Output: thousand, tenthous
- Settings: optimizer = 'off'
+ Settings: optimizer = 'off', enable_parallel = 'off'
  Optimizer: Postgres query optimizer
 (25 rows)
 
@@ -691,10 +533,10 @@ CREATE VIEW limit_thousand_v_1 AS SELECT thousand FROM onek WHERE thousand < 995
 ----------+---------+-----------+----------+---------+---------+-------------
  thousand | integer |           |          |         | plain   | 
 View definition:
- SELECT onek.thousand
+ SELECT thousand
    FROM onek
-  WHERE onek.thousand < 995
-  ORDER BY onek.thousand
+  WHERE thousand < 995
+  ORDER BY thousand
  OFFSET 10
  FETCH FIRST 5 ROWS WITH TIES;
 
@@ -706,10 +548,10 @@ CREATE VIEW limit_thousand_v_2 AS SELECT thousand FROM onek WHERE thousand < 995
 ----------+---------+-----------+----------+---------+---------+-------------
  thousand | integer |           |          |         | plain   | 
 View definition:
- SELECT onek.thousand
+ SELECT thousand
    FROM onek
-  WHERE onek.thousand < 995
-  ORDER BY onek.thousand
+  WHERE thousand < 995
+  ORDER BY thousand
  OFFSET 10
  LIMIT 5;
 
@@ -724,10 +566,10 @@ CREATE VIEW limit_thousand_v_3 AS SELECT thousand FROM onek WHERE thousand < 995
 ----------+---------+-----------+----------+---------+---------+-------------
  thousand | integer |           |          |         | plain   | 
 View definition:
- SELECT onek.thousand
+ SELECT thousand
    FROM onek
-  WHERE onek.thousand < 995
-  ORDER BY onek.thousand
+  WHERE thousand < 995
+  ORDER BY thousand
  FETCH FIRST (NULL::integer + 1) ROWS WITH TIES;
 
 CREATE VIEW limit_thousand_v_4 AS SELECT thousand FROM onek WHERE thousand < 995
@@ -738,10 +580,10 @@ CREATE VIEW limit_thousand_v_4 AS SELECT thousand FROM onek WHERE thousand < 995
 ----------+---------+-----------+----------+---------+---------+-------------
  thousand | integer |           |          |         | plain   | 
 View definition:
- SELECT onek.thousand
+ SELECT thousand
    FROM onek
-  WHERE onek.thousand < 995
-  ORDER BY onek.thousand
+  WHERE thousand < 995
+  ORDER BY thousand
  LIMIT ALL;
 
 -- leave these views

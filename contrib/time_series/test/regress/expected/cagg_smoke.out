@@ -209,21 +209,22 @@ SELECT count(*) AS diff_full FROM (
 -- it unpinned made the expected plan output non-deterministic.
 SET enable_hashagg = off;
 EXPLAIN (COSTS OFF) SELECT * FROM sensor_hourly WHERE device_id = 1;
-                                                                                                                QUERY PLAN                                                                                                                
-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+                                                                                                                   QUERY PLAN                                                                                                                   
+------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
  Gather Motion 1:1  (slice1; segments: 1)
    ->  Append
          ->  Seq Scan on _mat_sensor_hourly_1
                Filter: ((bucket < 'Mon Jan 01 10:00:00 2024 UTC'::timestamp with time zone) AND (device_id = 1))
          ->  GroupAggregate
-               Group Key: (time_bucket('@ 1 hour'::interval, sensor."time")), sensor.device_id
+               Group Key: (time_bucket('@ 1 hour'::interval, sensor."time"))
                ->  Sort
                      Sort Key: (time_bucket('@ 1 hour'::interval, sensor."time"))
-                     ->  Custom Scan (ChunkScan) on sensor
-                           Filter: (("time" >= 'Mon Jan 01 10:00:00 2024 UTC'::timestamp with time zone) AND (device_id = 1) AND (time_bucket('@ 1 hour'::interval, "time") >= 'Mon Jan 01 10:00:00 2024 UTC'::timestamp with time zone))
-                           Storage: Time-Series Chunk
+                     ->  Result
+                           ->  Custom Scan (ChunkScan) on sensor
+                                 Filter: (("time" >= 'Mon Jan 01 10:00:00 2024 UTC'::timestamp with time zone) AND (device_id = 1) AND (time_bucket('@ 1 hour'::interval, "time") >= 'Mon Jan 01 10:00:00 2024 UTC'::timestamp with time zone))
+                                 Storage: Time-Series Chunk
  Optimizer: Postgres query optimizer
-(12 rows)
+(13 rows)
 
 RESET enable_hashagg;
 -- ============================================================

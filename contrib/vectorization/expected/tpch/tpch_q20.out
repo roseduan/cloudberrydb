@@ -37,42 +37,42 @@ where
 	and n_name = 'RUSSIA'
 order by
 	s_name;
-                                                                                QUERY PLAN                                                                                 
----------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+                                                                             QUERY PLAN                                                                              
+---------------------------------------------------------------------------------------------------------------------------------------------------------------------
  Vec Gather Motion 3:1  (slice1; segments: 3)
    Merge Key: supplier.s_name
    ->  Vec Sort
          Sort Key: supplier.s_name
-         ->  Vec Hash Semi Join
-               Hash Cond: (supplier.s_suppkey = lineitem.l_suppkey)
-               ->  Vec Hash Join
-                     Hash Cond: (supplier.s_nationkey = nation.n_nationkey)
-                     ->  Vec Seq Scan on supplier
-                     ->  Vec Hash
-                           ->  Vec Broadcast Motion 3:3  (slice2; segments: 3)
-                                 ->  Vec Seq Scan on nation
-                                       Filter: (n_name = 'RUSSIA'::text)
+         ->  Vec Hash Right Semi Join
+               Hash Cond: (lineitem.l_suppkey = supplier.s_suppkey)
+               ->  Vec Redistribute Motion 3:3  (slice2; segments: 3)
+                     Hash Key: lineitem.l_suppkey
+                     ->  Vec Hash Join
+                           Hash Cond: ((lineitem.l_partkey = partsupp.ps_partkey) AND (lineitem.l_suppkey = partsupp.ps_suppkey))
+                           Join Filter: ((partsupp.ps_availqty)::numeric > ((0.5 * sum(lineitem.l_quantity))))
+                           ->  Vec HashAggregate
+                                 Group Key: lineitem.l_partkey, lineitem.l_suppkey
+                                 ->  Vec Redistribute Motion 3:3  (slice3; segments: 3)
+                                       Hash Key: lineitem.l_partkey, lineitem.l_suppkey
+                                       ->  Vec Seq Scan on lineitem
+                                             Filter: ((l_shipdate >= '01-01-1997'::date) AND (l_shipdate < 'Thu Jan 01 00:00:00 1998'::timestamp without time zone))
+                           ->  Vec Hash
+                                 ->  Vec Redistribute Motion 3:3  (slice4; segments: 3)
+                                       Hash Key: partsupp.ps_partkey, partsupp.ps_suppkey
+                                       ->  Vec Hash Semi Join
+                                             Hash Cond: (partsupp.ps_partkey = part.p_partkey)
+                                             ->  Vec Seq Scan on partsupp
+                                             ->  Vec Hash
+                                                   ->  Vec Seq Scan on part
+                                                         Filter: ((p_name)::text ~~ 'burnished%'::text)
                ->  Vec Hash
-                     ->  Vec Redistribute Motion 3:3  (slice3; segments: 3)
-                           Hash Key: lineitem.l_suppkey
-                           ->  Vec Hash Join
-                                 Hash Cond: ((lineitem.l_partkey = partsupp.ps_partkey) AND (lineitem.l_suppkey = partsupp.ps_suppkey))
-                                 Join Filter: ((partsupp.ps_availqty)::numeric > ((0.5 * sum(lineitem.l_quantity))))
-                                 ->  Vec HashAggregate
-                                       Group Key: lineitem.l_partkey, lineitem.l_suppkey
-                                       ->  Vec Redistribute Motion 3:3  (slice4; segments: 3)
-                                             Hash Key: lineitem.l_partkey, lineitem.l_suppkey
-                                             ->  Vec Seq Scan on lineitem
-                                                   Filter: ((l_shipdate >= '01-01-1997'::date) AND (l_shipdate < 'Thu Jan 01 00:00:00 1998'::timestamp without time zone))
-                                 ->  Vec Hash
-                                       ->  Vec Redistribute Motion 3:3  (slice5; segments: 3)
-                                             Hash Key: partsupp.ps_partkey, partsupp.ps_suppkey
-                                             ->  Vec Hash Semi Join
-                                                   Hash Cond: (partsupp.ps_partkey = part.p_partkey)
-                                                   ->  Vec Seq Scan on partsupp
-                                                   ->  Vec Hash
-                                                         ->  Vec Seq Scan on part
-                                                               Filter: ((p_name)::text ~~ 'burnished%'::text)
+                     ->  Vec Hash Join
+                           Hash Cond: (supplier.s_nationkey = nation.n_nationkey)
+                           ->  Vec Seq Scan on supplier
+                           ->  Vec Hash
+                                 ->  Vec Broadcast Motion 3:3  (slice5; segments: 3)
+                                       ->  Vec Seq Scan on nation
+                                             Filter: (n_name = 'RUSSIA'::text)
  Optimizer: Postgres query optimizer
 (35 rows)
 

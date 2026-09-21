@@ -31,12 +31,14 @@ select gp_inject_fault('execsort_sort_bounded_heap', 'reset', 2);
 -- set QueryFinishPending=true in sort_bounded_heap. This will stop sort.
 select gp_inject_fault('execsort_sort_bounded_heap', 'finish_pending', 2);
 
+set enable_parallel = off;
 -- return results although sort will be interrupted in one of the segments 
 select i1 from _tmp_table order by i2 limit 3;
+reset enable_parallel;
 
 select gp_inject_fault('execsort_sort_bounded_heap', 'status', 2);
 
--- test if shared input scan deletes memory correctly when QueryFinishPending and its child has been eagerly freed,
+-- test if Share Input Scan deletes memory correctly when QueryFinishPending and its child has been eagerly freed,
 -- where the child is a Sort node
 drop table if exists testsisc;
 create table testsisc (i1 int, i2 int, i3 int, i4 int); 
@@ -46,33 +48,37 @@ insert into testsisc select i, i % 1000, i % 100000, i % 75 from
 
 set gp_resqueue_print_operator_memory_limits=on;
 set statement_mem='2MB';
--- ORCA does not generate SharedInputScan with a Sort node underneath it. For
+-- ORCA does not generate ShareInputScan with a Sort node underneath it. For
 -- the following query, ORCA disregards the order by inside the cte definition;
 -- planner on the other hand does not.
 set optimizer=off;
 select gp_inject_fault('execshare_input_next', 'reset', 2);
--- Set QueryFinishPending to true after SharedInputScan has retrieved the first tuple. 
--- This will eagerly free the memory context of shared input scan's child node.  
+-- Set QueryFinishPending to true after ShareInputScan has retrieved the first tuple. 
+-- This will eagerly free the memory context of Share Input Scan's child node.  
 select gp_inject_fault('execshare_input_next', 'finish_pending', 2);
+
+set enable_parallel = off;
 
 with cte as (select i2 from testsisc order by i2)
 select * from cte c1, cte c2 limit 2;
 
 select gp_inject_fault('execshare_input_next', 'status', 2);
 
--- test if shared input scan deletes memory correctly when QueryFinishPending and its child has been eagerly freed,
+-- test if Share Input Scan deletes memory correctly when QueryFinishPending and its child has been eagerly freed,
 -- where the child is a Sort node and sort_mk algorithm is used
 
 
 select gp_inject_fault('execshare_input_next', 'reset', 2);
--- Set QueryFinishPending to true after SharedInputScan has retrieved the first tuple. 
--- This will eagerly free the memory context of shared input scan's child node.  
+-- Set QueryFinishPending to true after ShareInputScan has retrieved the first tuple. 
+-- This will eagerly free the memory context of Share Input Scan's child node.  
 select gp_inject_fault('execshare_input_next', 'finish_pending', 2);
 
 with cte as (select i2 from testsisc order by i2)
 select * from cte c1, cte c2 limit 2;
 
 select gp_inject_fault('execshare_input_next', 'status', 2);
+
+reset enable_parallel;
 
 -- Disable faultinjectors
 select gp_inject_fault('execsort_sort_mergeruns', 'reset', 2);
@@ -90,7 +96,6 @@ create table _tmp_table2 as select i as c1, 0 as c2 from generate_series(0, 10) 
 -- interval.
 select gp_inject_fault_infinite('fts_probe', 'skip', 1);
 select gp_request_fts_probe_scan();
-select gp_wait_until_triggered_fault('fts_probe', 1, 1);
 
 -- make one QE sleep before reading command
 select gp_inject_fault('before_read_command', 'sleep', '', '', '', 1, 1, 50, 2::smallint);

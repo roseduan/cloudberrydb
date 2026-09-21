@@ -39,7 +39,7 @@ order by
          ->  Vec GroupAggregate
                Group Key: part.p_brand, part.p_type, part.p_size
                ->  Vec Sort
-                     Sort Key: part.p_brand, part.p_type, part.p_size
+                     Sort Key: part.p_brand, part.p_type, part.p_size, partsupp.ps_suppkey
                      ->  Vec Redistribute Motion 3:3  (slice2; segments: 3)
                            Hash Key: part.p_brand, part.p_type, part.p_size
                            ->  Vec Hash Left Anti Semi (Not-In) Join

@@ -1,6 +1,7 @@
 #include<regex.h>
 #include <string.h>
 #include"transform.h"
+#include "nodes/parsenodes.h"
 #include "optimizer/cost.h"
 #include "utils/elog.h"
 #include "utils/palloc.h"
@@ -115,7 +116,7 @@ forbiden_stddev_vec(const char **query_string, const char* stddev_non_vec_partte
 		if (REG_NOERROR == r) {
 			prev_vec_stddev = (char *)GetConfigOption("vector.enable_vectorization", true, false);
 			List *guc_list = NIL;
-			A_Const aconst = {.type = T_A_Const, .val = {.type = T_String, .val.str = pstrdup("off")}};
+			A_Const aconst = {.type = T_A_Const, .val = {.sval = {.type = T_String, .sval = pstrdup("off")}}};
 			guc_list = lappend(guc_list, (void *)&aconst);
 			SetPGVariable("vector.enable_vectorization", guc_list, false);
 			break;
@@ -138,7 +139,7 @@ enable_partition_top_k(const char **query_string, const char* partition_top_k_pa
 	if (REG_NOERROR == r) {
 		prev_partition_top_k = (char*)GetConfigOption("vector.partition_top_k", true, false);
 		List *guc_list = NIL;
-		A_Const aconst = {.type = T_A_Const, .val = {.type = T_String, .val.str = pstrdup("100")}};
+		A_Const aconst = {.type = T_A_Const, .val = {.sval = {.type = T_String, .sval = pstrdup("100")}}};
 		guc_list = lappend(guc_list, (void*)&aconst);
 		SetPGVariable("vector.partition_top_k", guc_list, false);
 	}
@@ -160,7 +161,7 @@ restore_gucs(void)
 	if (prev_partition_top_k) 
 	{
 		List *guc_list = NIL;
-		A_Const aconst = {.type = T_A_Const, .val = {.type = T_String, .val.str = pstrdup(prev_partition_top_k)}};
+		A_Const aconst = {.type = T_A_Const, .val = {.sval = {.type = T_String, .sval = pstrdup(prev_partition_top_k)}}};
 		guc_list = lappend(guc_list, (void*)&aconst);
 		SetPGVariable("vector.partition_top_k", guc_list, false);
 		prev_partition_top_k = NULL;
@@ -168,7 +169,7 @@ restore_gucs(void)
 	if (prev_vec_stddev)
 	{
 		List *guc_list = NIL;
-		A_Const aconst = {.type = T_A_Const, .val = {.type = T_String, .val.str = pstrdup(prev_vec_stddev)}};
+		A_Const aconst = {.type = T_A_Const, .val = {.sval = {.type = T_String, .sval = pstrdup(prev_vec_stddev)}}};
 		guc_list = lappend(guc_list, (void *)&aconst);
 		SetPGVariable("vector.enable_vectorization", guc_list, false);
 		prev_vec_stddev = NULL;

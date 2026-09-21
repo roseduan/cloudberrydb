@@ -113,7 +113,7 @@ pg_iceberg_upsert_partition_by_option_local(PG_FUNCTION_ARGS)
 	relid = PG_GETARG_OID(0);
 	partition_by = text_to_cstring(PG_GETARG_TEXT_PP(1));
 
-	if (!pg_class_ownercheck(relid, GetUserId()))
+	if (!object_ownercheck(RelationRelationId, relid, GetUserId()))
 		aclcheck_error(ACLCHECK_NOT_OWNER, OBJECT_TABLE, get_rel_name(relid));
 
 	pg_iceberg_upsert_option_local_internal(relid,

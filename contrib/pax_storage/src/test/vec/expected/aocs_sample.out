@@ -16,11 +16,6 @@ SELECT gp_segment_id, count(dist) FROM test_aocs_tablesample_append GROUP BY 1 O
 SELECT t.id FROM test_aocs_tablesample_append AS t TABLESAMPLE SYSTEM (50) REPEATABLE (0);
  id 
 ----
- 21
- 22
- 24
- 28
- 29
  11
  12
  14
@@ -31,6 +26,11 @@ SELECT t.id FROM test_aocs_tablesample_append AS t TABLESAMPLE SYSTEM (50) REPEA
   4
   8
   9
+ 21
+ 22
+ 24
+ 28
+ 29
 (15 rows)
 
 SELECT id FROM test_aocs_tablesample_append TABLESAMPLE SYSTEM (100.0/11) REPEATABLE (0);
@@ -61,21 +61,21 @@ SELECT id FROM test_aocs_tablesample_append TABLESAMPLE SYSTEM (50) REPEATABLE (
 SELECT id FROM test_aocs_tablesample_append TABLESAMPLE BERNOULLI (50) REPEATABLE (0);
  id 
 ----
- 11
- 12
- 14
- 18
- 19
-  1
-  2
-  4
-  8
-  9
  21
  22
  24
  28
  29
+  1
+  2
+  4
+  8
+  9
+ 11
+ 12
+ 14
+ 18
+ 19
 (15 rows)
 
 SELECT id FROM test_aocs_tablesample_append TABLESAMPLE BERNOULLI (5.5) REPEATABLE (0);
@@ -112,7 +112,7 @@ CREATE VIEW test_aocs_tablesample_append_v2 AS
 --------+---------+-----------+----------+---------+---------+-------------
  id     | integer |           |          |         | plain   | 
 View definition:
- SELECT test_aocs_tablesample_append.id
+ SELECT id
    FROM test_aocs_tablesample_append TABLESAMPLE system ((10 * 2)) REPEATABLE (2);
 
 \d+ test_aocs_tablesample_append_v2
@@ -121,7 +121,7 @@ View definition:
 --------+---------+-----------+----------+---------+---------+-------------
  id     | integer |           |          |         | plain   | 
 View definition:
- SELECT test_aocs_tablesample_append.id
+ SELECT id
    FROM test_aocs_tablesample_append TABLESAMPLE system (99);
 
 -- check a sampled query doesn't affect cursor in progress
@@ -304,12 +304,12 @@ RESET enable_nestloop;
 select * from
   (values (0),(100)) v(pct),
   lateral (select count(*) from tenk1 tablesample bernoulli (pct)) ss;
-ERROR:  illegal rescan of motion node: invalid plan (nodeMotion.c:1275)
+ERROR:  illegal rescan of motion node: invalid plan (nodeMotion.c:1368)
 HINT:  Likely caused by bad NL-join, try setting enable_nestloop to off
 select * from
   (values (0),(100)) v(pct),
   lateral (select count(*) from tenk1 tablesample system (pct)) ss;
-ERROR:  illegal rescan of motion node: invalid plan (nodeMotion.c:1275)
+ERROR:  illegal rescan of motion node: invalid plan (nodeMotion.c:1368)
 HINT:  Likely caused by bad NL-join, try setting enable_nestloop to off
 explain (costs off)
 select pct, count(unique1) from
@@ -339,7 +339,8 @@ select pct, count(unique1) from
   group by pct;
  pct | count 
 -----+-------
-(0 rows)
+ 100 | 10000
+(1 row)
 
 select pct, count(unique1) from
   (values (0),(100)) v(pct),
@@ -347,7 +348,8 @@ select pct, count(unique1) from
   group by pct;
  pct | count 
 -----+-------
-(0 rows)
+ 100 | 10000
+(1 row)
 
 -- end_ignore
 -- errors
@@ -356,17 +358,17 @@ ERROR:  tablesample method foobar does not exist
 LINE 1: ... id FROM test_aocs_tablesample_append TABLESAMPLE FOOBAR (1)...
                                                              ^
 SELECT id FROM test_aocs_tablesample_append TABLESAMPLE SYSTEM (NULL);
-ERROR:  TABLESAMPLE parameter cannot be null  (seg0 slice1 127.0.0.1:7002 pid=1971276)
+ERROR:  TABLESAMPLE parameter cannot be null  (seg0 slice1 172.18.0.2:7002 pid=135579)
 SELECT id FROM test_aocs_tablesample_append TABLESAMPLE SYSTEM (50) REPEATABLE (NULL);
-ERROR:  TABLESAMPLE REPEATABLE parameter cannot be null  (seg0 slice1 127.0.0.1:7002 pid=1971276)
+ERROR:  TABLESAMPLE REPEATABLE parameter cannot be null  (seg1 slice1 172.18.0.2:7003 pid=135582)
 SELECT id FROM test_aocs_tablesample_append TABLESAMPLE BERNOULLI (-1);
-ERROR:  sample percentage must be between 0 and 100  (seg0 slice1 127.0.0.1:7002 pid=1971276)
+ERROR:  sample percentage must be between 0 and 100  (seg1 slice1 172.18.0.2:7003 pid=135582)
 SELECT id FROM test_aocs_tablesample_append TABLESAMPLE BERNOULLI (200);
-ERROR:  sample percentage must be between 0 and 100  (seg0 slice1 127.0.0.1:7002 pid=1971276)
+ERROR:  sample percentage must be between 0 and 100  (seg2 slice1 172.18.0.2:7004 pid=135585)
 SELECT id FROM test_aocs_tablesample_append TABLESAMPLE SYSTEM (-1);
-ERROR:  sample percentage must be between 0 and 100  (seg0 slice1 127.0.0.1:7002 pid=1971276)
+ERROR:  sample percentage must be between 0 and 100  (seg1 slice1 172.18.0.2:7003 pid=135582)
 SELECT id FROM test_aocs_tablesample_append TABLESAMPLE SYSTEM (200);
-ERROR:  sample percentage must be between 0 and 100  (seg0 slice1 127.0.0.1:7002 pid=1971276)
+ERROR:  sample percentage must be between 0 and 100  (seg0 slice1 172.18.0.2:7002 pid=135579)
 SELECT id FROM test_aocs_tablesample_append_v1 TABLESAMPLE BERNOULLI (1);
 ERROR:  TABLESAMPLE clause can only be applied to tables and materialized views
 LINE 1: SELECT id FROM test_aocs_tablesample_append_v1 TABLESAMPLE B...

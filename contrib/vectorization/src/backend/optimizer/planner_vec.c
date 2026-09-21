@@ -76,7 +76,7 @@ static Node *vectorize_plan_mutator(Node *node, void *context);
 static bool is_plan_vectorable(Plan* plan, List *rtable);
 static bool is_expr_vectorable(Expr* expr, void *context);
 static bool is_hash_expr_vectorable(Expr* expr, void *context);
-static bool is_relation_vectorable(SeqScan* seqscan, List *rtable, bool isForeign);
+static bool is_relation_vectorable(Scan* seqscan, List *rtable, bool isForeign);
 static bool is_iceberg_customscan_vectorable(CustomScan *cscan, List *rtable);
 static bool is_iceberg_am_relid(Oid relid);
 static bool iceberg_scan_types_vectorable(Oid relid, List *targetlist, List *qual);
@@ -1111,8 +1111,8 @@ is_plan_vectorable(Plan* plan, List *rtable)
 		case T_SeqScan:
 			{
 				SeqScan		   *seqscan = (SeqScan *) plan;
-				RangeTblEntry  *srte = (seqscan->scanrelid > 0)
-					? rt_fetch(seqscan->scanrelid, rtable) : NULL;
+				RangeTblEntry  *srte = (seqscan->scan.scanrelid > 0)
+					? rt_fetch(seqscan->scan.scanrelid, rtable) : NULL;
 
 				/*
 				 * A SeqScan over an iceberg AM relation is rewritten into an
@@ -1815,6 +1815,8 @@ is_sort_collation_vectorable(Sort *sort)
 		{
 			Oid collation = sortCollations[i];
 			HeapTuple  tp;
+			bool	   is_null;
+			Datum	   collcollate_datum;
 			Form_pg_collation collform;
 			const char *collcollate;
 			const char *localeptr = NULL;
@@ -1827,8 +1829,13 @@ is_sort_collation_vectorable(Sort *sort)
 				elog(ERROR, "cache lookup failed for collation %u", collation);
 
 			collform = (Form_pg_collation) GETSTRUCT(tp);
-			collcollate = NameStr(collform->collcollate);
-
+			collcollate_datum = SysCacheGetAttr(COLLOID, tp,
+				Anum_pg_collation_collcollate, &is_null);
+			if (collcollate_datum)
+				collcollate = TextDatumGetCString(collcollate_datum);
+			else
+				collcollate = "";
+			
 			if (strcasecmp(collcollate, "en_US.UTF-8") == 0
 					|| strcasecmp(collcollate, "en_US.utf8") == 0
 					|| strcasecmp(collcollate, "C.UTF-8") == 0
@@ -2224,7 +2231,7 @@ check_targetlist(Node *node, int varattno, PreNodeContext *context)
 		case T_SeqScan:
 			{
 				SeqScan *seqscan = (SeqScan *)node;
-				return loop_targetlist(seqscan->plan.targetlist, varattno, context);
+				return loop_targetlist(seqscan->scan.plan.targetlist, varattno, context);
 			}
 			break;
 		case T_Motion:

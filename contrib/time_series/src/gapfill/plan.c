@@ -1127,7 +1127,7 @@ adjust_column_indices(List *privdata, List *parse_tl, List *child_tlist)
 													child_tlist);
 
 			if (child_col >= 0)
-				((Value *) list_nth(privdata, 0))->val.ival = child_col;
+				intVal(list_nth(privdata, 0)) = child_col;
 			/* else: column computed in Result node above, no remap needed */
 		}
 	}
@@ -1156,7 +1156,7 @@ adjust_column_indices(List *privdata, List *parse_tl, List *child_tlist)
 														child_tlist);
 
 				if (child_col >= 0)
-					((Value *) list_nth(privdata, base_idx + i * 2))->val.ival = child_col;
+					intVal(list_nth(privdata, base_idx + i * 2)) = child_col;
 				/* else: column computed in Result node above, no remap needed */
 			}
 		}
@@ -1193,7 +1193,7 @@ adjust_column_indices(List *privdata, List *parse_tl, List *child_tlist)
 															child_tlist);
 
 					if (child_col >= 0)
-						((Value *) list_nth(privdata, base_idx + i * 2))->val.ival = child_col;
+						intVal(list_nth(privdata, base_idx + i * 2)) = child_col;
 					/* else: column computed in Result node above, no remap needed */
 				}
 			}
@@ -1220,7 +1220,7 @@ adjust_column_indices(List *privdata, List *parse_tl, List *child_tlist)
 														child_tlist);
 
 				if (child_col >= 0)
-					((Value *) list_nth(privdata, base_idx + i))->val.ival = child_col;
+					intVal(list_nth(privdata, base_idx + i)) = child_col;
 				/* else: column computed in Result node above, no remap needed */
 			}
 		}

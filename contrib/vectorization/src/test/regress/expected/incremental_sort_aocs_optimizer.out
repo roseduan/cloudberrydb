@@ -49,6 +49,8 @@ select * from (select * from tenk1 order by four) t order by four, ten;
 
 reset planner_work_mem;
 create table t(a integer, b integer);
+NOTICE:  Table doesn't have 'DISTRIBUTED BY' clause -- Using column named 'a' as the Apache Cloudberry data distribution key for this table.
+HINT:  The 'DISTRIBUTED BY' clause determines the distribution of data. Make sure column(s) chosen are the optimal data distribution key to minimize skew.
 create or replace function explain_analyze_without_memory(query text)
 returns table (out_line text) language plpgsql
 as
@@ -160,7 +162,7 @@ explain (costs off) select * from (select * from t order by a) s order by a, b l
                      Vec Sort Method:  TopK  K: 31
                      ->  Vec Seq Scan on t
  Optimizer: GPORCA
-(8 rows)
+(9 rows)
 
 select * from (select * from t order by a) s order by a, b limit 31;
  a | b  
@@ -210,7 +212,7 @@ explain (costs off) select * from (select * from t order by a) s order by a, b l
                      Vec Sort Method:  TopK  K: 32
                      ->  Vec Seq Scan on t
  Optimizer: GPORCA
-(8 rows)
+(9 rows)
 
 select * from (select * from t order by a) s order by a, b limit 32;
  a | b  
@@ -261,7 +263,7 @@ explain (costs off) select * from (select * from t order by a) s order by a, b l
                      Vec Sort Method:  TopK  K: 33
                      ->  Vec Seq Scan on t
  Optimizer: GPORCA
-(8 rows)
+(9 rows)
 
 select * from (select * from t order by a) s order by a, b limit 33;
  a | b  
@@ -313,7 +315,7 @@ explain (costs off) select * from (select * from t order by a) s order by a, b l
                      Vec Sort Method:  TopK  K: 65
                      ->  Vec Seq Scan on t
  Optimizer: GPORCA
-(8 rows)
+(9 rows)
 
 select * from (select * from t order by a) s order by a, b limit 65;
  a | b  
@@ -397,7 +399,7 @@ explain (costs off) select * from (select * from t order by a) s order by a, b l
                      Vec Sort Method:  TopK  K: 66
                      ->  Vec Seq Scan on t
  Optimizer: GPORCA
-(8 rows)
+(9 rows)
 
 select * from (select * from t order by a) s order by a, b limit 66;
  a | b  
@@ -486,7 +488,7 @@ explain (costs off) select * from (select * from t order by a) s order by a, b l
                      Vec Sort Method:  TopK  K: 55
                      ->  Vec Seq Scan on t
  Optimizer: GPORCA
-(8 rows)
+(9 rows)
 
 select * from (select * from t order by a) s order by a, b limit 55;
  a | b  
@@ -553,15 +555,20 @@ select explain_analyze_without_memory('select * from (select * from t order by a
                            explain_analyze_without_memory                            
 -------------------------------------------------------------------------------------
  Vec Limit (actual rows=55 loops=1)
+   Executor Memory: NNkB  Segments: 1  Max: NNkB (segment -1)
    ->  Vec Gather Motion 3:1  (slice1; segments: 3) (actual rows=165 loops=1)
          Merge Key: a, b
+         Executor Memory: NNkB  Segments: 1  Max: NNkB (segment -1)
          ->  Vec Limit (actual rows=55 loops=1)
+               Executor Memory: NNkB  Segments: 3  Max: NNkB (segment 0)
                ->  Vec Sort (actual rows=55 loops=1)
                      Sort Key: a, b
-                     Sort Method:  top-N heapsort  Memory: NNkB
+                     Vec Sort Method:  TopK  K: 55
+                     Executor Memory: NNkB  Segments: 3  Max: NNkB (segment 0)
                      ->  Vec Seq Scan on t (actual rows=400 loops=1)
+                           Executor Memory: NNkB  Segments: 3  Max: NNkB (segment 0)
  Optimizer: GPORCA
-(9 rows)
+(14 rows)
 
 select jsonb_pretty(explain_analyze_inc_sort_nodes_without_memory('select * from (select * from t order by a) s order by a, b limit 55'));
  jsonb_pretty 
@@ -592,7 +599,7 @@ explain (costs off) select * from (select * from t order by a) s order by a, b l
                      Vec Sort Method:  TopK  K: 70
                      ->  Vec Seq Scan on t
  Optimizer: GPORCA
-(8 rows)
+(9 rows)
 
 select * from (select * from t order by a) s order by a, b limit 70;
  a | b  
@@ -685,7 +692,7 @@ explain (costs off) select * from (select * from t order by a) s order by a, b l
                      Vec Sort Method:  TopK  K: 5
                      ->  Vec Seq Scan on t
  Optimizer: GPORCA
-(8 rows)
+(9 rows)
 
 select * from (select * from t order by a) s order by a, b limit 5;
  a | b 
@@ -725,8 +732,8 @@ explain (costs off) select * from t left join (select * from (select * from t or
 select * from t left join (select * from (select * from t order by a) v order by a, b) s on s.a = t.a where t.a in (1, 2);
  a | b | a | b 
 ---+---+---+---
- 1 | 1 | 1 | 1
  2 | 2 | 2 | 2
+ 1 | 1 | 1 | 1
 (2 rows)
 
 rollback;
@@ -735,15 +742,20 @@ select explain_analyze_without_memory('select * from (select * from t order by a
                            explain_analyze_without_memory                            
 -------------------------------------------------------------------------------------
  Vec Limit (actual rows=70 loops=1)
+   Executor Memory: NNkB  Segments: 1  Max: NNkB (segment -1)
    ->  Vec Gather Motion 3:1  (slice1; segments: 3) (actual rows=74 loops=1)
          Merge Key: a, b
+         Executor Memory: NNkB  Segments: 1  Max: NNkB (segment -1)
          ->  Vec Limit (actual rows=70 loops=1)
+               Executor Memory: NNkB  Segments: 3  Max: NNkB (segment 0)
                ->  Vec Sort (actual rows=70 loops=1)
                      Sort Key: a, b
-                     Sort Method:  top-N heapsort  Memory: NNkB
+                     Vec Sort Method:  TopK  K: 70
+                     Executor Memory: NNkB  Segments: 3  Max: NNkB (segment 0)
                      ->  Vec Seq Scan on t (actual rows=996 loops=1)
+                           Executor Memory: NNkB  Segments: 3  Max: NNkB (segment 0)
  Optimizer: GPORCA
-(9 rows)
+(14 rows)
 
 select jsonb_pretty(explain_analyze_inc_sort_nodes_without_memory('select * from (select * from t order by a) s order by a, b limit 70'));
  jsonb_pretty 
@@ -774,7 +786,7 @@ explain (costs off) select * from (select * from t order by a) s order by a, b l
                      Vec Sort Method:  TopK  K: 31
                      ->  Vec Seq Scan on t
  Optimizer: GPORCA
-(8 rows)
+(9 rows)
 
 select * from (select * from t order by a) s order by a, b limit 31;
  a | b  
@@ -824,7 +836,7 @@ explain (costs off) select * from (select * from t order by a) s order by a, b l
                      Vec Sort Method:  TopK  K: 32
                      ->  Vec Seq Scan on t
  Optimizer: GPORCA
-(8 rows)
+(9 rows)
 
 select * from (select * from t order by a) s order by a, b limit 32;
  a | b  
@@ -875,7 +887,7 @@ explain (costs off) select * from (select * from t order by a) s order by a, b l
                      Vec Sort Method:  TopK  K: 33
                      ->  Vec Seq Scan on t
  Optimizer: GPORCA
-(8 rows)
+(9 rows)
 
 select * from (select * from t order by a) s order by a, b limit 33;
  a | b  
@@ -927,7 +939,7 @@ explain (costs off) select * from (select * from t order by a) s order by a, b l
                      Vec Sort Method:  TopK  K: 65
                      ->  Vec Seq Scan on t
  Optimizer: GPORCA
-(8 rows)
+(9 rows)
 
 select * from (select * from t order by a) s order by a, b limit 65;
  a | b  
@@ -1011,7 +1023,7 @@ explain (costs off) select * from (select * from t order by a) s order by a, b l
                      Vec Sort Method:  TopK  K: 66
                      ->  Vec Seq Scan on t
  Optimizer: GPORCA
-(8 rows)
+(9 rows)
 
 select * from (select * from t order by a) s order by a, b limit 66;
  a | b  
@@ -1100,7 +1112,7 @@ explain (costs off) select * from (select * from t order by a) s order by a, b l
                      Vec Sort Method:  TopK  K: 31
                      ->  Vec Seq Scan on t
  Optimizer: GPORCA
-(8 rows)
+(9 rows)
 
 select * from (select * from t order by a) s order by a, b limit 31;
  a  | b  
@@ -1150,7 +1162,7 @@ explain (costs off) select * from (select * from t order by a) s order by a, b l
                      Vec Sort Method:  TopK  K: 32
                      ->  Vec Seq Scan on t
  Optimizer: GPORCA
-(8 rows)
+(9 rows)
 
 select * from (select * from t order by a) s order by a, b limit 32;
  a  | b  
@@ -1201,7 +1213,7 @@ explain (costs off) select * from (select * from t order by a) s order by a, b l
                      Vec Sort Method:  TopK  K: 33
                      ->  Vec Seq Scan on t
  Optimizer: GPORCA
-(8 rows)
+(9 rows)
 
 select * from (select * from t order by a) s order by a, b limit 33;
  a  | b  
@@ -1253,7 +1265,7 @@ explain (costs off) select * from (select * from t order by a) s order by a, b l
                      Vec Sort Method:  TopK  K: 65
                      ->  Vec Seq Scan on t
  Optimizer: GPORCA
-(8 rows)
+(9 rows)
 
 select * from (select * from t order by a) s order by a, b limit 65;
  a  | b  
@@ -1337,7 +1349,7 @@ explain (costs off) select * from (select * from t order by a) s order by a, b l
                      Vec Sort Method:  TopK  K: 66
                      ->  Vec Seq Scan on t
  Optimizer: GPORCA
-(8 rows)
+(9 rows)
 
 select * from (select * from t order by a) s order by a, b limit 66;
  a  | b  
@@ -1419,6 +1431,8 @@ set parallel_setup_cost = 0;
 set parallel_tuple_cost = 0;
 set max_parallel_workers_per_gather = 2;
 create table t (a int, b int, c int);
+NOTICE:  Table doesn't have 'DISTRIBUTED BY' clause -- Using column named 'a' as the Apache Cloudberry data distribution key for this table.
+HINT:  The 'DISTRIBUTED BY' clause determines the distribution of data. Make sure column(s) chosen are the optimal data distribution key to minimize skew.
 insert into t select mod(i,10),mod(i,10),i from generate_series(1,10000) s(i);
 create index on t (a);
 analyze t;
@@ -1437,7 +1451,7 @@ explain (costs off) select a,b,sum(c) from t group by 1,2 order by 1,2,3 limit 1
                            Group Key: a, b
                            ->  Vec Seq Scan on t
  Optimizer: GPORCA
-(10 rows)
+(11 rows)
 
 set enable_incremental_sort = on;
 explain (costs off) select a,b,sum(c) from t group by 1,2 order by 1,2,3 limit 1;
@@ -1454,7 +1468,7 @@ explain (costs off) select a,b,sum(c) from t group by 1,2 order by 1,2,3 limit 1
                            Group Key: a, b
                            ->  Vec Seq Scan on t
  Optimizer: GPORCA
-(10 rows)
+(11 rows)
 
 -- Incremental sort vs. set operations with varno 0
 set enable_hashagg to off;
@@ -1576,8 +1590,8 @@ from tenk1 t1
 join tenk1 t2 on t1.unique1 = t2.unique2
 join tenk1 t3 on t2.unique1 = t3.unique1
 order by count(*);
-                                     QUERY PLAN                                     
-------------------------------------------------------------------------------------
+                                    QUERY PLAN                                    
+----------------------------------------------------------------------------------
  Vec Sort
    Sort Key: (count(*))
    ->  Vec Finalize Vec Aggregate

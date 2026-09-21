@@ -11,15 +11,35 @@ include $(top_builddir)/src/Makefile.global
 # adminpack is disabled since the functionality has been imported into
 # GPDB.
 
+# FIXME: installcheck for extension pageinspect, pg_visibility, postgres_fdw,
+# seg, tsm_system_rows, tsm_system_time, xml2 is failed, which is also failed
+# in gpdb. We'll fix it if we need these plugins to work properly.
+
+# FIXME: the following are left out of SUBDIRS because they don't build yet
+# after the PG16 merge -- each needs real porting work, tracked separately
+# from the merge-conflict cleanup that restored the rest of this list:
+#   cloudberry_fdw     - postgres_fdw.c uses many removed/renamed PG16 APIs
+#                         (Value, RangeTblEntry.checkAsUser/updatedCols, etc.)
+#   pg_stat_statements  - unresolved merge conflict in pg_stat_statements.c
+#   pg_prewarm          - autoprewarm.c uses pre-PG16 BlockInfoRecord fields
+#   pg_surgery          - heap_surgery.c: implicit pg_class_ownercheck decl
+#   pgstattuple         - pgstatapprox.c has an unresolved merge conflict
+#   pg_visibility       - pg_visibility.c has an unresolved merge conflict
+#   unionstore_ext,
+#   unionstore_walredo  - use pre-PG16 BufferTag/SMgrRelationData fields
+#                         (rnode/smgr_rnode), need a RelFileLocator port
+#   time_series         - src/gapfill_plan.c uses the removed PG16 `Value` node
+
 SUBDIRS = \
 		amcheck		\
 		auth_delay	\
 		auto_explain	\
+		basic_archive	\
+		basebackup_to_shell	\
 		bloom		\
 		btree_gin	\
 		btree_gist	\
 		citext		\
-		cloudberry_fdw \
 		dblink		\
 		dict_int	\
 		dict_xsyn	\
@@ -29,7 +49,7 @@ SUBDIRS = \
 		hstore		\
 		intagg		\
 		intarray	\
-		interconnect \
+		interconnect	\
 		isn		\
 		ltree		\
 		oid2name	\
@@ -39,14 +59,9 @@ SUBDIRS = \
 		postgres_fdw \
 		pg_buffercache	\
 		pg_freespacemap \
-		pg_prewarm	\
-		pg_stat_statements \
-		pg_surgery	\
 		pg_trgm		\
-		pgcrypto	\
 		pgrowlocks	\
-		pgstattuple	\
-		pg_visibility	\
+		pg_walinspect	\
 		seg		\
 		spi		\
 		tablefunc	\
@@ -55,8 +70,6 @@ SUBDIRS = \
 		tsm_system_rows \
 		tsm_system_time \
 		unaccent	\
-		unionstore_ext  \
-		unionstore_walredo \
 		vacuumlo
 
 # Cloudberry-specific additions (to ease merge pain).
@@ -69,9 +82,9 @@ SUBDIRS += \
 		pg_tde
 
 ifeq ($(with_ssl),openssl)
-SUBDIRS += sslinfo
+SUBDIRS += pgcrypto sslinfo
 else
-ALWAYS_SUBDIRS += sslinfo
+ALWAYS_SUBDIRS += pgcrypto sslinfo
 endif
 
 ifneq ($(with_uuid),no)
@@ -158,11 +171,8 @@ else
 ALWAYS_SUBDIRS += vbf
 endif
 
-ifeq ($(enable_time_series),yes)
-SUBDIRS += time_series
-else
-ALWAYS_SUBDIRS += time_series
-endif
+# time_series is temporarily left out of SUBDIRS/ALWAYS_SUBDIRS -- see FIXME
+# above; it doesn't build yet after the PG16 merge (removed `Value` node).
 
 # Missing:
 #		start-scripts	\ (does not have a makefile)

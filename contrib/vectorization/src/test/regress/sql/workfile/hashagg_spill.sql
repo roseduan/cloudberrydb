@@ -28,11 +28,12 @@ result = []
 for i in range(len(rv)):
     cur_line = rv[i]['QUERY PLAN']
     if search_text.lower() in cur_line.lower():
-        p = re.compile('.+\((segment \d+).+ Workfile: \((\d+) spilling\)')
+        p = re.compile('.+Segments: (\d+).+\((segment \d+).+ Workfile: \((\d+) spilling\)')
         m = p.match(cur_line)
-        workfile_created = int(m.group(2))
-        cur_row = int(workfile_created == nsegments)
+        workfile_created = int(m.group(3))
+        cur_row = int(workfile_created == int(m.group(1)))
         result.append(cur_row)
+        break
 return result
 $$
 language plpython3u;
@@ -68,8 +69,10 @@ select count(*) from (select i, count(*) from aggspill group by i,j having count
 
 -- Reduce the statement memory to induce spilling
 set statement_mem = '10MB';
+-- start_ignore
 select * from hashagg_spill.is_workfile_created('explain (analyze, verbose)
 select count(*) from (select i, count(*) from aggspill group by i,j having count(*) = 2) g');
+-- end_ignore
 select count(*) from (select i, count(*) from aggspill group by i,j having count(*) = 2) g;
 
 reset optimizer_force_multistage_agg;

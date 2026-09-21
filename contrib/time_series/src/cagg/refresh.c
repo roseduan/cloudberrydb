@@ -1242,7 +1242,7 @@ cagg_refresh(PG_FUNCTION_ARGS)
 			: InvalidOid;
 
 		if (OidIsValid(view_oid) &&
-			!pg_class_ownercheck(view_oid, GetUserId()))
+			!object_ownercheck(RelationRelationId, view_oid, GetUserId()))
 			aclcheck_error(ACLCHECK_NOT_OWNER, OBJECT_MATVIEW,
 						   cagg_name_buf);
 	}

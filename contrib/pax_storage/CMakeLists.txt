@@ -16,6 +16,12 @@
 # under the License.
 cmake_minimum_required (VERSION 3.11.0)
 project(Pax)
+
+# Force GNUInstallDirs (used by the bundled yyjson subproject) to install
+# libraries to ${prefix}/lib rather than the lib64 it would otherwise pick
+# on this RHEL-derived aarch64 toolchain -- everything else in this build
+# (pax.so, greenplum_path.sh's LD_LIBRARY_PATH, ...) only looks in lib.
+set(CMAKE_INSTALL_LIBDIR lib)
 set(CMAKE_CXX_STANDARD 17)
 
 set(TOP_DIR ${PROJECT_SOURCE_DIR}/../..)
@@ -24,18 +30,28 @@ set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 # Base CXX flags
 # Note: -Wpessimizing-move is enabled by default in GCC 9+ and will be caught by -Werror
 # No need to explicitly add -Werror=pessimizing-move (which breaks GCC 8.x compatibility)
-set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wall -Wextra -Werror -Wno-unused-function -Wno-error=ignored-qualifiers -Wno-error=array-bounds -Wno-error=maybe-uninitialized -Wuninitialized -Winit-self -Wstrict-aliasing -Wno-missing-field-initializers -Wno-unused-parameter -Wno-clobbered -Wno-sized-deallocation -g")
-set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -Wall -Wno-unused-parameter -Wno-parameter-name")
+# -Wno-clobbered / -Wno-sized-deallocation / -Wno-parameter-name are GCC-only.
+# Clang on macOS errors out via -Werror,-Wunknown-warning-option, and is
+# stricter on virtual-override / overloaded-virtual / sometimes-uninitialized.
+if(APPLE)
+  set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wall -Wextra -Werror -Wno-unused-function -Wno-error=ignored-qualifiers -Wno-error=array-bounds -Wuninitialized -Winit-self -Wstrict-aliasing -Wno-missing-field-initializers -Wno-unused-parameter -Wno-unknown-warning-option -Wno-error=inconsistent-missing-override -Wno-error=overloaded-virtual -Wno-error=sometimes-uninitialized -Wno-error=unused-private-field -Wno-error=format -Wno-error=mismatched-tags -Wno-error=pessimizing-move -Wno-error=unused-but-set-variable -Wno-error=deprecated-copy -Wno-error=unused-result -g")
+  set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -Wall -Wno-unused-parameter -Wno-unknown-warning-option")
+else()
+  # -Wno-error=maybe-uninitialized: needed for GCC 8.x (Rocky Linux 8) compatibility.
+  # -Wno-error=redundant-move: GCC 9+ warns on std::move(prvalue) returns in vendored Arrow headers (arrow/util/numeric.h).
+  set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wall -Wextra -Werror -Wno-unused-function -Wno-error=ignored-qualifiers -Wno-error=array-bounds -Wno-error=maybe-uninitialized -Wno-error=redundant-move -Wuninitialized -Winit-self -Wstrict-aliasing -Wno-missing-field-initializers -Wno-unused-parameter -Wno-clobbered -Wno-sized-deallocation -g")
+  set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -Wall -Wno-unused-parameter -Wno-parameter-name")
+endif()
 
-option(USE_MANIFEST_API "Use manifest API" ON)
-option(USE_PAX_CATALOG "Use manifest API, by pax impl" OFF)
+option(USE_MANIFEST_API "Use manifest API" OFF)
+option(USE_PAX_CATALOG "Use manifest API, by pax impl" ON)
 
 # Build gtest options
 option(BUILD_GTEST "Build with google test" ON)
 option(BUILD_GBENCH "Build with google benchmark" OFF)
 
 # Build pax tools
-option(BUILD_TOOLS "Build with pax tools" ON)
+option(BUILD_TOOLS "Build with pax tools" OFF)
 
 # Build with return dictionary in record batch
 option(BUILD_RB_RET_DICT "Build with pax direct return dictionary in record batch." OFF)
@@ -72,19 +88,34 @@ message(STATUS "PAX BUILD TYPE: ${CMAKE_BUILD_TYPE}")
 
 if(BUILD_GBENCH)
   SET(BUILD_GTEST ON)
+  SET(BENCHMARK_ENABLE_INSTALL OFF) # disable benchmark install() target
 endif(BUILD_GBENCH)
+
+if (BUILD_GTEST)
+  if(APPLE)
+    # macOS clang/ld lacks several gcc/GNU-ld-only flags used below
+    # (-no-pie, -Wl,--allow-multiple-definition, -fno-access-control,
+    # -Wno-pmf-conversions). Use a clang-safe subset.
+    SET(CMAKE_C_FLAGS_DEBUG "${CMAKE_C_FLAGS_DEBUG} -fno-stack-protector -Wall -Wno-unused-function -Wno-unused-variable")
+    SET(CMAKE_CXX_FLAGS_DEBUG "${CMAKE_CXX_FLAGS_DEBUG} -fno-inline -fno-stack-protector")
+  else()
+    SET(CMAKE_C_FLAGS_DEBUG "${CMAKE_C_FLAGS_DEBUG} -no-pie -fno-stack-protector -Wall -Wno-unused-function  -Wno-unused-variable")
+    SET(CMAKE_CXX_FLAGS_DEBUG "${CMAKE_CXX_FLAGS_DEBUG} -fno-access-control -fno-inline -Wno-pmf-conversions -Wl,--allow-multiple-definition -no-pie -fno-stack-protector")
+  endif()
+endif(BUILD_GTEST)
 
 # Vec options
 CHECK_SYMBOL_EXISTS(USE_VECTORIZATION "${PG_CONFIG_HEADER_FILE}" VEC_BUILD)
 if (VEC_BUILD)
   set(VEC_HOME "${PROJECT_SOURCE_DIR}/../vectorization")
+  set(INSTALL_HOME "${CMAKE_INSTALL_PREFIX}")
 
   if (BUILD_RB_RET_DICT)
     ADD_DEFINITIONS(-DBUILD_RB_RET_DICT)
   endif(BUILD_RB_RET_DICT)
 
   ADD_DEFINITIONS(-DVEC_BUILD)
-  message(STATUS "Build pax with vectorization support, VEC_HOME=${VEC_HOME} BUILD_RB_RET_DICT=${BUILD_RB_RET_DICT}")
+  message(STATUS "Build pax with vectorization support, VEC_HOME=${VEC_HOME} INSTALL_HOME=${INSTALL_HOME}, BUILD_RB_RET_DICT=${BUILD_RB_RET_DICT}")
 else()
   message(STATUS "Build pax without vectorization support")
 endif(VEC_BUILD)

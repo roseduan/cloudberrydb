@@ -359,14 +359,14 @@ VarBlockMakerFinish(
 	{
 		int encryptDataOffset = VARBLOCK_HEADER_LEN;
 
-		if (TblspcEncryptionEnabled(storageWrite->relFileNode.node.spcNode))
+		if (TblspcEncryptionEnabled(storageWrite->relFileNode.locator.spcOid))
 			EncryptAOBlockForSpc(buffer + encryptDataOffset,
 								 bufferLen - encryptDataOffset,
-								 &storageWrite->relFileNode.node);
+								 (RelFileNode *) &storageWrite->relFileNode.locator);
 		else if (FileEncryptionEnabled)
 			EncryptAOBLock(buffer + encryptDataOffset,
 						   bufferLen - encryptDataOffset,
-						   &storageWrite->relFileNode.node);
+						   &storageWrite->relFileNode.locator);
 	}
 
 	return bufferLen;
@@ -656,7 +656,7 @@ VarBlockReaderInit(
 				   uint8 *buffer,
 				   VarBlockByteLen bufferLen,
 				   bool   needDecrypt,
-				   RelFileNode *file_node)
+				   RelFileLocator *file_node)
 {
 	VarBlockHeader *header;
 	VarBlockByteLen itemLenSum;
@@ -687,10 +687,10 @@ VarBlockReaderInit(
 	{
 		int encryptDataOffset = VARBLOCK_HEADER_LEN;
 
-		if (TblspcEncryptionEnabled(file_node->spcNode))
+		if (TblspcEncryptionEnabled(file_node->spcOid))
 			DecryptAOBlockForSpc(buffer + encryptDataOffset,
 								 bufferLen - encryptDataOffset,
-								 file_node);
+								 (RelFileNode *) file_node);
 		else if (FileEncryptionEnabled)
 			DecryptAOBlock(buffer + encryptDataOffset,
 						   bufferLen - encryptDataOffset,
@@ -886,7 +886,7 @@ VarBlockCollapseToSingleItem(
 					   source,
 					   sourceLen,
 					   	false,
-					   &storageWrite->relFileNode.node);
+					   &storageWrite->relFileNode.locator);
 
 	Assert(VarBlockReaderItemCount(&varBlockReader) == 1);
 
@@ -907,10 +907,10 @@ VarBlockCollapseToSingleItem(
 			itemPtr,
 			itemLen);
 
-	if (TblspcEncryptionEnabled(storageWrite->relFileNode.node.spcNode))
-		EncryptAOBlockForSpc(target, itemLen, &storageWrite->relFileNode.node);
+	if (TblspcEncryptionEnabled(storageWrite->relFileNode.locator.spcOid))
+		EncryptAOBlockForSpc(target, itemLen, (RelFileNode *) &storageWrite->relFileNode.locator);
 	else if (FileEncryptionEnabled)
-		EncryptAOBLock(target, itemLen, &storageWrite->relFileNode.node);
+		EncryptAOBLock(target, itemLen, &storageWrite->relFileNode.locator);
 
 	return itemLen;
 }

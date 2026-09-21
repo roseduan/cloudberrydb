@@ -111,59 +111,184 @@ set(pax_vec_src ${pax_vec_src} storage/vec_parallel_common.cc)
 
 endif()
 
-set(pax_target_include ${CMAKE_CURRENT_SOURCE_DIR} ${CBDB_INCLUDE_DIR} ${UUID_INCLUDE_DIRS})
-set(pax_target_link_libs ${UUID_LINK_LIBRARIES} orc::orc protobuf::libprotobuf zstd::libzstd_static ZLIB::ZLIB uring)
+set(pax_target_include ${ZTSD_HEADER} ${CMAKE_CURRENT_SOURCE_DIR} ${CBDB_INCLUDE_DIR})
+# tabulate is header-only; the tabulate::tabulate INTERFACE target (from
+# find_package(tabulate CONFIG) in FindDependencies.cmake) carries its
+# include path, so no separate include dir is needed here.
+set(pax_target_link_libs zstd z tabulate::tabulate)
+# protobuf v22+ on macOS splits its abseil deps into separate libs;
+# pull them in via pkg-config.
+if(APPLE)
+  find_package(PkgConfig REQUIRED)
+  pkg_check_modules(PB_PC REQUIRED protobuf)
+  set(pax_target_include ${pax_target_include} ${PB_PC_INCLUDE_DIRS})
+  list(APPEND pax_target_link_libs ${PB_PC_LIBRARIES})
+else()
+  list(APPEND pax_target_link_libs protobuf ${PAX_PROTOBUF_ABSL_LIBS})
+endif()
+# liburing is Linux-only (kernel io_uring iface). macOS provides uuid_*
+# functions in libSystem, so -luuid is also Linux-only.
+if (CMAKE_SYSTEM_NAME STREQUAL "Linux")
+  list(APPEND pax_target_link_libs uuid uring)
+endif()
 if (PAX_USE_LZ4)
-  list(APPEND pax_target_link_libs LZ4::lz4_static)
+  list(APPEND pax_target_link_libs lz4)
 endif()
 set(pax_target_link_directories ${PROJECT_SOURCE_DIR}/../../src/backend/)
+if(APPLE)
+  list(APPEND pax_target_link_directories ${PB_PC_LIBRARY_DIRS})
+endif()
 
 # vec build
 if (VEC_BUILD)
+  find_package(PkgConfig REQUIRED)
+  pkg_check_modules(GLIB REQUIRED glib-2.0)
   set(pax_target_include
       ${pax_target_include}
       ${VEC_HOME}/src/include # for utils/tuptable_vec.h
+      ${INSTALL_HOME}/include  # for arrow-glib/arrow-glib.h and otehr arrow interface
       ${GLIB_INCLUDE_DIRS} # for glib-object.h
   )
+  list(GET CMAKE_PREFIX_PATH 0 PAX_THIRDPARTY_DIR)
+  set(pax_target_link_directories
+      ${pax_target_link_directories}
+      ${INSTALL_HOME}/lib
+      ${PAX_THIRDPARTY_DIR}/lib)
   set(pax_target_link_libs
       ${pax_target_link_libs}
-      Arrow::arrow_shared
-      ArrowDataset::arrow_dataset_shared
-      ${OPENTELEMETRY_LIBS}
-)
+      arrow arrow_dataset
+      orc
+      absl_log_internal_check_op
+      absl_leak_check
+      absl_die_if_null
+      absl_log_internal_conditions
+      absl_log_internal_message
+      absl_log_internal_nullguard
+      absl_examine_stack
+      absl_log_internal_format
+      absl_log_internal_proto
+      absl_log_internal_log_sink_set
+      absl_log_sink
+      absl_log_entry
+      absl_flags
+      absl_flags_internal
+      absl_flags_marshalling
+      absl_flags_reflection
+      absl_flags_config
+      absl_flags_program_name
+      absl_flags_private_handle_accessor
+      absl_flags_commandlineflag
+      absl_flags_commandlineflag_internal
+      absl_log_initialize
+      absl_log_globals
+      absl_log_internal_globals
+      absl_raw_hash_set
+      absl_hash
+      absl_city
+      absl_low_level_hash
+      absl_hashtablez_sampler
+      absl_statusor
+      absl_status
+      absl_cord
+      absl_cordz_info
+      absl_cord_internal
+      absl_cordz_functions
+      absl_exponential_biased
+      absl_cordz_handle
+      absl_crc_cord_state
+      absl_crc32c
+      absl_crc_internal
+      absl_crc_cpu_detect
+      absl_bad_optional_access
+      absl_str_format_internal
+      absl_strerror
+      absl_synchronization
+      absl_stacktrace
+      absl_symbolize
+      absl_debugging_internal
+      absl_demangle_internal
+      absl_graphcycles_internal
+      absl_kernel_timeout_internal
+      absl_malloc_internal
+      absl_time
+      absl_strings
+      absl_string_view
+      absl_throw_delegate
+      absl_strings_internal
+      absl_base
+      absl_spinlock_wait
+      absl_int128
+      absl_civil_time
+      absl_time_zone
+      absl_bad_variant_access
+      absl_raw_logging_internal
+      absl_log_severity)
 endif(VEC_BUILD)
 
-add_library(paxformat SHARED ${pax_storage_src} ${pax_clustering_src} ${pax_exceptions_src} ${pax_comm_src} ${pax_vec_src})
-
-protobuf_generate(
-        TARGET
-        paxformat
-        PROTOS ${protobuf_files}
-        IMPORT_DIRS "${CMAKE_CURRENT_SOURCE_DIR}/"
-        PROTOC_OUT_DIR "${CMAKE_CURRENT_BINARY_DIR}/"
-        OUT_VAR pax_PROTO_SOURCES
-)
-
-target_include_directories(paxformat PUBLIC ${pax_target_include} ${CMAKE_CURRENT_BINARY_DIR})
+add_library(paxformat SHARED ${PROTO_SRCS} ${pax_storage_src} ${pax_clustering_src} ${pax_exceptions_src} ${pax_comm_src} ${pax_vec_src})
+target_include_directories(paxformat PUBLIC ${pax_target_include})
 target_link_directories(paxformat PUBLIC ${pax_target_link_directories})
-target_link_libraries(paxformat PUBLIC ${pax_target_link_libs})
-   
+target_link_libraries(paxformat PRIVATE ${pax_target_link_libs})
+
 set_target_properties(paxformat PROPERTIES
   OUTPUT_NAME paxformat)
+if(APPLE)
+  # PAX C++ code calls PG backend functions (write_stderr,
+  # xlog_check_consistency_hook, ...). On Linux ld defers unresolved
+  # references in .so; macOS ld rejects them unless told otherwise.
+  # Defer them to load time so paxformat is usable wherever PG symbols
+  # are provided.
+  set_target_properties(paxformat PROPERTIES
+    LINK_FLAGS "-Wl,-undefined,dynamic_lookup")
+endif()
+add_dependencies(paxformat generate_protobuf)
 
-set(PAX_PROTO_HEADERS
-    ${CMAKE_CURRENT_BINARY_DIR}/storage/proto/micro_partition_stats.pb.h
-    ${CMAKE_CURRENT_BINARY_DIR}/storage/proto/orc_proto.pb.h
-    ${CMAKE_CURRENT_BINARY_DIR}/storage/proto/pax.pb.h
+# export headers
+set(PAX_COMM_HEADERS
+  comm/bitmap.h
+  comm/cbdb_api.h
+  comm/log.h
+  comm/cbdb_wrappers.h
+  comm/pax_rel.h
+  comm/pax_memory.h
+  comm/guc.h
 )
 
-install(FILES ${PAX_PROTO_HEADERS}
-        DESTINATION ${CMAKE_INSTALL_PREFIX}/include/pax/storage/proto
+set(PAX_EXCEPTION_HEADERS
+  exceptions/CException.h
 )
 
-install(DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/
-        DESTINATION ${CMAKE_INSTALL_PREFIX}/include/pax
-        FILES_MATCHING PATTERN "*.h")
+set(PAX_CLUSTERING_HEADERS
+  clustering/clustering.h
+  clustering/clustering_reader.h
+  clustering/clustering_writer.h
+  clustering/index_clustering.h
+  clustering/lexical_clustering.h
+  clustering/zorder_clustering.h
+  clustering/zorder_utils.h
+)
+
+# TODO(gongxun):
+# We should explicitly specify the headers
+# that need to be exported, and use the syntax of
+# install(FILES,...) to install the header files
+install(DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/storage
+  DESTINATION ${CMAKE_INSTALL_PREFIX}/include/pax
+  FILES_MATCHING
+  PATTERN "*.h"
+)
+
+install(FILES ${PAX_COMM_HEADERS}
+  DESTINATION ${CMAKE_INSTALL_PREFIX}/include/pax/comm
+)
+
+install(FILES ${PAX_EXCEPTION_HEADERS}
+  DESTINATION ${CMAKE_INSTALL_PREFIX}/include/pax/exceptions
+)
+
+install(FILES ${PAX_CLUSTERING_HEADERS}
+  DESTINATION ${CMAKE_INSTALL_PREFIX}/include/pax/clustering
+)
 
 ## install dynamic libraray
 install(TARGETS paxformat
@@ -173,4 +298,13 @@ install(TARGETS paxformat
 add_executable(paxformat_test paxformat_test.cc)
 target_include_directories(paxformat_test PUBLIC ${pax_target_include} ${CMAKE_CURRENT_SOURCE_DIR})
 add_dependencies(paxformat_test paxformat)
-target_link_libraries(paxformat_test PUBLIC paxformat postgres)
+if(APPLE)
+  # No libpostgres.so to link against on macOS; defer PG symbols to
+  # load time. The test still validates that paxformat itself is a
+  # complete dylib.
+  target_link_libraries(paxformat_test PRIVATE paxformat)
+  set_target_properties(paxformat_test PROPERTIES
+    LINK_FLAGS "-Wl,-undefined,dynamic_lookup")
+else()
+  target_link_libraries(paxformat_test PRIVATE paxformat ${pax_target_link_libs} postgres)
+endif()

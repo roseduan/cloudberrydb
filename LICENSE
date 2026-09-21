@@ -270,21 +270,18 @@ The PostgreSQL software includes:
    test-ctype LICENSE
 
       src/test/locale/test-ctype.c
-  
       see licenses/LICENSE-test-ctype.txt
 
 ----------------------------
    regex LICENSE
       
       src/backend/regex 
-  
       see licenses/LICENSE-regex.txt
 
 ----------------------------
    PostgreSQL-style License
 
       src/port/gettimeofday.c 
-  
       see licenses/LICENSE-gettimeofday.txt
 
 ================================================================================
@@ -306,14 +303,12 @@ The Greenplum Database software includes:
    Stream License
 
       gpMgmt/bin/stream/*
-
       see licenses/LICENSE-stream.txt
 
 ----------------------------
    0-clause license ("Zero Clause BSD")
 
       gpcontrib/orafce/*
-
       see licenses/LICENSE-orafce.txt
 
 ----------------------------

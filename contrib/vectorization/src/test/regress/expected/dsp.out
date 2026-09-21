@@ -241,14 +241,14 @@ select * from t2 order by 1;
  5 | 14 | 10 | abc10
 (5 rows)
 
-select attrelid::regclass, attnum, attoptions
+select attrelid::regclass, attnum, filenum, attoptions
 	from pg_attribute_encoding order by 1,2;
- attrelid | attnum |                       attoptions                        
-----------+--------+---------------------------------------------------------
- t2       |      1 | {blocksize=65536,compresstype=zlib,compresslevel=2}
- t2       |      2 | {compresstype=zlib,compresslevel=2,blocksize=32768}
- t2       |      3 | {compresstype=rle_type,compresslevel=2,blocksize=32768}
- t2       |      4 | {compresstype=zlib,blocksize=32768,compresslevel=2}
+ attrelid | attnum | filenum |                       attoptions                        
+----------+--------+---------+---------------------------------------------------------
+ t2       |      1 |       1 | {blocksize=65536,compresstype=zlib,compresslevel=2}
+ t2       |      2 |       2 | {compresstype=zlib,compresslevel=2,blocksize=32768}
+ t2       |      3 |       3 | {compresstype=rle_type,compresslevel=2,blocksize=32768}
+ t2       |      4 |       4 | {compresstype=zlib,compresslevel=2,blocksize=32768}
 (4 rows)
 
 -- SET operation in a session has higher precedence.  Also test if
@@ -312,7 +312,7 @@ partition by list(a2) subpartition by range(a1)
    subpartition sp1 start(1) end(9) with (appendonly=true,orientation=column,checksum=true,compresstype=rle_type),
    subpartition sp2 start(11) end(20) with(appendonly=true,orientation=column,checksum=true,compresstype=none))
 );
-NOTICE:  Table doesn't have 'DISTRIBUTED BY' clause -- Using column named 'id' as the Cloudberry Database data distribution key for this table.
+NOTICE:  Table doesn't have 'DISTRIBUTED BY' clause -- Using column named 'id' as the Apache Cloudberry data distribution key for this table.
 HINT:  The 'DISTRIBUTED BY' clause determines the distribution of data. Make sure column(s) chosen are the optimal data distribution key to minimize skew.
 Insert into alter_part_tab1(a1,a2,a3)
   select g, 'val1', 'Lorem ipsum dolor sit amet, consectetur adipiscing elit, sed do eiusmod tempor incididunt ut labore et dolore magna aliqua.' from generate_series(1,10) g;
@@ -383,50 +383,34 @@ create table co7(
 	b varchar encoding(compresstype=zlib,compresslevel=6),
 	c char encoding(compresstype=rle_type))
 	with (checksum=false) distributed by (a);
-select relid::regclass,compresslevel,compresstype,blocksize,checksum,columnstore
-	from pg_appendonly order by 1;
- relid | compresslevel | compresstype | blocksize | checksum | columnstore 
--------+---------------+--------------+-----------+----------+-------------
- t1    |             2 | zlib         |     32768 | t        | f
- t2    |             2 | zlib         |     32768 | t        | t
- t3    |             4 | zlib         |     32768 | f        | f
- co1   |             1 | zlib         |     32768 | t        | t
- co2   |             1 | zlib         |      8192 | t        | t
- co3   |             1 | zlib         |     32768 | t        | t
- co4   |             1 | zlib         |     32768 | t        | t
- co5   |             1 | zlib         |     32768 | t        | t
- co6   |             1 | zlib         |     32768 | t        | t
- co7   |             1 | zlib         |     32768 | f        | t
-(10 rows)
-
-select attrelid::regclass,attnum,attoptions
+select attrelid::regclass,attnum,filenum,attoptions
 	from pg_attribute_encoding order by 1,2;
- attrelid | attnum |                       attoptions                        
-----------+--------+---------------------------------------------------------
- t2       |      1 | {blocksize=65536,compresstype=zlib,compresslevel=2}
- t2       |      2 | {compresstype=zlib,compresslevel=2,blocksize=32768}
- t2       |      3 | {compresstype=rle_type,compresslevel=2,blocksize=32768}
- t2       |      4 | {compresstype=zlib,blocksize=32768,compresslevel=2}
- co1      |      1 | {compresstype=zlib,blocksize=32768,compresslevel=1}
- co1      |      2 | {compresstype=zlib,blocksize=32768,compresslevel=1}
- co2      |      1 | {blocksize=8192,compresstype=zlib,compresslevel=1}
- co2      |      2 | {blocksize=8192,compresstype=zlib,compresslevel=1}
- co3      |      1 | {blocksize=65536,compresstype=zlib,compresslevel=1}
- co3      |      2 | {compresstype=zlib,compresslevel=6,blocksize=32768}
- co3      |      3 | {compresstype=rle_type,compresslevel=1,blocksize=32768}
- co4      |      1 | {compresslevel=5,compresstype=zlib,blocksize=32768}
- co4      |      2 | {compresslevel=5,compresstype=zlib,blocksize=32768}
- co4      |      3 | {compresslevel=5,compresstype=zlib,blocksize=32768}
- co5      |      1 | {compresslevel=5,compresstype=zlib,blocksize=32768}
- co5      |      2 | {compresslevel=5,compresstype=zlib,blocksize=32768}
- co5      |      3 | {compresslevel=0,compresstype=none,blocksize=32768}
- co6      |      1 | {compresstype=rle_type,compresslevel=1,blocksize=32768}
- co6      |      2 | {compresstype=rle_type,compresslevel=1,blocksize=32768}
- co6      |      3 | {compresstype=rle_type,compresslevel=1,blocksize=32768}
- co6      |      4 | {compresstype=rle_type,compresslevel=1,blocksize=32768}
- co7      |      1 | {blocksize=8192,compresstype=none,compresslevel=0}
- co7      |      2 | {compresstype=zlib,compresslevel=6,blocksize=32768}
- co7      |      3 | {compresstype=rle_type,compresslevel=1,blocksize=32768}
+ attrelid | attnum | filenum |                       attoptions                        
+----------+--------+---------+---------------------------------------------------------
+ t2       |      1 |       1 | {blocksize=65536,compresstype=zlib,compresslevel=2}
+ t2       |      2 |       2 | {compresstype=zlib,compresslevel=2,blocksize=32768}
+ t2       |      3 |       3 | {compresstype=rle_type,compresslevel=2,blocksize=32768}
+ t2       |      4 |       4 | {compresstype=zlib,compresslevel=2,blocksize=32768}
+ co1      |      1 |       1 | {compresstype=zlib,compresslevel=1,blocksize=32768}
+ co1      |      2 |       2 | {compresstype=zlib,compresslevel=1,blocksize=32768}
+ co2      |      1 |       1 | {blocksize=8192,compresstype=zlib,compresslevel=1}
+ co2      |      2 |       2 | {blocksize=8192,compresstype=zlib,compresslevel=1}
+ co3      |      1 |       1 | {blocksize=65536,compresstype=zlib,compresslevel=1}
+ co3      |      2 |       2 | {compresstype=zlib,compresslevel=6,blocksize=32768}
+ co3      |      3 |       3 | {compresstype=rle_type,compresslevel=1,blocksize=32768}
+ co4      |      1 |       1 | {compresslevel=5,compresstype=zlib,blocksize=32768}
+ co4      |      2 |       2 | {compresslevel=5,compresstype=zlib,blocksize=32768}
+ co4      |      3 |       3 | {compresslevel=5,compresstype=zlib,blocksize=32768}
+ co5      |      1 |       1 | {compresslevel=5,compresstype=zlib,blocksize=32768}
+ co5      |      2 |       2 | {compresslevel=5,compresstype=zlib,blocksize=32768}
+ co5      |      3 |       3 | {compresslevel=0,compresstype=none,blocksize=32768}
+ co6      |      1 |       1 | {compresstype=rle_type,compresslevel=1,blocksize=32768}
+ co6      |      2 |       2 | {compresstype=rle_type,compresslevel=1,blocksize=32768}
+ co6      |      3 |       3 | {compresstype=rle_type,compresslevel=1,blocksize=32768}
+ co6      |      4 |       4 | {compresstype=rle_type,compresslevel=1,blocksize=32768}
+ co7      |      1 |       1 | {blocksize=8192,compresstype=none,compresslevel=0}
+ co7      |      2 |       2 | {compresstype=zlib,compresslevel=6,blocksize=32768}
+ co7      |      3 |       3 | {compresstype=rle_type,compresslevel=1,blocksize=32768}
 (24 rows)
 
 drop database if exists dsp3;
@@ -487,32 +471,32 @@ set default_table_access_method = ao_row;
 set gp_default_storage_options = "blocksize=32768,compresstype=none,checksum=true";
 create table co5 (a int encoding (blocksize=8192), b float)
 	with (appendonly=true,orientation=column, checksum=false) distributed by (a);
-select relid::regclass,compresslevel,compresstype,blocksize,checksum,columnstore
-	from pg_appendonly order by 1;
- relid | compresslevel | compresstype | blocksize | checksum | columnstore 
--------+---------------+--------------+-----------+----------+-------------
- co1   |             0 |              |     32768 | t        | t
- co2   |             3 | zlib         |     32768 | t        | t
- co3   |             0 |              |     32768 | t        | t
- co5   |             0 |              |     32768 | f        | t
+select c.relname, am.amname, c.relkind, c.reloptions from pg_class c left join pg_am am on (c.relam=am.oid)
+where relname in ('co1', 'co2', 'co3', 'co5') order by 1;
+ relname |  amname   | relkind |    reloptions     
+---------+-----------+---------+-------------------
+ co1     | ao_column | r       | 
+ co2     | ao_column | r       | {compresslevel=3}
+ co3     | ao_column | r       | 
+ co5     | ao_column | r       | {checksum=false}
 (4 rows)
 
-select attrelid::regclass,attnum,attoptions
+select attrelid::regclass,attnum,filenum,attoptions
 	from pg_attribute_encoding order by 1,2;
- attrelid | attnum |                       attoptions                        
-----------+--------+---------------------------------------------------------
- co1      |      1 | {compresstype=rle_type,compresslevel=1,blocksize=32768}
- co1      |      2 | {compresslevel=5,compresstype=zlib,blocksize=32768}
- co1      |      3 | {compresslevel=0,blocksize=65536,compresstype=none}
- co1      |      4 | {compresstype=none,blocksize=32768,compresslevel=0}
- co2      |      1 | {compresstype=rle_type,compresslevel=3,blocksize=32768}
- co2      |      2 | {compresslevel=5,compresstype=zlib,blocksize=32768}
- co2      |      3 | {compresslevel=0,blocksize=65536,compresstype=none}
- co2      |      4 | {compresstype=none,compresslevel=0,blocksize=32768}
- co3      |      1 | {compresstype=none,blocksize=32768,compresslevel=0}
- co3      |      2 | {compresstype=none,blocksize=32768,compresslevel=0}
- co5      |      1 | {blocksize=8192,compresstype=none,compresslevel=0}
- co5      |      2 | {compresstype=none,blocksize=32768,compresslevel=0}
+ attrelid | attnum | filenum |                       attoptions                        
+----------+--------+---------+---------------------------------------------------------
+ co1      |      1 |       1 | {compresstype=rle_type,compresslevel=1,blocksize=32768}
+ co1      |      2 |       2 | {compresslevel=5,compresstype=zlib,blocksize=32768}
+ co1      |      3 |       3 | {compresslevel=0,blocksize=65536,compresstype=none}
+ co1      |      4 |       4 | {compresstype=none,compresslevel=0,blocksize=32768}
+ co2      |      1 |       1 | {compresstype=rle_type,compresslevel=3,blocksize=32768}
+ co2      |      2 |       2 | {compresslevel=5,compresstype=zlib,blocksize=32768}
+ co2      |      3 |       3 | {compresslevel=0,blocksize=65536,compresstype=none}
+ co2      |      4 |       4 | {compresstype=none,compresslevel=0,blocksize=32768}
+ co3      |      1 |       1 | {compresstype=none,compresslevel=0,blocksize=32768}
+ co3      |      2 |       2 | {compresstype=none,compresslevel=0,blocksize=32768}
+ co5      |      1 |       1 | {blocksize=8192,compresstype=none,compresslevel=0}
+ co5      |      2 |       2 | {compresstype=none,compresslevel=0,blocksize=32768}
 (12 rows)
 
 -- misc tests
@@ -799,13 +783,13 @@ set default_table_access_method = ao_row;
 set gp_default_storage_options = "compresstype=NONE";
 create table co10 (a int, b int, c int) with (appendonly=true,orientation=column)
     distributed by (a);
-select attnum,attoptions from pg_attribute_encoding
+select attnum,filenum,attoptions from pg_attribute_encoding
     where attrelid = 'co10'::regclass order by attnum;
- attnum |                     attoptions                      
---------+-----------------------------------------------------
-      1 | {compresstype=none,blocksize=32768,compresslevel=0}
-      2 | {compresstype=none,blocksize=32768,compresslevel=0}
-      3 | {compresstype=none,blocksize=32768,compresslevel=0}
+ attnum | filenum |                     attoptions                      
+--------+---------+-----------------------------------------------------
+      1 |       1 | {compresstype=none,compresslevel=0,blocksize=32768}
+      2 |       2 | {compresstype=none,compresslevel=0,blocksize=32768}
+      3 |       3 | {compresstype=none,compresslevel=0,blocksize=32768}
 (3 rows)
 
 select compresstype from pg_appendonly where relid = 'co10'::regclass;
@@ -938,7 +922,7 @@ Distributed by: (a)
 set default_table_access_method = ao_row;
 set gp_default_storage_options = "blocksize=32768,compresstype=none,checksum=true";
 create table bitmap_table(a int, b int, c varchar);
-NOTICE:  Table doesn't have 'DISTRIBUTED BY' clause -- Using column named 'a' as the Cloudberry Database data distribution key for this table.
+NOTICE:  Table doesn't have 'DISTRIBUTED BY' clause -- Using column named 'a' as the Apache Cloudberry data distribution key for this table.
 HINT:  The 'DISTRIBUTED BY' clause determines the distribution of data. Make sure column(s) chosen are the optimal data distribution key to minimize skew.
 create index bitmap_i on bitmap_table using bitmap(b);
 -- external tables: ensure that default access methods are ignored
@@ -1049,7 +1033,7 @@ RESET gp_vmem_idle_resource_timeout;
 set default_table_access_method = ao_row;
 set gp_default_storage_options = "blocksize=32768";
 create table alter_table_reorg_ao (a int, b text);
-NOTICE:  Table doesn't have 'DISTRIBUTED BY' clause -- Using column named 'a' as the Cloudberry Database data distribution key for this table.
+NOTICE:  Table doesn't have 'DISTRIBUTED BY' clause -- Using column named 'a' as the Apache Cloudberry data distribution key for this table.
 HINT:  The 'DISTRIBUTED BY' clause determines the distribution of data. Make sure column(s) chosen are the optimal data distribution key to minimize skew.
 select c.relname, am.amname, c.relkind, c.reloptions
 	from pg_class c left join pg_am am on (c.relam = am.oid)
@@ -1073,7 +1057,7 @@ select c.relname, am.amname, c.relkind, c.reloptions
 set default_table_access_method = ao_column;
 set gp_default_storage_options = "blocksize=32768";
 create table alter_table_reorg_aoco (a int, b text);
-NOTICE:  Table doesn't have 'DISTRIBUTED BY' clause -- Using column named 'a' as the Cloudberry Database data distribution key for this table.
+NOTICE:  Table doesn't have 'DISTRIBUTED BY' clause -- Using column named 'a' as the Apache Cloudberry data distribution key for this table.
 HINT:  The 'DISTRIBUTED BY' clause determines the distribution of data. Make sure column(s) chosen are the optimal data distribution key to minimize skew.
 select c.relname, am.amname, c.relkind, c.reloptions
 	from pg_class c left join pg_am am on (c.relam = am.oid)
@@ -1096,13 +1080,13 @@ select c.relname, am.amname, c.relkind, c.reloptions
 
 -- Make sure SELECT INTO uses gp_default_storage_options GUC
 create table select_into_heap_from (a int, b text);
-NOTICE:  Table doesn't have 'DISTRIBUTED BY' clause -- Using column named 'a' as the Cloudberry Database data distribution key for this table.
+NOTICE:  Table doesn't have 'DISTRIBUTED BY' clause -- Using column named 'a' as the Apache Cloudberry data distribution key for this table.
 HINT:  The 'DISTRIBUTED BY' clause determines the distribution of data. Make sure column(s) chosen are the optimal data distribution key to minimize skew.
 insert into select_into_heap_from select i, 'aaa' from generate_series(1,50)i;
 set default_table_access_method = ao_column;
 set gp_default_storage_options = "blocksize=32768";
 select * into select_into_heap_to from select_into_heap_from;
-NOTICE:  Table doesn't have 'DISTRIBUTED BY' clause -- Using column(s) named 'a' as the Cloudberry Database data distribution key for this table.
+NOTICE:  Table doesn't have 'DISTRIBUTED BY' clause -- Using column(s) named 'a' as the Apache Cloudberry data distribution key for this table.
 HINT:  The 'DISTRIBUTED BY' clause determines the distribution of data. Make sure column(s) chosen are the optimal data distribution key to minimize skew.
 select c.relname, am.amname, c.relkind, c.reloptions
 	from pg_class c left join pg_am am on (c.relam = am.oid)
@@ -1120,7 +1104,7 @@ select count(*) from select_into_heap_to;
 
 -- Also check CTAS works fine
 create table ctas_ao_from_heap as select * from select_into_heap_from;
-NOTICE:  Table doesn't have 'DISTRIBUTED BY' clause -- Using column(s) named 'a' as the Cloudberry Database data distribution key for this table.
+NOTICE:  Table doesn't have 'DISTRIBUTED BY' clause -- Using column(s) named 'a' as the Apache Cloudberry data distribution key for this table.
 HINT:  The 'DISTRIBUTED BY' clause determines the distribution of data. Make sure column(s) chosen are the optimal data distribution key to minimize skew.
 select c.relname, am.amname, c.relkind, c.reloptions
 	from pg_class c left join pg_am am on (c.relam = am.oid)
@@ -1138,7 +1122,7 @@ select count(*) from ctas_ao_from_heap;
 
 RESET gp_default_storage_options;
 create table dsp_partition1(i int, j int, k int) with(appendonly=true) partition by range(i) (start(1) end(10) every(5));
-NOTICE:  Table doesn't have 'DISTRIBUTED BY' clause -- Using column named 'i' as the Cloudberry Database data distribution key for this table.
+NOTICE:  Table doesn't have 'DISTRIBUTED BY' clause -- Using column named 'i' as the Apache Cloudberry data distribution key for this table.
 HINT:  The 'DISTRIBUTED BY' clause determines the distribution of data. Make sure column(s) chosen are the optimal data distribution key to minimize skew.
 Insert into dsp_partition1 select i, i+1, i+2 from generate_series(1,9) i;
 select count(*) from dsp_partition1;
@@ -1152,7 +1136,7 @@ select c.relname, am.amname, c.relkind, c.reloptions
     where c.relname like 'dsp_partition1%' order by relname;
         relname         | amname | relkind | reloptions 
 ------------------------+--------+---------+------------
- dsp_partition1         |        | p       | 
+ dsp_partition1         | ao_row | p       | 
  dsp_partition1_1_prt_1 | ao_row | r       | 
  dsp_partition1_1_prt_2 | ao_row | r       | 
 (3 rows)
@@ -1173,13 +1157,13 @@ alter table dsp_partition1 add partition p4 start(16) end(18) with(appendonly=fa
 select c.relname, am.amname, c.relkind, c.reloptions
 	from pg_class c left join pg_am am on (c.relam = am.oid)
     where c.relname like 'dsp_partition1%' order by relname;
-         relname         |  amname   | relkind | reloptions 
--------------------------+-----------+---------+------------
- dsp_partition1          |           | p       | 
- dsp_partition1_1_prt_1  | ao_row    | r       | 
- dsp_partition1_1_prt_2  | ao_row    | r       | 
- dsp_partition1_1_prt_p3 | ao_column | r       | 
- dsp_partition1_1_prt_p4 | heap      | r       | 
+         relname         | amname | relkind | reloptions 
+-------------------------+--------+---------+------------
+ dsp_partition1          | ao_row | p       | 
+ dsp_partition1_1_prt_1  | ao_row | r       | 
+ dsp_partition1_1_prt_2  | ao_row | r       | 
+ dsp_partition1_1_prt_p3 | ao_row | r       | 
+ dsp_partition1_1_prt_p4 | heap   | r       | 
 (5 rows)
 
 -- Split partition
@@ -1187,33 +1171,23 @@ alter table dsp_partition1 split partition for (6) at (7) into (partition split_
 select c.relname, am.amname, c.relkind, c.reloptions
 	from pg_class c left join pg_am am on (c.relam = am.oid)
     where c.relname like 'dsp_partition1%' order by relname;
-            relname            |  amname   | relkind | reloptions 
--------------------------------+-----------+---------+------------
- dsp_partition1                |           | p       | 
- dsp_partition1_1_prt_1        | ao_row    | r       | 
- dsp_partition1_1_prt_p3       | ao_column | r       | 
- dsp_partition1_1_prt_p4       | heap      | r       | 
- dsp_partition1_1_prt_split_p1 | ao_row    | r       | 
- dsp_partition1_1_prt_split_p2 | ao_row    | r       | 
+            relname            | amname | relkind | reloptions 
+-------------------------------+--------+---------+------------
+ dsp_partition1                | ao_row | p       | 
+ dsp_partition1_1_prt_1        | ao_row | r       | 
+ dsp_partition1_1_prt_p3       | ao_row | r       | 
+ dsp_partition1_1_prt_p4       | heap   | r       | 
+ dsp_partition1_1_prt_split_p1 | ao_row | r       | 
+ dsp_partition1_1_prt_split_p2 | ao_row | r       | 
 (6 rows)
 
--- GPDB_12_MERGE_FIXME: gpcheckcat fails for dsp_partition1_1_prt_1
--- with checksum mismatch between master and segments. The reason
--- being RESET gp_default_storage_options above somehow seems not
--- working properly. So, we should fix RESET to work. Plus, also we
--- should enhance code to not use `gp_default_storage_options` guc on
--- segments. Instead master should use it and make all the decisions
--- and pass the decision to segments. This should avoid any
--- mis-matches and eliminates the need for the guc to be in-sync
--- between master and segment.
-drop table dsp_partition1;
 RESET gp_default_storage_options;
 -- cleanup
 \c postgres
 -- Test that gp_default_storage_options option must be the same on all nodes
--- GPDB_12_MERGE_FIXME: Is this really strictly necessary? There's code in
--- gpconfig to verify this specifically for gp_default_storage_options. Can
--- we remove it?
+-- NOTE: although gpconfig might have unittest to verity this, the GUC
+-- gp_default_storage_options is so important that adding tests for it here
+-- do no harm.
 -- start_matchsubs
 -- m/.*\[ERROR\]*/
 -- s/.*\[ERROR\]/[ERROR]/gm

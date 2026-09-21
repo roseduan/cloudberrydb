@@ -53,7 +53,7 @@ SELECT size, pg_size_pretty(size), pg_size_pretty(-1 * size) FROM
     10994579406847 | 10239 GB       | -10239 GB
     10994579406848 | 10 TB          | -10 TB
  11258449312612351 | 10239 TB       | -10239 TB
- 11258449312612352 | 10240 TB       | -10240 TB
+ 11258449312612352 | 10 PB          | -10 PB
 (10 rows)
 
 SELECT size, pg_size_pretty(size), pg_size_pretty(-1 * size) FROM
@@ -73,7 +73,7 @@ SELECT size, pg_size_pretty(size), pg_size_pretty(-1 * size) FROM
     10994579406847 | 10239 GB       | -10239 GB
     10994579406848 | 10 TB          | -10 TB
  11258449312612351 | 10239 TB       | -10239 TB
- 11258449312612352 | 10240 TB       | -10240 TB
+ 11258449312612352 | 10 PB          | -10 PB
 (10 rows)
 
 -- pg_size_bytes() tests
@@ -147,15 +147,15 @@ SELECT size, pg_size_bytes(size) FROM
 SELECT pg_size_bytes('1 AB');
 ERROR:  invalid size: "1 AB"
 DETAIL:  Invalid size unit: "AB".
-HINT:  Valid units are "bytes", "kB", "MB", "GB", and "TB".
+HINT:  Valid units are "bytes", "B", "kB", "MB", "GB", "TB", and "PB".
 SELECT pg_size_bytes('1 AB A');
 ERROR:  invalid size: "1 AB A"
 DETAIL:  Invalid size unit: "AB A".
-HINT:  Valid units are "bytes", "kB", "MB", "GB", and "TB".
+HINT:  Valid units are "bytes", "B", "kB", "MB", "GB", "TB", and "PB".
 SELECT pg_size_bytes('1 AB A    ');
 ERROR:  invalid size: "1 AB A    "
 DETAIL:  Invalid size unit: "AB A".
-HINT:  Valid units are "bytes", "kB", "MB", "GB", and "TB".
+HINT:  Valid units are "bytes", "B", "kB", "MB", "GB", "TB", and "PB".
 SELECT pg_size_bytes('9223372036854775807.9');
 ERROR:  bigint out of range
 SELECT pg_size_bytes('1e100');
@@ -165,7 +165,7 @@ ERROR:  value overflows numeric format
 SELECT pg_size_bytes('1 byte');  -- the singular "byte" is not supported
 ERROR:  invalid size: "1 byte"
 DETAIL:  Invalid size unit: "byte".
-HINT:  Valid units are "bytes", "kB", "MB", "GB", and "TB".
+HINT:  Valid units are "bytes", "B", "kB", "MB", "GB", "TB", and "PB".
 SELECT pg_size_bytes('');
 ERROR:  invalid size: ""
 SELECT pg_size_bytes('kb');
@@ -183,6 +183,6 @@ ERROR:  invalid size: ".+912"
 SELECT pg_size_bytes('+912+ kB');
 ERROR:  invalid size: "+912+ kB"
 DETAIL:  Invalid size unit: "+ kB".
-HINT:  Valid units are "bytes", "kB", "MB", "GB", and "TB".
+HINT:  Valid units are "bytes", "B", "kB", "MB", "GB", "TB", and "PB".
 SELECT pg_size_bytes('++123 kB');
 ERROR:  invalid size: "++123 kB"

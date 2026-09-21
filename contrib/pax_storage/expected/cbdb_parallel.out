@@ -2,7 +2,7 @@
 -- CBDB PARALLEL
 -- Test CBDB style parallel plan.
 -- GUCs shoule be set with local, do not disturb other parallel plans.
--- Should not use force_parallel_mode as it will ignore plan and check results only.
+-- Should not use debug_parallel_query as it will ignore plan and check results only.
 -- We want to check plan in this file!
 -- If there is need to do that, set it local inside a transaction.
 -- Set optimizer off in this file, ORCA parallel is not supported.
@@ -31,7 +31,7 @@
 --  12  CdbLocusType_HashedWorkers
 --
 --
-set force_parallel_mode = 0;
+set debug_parallel_query = 0;
 set optimizer = off;
 create schema test_parallel;
 set search_path to test_parallel;
@@ -335,7 +335,7 @@ set local enable_parallel = on;
 create index on t1(c2);
 insert into t1 select i, i from generate_series(1, 1000000) i;
 analyze t1;
-set local force_parallel_mode = 1;
+set local debug_parallel_query = 1;
 set local enable_seqscan = off;
 explain(locus, costs off) select c2 from t1;
                       QUERY PLAN                      
@@ -736,15 +736,6 @@ explain(locus, costs off) select * from rt1 join t1 on rt1.a = t1.b join rt3 on 
 select * from rt1 join t1 on rt1.a = t1.b join rt3 on rt3.a = t1.b;
  a  | b  | a  | b  | a  | b  
 ----+----+----+----+----+----
-  5 |  6 |  5 |  5 |  5 |  6
-  6 |  7 |  6 |  6 |  6 |  7
-  9 | 10 |  9 |  9 |  9 | 10
- 10 | 11 | 10 | 10 | 10 | 11
-  6 |  7 |  5 |  6 |  6 |  7
-  7 |  8 |  6 |  7 |  7 |  8
- 10 | 11 |  9 | 10 | 10 | 11
-  1 |  2 |  1 |  1 |  1 |  2
-  2 |  3 |  1 |  2 |  2 |  3
   2 |  3 |  2 |  2 |  2 |  3
   3 |  4 |  3 |  3 |  3 |  4
   4 |  5 |  4 |  4 |  4 |  5
@@ -755,6 +746,15 @@ select * from rt1 join t1 on rt1.a = t1.b join rt3 on rt3.a = t1.b;
   5 |  6 |  4 |  5 |  5 |  6
   8 |  9 |  7 |  8 |  8 |  9
   9 | 10 |  8 |  9 |  9 | 10
+  5 |  6 |  5 |  5 |  5 |  6
+  6 |  7 |  6 |  6 |  6 |  7
+  9 | 10 |  9 |  9 |  9 | 10
+ 10 | 11 | 10 | 10 | 10 | 11
+  6 |  7 |  5 |  6 |  6 |  7
+  7 |  8 |  6 |  7 |  7 |  8
+ 10 | 11 |  9 | 10 | 10 | 11
+  1 |  2 |  1 |  1 |  1 |  2
+  2 |  3 |  1 |  2 |  2 |  3
 (19 rows)
 
 -- parallel join without parallel hash
@@ -791,13 +791,6 @@ explain(locus, costs off) select * from rt1 join t1 on rt1.a = t1.b join rt3 on 
 select * from rt1 join t1 on rt1.a = t1.b join rt3 on rt3.a = t1.b;
  a  | b  | a  | b  | a  | b  
 ----+----+----+----+----+----
-  5 |  6 |  5 |  5 |  5 |  6
-  6 |  7 |  6 |  6 |  6 |  7
-  9 | 10 |  9 |  9 |  9 | 10
- 10 | 11 | 10 | 10 | 10 | 11
-  6 |  7 |  5 |  6 |  6 |  7
-  7 |  8 |  6 |  7 |  7 |  8
- 10 | 11 |  9 | 10 | 10 | 11
   1 |  2 |  1 |  1 |  1 |  2
   2 |  3 |  1 |  2 |  2 |  3
   2 |  3 |  2 |  2 |  2 |  3
@@ -810,6 +803,13 @@ select * from rt1 join t1 on rt1.a = t1.b join rt3 on rt3.a = t1.b;
   5 |  6 |  4 |  5 |  5 |  6
   8 |  9 |  7 |  8 |  8 |  9
   9 | 10 |  8 |  9 |  9 | 10
+  5 |  6 |  5 |  5 |  5 |  6
+  6 |  7 |  6 |  6 |  6 |  7
+  9 | 10 |  9 |  9 |  9 | 10
+ 10 | 11 | 10 | 10 | 10 | 11
+  6 |  7 |  5 |  6 |  6 |  7
+  7 |  8 |  6 |  7 |  7 |  8
+ 10 | 11 |  9 | 10 | 10 | 11
 (19 rows)
 
 create table t2(a int, b int) with(parallel_workers=0);
@@ -824,16 +824,16 @@ set local enable_parallel = off;
 select * from rt4 join t2 using(b);
  b  | a  | a  
 ----+----+----
+  6 |  5 |  5
+  7 |  6 |  6
+ 10 |  9 |  9
+ 11 | 10 | 10
   3 |  2 |  2
   4 |  3 |  3
   5 |  4 |  4
   8 |  7 |  7
   9 |  8 |  8
   2 |  1 |  1
-  6 |  5 |  5
-  7 |  6 |  6
- 10 |  9 |  9
- 11 | 10 | 10
 (10 rows)
 
 set local enable_parallel = on;
@@ -864,16 +864,16 @@ explain(locus, costs off) select * from rt4 join t2 using(b);
 select * from rt4 join t2 using(b);
  b  | a  | a  
 ----+----+----
-  3 |  2 |  2
-  4 |  3 |  3
-  5 |  4 |  4
-  8 |  7 |  7
-  9 |  8 |  8
   6 |  5 |  5
   7 |  6 |  6
  10 |  9 |  9
  11 | 10 | 10
   2 |  1 |  1
+  3 |  2 |  2
+  4 |  3 |  3
+  5 |  4 |  4
+  8 |  7 |  7
+  9 |  8 |  8
 (10 rows)
 
 create table t3(a int, b int) with(parallel_workers=2);
@@ -958,10 +958,10 @@ select * from t_replica_workers_2 join t_random_workers_0 using(a);
  a | b | b 
 ---+---+---
  1 | 2 | 2
- 2 | 3 | 3
  5 | 6 | 6
- 4 | 5 | 5
+ 2 | 3 | 3
  3 | 4 | 4
+ 4 | 5 | 5
 (5 rows)
 
 -- non parallel results
@@ -969,11 +969,11 @@ set local enable_parallel=false;
 select * from t_replica_workers_2 join t_random_workers_0 using(a);
  a | b | b 
 ---+---+---
- 3 | 4 | 4
- 1 | 2 | 2
  2 | 3 | 3
- 5 | 6 | 6
+ 3 | 4 | 4
  4 | 5 | 5
+ 1 | 2 | 2
+ 5 | 6 | 6
 (5 rows)
 
 abort;
@@ -1014,11 +1014,11 @@ explain(locus, costs off) select * from t_replica_workers_2 right join t_random_
 select * from t_replica_workers_2 right join t_random_workers_2 using(a);
  a | b | b 
 ---+---+---
+ 1 | 2 | 2
+ 2 | 3 | 3
  3 | 4 | 4
  5 | 6 | 6
  4 | 5 | 5
- 1 | 2 | 2
- 2 | 3 | 3
 (5 rows)
 
 -- non parallel results
@@ -1026,9 +1026,9 @@ set local enable_parallel=false;
 select * from t_replica_workers_2 right join t_random_workers_2 using(a);
  a | b | b 
 ---+---+---
+ 4 | 5 | 5
  1 | 2 | 2
  2 | 3 | 3
- 4 | 5 | 5
  3 | 4 | 4
  5 | 6 | 6
 (5 rows)
@@ -1071,9 +1071,9 @@ explain(locus, costs off) select * from t_replica_workers_2 join t_random_worker
 select * from t_replica_workers_2 join t_random_workers_2 using(a);
  a | b | b 
 ---+---+---
- 1 | 2 | 2
- 5 | 6 | 6
  2 | 3 | 3
+ 5 | 6 | 6
+ 1 | 2 | 2
  3 | 4 | 4
  4 | 5 | 5
 (5 rows)
@@ -1083,11 +1083,11 @@ set local enable_parallel=false;
 select * from t_replica_workers_2 join t_random_workers_2 using(a);
  a | b | b 
 ---+---+---
- 1 | 2 | 2
- 5 | 6 | 6
- 2 | 3 | 3
- 3 | 4 | 4
  4 | 5 | 5
+ 1 | 2 | 2
+ 3 | 4 | 4
+ 2 | 3 | 3
+ 5 | 6 | 6
 (5 rows)
 
 abort;
@@ -1437,7 +1437,7 @@ explain (locus, costs off) select * from rt1 union all select * from t1;
          ->  Result
                Locus: Strewn
                Parallel Workers: 2
-               One-Time Filter: (gp_execution_segment() = 2)
+               One-Time Filter: (gp_execution_segment() = 1)
                ->  Parallel Seq Scan on rt1
                      Locus: SegmentGeneralWorkers
                      Parallel Workers: 2
@@ -1461,7 +1461,7 @@ explain (locus, costs off) select * from rt1 union all select * from t2;
          ->  Result
                Locus: Strewn
                Parallel Workers: 2
-               One-Time Filter: (gp_execution_segment() = 2)
+               One-Time Filter: (gp_execution_segment() = 1)
                ->  Parallel Seq Scan on rt1
                      Locus: SegmentGeneralWorkers
                      Parallel Workers: 2
@@ -2191,7 +2191,7 @@ abort;
 begin;
 set local optimizer=off;
 set local enable_parallel=on;
-set local force_parallel_mode =1 ;
+set local debug_parallel_query =1 ;
 set local min_parallel_table_scan_size = 0;
 create table semi_t1 (c1 integer) with(parallel_workers=2) distributed randomly;
 create table semi_t2 (c2 integer) with(parallel_workers=2) distributed randomly;
@@ -2450,5 +2450,5 @@ abort;
 drop schema test_parallel cascade;
 -- end_ignore
 reset gp_appendonly_insert_files;
-reset force_parallel_mode;
+reset debug_parallel_query;
 reset optimizer;

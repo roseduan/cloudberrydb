@@ -8,7 +8,7 @@
  *
  * Portions Copyright (c) 2005-2008, Greenplum inc
  * Portions Copyright (c) 2012-Present VMware, Inc. or its affiliates.
- * Portions Copyright (c) 1996-2021, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2023, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * IDENTIFICATION
@@ -1001,7 +1001,6 @@ subplan_is_hashable(Plan *plan)
 	 */
 	subquery_size = plan->plan_rows *
 		(MAXALIGN(plan->plan_width) + MAXALIGN(SizeofHeapTupleHeader));
-
 	if (subquery_size > get_hash_memory_limit())
 		return false;
 
@@ -1793,7 +1792,8 @@ convert_EXISTS_sublink_to_join(PlannerInfo *root, SubLink *sublink,
 	 */
 	clause_varnos = pull_varnos(root, whereClause);
 	upper_varnos = NULL;
-	while ((varno = bms_first_member(clause_varnos)) >= 0)
+	varno = -1;
+	while ((varno = bms_next_member(clause_varnos, varno)) >= 0)
 	{
 		if (varno <= rtoffset)
 			upper_varnos = bms_add_member(upper_varnos, varno);
@@ -1808,8 +1808,12 @@ convert_EXISTS_sublink_to_join(PlannerInfo *root, SubLink *sublink,
 	if (!bms_is_subset(upper_varnos, available_rels))
 		return NULL;
 
-	/* Now we can attach the modified subquery rtable to the parent */
-	parse->rtable = list_concat(parse->rtable, subselect->rtable);
+	/*
+	 * Now we can attach the modified subquery rtable to the parent. This also
+	 * adds subquery's RTEPermissionInfos into the upper query.
+	 */
+	CombineRangeTables(&parse->rtable, &parse->rteperminfos,
+					   subselect->rtable, subselect->rteperminfos);
 
 	/*
 	 * And finally, build the JoinExpr node.
@@ -2593,7 +2597,7 @@ SS_identify_outer_params(PlannerInfo *root)
  * This is separate from SS_attach_initplans because we might conditionally
  * create more initPlans during create_plan(), depending on which Path we
  * select.  However, Paths that would generate such initPlans are expected
- * to have included their cost already.
+ * to have included their cost and parallel-safety effects already.
  */
 void
 SS_charge_for_initplans(PlannerInfo *root, RelOptInfo *final_rel)
@@ -2655,8 +2659,10 @@ SS_charge_for_initplans(PlannerInfo *root, RelOptInfo *final_rel)
  * (In principle the initPlans could go in any node at or above where they're
  * referenced; but there seems no reason to put them any lower than the
  * topmost node, so we don't bother to track exactly where they came from.)
- * We do not touch the plan node's cost; the initplans should have been
- * accounted for in path costing.
+ *
+ * We do not touch the plan node's cost or parallel_safe flag.  The initplans
+ * must have been accounted for in SS_charge_for_initplans, or by any later
+ * code that adds initplans via SS_make_initplan_from_plan.
  */
 void
 SS_attach_initplans(PlannerInfo *root, Plan *plan)
@@ -2782,7 +2788,8 @@ finalize_plan(PlannerInfo *root, Plan *plan,
 			}
 
 			upperset = bms_difference(extset, parentset);
-			while ((paramid = bms_first_member(upperset)) >= 0)
+			paramid = -1;
+			while ((paramid = bms_next_member(upperset, paramid)) >= 0)
 				initsubplan->extParam = lappend_int(initsubplan->extParam, paramid);
 		}
 	}
@@ -3089,8 +3096,6 @@ finalize_plan(PlannerInfo *root, Plan *plan,
 
 		case T_Append:
 			{
-				ListCell   *l;
-
 				foreach(l, ((Append *) plan)->appendplans)
 				{
 					context.paramids =
@@ -3106,8 +3111,6 @@ finalize_plan(PlannerInfo *root, Plan *plan,
 
 		case T_MergeAppend:
 			{
-				ListCell   *l;
-
 				foreach(l, ((MergeAppend *) plan)->mergeplans)
 				{
 					context.paramids =
@@ -3123,8 +3126,6 @@ finalize_plan(PlannerInfo *root, Plan *plan,
 
 		case T_BitmapAnd:
 			{
-				ListCell   *l;
-
 				foreach(l, ((BitmapAnd *) plan)->bitmapplans)
 				{
 					context.paramids =
@@ -3140,8 +3141,6 @@ finalize_plan(PlannerInfo *root, Plan *plan,
 
 		case T_BitmapOr:
 			{
-				ListCell   *l;
-
 				foreach(l, ((BitmapOr *) plan)->bitmapplans)
 				{
 					context.paramids =
@@ -3157,8 +3156,6 @@ finalize_plan(PlannerInfo *root, Plan *plan,
 
 		case T_NestLoop:
 			{
-				ListCell   *l;
-
 				finalize_primnode((Node *) ((Join *) plan)->joinqual,
 								  &context);
 				/* collect set of params that will be passed to right child */
@@ -3191,6 +3188,11 @@ finalize_plan(PlannerInfo *root, Plan *plan,
 		case T_Motion:
 
 			finalize_primnode((Node *) ((Motion *) plan)->hashExprs,
+							  &context);
+			break;
+
+		case T_Hash:
+			finalize_primnode((Node *) ((Hash *) plan)->hashkeys,
 							  &context);
 			break;
 
@@ -3314,7 +3316,6 @@ finalize_plan(PlannerInfo *root, Plan *plan,
 			break;
 
 		case T_ProjectSet:
-		case T_Hash:
 		case T_RuntimeFilter:
 		case T_Material:
 		case T_Sort:
@@ -3323,6 +3324,7 @@ finalize_plan(PlannerInfo *root, Plan *plan,
 		case T_Unique:
 		case T_SetOp:
 		case T_SplitUpdate:
+		case T_SplitMerge:
 		case T_TupleSplit:
 			/* no node-type-specific fields need fixing */
 			break;
@@ -3413,21 +3415,12 @@ finalize_plan(PlannerInfo *root, Plan *plan,
 				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
 				 errmsg("shareinputscan with outer refs is not supported by GPDB")));
 
-	/*
-	 * For speed at execution time, make sure extParam/allParam are actually
-	 * NULL if they are empty sets.
-	 */
-	if (bms_is_empty(plan->extParam))
-		plan->extParam = NULL;
-	if (bms_is_empty(plan->allParam))
-		plan->allParam = NULL;
-
 	return plan->allParam;
 }
 
 /*
- * finalize_primnode: add IDs of all PARAM_EXEC params appearing in the given
- * expression tree to the result set.
+ * finalize_primnode: add IDs of all PARAM_EXEC params that appear (or will
+ * appear) in the given expression tree to the result set.
  */
 static bool
 finalize_primnode(Node *node, finalize_primnode_context *context)
@@ -3444,7 +3437,26 @@ finalize_primnode(Node *node, finalize_primnode_context *context)
 		}
 		return false;			/* no more to do here */
 	}
-	if (IsA(node, SubPlan))
+	else if (IsA(node, Aggref))
+	{
+		/*
+		 * Check to see if the aggregate will be replaced by a Param
+		 * referencing a subquery output during setrefs.c.  If so, we must
+		 * account for that Param here.  (For various reasons, it's not
+		 * convenient to perform that substitution earlier than setrefs.c, nor
+		 * to perform this processing after setrefs.c.  Thus we need a wart
+		 * here.)
+		 */
+		Aggref	   *aggref = (Aggref *) node;
+		Param	   *aggparam;
+
+		aggparam = find_minmax_agg_replacement_param(context->root, aggref);
+		if (aggparam != NULL)
+			context->paramids = bms_add_member(context->paramids,
+											   aggparam->paramid);
+		/* Fall through to examine the agg's arguments */
+	}
+	else if (IsA(node, SubPlan))
 	{
 		SubPlan    *subplan = (SubPlan *) node;
 		Plan	   *plan = planner_subplan_get_plan(context->root, subplan);

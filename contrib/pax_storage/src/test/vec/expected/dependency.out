@@ -9,8 +9,11 @@
 -- DEPENDENCIES
 --
 CREATE USER regress_dep_user;
+NOTICE:  resource queue required -- using default resource queue "pg_default"
 CREATE USER regress_dep_user2;
+NOTICE:  resource queue required -- using default resource queue "pg_default"
 CREATE USER regress_dep_user3;
+NOTICE:  resource queue required -- using default resource queue "pg_default"
 CREATE GROUP regress_dep_group;
 NOTICE:  resource queue required -- using default resource queue "pg_default"
 CREATE TABLE deptest (f1 serial, f2 text) DISTRIBUTED BY (f1);
@@ -50,18 +53,25 @@ DROP TABLE deptest;
 DROP USER regress_dep_user3;
 -- Test DROP OWNED
 CREATE USER regress_dep_user0;
+NOTICE:  resource queue required -- using default resource queue "pg_default"
 CREATE USER regress_dep_user1;
+NOTICE:  resource queue required -- using default resource queue "pg_default"
 CREATE USER regress_dep_user2;
+NOTICE:  resource queue required -- using default resource queue "pg_default"
 SET SESSION AUTHORIZATION regress_dep_user0;
 -- permission denied
 DROP OWNED BY regress_dep_user1;
 ERROR:  permission denied to drop objects
+DETAIL:  Only roles with privileges of role "regress_dep_user1" may drop objects owned by it.
 DROP OWNED BY regress_dep_user0, regress_dep_user2;
 ERROR:  permission denied to drop objects
+DETAIL:  Only roles with privileges of role "regress_dep_user2" may drop objects owned by it.
 REASSIGN OWNED BY regress_dep_user0 TO regress_dep_user1;
 ERROR:  permission denied to reassign objects
+DETAIL:  Only roles with privileges of role "regress_dep_user1" may reassign objects to it.
 REASSIGN OWNED BY regress_dep_user1 TO regress_dep_user0;
 ERROR:  permission denied to reassign objects
+DETAIL:  Only roles with privileges of role "regress_dep_user1" may reassign objects owned by it.
 -- this one is allowed
 DROP OWNED BY regress_dep_user0;
 CREATE TABLE deptest1 (f1 int) DISTRIBUTED BY (f1);
@@ -96,6 +106,8 @@ GRANT CREATE ON DATABASE regression TO regress_dep_user1;
 SET SESSION AUTHORIZATION regress_dep_user1;
 CREATE SCHEMA deptest;
 CREATE TABLE deptest (a serial, b text);
+NOTICE:  Table doesn't have 'DISTRIBUTED BY' clause -- Using column named 'a' as the Apache Cloudberry data distribution key for this table.
+HINT:  The 'DISTRIBUTED BY' clause determines the distribution of data. Make sure column(s) chosen are the optimal data distribution key to minimize skew.
 ALTER DEFAULT PRIVILEGES FOR ROLE regress_dep_user1 IN SCHEMA deptest
   GRANT ALL ON TABLES TO regress_dep_user2;
 CREATE FUNCTION deptest_func() RETURNS void LANGUAGE plpgsql
@@ -103,6 +115,8 @@ CREATE FUNCTION deptest_func() RETURNS void LANGUAGE plpgsql
 CREATE TYPE deptest_enum AS ENUM ('red');
 CREATE TYPE deptest_range AS RANGE (SUBTYPE = int4);
 CREATE TABLE deptest2 (f1 int);
+NOTICE:  Table doesn't have 'DISTRIBUTED BY' clause -- Using column named 'f1' as the Apache Cloudberry data distribution key for this table.
+HINT:  The 'DISTRIBUTED BY' clause determines the distribution of data. Make sure column(s) chosen are the optimal data distribution key to minimize skew.
 -- make a serial column the hard way
 CREATE SEQUENCE ss1;
 ALTER TABLE deptest2 ALTER f1 SET DEFAULT nextval('ss1');

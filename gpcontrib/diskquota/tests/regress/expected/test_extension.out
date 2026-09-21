@@ -50,7 +50,7 @@ CREATE DATABASE dbx10 ;
 show max_worker_processes;
  max_worker_processes 
 ----------------------
- 32
+ 20
 (1 row)
 
 show diskquota.max_workers;

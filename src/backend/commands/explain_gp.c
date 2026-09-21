@@ -936,6 +936,8 @@ cdbexplain_collectStatsFromNode(PlanState *planstate, CdbExplain_SendStatCtx *ct
 	si->nloops = instr->nloops;
 	si->nfiltered1 = instr->nfiltered1;
 	si->nfiltered2 = instr->nfiltered2;
+	si->prf_work     = instr->prf_work;
+	si->nfilteredPRF = instr->nfilteredPRF;
 	si->workmemused = instr->workmemused;
 	si->workmemwanted = instr->workmemwanted;
 	si->workfileCreated = instr->workfileCreated;
@@ -1352,7 +1354,7 @@ cdbexplain_depositStatsToNode(PlanState *planstate, CdbExplain_RecvStatCtx *ctx)
 
 	instr->total = ntuples.max_total;
 	INSTR_TIME_ASSIGN(instr->firststart, ntuples.firststart_of_max_total);
-	
+
 	/*
 	 * Put winner's stats into qDisp PlanState's Instrument node.
 	 */

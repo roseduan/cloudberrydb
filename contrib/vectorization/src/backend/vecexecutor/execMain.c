@@ -38,6 +38,7 @@
 #include "vecexecutor/vec_motion_direct_send.h"
 #include "vecexecutor/vec_topk_bounds.h"
 #include "utils/numeric.h"
+#include "utils/guc.h"
 #include "utils/guc_vec.h"
 #include "storage/fd.h"
 #include "storage/ipc.h"
@@ -3926,12 +3927,61 @@ build_agg_project_options(List *targetList, List *aggInfos, PlanBuildContext *pc
 	GList *expressions = NULL;
 	Agg *agg = (Agg *) pcontext->planstate->plan;
 	gsize nkey = agg->numCols;
+	List *extra_atts = NIL;
 	g_autoptr(GArrowProjectNodeOptions) options = NULL;
 	gsize			length;
 	int				i = 0;
 	bool 			need_project = false;
 	ListCell	   *l;
 	const gchar	  **names; /* project result names */
+
+	/*
+	 * The planner removes any GROUP BY column it can prove equal to a
+	 * constant from the Agg node (e.g. "... WHERE k = 'x' GROUP BY k, j"
+	 * keeps only j in grpColIdx, and "... WHERE k = 'x' GROUP BY k" leaves
+	 * grpColIdx empty).  Arrow's aggregate emits only the grpColIdx columns
+	 * plus the aggregate results, so a constant-folded column that the upper
+	 * targetlist still references can no longer be resolved and plan
+	 * construction fails with "No match for FieldRef ... in _outagg_0".
+	 *
+	 * Re-add every such column (a bare Var in the Agg targetlist that is not
+	 * already a grpColIdx entry) as a grouping key.  Each is single-valued
+	 * at this point -- it is either constant or functionally dependent on a
+	 * real grouping column -- so grouping on it does not change the result
+	 * and it stays in the aggregate's output schema for the projection above.
+	 */
+	if (targetList != NIL)
+	{
+		ListCell   *tc;
+
+		foreach(tc, targetList)
+		{
+			TargetEntry *tle = (TargetEntry *) lfirst(tc);
+			Node	   *e = (Node *) tle->expr;
+			AttrNumber	attno;
+			bool		in_grpcols = false;
+
+			if (tle->resjunk)
+				continue;
+			while (e != NULL && IsA(e, RelabelType))
+				e = (Node *) ((RelabelType *) e)->arg;
+			if (e == NULL || !IsA(e, Var) || ((Var *) e)->varattno <= 0)
+				continue;
+			attno = ((Var *) e)->varattno;
+
+			for (int k = 0; k < agg->numCols; k++)
+			{
+				if (agg->grpColIdx[k] == attno)
+				{
+					in_grpcols = true;
+					break;
+				}
+			}
+			if (!in_grpcols && !list_member_int(extra_atts, attno))
+				extra_atts = lappend_int(extra_atts, attno);
+		}
+		nkey += list_length(extra_atts);
+	}
 
 	length = list_length(aggInfos) + nkey;
 	names = palloc(length * sizeof(gchar *));
@@ -3943,7 +3993,11 @@ build_agg_project_options(List *targetList, List *aggInfos, PlanBuildContext *pc
 		g_autoptr(GError) error = NULL;
 
 		/* group key out name is same as input name */
-		names[i] = GetSchemaName(pcontext->inputschema, agg->grpColIdx[i], pcontext->map);
+		names[i] = GetSchemaName(pcontext->inputschema,
+								 (i < agg->numCols)
+									 ? agg->grpColIdx[i]
+									 : list_nth_int(extra_atts, i - agg->numCols),
+								 pcontext->map);
 		arrow_expr = GARROW_EXPRESSION(
 				garrow_field_expression_new(names[i], &error));
 		if (error)

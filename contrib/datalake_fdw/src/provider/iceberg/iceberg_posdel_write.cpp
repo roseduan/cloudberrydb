@@ -40,7 +40,7 @@ void icebergPosDeleteWrite::setDeletePartition(void *partitionValues)
 	pendingPartition.clear();
 	foreach(lc, pv)
 	{
-		Value				 *v = (Value *) lfirst(lc);
+		String				 *v = (String *) lfirst(lc);
 		IcebergPartitionValue val;
 
 		if (v == NULL)

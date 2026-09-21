@@ -3,6 +3,8 @@ SET default_table_access_method=ao_column;
 -- TIMETZ
 --
 CREATE TABLE TIMETZ_TBL (f1 time(2) with time zone);
+NOTICE:  Table doesn't have 'DISTRIBUTED BY' clause -- Using column named 'f1' as the Apache Cloudberry data distribution key for this table.
+HINT:  The 'DISTRIBUTED BY' clause determines the distribution of data. Make sure column(s) chosen are the optimal data distribution key to minimize skew.
 INSERT INTO TIMETZ_TBL VALUES ('00:01 PDT');
 INSERT INTO TIMETZ_TBL VALUES ('01:00 PDT');
 INSERT INTO TIMETZ_TBL VALUES ('02:03 PDT');
@@ -33,18 +35,18 @@ LINE 1: INSERT INTO TIMETZ_TBL VALUES ('15:36:39 MSK m2');
 SELECT f1 AS "Time TZ" FROM TIMETZ_TBL;
     Time TZ     
 ----------------
+ 07:07:00-08
+ 15:36:39-04
  00:01:00-07
  01:00:00-07
  02:03:00-07
- 07:07:00-08
- 08:08:00-04
  11:59:00-07
+ 08:08:00-04
  12:00:00-07
  12:01:00-07
  23:59:00-07
  23:59:59.99-07
  15:36:39-05
- 15:36:39-04
 (12 rows)
 
 SELECT f1 AS "Three" FROM TIMETZ_TBL WHERE f1 < '05:06:07-07';
@@ -59,14 +61,14 @@ SELECT f1 AS "Seven" FROM TIMETZ_TBL WHERE f1 > '05:06:07-07';
      Seven      
 ----------------
  07:07:00-08
+ 15:36:39-04
  08:08:00-04
- 11:59:00-07
  12:00:00-07
  12:01:00-07
  23:59:00-07
  23:59:59.99-07
  15:36:39-05
- 15:36:39-04
+ 11:59:00-07
 (9 rows)
 
 SELECT f1 AS "None" FROM TIMETZ_TBL WHERE f1 < '00:00-07';
@@ -77,17 +79,17 @@ SELECT f1 AS "None" FROM TIMETZ_TBL WHERE f1 < '00:00-07';
 SELECT f1 AS "Ten" FROM TIMETZ_TBL WHERE f1 >= '00:00-07';
       Ten       
 ----------------
- 00:01:00-07
- 01:00:00-07
- 02:03:00-07
- 07:07:00-08
  08:08:00-04
- 11:59:00-07
  12:00:00-07
  12:01:00-07
  23:59:00-07
  23:59:59.99-07
  15:36:39-05
+ 00:01:00-07
+ 01:00:00-07
+ 02:03:00-07
+ 11:59:00-07
+ 07:07:00-08
  15:36:39-04
 (12 rows)
 
@@ -223,9 +225,9 @@ SELECT EXTRACT(HOUR        FROM TIME WITH TIME ZONE '2020-05-26 13:30:25.575401-
 (1 row)
 
 SELECT EXTRACT(DAY         FROM TIME WITH TIME ZONE '2020-05-26 13:30:25.575401-04');  -- error
-ERROR:  "time with time zone" units "day" not recognized
+ERROR:  unit "day" not supported for type time with time zone
 SELECT EXTRACT(FORTNIGHT   FROM TIME WITH TIME ZONE '2020-05-26 13:30:25.575401-04');  -- error
-ERROR:  "time with time zone" units "fortnight" not recognized
+ERROR:  unit "fortnight" not recognized for type time with time zone
 SELECT EXTRACT(TIMEZONE    FROM TIME WITH TIME ZONE '2020-05-26 13:30:25.575401-04:30');
  extract 
 ---------

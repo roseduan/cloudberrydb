@@ -133,6 +133,8 @@ INSERT 2
 
 -- recovery the nodes
 !\retcode gprecoverseg -a;
+-- start_ignore
+-- end_ignore
 (exited with code 0)
 1: select wait_until_segment_synchronized(0);
  wait_until_segment_synchronized 
@@ -141,6 +143,8 @@ INSERT 2
 (1 row)
 
 !\retcode gprecoverseg -ar;
+-- start_ignore
+-- end_ignore
 (exited with code 0)
 1: select wait_until_segment_synchronized(0);
  wait_until_segment_synchronized 
@@ -170,4 +174,6 @@ DROP
 !\retcode gpconfig -r archive_command --skipvalidation;
 (exited with code 0)
 !\retcode gpstop -rai;
+-- start_ignore
+-- end_ignore
 (exited with code 0)

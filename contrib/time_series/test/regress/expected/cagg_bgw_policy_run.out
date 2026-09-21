@@ -746,16 +746,17 @@ SELECT time_bucket('1 hour'::interval, time) AS bucket,
  WHERE time >= '2024-01-01 08:00+00'::timestamptz
    AND time <  '2024-01-01 12:00+00'::timestamptz
  GROUP BY 1, 2;
-                                                                              QUERY PLAN                                                                              
-----------------------------------------------------------------------------------------------------------------------------------------------------------------------
+                                                                                 QUERY PLAN                                                                                 
+----------------------------------------------------------------------------------------------------------------------------------------------------------------------------
  Gather Motion 3:1  (slice1; segments: 3)
    ->  HashAggregate
          Group Key: time_bucket('@ 1 hour'::interval, "time"), tags_id
-         ->  Custom Scan (ChunkScan) on m_chunk
-               Filter: (("time" >= 'Mon Jan 01 08:00:00 2024 UTC'::timestamp with time zone) AND ("time" < 'Mon Jan 01 12:00:00 2024 UTC'::timestamp with time zone))
-               Storage: Time-Series Chunk
+         ->  Result
+               ->  Custom Scan (ChunkScan) on m_chunk
+                     Filter: (("time" >= 'Mon Jan 01 08:00:00 2024 UTC'::timestamp with time zone) AND ("time" < 'Mon Jan 01 12:00:00 2024 UTC'::timestamp with time zone))
+                     Storage: Time-Series Chunk
  Optimizer: Postgres query optimizer
-(7 rows)
+(8 rows)
 
 -- Cleanup RUN-CHUNK suite
 DROP VIEW cv_chunk;

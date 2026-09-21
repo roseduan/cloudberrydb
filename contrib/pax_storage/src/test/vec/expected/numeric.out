@@ -2,15 +2,35 @@
 -- NUMERIC
 --
 CREATE TABLE num_data (id int4, val numeric(210,10));
+NOTICE:  Table doesn't have 'DISTRIBUTED BY' clause -- Using column named 'id' as the Apache Cloudberry data distribution key for this table.
+HINT:  The 'DISTRIBUTED BY' clause determines the distribution of data. Make sure column(s) chosen are the optimal data distribution key to minimize skew.
 CREATE TABLE num_exp_add (id1 int4, id2 int4, expected numeric(210,10));
+NOTICE:  Table doesn't have 'DISTRIBUTED BY' clause -- Using column named 'id1' as the Apache Cloudberry data distribution key for this table.
+HINT:  The 'DISTRIBUTED BY' clause determines the distribution of data. Make sure column(s) chosen are the optimal data distribution key to minimize skew.
 CREATE TABLE num_exp_sub (id1 int4, id2 int4, expected numeric(210,10));
+NOTICE:  Table doesn't have 'DISTRIBUTED BY' clause -- Using column named 'id1' as the Apache Cloudberry data distribution key for this table.
+HINT:  The 'DISTRIBUTED BY' clause determines the distribution of data. Make sure column(s) chosen are the optimal data distribution key to minimize skew.
 CREATE TABLE num_exp_div (id1 int4, id2 int4, expected numeric(210,10));
+NOTICE:  Table doesn't have 'DISTRIBUTED BY' clause -- Using column named 'id1' as the Apache Cloudberry data distribution key for this table.
+HINT:  The 'DISTRIBUTED BY' clause determines the distribution of data. Make sure column(s) chosen are the optimal data distribution key to minimize skew.
 CREATE TABLE num_exp_mul (id1 int4, id2 int4, expected numeric(210,10));
+NOTICE:  Table doesn't have 'DISTRIBUTED BY' clause -- Using column named 'id1' as the Apache Cloudberry data distribution key for this table.
+HINT:  The 'DISTRIBUTED BY' clause determines the distribution of data. Make sure column(s) chosen are the optimal data distribution key to minimize skew.
 CREATE TABLE num_exp_sqrt (id int4, expected numeric(210,10));
+NOTICE:  Table doesn't have 'DISTRIBUTED BY' clause -- Using column named 'id' as the Apache Cloudberry data distribution key for this table.
+HINT:  The 'DISTRIBUTED BY' clause determines the distribution of data. Make sure column(s) chosen are the optimal data distribution key to minimize skew.
 CREATE TABLE num_exp_ln (id int4, expected numeric(210,10));
+NOTICE:  Table doesn't have 'DISTRIBUTED BY' clause -- Using column named 'id' as the Apache Cloudberry data distribution key for this table.
+HINT:  The 'DISTRIBUTED BY' clause determines the distribution of data. Make sure column(s) chosen are the optimal data distribution key to minimize skew.
 CREATE TABLE num_exp_log10 (id int4, expected numeric(210,10));
+NOTICE:  Table doesn't have 'DISTRIBUTED BY' clause -- Using column named 'id' as the Apache Cloudberry data distribution key for this table.
+HINT:  The 'DISTRIBUTED BY' clause determines the distribution of data. Make sure column(s) chosen are the optimal data distribution key to minimize skew.
 CREATE TABLE num_exp_power_10_ln (id int4, expected numeric(210,10));
+NOTICE:  Table doesn't have 'DISTRIBUTED BY' clause -- Using column named 'id' as the Apache Cloudberry data distribution key for this table.
+HINT:  The 'DISTRIBUTED BY' clause determines the distribution of data. Make sure column(s) chosen are the optimal data distribution key to minimize skew.
 CREATE TABLE num_result (id1 int4, id2 int4, result numeric(210,10));
+NOTICE:  Table doesn't have 'DISTRIBUTED BY' clause -- Using column named 'id1' as the Apache Cloudberry data distribution key for this table.
+HINT:  The 'DISTRIBUTED BY' clause determines the distribution of data. Make sure column(s) chosen are the optimal data distribution key to minimize skew.
 -- ******************************
 -- * The following EXPECTED results are computed by bc(1)
 -- * with a scale of 200
@@ -732,46 +752,46 @@ FROM v AS v1(x1), v AS v2(x2) WHERE x2 != 0;
     x1     |    x2     |          quot           | mod  |    div    
 -----------+-----------+-------------------------+------+-----------
          0 |         1 |  0.00000000000000000000 |    0 |         0
-         1 |         1 |  1.00000000000000000000 |    0 |         1
-        -1 |         1 | -1.00000000000000000000 |    0 |        -1
-       4.2 |         1 |      4.2000000000000000 |  0.2 |         4
-  Infinity |         1 |                Infinity |  NaN |  Infinity
- -Infinity |         1 |               -Infinity |  NaN | -Infinity
-       NaN |         1 |                     NaN |  NaN |       NaN
          0 |        -1 |  0.00000000000000000000 |    0 |         0
-         1 |        -1 | -1.00000000000000000000 |    0 |        -1
-        -1 |        -1 |  1.00000000000000000000 |    0 |         1
-       4.2 |        -1 |     -4.2000000000000000 |  0.2 |        -4
-  Infinity |        -1 |               -Infinity |  NaN | -Infinity
- -Infinity |        -1 |                Infinity |  NaN |  Infinity
-       NaN |        -1 |                     NaN |  NaN |       NaN
          0 |       4.2 |  0.00000000000000000000 |  0.0 |         0
-         1 |       4.2 |  0.23809523809523809524 |  1.0 |         0
-        -1 |       4.2 | -0.23809523809523809524 | -1.0 |         0
-       4.2 |       4.2 |  1.00000000000000000000 |  0.0 |         1
-  Infinity |       4.2 |                Infinity |  NaN |  Infinity
- -Infinity |       4.2 |               -Infinity |  NaN | -Infinity
-       NaN |       4.2 |                     NaN |  NaN |       NaN
          0 |  Infinity |                       0 |    0 |         0
-         1 |  Infinity |                       0 |    1 |         0
-        -1 |  Infinity |                       0 |   -1 |         0
-       4.2 |  Infinity |                       0 |  4.2 |         0
-  Infinity |  Infinity |                     NaN |  NaN |       NaN
- -Infinity |  Infinity |                     NaN |  NaN |       NaN
-       NaN |  Infinity |                     NaN |  NaN |       NaN
          0 | -Infinity |                       0 |    0 |         0
-         1 | -Infinity |                       0 |    1 |         0
-        -1 | -Infinity |                       0 |   -1 |         0
-       4.2 | -Infinity |                       0 |  4.2 |         0
-  Infinity | -Infinity |                     NaN |  NaN |       NaN
- -Infinity | -Infinity |                     NaN |  NaN |       NaN
-       NaN | -Infinity |                     NaN |  NaN |       NaN
          0 |       NaN |                     NaN |  NaN |       NaN
+         1 |         1 |  1.00000000000000000000 |    0 |         1
+         1 |        -1 | -1.00000000000000000000 |    0 |        -1
+         1 |       4.2 |  0.23809523809523809524 |  1.0 |         0
+         1 |  Infinity |                       0 |    1 |         0
+         1 | -Infinity |                       0 |    1 |         0
          1 |       NaN |                     NaN |  NaN |       NaN
+        -1 |         1 | -1.00000000000000000000 |    0 |        -1
+        -1 |        -1 |  1.00000000000000000000 |    0 |         1
+        -1 |       4.2 | -0.23809523809523809524 | -1.0 |         0
+        -1 |  Infinity |                       0 |   -1 |         0
+        -1 | -Infinity |                       0 |   -1 |         0
         -1 |       NaN |                     NaN |  NaN |       NaN
+       4.2 |         1 |      4.2000000000000000 |  0.2 |         4
+       4.2 |        -1 |     -4.2000000000000000 |  0.2 |        -4
+       4.2 |       4.2 |  1.00000000000000000000 |  0.0 |         1
+       4.2 |  Infinity |                       0 |  4.2 |         0
+       4.2 | -Infinity |                       0 |  4.2 |         0
        4.2 |       NaN |                     NaN |  NaN |       NaN
+  Infinity |         1 |                Infinity |  NaN |  Infinity
+  Infinity |        -1 |               -Infinity |  NaN | -Infinity
+  Infinity |       4.2 |                Infinity |  NaN |  Infinity
+  Infinity |  Infinity |                     NaN |  NaN |       NaN
+  Infinity | -Infinity |                     NaN |  NaN |       NaN
   Infinity |       NaN |                     NaN |  NaN |       NaN
+ -Infinity |         1 |               -Infinity |  NaN | -Infinity
+ -Infinity |        -1 |                Infinity |  NaN |  Infinity
+ -Infinity |       4.2 |               -Infinity |  NaN | -Infinity
+ -Infinity |  Infinity |                     NaN |  NaN |       NaN
+ -Infinity | -Infinity |                     NaN |  NaN |       NaN
  -Infinity |       NaN |                     NaN |  NaN |       NaN
+       NaN |         1 |                     NaN |  NaN |       NaN
+       NaN |        -1 |                     NaN |  NaN |       NaN
+       NaN |       4.2 |                     NaN |  NaN |       NaN
+       NaN |  Infinity |                     NaN |  NaN |       NaN
+       NaN | -Infinity |                     NaN |  NaN |       NaN
        NaN |       NaN |                     NaN |  NaN |       NaN
 (42 rows)
 
@@ -949,44 +969,44 @@ WITH v(x) AS
 SELECT x1, x2,
   power(x1, x2)
 FROM v AS v1(x1), v AS v2(x2) WHERE x1 != 0 OR x2 >= 0;
-    x1    |    x2    |        power        
-----------+----------+---------------------
-        0 |        0 |  1.0000000000000000
-        0 |        1 |  0.0000000000000000
-        0 |        2 |  0.0000000000000000
-        0 |      4.2 |  0.0000000000000000
-        0 | Infinity |                   0
-        0 |      NaN |                 NaN
-        1 |        0 |  1.0000000000000000
-        1 |        1 |  1.0000000000000000
-        1 |        2 |  1.0000000000000000
-        1 |      4.2 |  1.0000000000000000
-        1 | Infinity |                   1
-        1 |      NaN |                   1
-        2 |        0 |  1.0000000000000000
-        2 |        1 |  2.0000000000000000
-        2 |        2 |  4.0000000000000000
-        2 |      4.2 |  18.379173679952560
-        2 | Infinity |            Infinity
-        2 |      NaN |                 NaN
-      4.2 |        0 |  1.0000000000000000
-      4.2 |        1 |  4.2000000000000000
-      4.2 |        2 | 17.6400000000000000
-      4.2 |      4.2 |  414.61691860129675
-      4.2 | Infinity |            Infinity
-      4.2 |      NaN |                 NaN
- Infinity |        0 |                   1
- Infinity |        1 |            Infinity
- Infinity |        2 |            Infinity
- Infinity |      4.2 |            Infinity
- Infinity | Infinity |            Infinity
- Infinity |      NaN |                 NaN
-      NaN |        0 |                   1
-      NaN |        1 |                 NaN
-      NaN |        2 |                 NaN
-      NaN |      4.2 |                 NaN
-      NaN | Infinity |                 NaN
-      NaN |      NaN |                 NaN
+    x1    |    x2    |       power        
+----------+----------+--------------------
+        0 |        0 | 1.0000000000000000
+        0 |        1 | 0.0000000000000000
+        0 |        2 | 0.0000000000000000
+        0 |      4.2 | 0.0000000000000000
+        0 | Infinity |                  0
+        0 |      NaN |                NaN
+        1 |        0 | 1.0000000000000000
+        1 |        1 | 1.0000000000000000
+        1 |        2 | 1.0000000000000000
+        1 |      4.2 | 1.0000000000000000
+        1 | Infinity |                  1
+        1 |      NaN |                  1
+        2 |        0 | 1.0000000000000000
+        2 |        1 | 2.0000000000000000
+        2 |        2 | 4.0000000000000000
+        2 |      4.2 | 18.379173679952560
+        2 | Infinity |           Infinity
+        2 |      NaN |                NaN
+      4.2 |        0 | 1.0000000000000000
+      4.2 |        1 | 4.2000000000000000
+      4.2 |        2 | 17.640000000000000
+      4.2 |      4.2 | 414.61691860129675
+      4.2 | Infinity |           Infinity
+      4.2 |      NaN |                NaN
+ Infinity |        0 |                  1
+ Infinity |        1 |           Infinity
+ Infinity |        2 |           Infinity
+ Infinity |      4.2 |           Infinity
+ Infinity | Infinity |           Infinity
+ Infinity |      NaN |                NaN
+      NaN |        0 |                  1
+      NaN |        1 |                NaN
+      NaN |        2 |                NaN
+      NaN |      4.2 |                NaN
+      NaN | Infinity |                NaN
+      NaN |      NaN |                NaN
 (36 rows)
 
 SELECT power('0'::numeric, '-1');
@@ -1119,6 +1139,8 @@ SELECT VARIANCE(val) FROM num_data;
 
 -- Check for appropriate rounding and overflow
 CREATE TABLE fract_only (id int, val numeric(4,4));
+NOTICE:  Table doesn't have 'DISTRIBUTED BY' clause -- Using column named 'id' as the Apache Cloudberry data distribution key for this table.
+HINT:  The 'DISTRIBUTED BY' clause determines the distribution of data. Make sure column(s) chosen are the optimal data distribution key to minimize skew.
 INSERT INTO fract_only VALUES (1, '0.0');
 INSERT INTO fract_only VALUES (2, '0.1');
 INSERT INTO fract_only VALUES (3, '1.0');	-- should fail
@@ -1144,9 +1166,9 @@ SELECT * FROM fract_only;
   1 |  0.0000
   2 |  0.1000
   4 | -0.9999
-  5 |  0.9999
   7 |  0.0000
   8 |  0.0002
+  5 |  0.9999
   9 |     NaN
 (7 rows)
 
@@ -1299,6 +1321,8 @@ SELECT '-Infinity'::numeric::int8;
 ERROR:  cannot convert infinity to bigint
 -- Simple check that ceil(), floor(), and round() work correctly
 CREATE TABLE ceil_floor_round (a numeric);
+NOTICE:  Table doesn't have 'DISTRIBUTED BY' clause -- Using column named 'a' as the Apache Cloudberry data distribution key for this table.
+HINT:  The 'DISTRIBUTED BY' clause determines the distribution of data. Make sure column(s) chosen are the optimal data distribution key to minimize skew.
 INSERT INTO ceil_floor_round VALUES ('-5.5');
 INSERT INTO ceil_floor_round VALUES ('-5.499999');
 INSERT INTO ceil_floor_round VALUES ('9.5');
@@ -1310,12 +1334,12 @@ SELECT a, ceil(a), ceiling(a), floor(a), round(a) FROM ceil_floor_round;
      a     | ceil | ceiling | floor | round 
 -----------+------+---------+-------+-------
       -5.5 |   -5 |      -5 |    -6 |    -6
- -5.499999 |   -5 |      -5 |    -6 |    -5
-       9.5 |   10 |      10 |     9 |    10
  9.4999999 |   10 |      10 |     9 |     9
        0.0 |    0 |       0 |     0 |     0
- 0.0000001 |    1 |       1 |     0 |     0
  -0.000001 |    0 |       0 |    -1 |     0
+ -5.499999 |   -5 |      -5 |    -6 |    -5
+       9.5 |   10 |      10 |     9 |    10
+ 0.0000001 |    1 |       1 |     0 |     0
 (7 rows)
 
 DROP TABLE ceil_floor_round;
@@ -1368,6 +1392,8 @@ SELECT width_bucket(0::float8, '-inf', 4.0::float8, 888);
 ERROR:  lower and upper bounds must be finite
 -- normal operation
 CREATE TABLE width_bucket_test (operand_num numeric, operand_f8 float8);
+NOTICE:  Table doesn't have 'DISTRIBUTED BY' clause -- Using column named 'operand_num' as the Apache Cloudberry data distribution key for this table.
+HINT:  The 'DISTRIBUTED BY' clause determines the distribution of data. Make sure column(s) chosen are the optimal data distribution key to minimize skew.
 COPY width_bucket_test (operand_num) FROM stdin;
 UPDATE width_bucket_test SET operand_f8 = operand_num::float8;
 SELECT
@@ -1385,25 +1411,25 @@ SELECT
     FROM width_bucket_test;
    operand_num    | wb_1 | wb_1f | wb_2 | wb_2f | wb_3 | wb_3f | wb_4 | wb_4f | wb_5 | wb_5f 
 ------------------+------+-------+------+-------+------+-------+------+-------+------+-------
+                3 |    2 |     2 |    4 |     4 |    1 |     1 |    0 |     0 |    6 |     6
+                4 |    3 |     3 |    4 |     4 |    2 |     2 |    0 |     0 |    6 |     6
+                5 |    3 |     3 |    3 |     3 |    3 |     3 |    1 |     1 |    7 |     7
+              5.5 |    3 |     3 |    3 |     3 |    3 |     3 |   21 |    21 |    7 |     7
+                7 |    4 |     4 |    2 |     2 |    4 |     4 |   21 |    21 |    7 |     7
+                8 |    5 |     5 |    2 |     2 |    5 |     5 |   21 |    21 |    7 |     7
+ 9.99999999999999 |    5 |     5 |    1 |     1 |    5 |     5 |   21 |    21 |    7 |     7
              -5.2 |    0 |     0 |    6 |     6 |    0 |     0 |    0 |     0 |    4 |     4
     -0.0000000001 |    0 |     0 |    6 |     6 |    0 |     0 |    0 |     0 |    5 |     5
+                2 |    2 |     2 |    5 |     5 |    1 |     1 |    0 |     0 |    6 |     6
+              4.5 |    3 |     3 |    3 |     3 |    2 |     2 |    0 |     0 |    6 |     6
+                6 |    4 |     4 |    3 |     3 |    3 |     3 |   21 |    21 |    7 |     7
+                9 |    5 |     5 |    1 |     1 |    5 |     5 |   21 |    21 |    7 |     7
+ 10.0000000000001 |    6 |     6 |    0 |     0 |    5 |     5 |   21 |    21 |    8 |     8
    0.000000000001 |    1 |     1 |    5 |     5 |    0 |     0 |    0 |     0 |    6 |     6
                 1 |    1 |     1 |    5 |     5 |    0 |     0 |    0 |     0 |    6 |     6
  1.99999999999999 |    1 |     1 |    5 |     5 |    0 |     0 |    0 |     0 |    6 |     6
-                2 |    2 |     2 |    5 |     5 |    1 |     1 |    0 |     0 |    6 |     6
  2.00000000000001 |    2 |     2 |    4 |     4 |    1 |     1 |    0 |     0 |    6 |     6
-                3 |    2 |     2 |    4 |     4 |    1 |     1 |    0 |     0 |    6 |     6
-                4 |    3 |     3 |    4 |     4 |    2 |     2 |    0 |     0 |    6 |     6
-              4.5 |    3 |     3 |    3 |     3 |    2 |     2 |    0 |     0 |    6 |     6
-                5 |    3 |     3 |    3 |     3 |    3 |     3 |    1 |     1 |    7 |     7
-              5.5 |    3 |     3 |    3 |     3 |    3 |     3 |   21 |    21 |    7 |     7
-                6 |    4 |     4 |    3 |     3 |    3 |     3 |   21 |    21 |    7 |     7
-                7 |    4 |     4 |    2 |     2 |    4 |     4 |   21 |    21 |    7 |     7
-                8 |    5 |     5 |    2 |     2 |    5 |     5 |   21 |    21 |    7 |     7
-                9 |    5 |     5 |    1 |     1 |    5 |     5 |   21 |    21 |    7 |     7
- 9.99999999999999 |    5 |     5 |    1 |     1 |    5 |     5 |   21 |    21 |    7 |     7
                10 |    6 |     6 |    1 |     1 |    5 |     5 |   21 |    21 |    8 |     8
- 10.0000000000001 |    6 |     6 |    0 |     0 |    5 |     5 |   21 |    21 |    8 |     8
 (19 rows)
 
 -- Check positive and negative infinity: we require
@@ -1477,15 +1503,15 @@ SELECT to_char(val, '9G999G999G999G999G999')
 	FROM num_data;
         to_char         
 ------------------------
-                      0
-                      0
             -34,338,492
                       4
               7,799,461
-                 16,397
-                 93,902
             -83,028,485
                  74,881
+                      0
+                      0
+                 16,397
+                 93,902
             -24,926,804
 (10 rows)
 
@@ -1495,14 +1521,14 @@ SELECT to_char(val, '9G999G999G999G999G999D999G999G999G999G999')
 --------------------------------------------
                        .000,000,000,000,000
                        .000,000,000,000,000
+                 16,397.038,491,000,000,000
+                 93,901.577,630,260,000,000
+            -24,926,804.045,047,420,000,000
             -34,338,492.215,397,047,000,000
                       4.310,000,000,000,000
               7,799,461.411,900,000,000,000
-                 16,397.038,491,000,000,000
-                 93,901.577,630,260,000,000
             -83,028,485.000,000,000,000,000
                  74,881.000,000,000,000,000
-            -24,926,804.045,047,420,000,000
 (10 rows)
 
 SELECT to_char(val, '9999999999999999.999999999999999PR')
@@ -1511,14 +1537,14 @@ SELECT to_char(val, '9999999999999999.999999999999999PR')
 ------------------------------------
                   .000000000000000 
                   .000000000000000 
+             16397.038491000000000 
+             93901.577630260000000 
+         <24926804.045047420000000>
          <34338492.215397047000000>
                  4.310000000000000 
            7799461.411900000000000 
-             16397.038491000000000 
-             93901.577630260000000 
          <83028485.000000000000000>
              74881.000000000000000 
-         <24926804.045047420000000>
 (10 rows)
 
 SELECT to_char(val, '9999999999999999.999999999999999S')
@@ -1527,14 +1553,14 @@ SELECT to_char(val, '9999999999999999.999999999999999S')
 -----------------------------------
                  .000000000000000+
                  .000000000000000+
+            16397.038491000000000+
+            93901.577630260000000+
+         24926804.045047420000000-
          34338492.215397047000000-
                 4.310000000000000+
           7799461.411900000000000+
-            16397.038491000000000+
-            93901.577630260000000+
          83028485.000000000000000-
             74881.000000000000000+
-         24926804.045047420000000-
 (10 rows)
 
 SELECT to_char(val, 'MI9999999999999999.999999999999999')     FROM num_data;
@@ -1542,14 +1568,14 @@ SELECT to_char(val, 'MI9999999999999999.999999999999999')     FROM num_data;
 -----------------------------------
                   .000000000000000
                   .000000000000000
+             16397.038491000000000
+             93901.577630260000000
+ -        24926804.045047420000000
  -        34338492.215397047000000
                  4.310000000000000
            7799461.411900000000000
-             16397.038491000000000
-             93901.577630260000000
  -        83028485.000000000000000
              74881.000000000000000
- -        24926804.045047420000000
 (10 rows)
 
 SELECT to_char(val, 'FMS9999999999999999.999999999999999')    FROM num_data;
@@ -1557,14 +1583,14 @@ SELECT to_char(val, 'FMS9999999999999999.999999999999999')    FROM num_data;
 ---------------------
  +0.
  +0.
+ +16397.038491
+ +93901.57763026
+ -24926804.04504742
  -34338492.215397047
  +4.31
  +7799461.4119
- +16397.038491
- +93901.57763026
  -83028485.
  +74881.
- -24926804.04504742
 (10 rows)
 
 SELECT to_char(val, 'FM9999999999999999.999999999999999THPR') FROM num_data;
@@ -1572,14 +1598,14 @@ SELECT to_char(val, 'FM9999999999999999.999999999999999THPR') FROM num_data;
 ----------------------
  0.
  0.
+ 16397.038491
+ 93901.57763026
+ <24926804.04504742>
  <34338492.215397047>
  4.31
  7799461.4119
- 16397.038491
- 93901.57763026
  <83028485.>
  74881.
- <24926804.04504742>
 (10 rows)
 
 SELECT to_char(val, 'SG9999999999999999.999999999999999th')   FROM num_data;
@@ -1587,14 +1613,14 @@ SELECT to_char(val, 'SG9999999999999999.999999999999999th')   FROM num_data;
 -----------------------------------
  +                .000000000000000
  +                .000000000000000
+ +           16397.038491000000000
+ +           93901.577630260000000
+ -        24926804.045047420000000
  -        34338492.215397047000000
  +               4.310000000000000
  +         7799461.411900000000000
- +           16397.038491000000000
- +           93901.577630260000000
  -        83028485.000000000000000
  +           74881.000000000000000
- -        24926804.045047420000000
 (10 rows)
 
 SELECT to_char(val, '0999999999999999.999999999999999')       FROM num_data;
@@ -1602,14 +1628,14 @@ SELECT to_char(val, '0999999999999999.999999999999999')       FROM num_data;
 -----------------------------------
   0000000000000000.000000000000000
   0000000000000000.000000000000000
+  0000000000016397.038491000000000
+  0000000000093901.577630260000000
+ -0000000024926804.045047420000000
  -0000000034338492.215397047000000
   0000000000000004.310000000000000
   0000000007799461.411900000000000
-  0000000000016397.038491000000000
-  0000000000093901.577630260000000
  -0000000083028485.000000000000000
   0000000000074881.000000000000000
- -0000000024926804.045047420000000
 (10 rows)
 
 SELECT to_char(val, 'S0999999999999999.999999999999999')      FROM num_data;
@@ -1617,14 +1643,14 @@ SELECT to_char(val, 'S0999999999999999.999999999999999')      FROM num_data;
 -----------------------------------
  +0000000000000000.000000000000000
  +0000000000000000.000000000000000
+ +0000000000016397.038491000000000
+ +0000000000093901.577630260000000
+ -0000000024926804.045047420000000
  -0000000034338492.215397047000000
  +0000000000000004.310000000000000
  +0000000007799461.411900000000000
- +0000000000016397.038491000000000
- +0000000000093901.577630260000000
  -0000000083028485.000000000000000
  +0000000000074881.000000000000000
- -0000000024926804.045047420000000
 (10 rows)
 
 SELECT to_char(val, 'FM0999999999999999.999999999999999')     FROM num_data;
@@ -1632,14 +1658,14 @@ SELECT to_char(val, 'FM0999999999999999.999999999999999')     FROM num_data;
 -----------------------------
  0000000000000000.
  0000000000000000.
+ 0000000000016397.038491
+ 0000000000093901.57763026
+ -0000000024926804.04504742
  -0000000034338492.215397047
  0000000000000004.31
  0000000007799461.4119
- 0000000000016397.038491
- 0000000000093901.57763026
  -0000000083028485.
  0000000000074881.
- -0000000024926804.04504742
 (10 rows)
 
 SELECT to_char(val, 'FM9999999999999999.099999999999999') 	FROM num_data;
@@ -1647,14 +1673,14 @@ SELECT to_char(val, 'FM9999999999999999.099999999999999') 	FROM num_data;
 ---------------------
  .0
  .0
+ 16397.038491
+ 93901.57763026
+ -24926804.04504742
  -34338492.215397047
  4.31
  7799461.4119
- 16397.038491
- 93901.57763026
  -83028485.0
  74881.0
- -24926804.04504742
 (10 rows)
 
 SELECT to_char(val, 'FM9999999999990999.990999999999999') 	FROM num_data;
@@ -1662,14 +1688,14 @@ SELECT to_char(val, 'FM9999999999990999.990999999999999') 	FROM num_data;
 ---------------------
  0000.000
  0000.000
+ 16397.038491
+ 93901.57763026
+ -24926804.04504742
  -34338492.215397047
  0004.310
  7799461.4119
- 16397.038491
- 93901.57763026
  -83028485.000
  74881.000
- -24926804.04504742
 (10 rows)
 
 SELECT to_char(val, 'FM0999999999999999.999909999999999') 	FROM num_data;
@@ -1680,10 +1706,10 @@ SELECT to_char(val, 'FM0999999999999999.999909999999999') 	FROM num_data;
  -0000000034338492.215397047
  0000000000000004.31000
  0000000007799461.41190
- 0000000000016397.038491
- 0000000000093901.57763026
  -0000000083028485.00000
  0000000000074881.00000
+ 0000000000016397.038491
+ 0000000000093901.57763026
  -0000000024926804.04504742
 (10 rows)
 
@@ -1692,14 +1718,14 @@ SELECT to_char(val, 'FM9999999990999999.099999999999999') 	FROM num_data;
 ---------------------
  0000000.0
  0000000.0
+ 0016397.038491
+ 0093901.57763026
+ -24926804.04504742
  -34338492.215397047
  0000004.31
  7799461.4119
- 0016397.038491
- 0093901.57763026
  -83028485.0
  0074881.0
- -24926804.04504742
 (10 rows)
 
 SELECT to_char(val, 'L9999999999999999.099999999999999')	FROM num_data;
@@ -1707,14 +1733,14 @@ SELECT to_char(val, 'L9999999999999999.099999999999999')	FROM num_data;
 ------------------------------------
                    .000000000000000
                    .000000000000000
+              16397.038491000000000
+              93901.577630260000000
+          -24926804.045047420000000
           -34338492.215397047000000
                   4.310000000000000
             7799461.411900000000000
-              16397.038491000000000
-              93901.577630260000000
           -83028485.000000000000000
               74881.000000000000000
-          -24926804.045047420000000
 (10 rows)
 
 SELECT to_char(val, 'FM9999999999999999.99999999999999')	FROM num_data;
@@ -1722,14 +1748,14 @@ SELECT to_char(val, 'FM9999999999999999.99999999999999')	FROM num_data;
 ---------------------
  0.
  0.
+ 16397.038491
+ 93901.57763026
+ -24926804.04504742
  -34338492.215397047
  4.31
  7799461.4119
- 16397.038491
- 93901.57763026
  -83028485.
  74881.
- -24926804.04504742
 (10 rows)
 
 SELECT to_char(val, 'S 9 9 9 9 9 9 9 9 9 9 9 9 9 9 9 9 . 9 9 9 9 9 9 9 9 9 9 9 9 9 9 9 9 9') FROM num_data;
@@ -1740,10 +1766,10 @@ SELECT to_char(val, 'S 9 9 9 9 9 9 9 9 9 9 9 9 9 9 9 9 . 9 9 9 9 9 9 9 9 9 9 9 9
                   -3 4 3 3 8 4 9 2 . 2 1 5 3 9 7 0 4 7 0 0 0 0 0 0 0 0
                                 +4 . 3 1 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0
                     +7 7 9 9 4 6 1 . 4 1 1 9 0 0 0 0 0 0 0 0 0 0 0 0 0
-                        +1 6 3 9 7 . 0 3 8 4 9 1 0 0 0 0 0 0 0 0 0 0 0
-                        +9 3 9 0 1 . 5 7 7 6 3 0 2 6 0 0 0 0 0 0 0 0 0
                   -8 3 0 2 8 4 8 5 . 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0
                         +7 4 8 8 1 . 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0
+                        +1 6 3 9 7 . 0 3 8 4 9 1 0 0 0 0 0 0 0 0 0 0 0
+                        +9 3 9 0 1 . 5 7 7 6 3 0 2 6 0 0 0 0 0 0 0 0 0
                   -2 4 9 2 6 8 0 4 . 0 4 5 0 4 7 4 2 0 0 0 0 0 0 0 0 0
 (10 rows)
 
@@ -1752,14 +1778,14 @@ SELECT to_char(val, 'FMS 9 9 9 9 9 9 9 9 9 9 9 9 9 9 9 9 . 9 9 9 9 9 9 9 9 9 9 9
 -------------------------------------------------------
                  +0 .                 
                  +0 .                 
+             +1 6 3 9 7 . 0 3 8 4 9 1           
+             +9 3 9 0 1 . 5 7 7 6 3 0 2 6         
+          -2 4 9 2 6 8 0 4 . 0 4 5 0 4 7 4 2         
           -3 4 3 3 8 4 9 2 . 2 1 5 3 9 7 0 4 7        
                  +4 . 3 1               
            +7 7 9 9 4 6 1 . 4 1 1 9             
-             +1 6 3 9 7 . 0 3 8 4 9 1           
-             +9 3 9 0 1 . 5 7 7 6 3 0 2 6         
           -8 3 0 2 8 4 8 5 .                 
              +7 4 8 8 1 .                 
-          -2 4 9 2 6 8 0 4 . 0 4 5 0 4 7 4 2         
 (10 rows)
 
 SELECT to_char(val, E'99999 "text" 9999 "9999" 999 "\\"text between quote marks\\"" 9999') FROM num_data;
@@ -1767,14 +1793,14 @@ SELECT to_char(val, E'99999 "text" 9999 "9999" 999 "\\"text between quote marks\
 -----------------------------------------------------------
        text      9999     "text between quote marks"     0
        text      9999     "text between quote marks"     0
+       text      9999    1 "text between quote marks" 6397
+       text      9999    9 "text between quote marks" 3902
+       text    -2 9999 492 "text between quote marks" 6804
        text    -3 9999 433 "text between quote marks" 8492
        text      9999     "text between quote marks"     4
        text      9999  779 "text between quote marks" 9461
-       text      9999    1 "text between quote marks" 6397
-       text      9999    9 "text between quote marks" 3902
        text    -8 9999 302 "text between quote marks" 8485
        text      9999    7 "text between quote marks" 4881
-       text    -2 9999 492 "text between quote marks" 6804
 (10 rows)
 
 SELECT to_char(val, '999999SG9999999999')			FROM num_data;
@@ -1782,14 +1808,14 @@ SELECT to_char(val, '999999SG9999999999')			FROM num_data;
 -------------------
        +         0
        +         0
+       +     16397
+       +     93902
+       -  24926804
        -  34338492
        +         4
        +   7799461
-       +     16397
-       +     93902
        -  83028485
        +     74881
-       -  24926804
 (10 rows)
 
 SELECT to_char(val, 'FM9999999999999999.999999999999999')	FROM num_data;
@@ -1797,14 +1823,14 @@ SELECT to_char(val, 'FM9999999999999999.999999999999999')	FROM num_data;
 ---------------------
  0.
  0.
+ 16397.038491
+ 93901.57763026
+ -24926804.04504742
  -34338492.215397047
  4.31
  7799461.4119
- 16397.038491
- 93901.57763026
  -83028485.
  74881.
- -24926804.04504742
 (10 rows)
 
 SELECT to_char(val, '9.999EEEE')				FROM num_data;
@@ -1812,14 +1838,14 @@ SELECT to_char(val, '9.999EEEE')				FROM num_data;
 ------------
   0.000e+00
   0.000e+00
+  1.640e+04
+  9.390e+04
+ -2.493e+07
  -3.434e+07
   4.310e+00
   7.799e+06
-  1.640e+04
-  9.390e+04
  -8.303e+07
   7.488e+04
- -2.493e+07
 (10 rows)
 
 WITH v(val) AS
@@ -2127,6 +2153,8 @@ RESET lc_numeric;
 -- Input syntax
 --
 CREATE TABLE num_input_test (n1 numeric);
+NOTICE:  Table doesn't have 'DISTRIBUTED BY' clause -- Using column named 'n1' as the Apache Cloudberry data distribution key for this table.
+HINT:  The 'DISTRIBUTED BY' clause determines the distribution of data. Make sure column(s) chosen are the optimal data distribution key to minimize skew.
 -- good inputs
 INSERT INTO num_input_test(n1) VALUES (' 123');
 INSERT INTO num_input_test(n1) VALUES ('   3245874    ');
@@ -2182,8 +2210,8 @@ SELECT * FROM num_input_test;
     n1     
 -----------
        123
-   3245874
     -93853
+   3245874
     555.50
    -555.50
        NaN
@@ -2365,15 +2393,15 @@ select sqrt(8015491789940783531003294973900307::numeric);
 -- Test code path for raising to integer powers
 --
 select 10.0 ^ -2147483648 as rounds_to_zero;
-   rounds_to_zero   
---------------------
- 0.0000000000000000
+                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               rounds_to_zero                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               
+--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+ 0.0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
 (1 row)
 
 select 10.0 ^ -2147483647 as rounds_to_zero;
-   rounds_to_zero   
---------------------
- 0.0000000000000000
+                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               rounds_to_zero                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               
+--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+ 0.0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
 (1 row)
 
 select 10.0 ^ 2147483647 as overflows;
@@ -2382,27 +2410,27 @@ select 117743296169.0 ^ 1000000000 as overflows;
 ERROR:  value overflows numeric format
 -- cases that used to return inaccurate results
 select 3.789 ^ 21;
-            ?column?            
---------------------------------
- 1409343026052.8716016316022141
+      ?column?      
+--------------------
+ 1409343026052.8716
 (1 row)
 
 select 3.789 ^ 35;
-                ?column?                
-----------------------------------------
- 177158169650516670809.3820586142670135
+         ?column?          
+---------------------------
+ 177158169650516670809.382
 (1 row)
 
 select 1.2 ^ 345;
-                   ?column?                    
------------------------------------------------
- 2077446682327378559843444695.5827049735727869
+            ?column?            
+--------------------------------
+ 2077446682327378559843444695.6
 (1 row)
 
 select 0.12 ^ (-20);
-               ?column?               
---------------------------------------
- 2608405330458882702.5529619561355838
+        ?column?        
+------------------------
+ 2608405330458882702.55
 (1 row)
 
 select 1.000000000123 ^ (-2147483648);
@@ -2425,15 +2453,15 @@ select round(((1 - 1.500012345678e-1000) ^ 1.45e1003) * 1e1000);
 
 -- cases that used to error out
 select 0.12 ^ (-25);
-                 ?column?                  
--------------------------------------------
- 104825960103961013959336.4983657883169110
+          ?column?           
+-----------------------------
+ 104825960103961013959336.50
 (1 row)
 
 select 0.5678 ^ (-85);
-                ?column?                
-----------------------------------------
- 782333637740774446257.7719390061997396
+          ?column?          
+----------------------------
+ 782333637740774446257.7719
 (1 row)
 
 select coalesce(nullif(0.9999999999 ^ 70000000000000, 0), 0) as underflows;
@@ -2564,9 +2592,9 @@ select 12.3 ^ (-45.6);
 
 -- big test
 select 1.234 ^ 5678;
-                                                                                                                                                                                                                                                                         ?column?                                                                                                                                                                                                                                                                         
-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
- 307239295662090741644584872593956173493568238595074141254349565406661439636598896798876823220904084953233015553994854875890890858118656468658643918169805277399402542281777901029346337707622181574346585989613344285010764501017625366742865066948856161360224801370482171458030533346309750557140549621313515752078638620714732831815297168231790779296290266207315344008883935010274044001522606235576584215999260117523114297033944018699691024106823438431754073086813382242140602291215149759520833200152654884259619588924545324.5973362312547382
+                                                                                                                                                                                                                                                                  ?column?                                                                                                                                                                                                                                                                   
+---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+ 307239295662090741644584872593956173493568238595074141254349565406661439636598896798876823220904084953233015553994854875890890858118656468658643918169805277399402542281777901029346337707622181574346585989613344285010764501017625366742865066948856161360224801370482171458030533346309750557140549621313515752078638620714732831815297168231790779296290266207315344008883935010274044001522606235576584215999260117523114297033944018699691024106823438431754073086813382242140602291215149759520833200152654884259619588924545324.597
 (1 row)
 
 --

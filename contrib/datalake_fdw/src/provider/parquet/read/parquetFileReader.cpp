@@ -399,7 +399,7 @@ Datum parquetFileReader::read(Oid typeOid, int column_index, bool &isNull, int &
                     }
                     dataBuff *res = options.buffer.getDataBuffer(column_index);
                     int_to_numeric_with_scale(values, scale, (Numeric) res->buffer);
-			        return NumericGetDatum(res->buffer);
+			        return NumericGetDatum((Numeric) res->buffer);
                 }
                 case ::parquet::Type::INT64: {
                     parquet::TypedScanner<parquet::Int64Type>* scanner_ = reinterpret_cast<parquet::TypedScanner<parquet::Int64Type>*>(scanner.get());
@@ -418,7 +418,7 @@ Datum parquetFileReader::read(Oid typeOid, int column_index, bool &isNull, int &
                     }
                     dataBuff *res = options.buffer.getDataBuffer(column_index);
                     int_to_numeric_with_scale(values, scale, (Numeric) res->buffer);
-			        return NumericGetDatum(res->buffer);
+			        return NumericGetDatum((Numeric) res->buffer);
                 }
                 case ::parquet::Type::BYTE_ARRAY: {
                     int precision = des->type_precision();
@@ -446,7 +446,7 @@ Datum parquetFileReader::read(Oid typeOid, int column_index, bool &isNull, int &
                     }
                     dataBuff *res = options.buffer.getDataBuffer(column_index);
                     int_to_numeric_with_scale(FLBA_to_int128(values.ptr, values.len), scale, (Numeric) res->buffer);
-			        return NumericGetDatum(res->buffer);
+			        return NumericGetDatum((Numeric) res->buffer);
                 }
                 case ::parquet::Type::FIXED_LEN_BYTE_ARRAY: {
                     int precision = des->type_precision();
@@ -475,7 +475,7 @@ Datum parquetFileReader::read(Oid typeOid, int column_index, bool &isNull, int &
                     }
                     dataBuff *res = options.buffer.getDataBuffer(column_index);
                     int_to_numeric_with_scale(FLBA_to_int128(values.ptr, type_len), scale, (Numeric) res->buffer);
-			        return NumericGetDatum(res->buffer);
+			        return NumericGetDatum((Numeric) res->buffer);
                 }
                 default:
                     elog(ERROR, "Datalake foreign table Error, Column index %d Parquet format "

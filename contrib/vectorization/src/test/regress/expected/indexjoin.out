@@ -37,7 +37,7 @@ ORDER BY 1 asc ;
                Group Key: ((((tt.event_ts / 100000) / 5) * 5))
                ->  Redistribute Motion 3:3  (slice2; segments: 3)  (cost=1236.97..1252.45 rows=413 width=16)
                      Hash Key: ((((tt.event_ts / 100000) / 5) * 5))
-                     ->  Partial HashAggregate  (cost=1236.97..1244.19 rows=413 width=16)
+                     ->  Streaming Partial HashAggregate  (cost=1236.97..1244.19 rows=413 width=16)
                            Group Key: (((tt.event_ts / 100000) / 5) * 5)
                            ->  Hash Join  (cost=17.20..1161.31 rows=15131 width=8)
                                  Hash Cond: (tt.symbol = (tq.sym)::bpchar)
@@ -133,7 +133,7 @@ create table no_index_table(fake_col1 int, fake_col2 int, fake_col3 int, a int, 
 insert into no_index_table values (1,1,1,1,1);
 analyze no_index_table;
 create table with_index_table(x int, y int) with (appendonly=true, orientation=column);
-NOTICE:  Table doesn't have 'DISTRIBUTED BY' clause -- Using column named 'x' as the Cloudberry Database data distribution key for this table.
+NOTICE:  Table doesn't have 'DISTRIBUTED BY' clause -- Using column named 'x' as the Apache Cloudberry data distribution key for this table.
 HINT:  The 'DISTRIBUTED BY' clause determines the distribution of data. Make sure column(s) chosen are the optimal data distribution key to minimize skew.
 create index with_index_table_index on with_index_table (x);
 insert into with_index_table select i, 1 from generate_series(1, 20)i;

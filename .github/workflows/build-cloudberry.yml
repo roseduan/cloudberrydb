@@ -275,6 +275,11 @@ jobs:
                "make_configs":["gpcontrib/gp_stats_collector:installcheck"],
                "extension":"gp_stats_collector"
               },
+              {"test":"gpcontrib-gp-relsizes-stats",
+               "make_configs":["gpcontrib/gp_relsizes_stats:installcheck"],
+               "extension":"gp_relsizes_stats",
+               "shared_preload_libraries":"gp_relsizes_stats"
+              },
               {"test":"ic-expandshrink",
                "make_configs":["src/test/isolation2:installcheck-expandshrink"]
               },
@@ -290,6 +295,7 @@ jobs:
               },
               {"test":"ic-contrib",
                "make_configs":["contrib/auto_explain:installcheck",
+                               "contrib/amcheck:installcheck",
                                "contrib/citext:installcheck",
                                "contrib/btree_gin:installcheck",
                                "contrib/btree_gist:installcheck",
@@ -301,6 +307,7 @@ jobs:
                                "contrib/formatter_fixedwidth:installcheck",
                                "contrib/hstore:installcheck",
                                "contrib/indexscan:installcheck",
+                               "contrib/interconnect:installcheck",
                                "contrib/pg_trgm:installcheck",
                                "contrib/indexscan:installcheck",
                                "contrib/pgcrypto:installcheck",
@@ -656,7 +663,7 @@ jobs:
             "${SRC_DIR}"/devops/build/packaging/rpm/build-rpm.sh --version "${CBDB_VERSION}" --release "${BUILD_NUMBER}" "${DEBUG_RPMBUILD_OPT}"
 
             # Get OS version and move RPM
-            os_version=$(grep -oP '(?<=^VERSION_ID=")[0-9]' /etc/os-release)
+            os_version=$(grep -oP '(?<=^VERSION_ID=")[0-9]+' /etc/os-release)
             RPM_FILE="${HOME}"/rpmbuild/RPMS/x86_64/apache-cloudberry-db-incubating-"${CBDB_VERSION}"-"${BUILD_NUMBER}""${DEBUG_IDENTIFIER}".el"${os_version}".x86_64.rpm
             cp "${RPM_FILE}" "${SRC_DIR}"
             RPM_DEBUG="${HOME}"/rpmbuild/RPMS/x86_64/apache-cloudberry-db-incubating-debuginfo-"${CBDB_VERSION}"-"${BUILD_NUMBER}""${DEBUG_IDENTIFIER}".el"${os_version}".x86_64.rpm
@@ -669,7 +676,7 @@ jobs:
             # Verify critical files in RPM
             echo "Verifying critical files in RPM..."
             for binary in "bin/postgres" "bin/psql"; do
-              if ! rpm -qlp "${RPM_FILE}" | grep -q "${binary}$"; then
+              if ! rpm -qlp "${RPM_FILE}" | grep "${binary}$" >/dev/null 2>&1; then
                 echo "::error::Critical binary '${binary}' not found in RPM"
                 exit 1
               fi
@@ -861,7 +868,7 @@ jobs:
             # Verify expected binaries are in the RPM
             echo "Verifying critical files in RPM..."
             for binary in "bin/postgres" "bin/psql"; do
-              if ! rpm -qlp "${RPM_FILE}" | grep -q "${binary}$"; then
+              if ! rpm -qlp "${RPM_FILE}" | grep "${binary}$" >/dev/null 2>&1; then
                 echo "::error::Critical binary '${binary}' not found in RPM"
                 exit 1
               fi
@@ -1271,7 +1278,7 @@ jobs:
             # Verify expected binaries are in the RPM
             echo "Verifying critical files in RPM..."
             for binary in "bin/postgres" "bin/psql"; do
-              if ! rpm -qlp "${RPM_FILE}" | grep -q "${binary}$"; then
+              if ! rpm -qlp "${RPM_FILE}" | grep "${binary}$" >/dev/null 2>&1; then
                 echo "::error::Critical binary '${binary}' not found in RPM"
                 exit 1
               fi
@@ -1460,6 +1467,20 @@ jobs:
                     exit 1
                 fi
                 ;;
+              gp_relsizes_stats)
+                if ! su - gpadmin -c "source ${BUILD_DESTINATION}/cloudberry-env.sh && \
+                  source ${SRC_DIR}/gpAux/gpdemo/gpdemo-env.sh && \
+                  gpconfig -c shared_preload_libraries -v 'gp_relsizes_stats' && \
+                  gpstop -ra && \
+                  echo 'CREATE EXTENSION IF NOT EXISTS gp_relsizes_stats; \
+                        SHOW shared_preload_libraries; \
+                        TABLE pg_extension;' | \
+                    psql postgres"
+                then
+                    echo "Error creating gp_relsizes_stats extension"
+                    exit 1
+                fi
+                ;;
               *)
                 echo "Unknown extension: ${{ matrix.extension }}"
                 exit 1
@@ -1470,7 +1491,6 @@ jobs:
           if [[ "${{ matrix.pg_settings.default_table_access_method != '' }}" == "true" ]]; then
             PG_OPTS="$PG_OPTS -c default_table_access_method=${{ matrix.pg_settings.default_table_access_method }}"
           fi
-
 
           # Read configs into array
           IFS=' ' read -r -a configs <<< "${{ join(matrix.make_configs, ' ') }}"

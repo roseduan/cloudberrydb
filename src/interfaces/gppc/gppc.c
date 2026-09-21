@@ -248,7 +248,7 @@ GppcByteaGetDatum(GppcBytea x)
 GppcDatum
 GppcNumericGetDatum(GppcNumeric x)
 {
-	return NumericGetDatum(x);
+	return NumericGetDatum((Numeric) x);
 }
 
 /*
@@ -275,7 +275,7 @@ GppcTimeGetDatum(GppcTime x)
 GppcDatum
 GppcTimeTzGetDatum(GppcTimeTz x)
 {
-	return TimeTzADTPGetDatum(x);
+	return TimeTzADTPGetDatum((TimeTzADT *) x);
 }
 
 /*
@@ -671,7 +671,7 @@ GppcGetByteaPointer(GppcBytea x)
 char *
 GppcNumericGetCString(GppcNumeric n)
 {
-	return DatumGetCString(DirectFunctionCall1(numeric_out, NumericGetDatum((Numeric *) n)));
+	return DatumGetCString(DirectFunctionCall1(numeric_out, NumericGetDatum((Numeric) n)));
 }
 
 /*
@@ -703,7 +703,7 @@ GppcFloat8
 GppcNumericGetFloat8(GppcNumeric n)
 {
 	return DatumGetFloat8(
-			DirectFunctionCall1(numeric_float8, NumericGetDatum((Numeric *) n)));
+			DirectFunctionCall1(numeric_float8, NumericGetDatum((Numeric) n)));
 }
 
 GppcNumeric

@@ -52,6 +52,7 @@ LIMIT 100;
          ->  Vec Limit
                ->  Vec Sort
                      Sort Key: supplier.s_acctbal DESC, nation.n_name, supplier.s_name, part.p_partkey
+                     Vec Sort Method:  TopK  K: 100
                      ->  Vec Hash Join
                            Hash Cond: (partsupp.ps_suppkey = supplier.s_suppkey)
                            ->  Vec Redistribute Motion 3:3  (slice2; segments: 3)
@@ -98,7 +99,7 @@ LIMIT 100;
                                                                      ->  Vec Seq Scan on region
                                                                            Filter: (r_name = 'EUROPE'::text)
  Optimizer: Postgres query optimizer
-(52 rows)
+(53 rows)
 
 select
         s_acctbal,

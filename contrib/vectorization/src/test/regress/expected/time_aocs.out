@@ -3,6 +3,8 @@ SET default_table_access_method=ao_column;
 -- TIME
 --
 CREATE TABLE TIME_TBL (f1 time(2));
+NOTICE:  Table doesn't have 'DISTRIBUTED BY' clause -- Using column named 'f1' as the Apache Cloudberry data distribution key for this table.
+HINT:  The 'DISTRIBUTED BY' clause determines the distribution of data. Make sure column(s) chosen are the optimal data distribution key to minimize skew.
 INSERT INTO TIME_TBL VALUES ('00:00');
 INSERT INTO TIME_TBL VALUES ('01:00');
 -- as of 7.4, timezone spec should be accepted and ignored
@@ -22,16 +24,16 @@ LINE 1: INSERT INTO TIME_TBL VALUES ('15:36:39 America/New_York');
 SELECT f1 AS "Time" FROM TIME_TBL;
     Time     
 -------------
- 00:00:00
- 01:00:00
- 02:03:00
  11:59:00
- 12:00:00
- 12:01:00
  23:59:00
  23:59:59.99
+ 01:00:00
+ 02:03:00
+ 12:01:00
  15:36:39
  15:36:39
+ 00:00:00
+ 12:00:00
 (10 rows)
 
 SELECT f1 AS "Three" FROM TIME_TBL WHERE f1 < '05:06:07';
@@ -45,13 +47,13 @@ SELECT f1 AS "Three" FROM TIME_TBL WHERE f1 < '05:06:07';
 SELECT f1 AS "Five" FROM TIME_TBL WHERE f1 > '05:06:07';
     Five     
 -------------
- 11:59:00
- 12:00:00
  12:01:00
+ 15:36:39
+ 15:36:39
+ 12:00:00
+ 11:59:00
  23:59:00
  23:59:59.99
- 15:36:39
- 15:36:39
 (7 rows)
 
 SELECT f1 AS "None" FROM TIME_TBL WHERE f1 < '00:00';
@@ -63,13 +65,13 @@ SELECT f1 AS "Eight" FROM TIME_TBL WHERE f1 >= '00:00';
     Eight    
 -------------
  00:00:00
- 01:00:00
- 02:03:00
- 11:59:00
  12:00:00
- 12:01:00
+ 11:59:00
  23:59:00
  23:59:59.99
+ 01:00:00
+ 02:03:00
+ 12:01:00
  15:36:39
  15:36:39
 (10 rows)
@@ -162,11 +164,11 @@ SELECT EXTRACT(HOUR        FROM TIME '2020-05-26 13:30:25.575401');
 (1 row)
 
 SELECT EXTRACT(DAY         FROM TIME '2020-05-26 13:30:25.575401');  -- error
-ERROR:  "time" units "day" not recognized
+ERROR:  unit "day" not supported for type time without time zone
 SELECT EXTRACT(FORTNIGHT   FROM TIME '2020-05-26 13:30:25.575401');  -- error
-ERROR:  "time" units "fortnight" not recognized
+ERROR:  unit "fortnight" not recognized for type time without time zone
 SELECT EXTRACT(TIMEZONE    FROM TIME '2020-05-26 13:30:25.575401');  -- error
-ERROR:  "time" units "timezone" not recognized
+ERROR:  unit "timezone" not supported for type time without time zone
 SELECT EXTRACT(EPOCH       FROM TIME '2020-05-26 13:30:25.575401');
    extract    
 --------------

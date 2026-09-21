@@ -18,7 +18,7 @@
 
 MODULE_big = pax
 OBJS = \
-	$(WIN32RES) 
+	$(WIN32RES)
 PG_CPPFLAGS = -I/usr/local/include
 PG_CXXFLAGS = -std=c++17
 

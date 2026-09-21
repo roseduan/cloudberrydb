@@ -1292,10 +1292,12 @@ set optimizer_analyze_root_partition=on;
 set optimizer_analyze_midlevel_partition=off;
 analyze verbose p1;
 INFO:  analyzing "public.p1"
-INFO:  Executing SQL: select pg_catalog.gp_acquire_sample_rows(24981, 10000, 'f');
+INFO:  skipping analyze of "public.p1" inheritance tree --- this inheritance tree contains no child tables
+INFO:  Executing SQL: select pg_catalog.gp_acquire_sample_rows(56435, 10000, 'f');
 analyze verbose p2;
 INFO:  analyzing "public.p2"
-INFO:  Executing SQL: select pg_catalog.gp_acquire_sample_rows(24984, 10000, 'f');
+INFO:  skipping analyze of "public.p2" inheritance tree --- this inheritance tree contains no child tables
+INFO:  Executing SQL: select pg_catalog.gp_acquire_sample_rows(56438, 10000, 'f');
 select * from pg_stats where tablename like 'part2';
  schemaname | tablename | attname | inherited | null_frac | avg_width | n_distinct | most_common_vals | most_common_freqs | histogram_bounds | correlation | most_common_elems | most_common_elem_freqs | elem_count_histogram 
 ------------+-----------+---------+-----------+-----------+-----------+------------+------------------+-------------------+------------------+-------------+-------------------+------------------------+----------------------
@@ -1304,7 +1306,8 @@ select * from pg_stats where tablename like 'part2';
 set optimizer_analyze_midlevel_partition=on;
 analyze verbose p2;
 INFO:  analyzing "public.p2"
-INFO:  Executing SQL: select pg_catalog.gp_acquire_sample_rows(24984, 10000, 'f');
+INFO:  skipping analyze of "public.p2" inheritance tree --- this inheritance tree contains no child tables
+INFO:  Executing SQL: select pg_catalog.gp_acquire_sample_rows(56438, 10000, 'f');
 INFO:  analyzing "public.part2" inheritance tree
 INFO:  Executing SQL: select pg_catalog.gp_acquire_sample_rows(24975, 10000, 't');
 select * from pg_stats where tablename like 'part2';
@@ -1355,7 +1358,8 @@ set client_min_messages to log;
 analyze verbose analyze_modified_0;
 LOG:  statement: analyze verbose analyze_modified_0;
 INFO:  analyzing "public.analyze_modified_0"
-INFO:  Executing SQL: select pg_catalog.gp_acquire_sample_rows(27766, 10000, 'f');
+INFO:  skipping analyze of "public.analyze_modified_0" inheritance tree --- this inheritance tree contains no child tables
+INFO:  Executing SQL: select pg_catalog.gp_acquire_sample_rows(23401, 10000, 'f');
 reset client_min_messages;
 LOG:  statement: reset client_min_messages;
 -- vacuum analyze
@@ -1380,16 +1384,19 @@ set client_min_messages to log;
 analyze verbose analyze_modified_cols (tc1, tc2);
 LOG:  statement: analyze verbose analyze_modified_cols (tc1, tc2);
 INFO:  analyzing "public.analyze_modified_cols"
-INFO:  Executing SQL: select pg_catalog.gp_acquire_sample_rows(20267, 10000, 'f');
+INFO:  skipping analyze of "public.analyze_modified_cols" inheritance tree --- this inheritance tree contains no child tables
+INFO:  Executing SQL: select pg_catalog.gp_acquire_sample_rows(23404, 10000, 'f');
 reset client_min_messages;
 LOG:  statement: reset client_min_messages;
 alter table analyze_modified_cols drop column tc2;
 set client_min_messages to log;
+-- start_ignore
 analyze verbose analyze_modified_cols (tc2);
 LOG:  statement: analyze verbose analyze_modified_cols (tc2);
 INFO:  analyzing "public.analyze_modified_cols"
 LOG:  An exception was encountered during the execution of statement: analyze verbose analyze_modified_cols (tc2);
 ERROR:  column "tc2" of relation "analyze_modified_cols" does not exist
+-- end_ignore
 reset client_min_messages;
 LOG:  statement: reset client_min_messages;
 -- Case 3: partitioned table
@@ -1401,6 +1408,8 @@ PARTITION BY RANGE (tc2)
 (
     start (1) end (100) every(20)
 );
+NOTICE:  Table doesn't have 'DISTRIBUTED BY' clause -- Using column named 'tc1' as the Apache Cloudberry data distribution key for this table.
+HINT:  The 'DISTRIBUTED BY' clause determines the distribution of data. Make sure column(s) chosen are the optimal data distribution key to minimize skew.
 -- no modfications, analyze skipping
 set client_min_messages to log;
 analyze verbose analyze_modified;
@@ -1413,7 +1422,7 @@ INFO:  skipping analyze relation "analyze_modified_1_prt_1", no data modificatio
 INFO:  analyzing "public.analyze_modified" inheritance tree
 INFO:  partition analyze_modified_1_prt_1 is not analyzed, so ANALYZE will collect sample for stats calculation
 INFO:  partition analyze_modified_1_prt_1 is not analyzed, so ANALYZE will collect sample for stats calculation
-INFO:  Executing SQL: select pg_catalog.gp_acquire_sample_rows(18582, 10000, 't');
+INFO:  Executing SQL: select pg_catalog.gp_acquire_sample_rows(23407, 10000, 't');
 reset client_min_messages;
 LOG:  statement: reset client_min_messages;
 -- do analyze
@@ -1428,15 +1437,20 @@ set client_min_messages to log;
 analyze verbose analyze_modified;
 LOG:  statement: analyze verbose analyze_modified;
 INFO:  analyzing "public.analyze_modified_1_prt_5"
-INFO:  Executing SQL: select pg_catalog.gp_acquire_sample_rows(26810, 10000, 'f');
+INFO:  skipping analyze of "public.analyze_modified_1_prt_5" inheritance tree --- this inheritance tree contains no child tables
+INFO:  Executing SQL: select pg_catalog.gp_acquire_sample_rows(23434, 10000, 'f');
 INFO:  analyzing "public.analyze_modified_1_prt_4"
-INFO:  Executing SQL: select pg_catalog.gp_acquire_sample_rows(26807, 10000, 'f');
+INFO:  skipping analyze of "public.analyze_modified_1_prt_4" inheritance tree --- this inheritance tree contains no child tables
+INFO:  Executing SQL: select pg_catalog.gp_acquire_sample_rows(23428, 10000, 'f');
 INFO:  analyzing "public.analyze_modified_1_prt_3"
-INFO:  Executing SQL: select pg_catalog.gp_acquire_sample_rows(26804, 10000, 'f');
+INFO:  skipping analyze of "public.analyze_modified_1_prt_3" inheritance tree --- this inheritance tree contains no child tables
+INFO:  Executing SQL: select pg_catalog.gp_acquire_sample_rows(23422, 10000, 'f');
 INFO:  analyzing "public.analyze_modified_1_prt_2"
-INFO:  Executing SQL: select pg_catalog.gp_acquire_sample_rows(26801, 10000, 'f');
+INFO:  skipping analyze of "public.analyze_modified_1_prt_2" inheritance tree --- this inheritance tree contains no child tables
+INFO:  Executing SQL: select pg_catalog.gp_acquire_sample_rows(23416, 10000, 'f');
 INFO:  analyzing "public.analyze_modified_1_prt_1"
-INFO:  Executing SQL: select pg_catalog.gp_acquire_sample_rows(18585, 10000, 'f');
+INFO:  skipping analyze of "public.analyze_modified_1_prt_1" inheritance tree --- this inheritance tree contains no child tables
+INFO:  Executing SQL: select pg_catalog.gp_acquire_sample_rows(23410, 10000, 'f');
 INFO:  analyzing "public.analyze_modified" inheritance tree
 reset client_min_messages;
 LOG:  statement: reset client_min_messages;
@@ -1454,9 +1468,11 @@ INFO:  skipping analyze relation "analyze_modified_1_prt_5", no data modificatio
 INFO:  skipping analyze relation "analyze_modified_1_prt_4", no data modifications since last analyze
 INFO:  skipping analyze relation "analyze_modified_1_prt_3", no data modifications since last analyze
 INFO:  analyzing "public.analyze_modified_1_prt_2"
-INFO:  Executing SQL: select pg_catalog.gp_acquire_sample_rows(26801, 10000, 'f');
+INFO:  skipping analyze of "public.analyze_modified_1_prt_2" inheritance tree --- this inheritance tree contains no child tables
+INFO:  Executing SQL: select pg_catalog.gp_acquire_sample_rows(23416, 10000, 'f');
 INFO:  analyzing "public.analyze_modified_1_prt_1"
-INFO:  Executing SQL: select pg_catalog.gp_acquire_sample_rows(18585, 10000, 'f');
+INFO:  skipping analyze of "public.analyze_modified_1_prt_1" inheritance tree --- this inheritance tree contains no child tables
+INFO:  Executing SQL: select pg_catalog.gp_acquire_sample_rows(23410, 10000, 'f');
 INFO:  analyzing "public.analyze_modified" inheritance tree
 reset client_min_messages;
 LOG:  statement: reset client_min_messages;
@@ -1473,9 +1489,11 @@ LOG:  statement: analyze verbose analyze_modified;
 INFO:  skipping analyze relation "analyze_modified_1_prt_5", no data modifications since last analyze
 INFO:  skipping analyze relation "analyze_modified_1_prt_4", no data modifications since last analyze
 INFO:  analyzing "public.analyze_modified_1_prt_3"
-INFO:  Executing SQL: select pg_catalog.gp_acquire_sample_rows(26804, 10000, 'f');
+INFO:  skipping analyze of "public.analyze_modified_1_prt_3" inheritance tree --- this inheritance tree contains no child tables
+INFO:  Executing SQL: select pg_catalog.gp_acquire_sample_rows(23422, 10000, 'f');
 INFO:  analyzing "public.analyze_modified_1_prt_2"
-INFO:  Executing SQL: select pg_catalog.gp_acquire_sample_rows(26801, 10000, 'f');
+INFO:  skipping analyze of "public.analyze_modified_1_prt_2" inheritance tree --- this inheritance tree contains no child tables
+INFO:  Executing SQL: select pg_catalog.gp_acquire_sample_rows(23416, 10000, 'f');
 INFO:  skipping analyze relation "analyze_modified_1_prt_1", no data modifications since last analyze
 INFO:  analyzing "public.analyze_modified" inheritance tree
 reset client_min_messages;
@@ -1486,28 +1504,38 @@ set client_min_messages to log;
 analyze verbose analyze_modified;
 LOG:  statement: analyze verbose analyze_modified;
 INFO:  analyzing "public.analyze_modified_1_prt_5"
-INFO:  Executing SQL: select pg_catalog.gp_acquire_sample_rows(18633, 10000, 'f');
+INFO:  skipping analyze of "public.analyze_modified_1_prt_5" inheritance tree --- this inheritance tree contains no child tables
+INFO:  Executing SQL: select pg_catalog.gp_acquire_sample_rows(23434, 10000, 'f');
 INFO:  analyzing "public.analyze_modified_1_prt_4"
-INFO:  Executing SQL: select pg_catalog.gp_acquire_sample_rows(18630, 10000, 'f');
+INFO:  skipping analyze of "public.analyze_modified_1_prt_4" inheritance tree --- this inheritance tree contains no child tables
+INFO:  Executing SQL: select pg_catalog.gp_acquire_sample_rows(23428, 10000, 'f');
 INFO:  analyzing "public.analyze_modified_1_prt_3"
-INFO:  Executing SQL: select pg_catalog.gp_acquire_sample_rows(18627, 10000, 'f');
+INFO:  skipping analyze of "public.analyze_modified_1_prt_3" inheritance tree --- this inheritance tree contains no child tables
+INFO:  Executing SQL: select pg_catalog.gp_acquire_sample_rows(23422, 10000, 'f');
 INFO:  analyzing "public.analyze_modified_1_prt_2"
-INFO:  Executing SQL: select pg_catalog.gp_acquire_sample_rows(18624, 10000, 'f');
+INFO:  skipping analyze of "public.analyze_modified_1_prt_2" inheritance tree --- this inheritance tree contains no child tables
+INFO:  Executing SQL: select pg_catalog.gp_acquire_sample_rows(23416, 10000, 'f');
 INFO:  analyzing "public.analyze_modified_1_prt_1"
-INFO:  Executing SQL: select pg_catalog.gp_acquire_sample_rows(18621, 10000, 'f');
+INFO:  skipping analyze of "public.analyze_modified_1_prt_1" inheritance tree --- this inheritance tree contains no child tables
+INFO:  Executing SQL: select pg_catalog.gp_acquire_sample_rows(23410, 10000, 'f');
 INFO:  analyzing "public.analyze_modified" inheritance tree
 analyze verbose analyze_modified;
 LOG:  statement: analyze verbose analyze_modified;
 INFO:  analyzing "public.analyze_modified_1_prt_5"
-INFO:  Executing SQL: select pg_catalog.gp_acquire_sample_rows(18633, 10000, 'f');
+INFO:  skipping analyze of "public.analyze_modified_1_prt_5" inheritance tree --- this inheritance tree contains no child tables
+INFO:  Executing SQL: select pg_catalog.gp_acquire_sample_rows(23434, 10000, 'f');
 INFO:  analyzing "public.analyze_modified_1_prt_4"
-INFO:  Executing SQL: select pg_catalog.gp_acquire_sample_rows(18630, 10000, 'f');
+INFO:  skipping analyze of "public.analyze_modified_1_prt_4" inheritance tree --- this inheritance tree contains no child tables
+INFO:  Executing SQL: select pg_catalog.gp_acquire_sample_rows(23428, 10000, 'f');
 INFO:  analyzing "public.analyze_modified_1_prt_3"
-INFO:  Executing SQL: select pg_catalog.gp_acquire_sample_rows(18627, 10000, 'f');
+INFO:  skipping analyze of "public.analyze_modified_1_prt_3" inheritance tree --- this inheritance tree contains no child tables
+INFO:  Executing SQL: select pg_catalog.gp_acquire_sample_rows(23422, 10000, 'f');
 INFO:  analyzing "public.analyze_modified_1_prt_2"
-INFO:  Executing SQL: select pg_catalog.gp_acquire_sample_rows(18624, 10000, 'f');
+INFO:  skipping analyze of "public.analyze_modified_1_prt_2" inheritance tree --- this inheritance tree contains no child tables
+INFO:  Executing SQL: select pg_catalog.gp_acquire_sample_rows(23416, 10000, 'f');
 INFO:  analyzing "public.analyze_modified_1_prt_1"
-INFO:  Executing SQL: select pg_catalog.gp_acquire_sample_rows(18621, 10000, 'f');
+INFO:  skipping analyze of "public.analyze_modified_1_prt_1" inheritance tree --- this inheritance tree contains no child tables
+INFO:  Executing SQL: select pg_catalog.gp_acquire_sample_rows(23410, 10000, 'f');
 INFO:  analyzing "public.analyze_modified" inheritance tree
 reset client_min_messages;
 LOG:  statement: reset client_min_messages;
@@ -1534,9 +1562,10 @@ set client_min_messages to log;
 analyze verbose analyze_modified_sub;
 LOG:  statement: analyze verbose analyze_modified_sub;
 INFO:  analyzing "public.analyze_modified_sub_1_prt_p1_2_prt_sp1"
-INFO:  Executing SQL: select pg_catalog.gp_acquire_sample_rows(38522, 10000, 'f');
+INFO:  skipping analyze of "public.analyze_modified_sub_1_prt_p1_2_prt_sp1" inheritance tree --- this inheritance tree contains no child tables
+INFO:  Executing SQL: select pg_catalog.gp_acquire_sample_rows(23446, 10000, 'f');
 INFO:  analyzing "public.analyze_modified_sub_1_prt_p1" inheritance tree
-INFO:  Executing SQL: select pg_catalog.gp_acquire_sample_rows(38519, 10000, 't');
+INFO:  Executing SQL: select pg_catalog.gp_acquire_sample_rows(23443, 10000, 't');
 INFO:  analyzing "public.analyze_modified_sub" inheritance tree
 reset client_min_messages;
 LOG:  statement: reset client_min_messages;
@@ -1562,9 +1591,9 @@ set client_min_messages to log;
 analyze verbose analyze_modified_base;
 LOG:  statement: analyze verbose analyze_modified_base;
 INFO:  analyzing "public.analyze_modified_base"
-INFO:  Executing SQL: select pg_catalog.gp_acquire_sample_rows(18633, 10000, 'f');
+INFO:  Executing SQL: select pg_catalog.gp_acquire_sample_rows(23449, 10000, 'f');
 INFO:  analyzing "public.analyze_modified_base" inheritance tree
-INFO:  Executing SQL: select pg_catalog.gp_acquire_sample_rows(18633, 10000, 't');
+INFO:  Executing SQL: select pg_catalog.gp_acquire_sample_rows(23449, 10000, 't');
 reset client_min_messages;
 LOG:  statement: reset client_min_messages;
 -- start_ignore

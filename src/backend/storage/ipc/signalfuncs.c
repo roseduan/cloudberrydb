@@ -3,7 +3,7 @@
  * signalfuncs.c
  *	  Functions for signaling backends
  *
- * Portions Copyright (c) 1996-2021, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2023, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  *
@@ -60,6 +60,10 @@ pg_signal_backend(int pid, int sig, char *msg)
 	 * arbitrary process to prevent that. But since so far all the callers of
 	 * this mechanism involve some request for ending the process anyway, that
 	 * it might end on its own first is not a problem.
+	 *
+	 * Note that proc will also be NULL if the pid refers to an auxiliary
+	 * process or the postmaster (neither of which can be signaled via
+	 * pg_signal_backend()).
 	 */
 	if (proc == NULL)
 	{
@@ -68,7 +72,8 @@ pg_signal_backend(int pid, int sig, char *msg)
 		 * if one backend terminated on its own during the run.
 		 */
 		ereport(WARNING,
-				(errmsg("PID %d is not a PostgreSQL server process", pid)));
+				(errmsg("PID %d is not a PostgreSQL backend process", pid)));
+
 		return SIGNAL_BACKEND_ERROR;
 	}
 
@@ -76,10 +81,32 @@ pg_signal_backend(int pid, int sig, char *msg)
 	 * Only allow superusers to signal superuser-owned backends.  Any process
 	 * not advertising a role might have the importance of a superuser-owned
 	 * backend, so treat it that way.
+	 *
+	 * mdb_admin patch (re-applied after being dropped in the REL_16_9 merge;
+	 * originally from commit 4af1cf5a09b): as an exception, members of the
+	 * mdb_admin role may also signal autovacuum workers and backends whose
+	 * application_name is 'MDB'.
 	 */
 	if ((!OidIsValid(proc->roleId) || superuser_arg(proc->roleId)) &&
 		!superuser())
-		return SIGNAL_BACKEND_NOSUPERUSER;
+	{
+		LocalPgBackendStatus *local_beentry;
+		Oid			mdb_admin_role;
+		char	   *appname;
+
+		local_beentry = pgstat_fetch_stat_local_beentry_by_pid(pid);
+		if (local_beentry == NULL)
+			return SIGNAL_BACKEND_NOSUPERUSER;
+
+		mdb_admin_role = get_role_oid("mdb_admin", true);
+		if (!is_member_of_role(GetUserId(), mdb_admin_role))
+			return SIGNAL_BACKEND_NOSUPERUSER;
+
+		appname = local_beentry->backendStatus.st_appname;
+		if (local_beentry->backendStatus.st_backendType != B_AUTOVAC_WORKER &&
+			!(appname != NULL && strcmp(appname, "MDB") == 0))
+			return SIGNAL_BACKEND_NOSUPERUSER;
+	}
 
 	/* Users can signal backends they have role membership in. */
 	if (!has_privs_of_role(GetUserId(), proc->roleId) &&
@@ -157,12 +184,16 @@ pg_cancel_backend_msg(PG_FUNCTION_ARGS)
 	if (r == SIGNAL_BACKEND_NOSUPERUSER)
 		ereport(ERROR,
 				(errcode(ERRCODE_INSUFFICIENT_PRIVILEGE),
-				 errmsg("must be a superuser to cancel superuser query")));
+				 errmsg("permission denied to cancel query"),
+				 errdetail("Only roles with the %s attribute may cancel queries of roles with the %s attribute.",
+						   "SUPERUSER", "SUPERUSER")));
 
 	if (r == SIGNAL_BACKEND_NOPERMISSION)
 		ereport(ERROR,
 				(errcode(ERRCODE_INSUFFICIENT_PRIVILEGE),
-				 errmsg("must be a member of the role whose query is being canceled or member of pg_signal_backend")));
+				 errmsg("permission denied to cancel query"),
+				 errdetail("Only roles with privileges of the role whose query is being canceled or with privileges of the \"%s\" role may cancel this query.",
+						   "pg_signal_backend")));
 
 	PG_RETURN_BOOL(r == SIGNAL_BACKEND_SUCCESS);
 }
@@ -259,12 +290,16 @@ pg_terminate_backend(PG_FUNCTION_ARGS)
 	if (r == SIGNAL_BACKEND_NOSUPERUSER)
 		ereport(ERROR,
 				(errcode(ERRCODE_INSUFFICIENT_PRIVILEGE),
-				 errmsg("must be a superuser to terminate superuser process")));
+				 errmsg("permission denied to terminate process"),
+				 errdetail("Only roles with the %s attribute may terminate processes of roles with the %s attribute.",
+						   "SUPERUSER", "SUPERUSER")));
 
 	if (r == SIGNAL_BACKEND_NOPERMISSION)
 		ereport(ERROR,
 				(errcode(ERRCODE_INSUFFICIENT_PRIVILEGE),
-				 errmsg("must be a member of the role whose process is being terminated or member of pg_signal_backend")));
+				 errmsg("permission denied to terminate process"),
+				 errdetail("Only roles with privileges of the role whose process is being terminated or with privileges of the \"%s\" role may terminate this process.",
+						   "pg_signal_backend")));
 
 	/* Wait only on success and if actually requested */
 	if (r == SIGNAL_BACKEND_SUCCESS && timeout > 0)

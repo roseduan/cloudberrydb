@@ -457,43 +457,45 @@ CALL
 
 -- First planning: cache miss -> SPI -> Const 11:00 (fills the cache)
 1: EXPLAIN (COSTS OFF) SELECT * FROM wmc_cv;
- QUERY PLAN                                                                                                                                                                                                                 
-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
- Gather Motion 3:1  (slice1; segments: 3)                                                                                                                                                                                   
-   ->  Append                                                                                                                                                                                                               
-         ->  Seq Scan on _mat_wmc_cv_2                                                                                                                                                                                      
-               Filter: (bucket < 'Mon Jan 01 11:00:00 2024 UTC'::timestamp with time zone)                                                                                                                                  
-         ->  Finalize HashAggregate                                                                                                                                                                                         
-               Group Key: (time_bucket('@ 1 hour'::interval, wmc_src."time"))                                                                                                                                               
-               ->  Redistribute Motion 3:3  (slice2; segments: 3)                                                                                                                                                           
-                     Hash Key: (time_bucket('@ 1 hour'::interval, wmc_src."time"))                                                                                                                                          
-                     ->  Streaming Partial HashAggregate                                                                                                                                                                    
-                           Group Key: time_bucket('@ 1 hour'::interval, wmc_src."time")                                                                                                                                     
-                           ->  Custom Scan (ChunkScan) on wmc_src                                                                                                                                                           
-                                 Filter: (("time" >= 'Mon Jan 01 11:00:00 2024 UTC'::timestamp with time zone) AND (time_bucket('@ 1 hour'::interval, "time") >= 'Mon Jan 01 11:00:00 2024 UTC'::timestamp with time zone)) 
-                                 Storage: Time-Series Chunk                                                                                                                                                                 
- Optimizer: Postgres query optimizer                                                                                                                                                                                        
-(14 rows)
+ QUERY PLAN                                                                                                                                                                                                                       
+----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+ Gather Motion 3:1  (slice1; segments: 3)                                                                                                                                                                                         
+   ->  Append                                                                                                                                                                                                                     
+         ->  Seq Scan on _mat_wmc_cv_2                                                                                                                                                                                            
+               Filter: (bucket < 'Mon Jan 01 11:00:00 2024 UTC'::timestamp with time zone)                                                                                                                                        
+         ->  Finalize HashAggregate                                                                                                                                                                                               
+               Group Key: (time_bucket('@ 1 hour'::interval, wmc_src."time"))                                                                                                                                                     
+               ->  Redistribute Motion 3:3  (slice2; segments: 3)                                                                                                                                                                 
+                     Hash Key: (time_bucket('@ 1 hour'::interval, wmc_src."time"))                                                                                                                                                
+                     ->  Streaming Partial HashAggregate                                                                                                                                                                          
+                           Group Key: time_bucket('@ 1 hour'::interval, wmc_src."time")                                                                                                                                           
+                           ->  Result                                                                                                                                                                                             
+                                 ->  Custom Scan (ChunkScan) on wmc_src                                                                                                                                                           
+                                       Filter: (("time" >= 'Mon Jan 01 11:00:00 2024 UTC'::timestamp with time zone) AND (time_bucket('@ 1 hour'::interval, "time") >= 'Mon Jan 01 11:00:00 2024 UTC'::timestamp with time zone)) 
+                                       Storage: Time-Series Chunk                                                                                                                                                                 
+ Optimizer: Postgres query optimizer                                                                                                                                                                                              
+(15 rows)
 
 -- Second planning: served from the backend cache -> identical Const
 1: EXPLAIN (COSTS OFF) SELECT * FROM wmc_cv;
- QUERY PLAN                                                                                                                                                                                                                 
-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
- Gather Motion 3:1  (slice1; segments: 3)                                                                                                                                                                                   
-   ->  Append                                                                                                                                                                                                               
-         ->  Seq Scan on _mat_wmc_cv_2                                                                                                                                                                                      
-               Filter: (bucket < 'Mon Jan 01 11:00:00 2024 UTC'::timestamp with time zone)                                                                                                                                  
-         ->  Finalize HashAggregate                                                                                                                                                                                         
-               Group Key: (time_bucket('@ 1 hour'::interval, wmc_src."time"))                                                                                                                                               
-               ->  Redistribute Motion 3:3  (slice2; segments: 3)                                                                                                                                                           
-                     Hash Key: (time_bucket('@ 1 hour'::interval, wmc_src."time"))                                                                                                                                          
-                     ->  Streaming Partial HashAggregate                                                                                                                                                                    
-                           Group Key: time_bucket('@ 1 hour'::interval, wmc_src."time")                                                                                                                                     
-                           ->  Custom Scan (ChunkScan) on wmc_src                                                                                                                                                           
-                                 Filter: (("time" >= 'Mon Jan 01 11:00:00 2024 UTC'::timestamp with time zone) AND (time_bucket('@ 1 hour'::interval, "time") >= 'Mon Jan 01 11:00:00 2024 UTC'::timestamp with time zone)) 
-                                 Storage: Time-Series Chunk                                                                                                                                                                 
- Optimizer: Postgres query optimizer                                                                                                                                                                                        
-(14 rows)
+ QUERY PLAN                                                                                                                                                                                                                       
+----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+ Gather Motion 3:1  (slice1; segments: 3)                                                                                                                                                                                         
+   ->  Append                                                                                                                                                                                                                     
+         ->  Seq Scan on _mat_wmc_cv_2                                                                                                                                                                                            
+               Filter: (bucket < 'Mon Jan 01 11:00:00 2024 UTC'::timestamp with time zone)                                                                                                                                        
+         ->  Finalize HashAggregate                                                                                                                                                                                               
+               Group Key: (time_bucket('@ 1 hour'::interval, wmc_src."time"))                                                                                                                                                     
+               ->  Redistribute Motion 3:3  (slice2; segments: 3)                                                                                                                                                                 
+                     Hash Key: (time_bucket('@ 1 hour'::interval, wmc_src."time"))                                                                                                                                                
+                     ->  Streaming Partial HashAggregate                                                                                                                                                                          
+                           Group Key: time_bucket('@ 1 hour'::interval, wmc_src."time")                                                                                                                                           
+                           ->  Result                                                                                                                                                                                             
+                                 ->  Custom Scan (ChunkScan) on wmc_src                                                                                                                                                           
+                                       Filter: (("time" >= 'Mon Jan 01 11:00:00 2024 UTC'::timestamp with time zone) AND (time_bucket('@ 1 hour'::interval, "time") >= 'Mon Jan 01 11:00:00 2024 UTC'::timestamp with time zone)) 
+                                       Storage: Time-Series Chunk                                                                                                                                                                 
+ Optimizer: Postgres query optimizer                                                                                                                                                                                              
+(15 rows)
 
 -- Advance the watermark in this same backend
 1: INSERT INTO wmc_src VALUES ('2024-01-01 14:30+00', 3, 14.0);
@@ -503,45 +505,47 @@ CALL
 
 -- The refresh's invalidation cleared this backend's cache: Const 14:00
 1: EXPLAIN (COSTS OFF) SELECT * FROM wmc_cv;
- QUERY PLAN                                                                                                                                                                                                                 
-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
- Gather Motion 3:1  (slice1; segments: 3)                                                                                                                                                                                   
-   ->  Append                                                                                                                                                                                                               
-         ->  Seq Scan on _mat_wmc_cv_2                                                                                                                                                                                      
-               Filter: (bucket < 'Mon Jan 01 14:00:00 2024 UTC'::timestamp with time zone)                                                                                                                                  
-         ->  Finalize HashAggregate                                                                                                                                                                                         
-               Group Key: (time_bucket('@ 1 hour'::interval, wmc_src."time"))                                                                                                                                               
-               ->  Redistribute Motion 3:3  (slice2; segments: 3)                                                                                                                                                           
-                     Hash Key: (time_bucket('@ 1 hour'::interval, wmc_src."time"))                                                                                                                                          
-                     ->  Streaming Partial HashAggregate                                                                                                                                                                    
-                           Group Key: time_bucket('@ 1 hour'::interval, wmc_src."time")                                                                                                                                     
-                           ->  Custom Scan (ChunkScan) on wmc_src                                                                                                                                                           
-                                 Filter: (("time" >= 'Mon Jan 01 14:00:00 2024 UTC'::timestamp with time zone) AND (time_bucket('@ 1 hour'::interval, "time") >= 'Mon Jan 01 14:00:00 2024 UTC'::timestamp with time zone)) 
-                                 Storage: Time-Series Chunk                                                                                                                                                                 
- Optimizer: Postgres query optimizer                                                                                                                                                                                        
-(14 rows)
+ QUERY PLAN                                                                                                                                                                                                                       
+----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+ Gather Motion 3:1  (slice1; segments: 3)                                                                                                                                                                                         
+   ->  Append                                                                                                                                                                                                                     
+         ->  Seq Scan on _mat_wmc_cv_2                                                                                                                                                                                            
+               Filter: (bucket < 'Mon Jan 01 14:00:00 2024 UTC'::timestamp with time zone)                                                                                                                                        
+         ->  Finalize HashAggregate                                                                                                                                                                                               
+               Group Key: (time_bucket('@ 1 hour'::interval, wmc_src."time"))                                                                                                                                                     
+               ->  Redistribute Motion 3:3  (slice2; segments: 3)                                                                                                                                                                 
+                     Hash Key: (time_bucket('@ 1 hour'::interval, wmc_src."time"))                                                                                                                                                
+                     ->  Streaming Partial HashAggregate                                                                                                                                                                          
+                           Group Key: time_bucket('@ 1 hour'::interval, wmc_src."time")                                                                                                                                           
+                           ->  Result                                                                                                                                                                                             
+                                 ->  Custom Scan (ChunkScan) on wmc_src                                                                                                                                                           
+                                       Filter: (("time" >= 'Mon Jan 01 14:00:00 2024 UTC'::timestamp with time zone) AND (time_bucket('@ 1 hour'::interval, "time") >= 'Mon Jan 01 14:00:00 2024 UTC'::timestamp with time zone)) 
+                                       Storage: Time-Series Chunk                                                                                                                                                                 
+ Optimizer: Postgres query optimizer                                                                                                                                                                                              
+(15 rows)
 
 -- ---- 7b. Cross-session propagation (refresh-driven) ----
 
 -- Session 2 fills its own cache with 14:00
 2: EXPLAIN (COSTS OFF) SELECT * FROM wmc_cv;
- QUERY PLAN                                                                                                                                                                                                                 
-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
- Gather Motion 3:1  (slice1; segments: 3)                                                                                                                                                                                   
-   ->  Append                                                                                                                                                                                                               
-         ->  Seq Scan on _mat_wmc_cv_2                                                                                                                                                                                      
-               Filter: (bucket < 'Mon Jan 01 14:00:00 2024 UTC'::timestamp with time zone)                                                                                                                                  
-         ->  Finalize HashAggregate                                                                                                                                                                                         
-               Group Key: (time_bucket('@ 1 hour'::interval, wmc_src."time"))                                                                                                                                               
-               ->  Redistribute Motion 3:3  (slice2; segments: 3)                                                                                                                                                           
-                     Hash Key: (time_bucket('@ 1 hour'::interval, wmc_src."time"))                                                                                                                                          
-                     ->  Streaming Partial HashAggregate                                                                                                                                                                    
-                           Group Key: time_bucket('@ 1 hour'::interval, wmc_src."time")                                                                                                                                     
-                           ->  Custom Scan (ChunkScan) on wmc_src                                                                                                                                                           
-                                 Filter: (("time" >= 'Mon Jan 01 14:00:00 2024 UTC'::timestamp with time zone) AND (time_bucket('@ 1 hour'::interval, "time") >= 'Mon Jan 01 14:00:00 2024 UTC'::timestamp with time zone)) 
-                                 Storage: Time-Series Chunk                                                                                                                                                                 
- Optimizer: Postgres query optimizer                                                                                                                                                                                        
-(14 rows)
+ QUERY PLAN                                                                                                                                                                                                                       
+----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+ Gather Motion 3:1  (slice1; segments: 3)                                                                                                                                                                                         
+   ->  Append                                                                                                                                                                                                                     
+         ->  Seq Scan on _mat_wmc_cv_2                                                                                                                                                                                            
+               Filter: (bucket < 'Mon Jan 01 14:00:00 2024 UTC'::timestamp with time zone)                                                                                                                                        
+         ->  Finalize HashAggregate                                                                                                                                                                                               
+               Group Key: (time_bucket('@ 1 hour'::interval, wmc_src."time"))                                                                                                                                                     
+               ->  Redistribute Motion 3:3  (slice2; segments: 3)                                                                                                                                                                 
+                     Hash Key: (time_bucket('@ 1 hour'::interval, wmc_src."time"))                                                                                                                                                
+                     ->  Streaming Partial HashAggregate                                                                                                                                                                          
+                           Group Key: time_bucket('@ 1 hour'::interval, wmc_src."time")                                                                                                                                           
+                           ->  Result                                                                                                                                                                                             
+                                 ->  Custom Scan (ChunkScan) on wmc_src                                                                                                                                                           
+                                       Filter: (("time" >= 'Mon Jan 01 14:00:00 2024 UTC'::timestamp with time zone) AND (time_bucket('@ 1 hour'::interval, "time") >= 'Mon Jan 01 14:00:00 2024 UTC'::timestamp with time zone)) 
+                                       Storage: Time-Series Chunk                                                                                                                                                                 
+ Optimizer: Postgres query optimizer                                                                                                                                                                                              
+(15 rows)
 
 -- Session 1 advances the watermark to 18:00
 1: INSERT INTO wmc_src VALUES ('2024-01-01 18:30+00', 4, 18.0);
@@ -552,23 +556,24 @@ CALL
 -- Session 2 must see 18:00 (sinval propagated; stale cache would
 -- still show 14:00 here)
 2: EXPLAIN (COSTS OFF) SELECT * FROM wmc_cv;
- QUERY PLAN                                                                                                                                                                                                                 
-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
- Gather Motion 3:1  (slice1; segments: 3)                                                                                                                                                                                   
-   ->  Append                                                                                                                                                                                                               
-         ->  Seq Scan on _mat_wmc_cv_2                                                                                                                                                                                      
-               Filter: (bucket < 'Mon Jan 01 18:00:00 2024 UTC'::timestamp with time zone)                                                                                                                                  
-         ->  Finalize HashAggregate                                                                                                                                                                                         
-               Group Key: (time_bucket('@ 1 hour'::interval, wmc_src."time"))                                                                                                                                               
-               ->  Redistribute Motion 3:3  (slice2; segments: 3)                                                                                                                                                           
-                     Hash Key: (time_bucket('@ 1 hour'::interval, wmc_src."time"))                                                                                                                                          
-                     ->  Streaming Partial HashAggregate                                                                                                                                                                    
-                           Group Key: time_bucket('@ 1 hour'::interval, wmc_src."time")                                                                                                                                     
-                           ->  Custom Scan (ChunkScan) on wmc_src                                                                                                                                                           
-                                 Filter: (("time" >= 'Mon Jan 01 18:00:00 2024 UTC'::timestamp with time zone) AND (time_bucket('@ 1 hour'::interval, "time") >= 'Mon Jan 01 18:00:00 2024 UTC'::timestamp with time zone)) 
-                                 Storage: Time-Series Chunk                                                                                                                                                                 
- Optimizer: Postgres query optimizer                                                                                                                                                                                        
-(14 rows)
+ QUERY PLAN                                                                                                                                                                                                                       
+----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+ Gather Motion 3:1  (slice1; segments: 3)                                                                                                                                                                                         
+   ->  Append                                                                                                                                                                                                                     
+         ->  Seq Scan on _mat_wmc_cv_2                                                                                                                                                                                            
+               Filter: (bucket < 'Mon Jan 01 18:00:00 2024 UTC'::timestamp with time zone)                                                                                                                                        
+         ->  Finalize HashAggregate                                                                                                                                                                                               
+               Group Key: (time_bucket('@ 1 hour'::interval, wmc_src."time"))                                                                                                                                                     
+               ->  Redistribute Motion 3:3  (slice2; segments: 3)                                                                                                                                                                 
+                     Hash Key: (time_bucket('@ 1 hour'::interval, wmc_src."time"))                                                                                                                                                
+                     ->  Streaming Partial HashAggregate                                                                                                                                                                          
+                           Group Key: time_bucket('@ 1 hour'::interval, wmc_src."time")                                                                                                                                           
+                           ->  Result                                                                                                                                                                                             
+                                 ->  Custom Scan (ChunkScan) on wmc_src                                                                                                                                                           
+                                       Filter: (("time" >= 'Mon Jan 01 18:00:00 2024 UTC'::timestamp with time zone) AND (time_bucket('@ 1 hour'::interval, "time") >= 'Mon Jan 01 18:00:00 2024 UTC'::timestamp with time zone)) 
+                                       Storage: Time-Series Chunk                                                                                                                                                                 
+ Optimizer: Postgres query optimizer                                                                                                                                                                                              
+(15 rows)
 
 -- ---- 7c. REPEATABLE READ snapshot consistency ----
 
@@ -590,23 +595,24 @@ CALL
 -- RR planning must show the snapshot-consistent OLD value (18:00),
 -- NOT the latest committed 22:00
 2: EXPLAIN (COSTS OFF) SELECT * FROM wmc_cv;
- QUERY PLAN                                                                                                                                                                                                                 
-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
- Gather Motion 3:1  (slice1; segments: 3)                                                                                                                                                                                   
-   ->  Append                                                                                                                                                                                                               
-         ->  Seq Scan on _mat_wmc_cv_2                                                                                                                                                                                      
-               Filter: (bucket < 'Mon Jan 01 18:00:00 2024 UTC'::timestamp with time zone)                                                                                                                                  
-         ->  Finalize HashAggregate                                                                                                                                                                                         
-               Group Key: (time_bucket('@ 1 hour'::interval, wmc_src."time"))                                                                                                                                               
-               ->  Redistribute Motion 3:3  (slice2; segments: 3)                                                                                                                                                           
-                     Hash Key: (time_bucket('@ 1 hour'::interval, wmc_src."time"))                                                                                                                                          
-                     ->  Streaming Partial HashAggregate                                                                                                                                                                    
-                           Group Key: time_bucket('@ 1 hour'::interval, wmc_src."time")                                                                                                                                     
-                           ->  Custom Scan (ChunkScan) on wmc_src                                                                                                                                                           
-                                 Filter: (("time" >= 'Mon Jan 01 18:00:00 2024 UTC'::timestamp with time zone) AND (time_bucket('@ 1 hour'::interval, "time") >= 'Mon Jan 01 18:00:00 2024 UTC'::timestamp with time zone)) 
-                                 Storage: Time-Series Chunk                                                                                                                                                                 
- Optimizer: Postgres query optimizer                                                                                                                                                                                        
-(14 rows)
+ QUERY PLAN                                                                                                                                                                                                                       
+----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+ Gather Motion 3:1  (slice1; segments: 3)                                                                                                                                                                                         
+   ->  Append                                                                                                                                                                                                                     
+         ->  Seq Scan on _mat_wmc_cv_2                                                                                                                                                                                            
+               Filter: (bucket < 'Mon Jan 01 18:00:00 2024 UTC'::timestamp with time zone)                                                                                                                                        
+         ->  Finalize HashAggregate                                                                                                                                                                                               
+               Group Key: (time_bucket('@ 1 hour'::interval, wmc_src."time"))                                                                                                                                                     
+               ->  Redistribute Motion 3:3  (slice2; segments: 3)                                                                                                                                                                 
+                     Hash Key: (time_bucket('@ 1 hour'::interval, wmc_src."time"))                                                                                                                                                
+                     ->  Streaming Partial HashAggregate                                                                                                                                                                          
+                           Group Key: time_bucket('@ 1 hour'::interval, wmc_src."time")                                                                                                                                           
+                           ->  Result                                                                                                                                                                                             
+                                 ->  Custom Scan (ChunkScan) on wmc_src                                                                                                                                                           
+                                       Filter: (("time" >= 'Mon Jan 01 18:00:00 2024 UTC'::timestamp with time zone) AND (time_bucket('@ 1 hour'::interval, "time") >= 'Mon Jan 01 18:00:00 2024 UTC'::timestamp with time zone)) 
+                                       Storage: Time-Series Chunk                                                                                                                                                                 
+ Optimizer: Postgres query optimizer                                                                                                                                                                                              
+(15 rows)
 
 -- And the query result matches the snapshot: buckets 10,11,14 from
 -- mat, bucket 18 live; the 22:30 row is invisible to this snapshot
@@ -623,23 +629,24 @@ COMMIT
 
 -- Back in READ COMMITTED: latest value (22:00)
 2: EXPLAIN (COSTS OFF) SELECT * FROM wmc_cv;
- QUERY PLAN                                                                                                                                                                                                                 
-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
- Gather Motion 3:1  (slice1; segments: 3)                                                                                                                                                                                   
-   ->  Append                                                                                                                                                                                                               
-         ->  Seq Scan on _mat_wmc_cv_2                                                                                                                                                                                      
-               Filter: (bucket < 'Mon Jan 01 22:00:00 2024 UTC'::timestamp with time zone)                                                                                                                                  
-         ->  Finalize HashAggregate                                                                                                                                                                                         
-               Group Key: (time_bucket('@ 1 hour'::interval, wmc_src."time"))                                                                                                                                               
-               ->  Redistribute Motion 3:3  (slice2; segments: 3)                                                                                                                                                           
-                     Hash Key: (time_bucket('@ 1 hour'::interval, wmc_src."time"))                                                                                                                                          
-                     ->  Streaming Partial HashAggregate                                                                                                                                                                    
-                           Group Key: time_bucket('@ 1 hour'::interval, wmc_src."time")                                                                                                                                     
-                           ->  Custom Scan (ChunkScan) on wmc_src                                                                                                                                                           
-                                 Filter: (("time" >= 'Mon Jan 01 22:00:00 2024 UTC'::timestamp with time zone) AND (time_bucket('@ 1 hour'::interval, "time") >= 'Mon Jan 01 22:00:00 2024 UTC'::timestamp with time zone)) 
-                                 Storage: Time-Series Chunk                                                                                                                                                                 
- Optimizer: Postgres query optimizer                                                                                                                                                                                        
-(14 rows)
+ QUERY PLAN                                                                                                                                                                                                                       
+----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+ Gather Motion 3:1  (slice1; segments: 3)                                                                                                                                                                                         
+   ->  Append                                                                                                                                                                                                                     
+         ->  Seq Scan on _mat_wmc_cv_2                                                                                                                                                                                            
+               Filter: (bucket < 'Mon Jan 01 22:00:00 2024 UTC'::timestamp with time zone)                                                                                                                                        
+         ->  Finalize HashAggregate                                                                                                                                                                                               
+               Group Key: (time_bucket('@ 1 hour'::interval, wmc_src."time"))                                                                                                                                                     
+               ->  Redistribute Motion 3:3  (slice2; segments: 3)                                                                                                                                                                 
+                     Hash Key: (time_bucket('@ 1 hour'::interval, wmc_src."time"))                                                                                                                                                
+                     ->  Streaming Partial HashAggregate                                                                                                                                                                          
+                           Group Key: time_bucket('@ 1 hour'::interval, wmc_src."time")                                                                                                                                           
+                           ->  Result                                                                                                                                                                                             
+                                 ->  Custom Scan (ChunkScan) on wmc_src                                                                                                                                                           
+                                       Filter: (("time" >= 'Mon Jan 01 22:00:00 2024 UTC'::timestamp with time zone) AND (time_bucket('@ 1 hour'::interval, "time") >= 'Mon Jan 01 22:00:00 2024 UTC'::timestamp with time zone)) 
+                                       Storage: Time-Series Chunk                                                                                                                                                                 
+ Optimizer: Postgres query optimizer                                                                                                                                                                                              
+(15 rows)
 
 -- ---- 7d. Manual watermark DML (planner-hook inval, cross-session) ----
 
@@ -653,23 +660,24 @@ COMMIT
 UPDATE 3
 
 2: EXPLAIN (COSTS OFF) SELECT * FROM wmc_cv;
- QUERY PLAN                                                                                                                                                                                                                 
-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
- Gather Motion 3:1  (slice1; segments: 3)                                                                                                                                                                                   
-   ->  Append                                                                                                                                                                                                               
-         ->  Seq Scan on _mat_wmc_cv_2                                                                                                                                                                                      
-               Filter: (bucket < 'Mon Jan 01 14:00:00 2024 UTC'::timestamp with time zone)                                                                                                                                  
-         ->  Finalize HashAggregate                                                                                                                                                                                         
-               Group Key: (time_bucket('@ 1 hour'::interval, wmc_src."time"))                                                                                                                                               
-               ->  Redistribute Motion 3:3  (slice2; segments: 3)                                                                                                                                                           
-                     Hash Key: (time_bucket('@ 1 hour'::interval, wmc_src."time"))                                                                                                                                          
-                     ->  Streaming Partial HashAggregate                                                                                                                                                                    
-                           Group Key: time_bucket('@ 1 hour'::interval, wmc_src."time")                                                                                                                                     
-                           ->  Custom Scan (ChunkScan) on wmc_src                                                                                                                                                           
-                                 Filter: (("time" >= 'Mon Jan 01 14:00:00 2024 UTC'::timestamp with time zone) AND (time_bucket('@ 1 hour'::interval, "time") >= 'Mon Jan 01 14:00:00 2024 UTC'::timestamp with time zone)) 
-                                 Storage: Time-Series Chunk                                                                                                                                                                 
- Optimizer: Postgres query optimizer                                                                                                                                                                                        
-(14 rows)
+ QUERY PLAN                                                                                                                                                                                                                       
+----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+ Gather Motion 3:1  (slice1; segments: 3)                                                                                                                                                                                         
+   ->  Append                                                                                                                                                                                                                     
+         ->  Seq Scan on _mat_wmc_cv_2                                                                                                                                                                                            
+               Filter: (bucket < 'Mon Jan 01 14:00:00 2024 UTC'::timestamp with time zone)                                                                                                                                        
+         ->  Finalize HashAggregate                                                                                                                                                                                               
+               Group Key: (time_bucket('@ 1 hour'::interval, wmc_src."time"))                                                                                                                                                     
+               ->  Redistribute Motion 3:3  (slice2; segments: 3)                                                                                                                                                                 
+                     Hash Key: (time_bucket('@ 1 hour'::interval, wmc_src."time"))                                                                                                                                                
+                     ->  Streaming Partial HashAggregate                                                                                                                                                                          
+                           Group Key: time_bucket('@ 1 hour'::interval, wmc_src."time")                                                                                                                                           
+                           ->  Result                                                                                                                                                                                             
+                                 ->  Custom Scan (ChunkScan) on wmc_src                                                                                                                                                           
+                                       Filter: (("time" >= 'Mon Jan 01 14:00:00 2024 UTC'::timestamp with time zone) AND (time_bucket('@ 1 hour'::interval, "time") >= 'Mon Jan 01 14:00:00 2024 UTC'::timestamp with time zone)) 
+                                       Storage: Time-Series Chunk                                                                                                                                                                 
+ Optimizer: Postgres query optimizer                                                                                                                                                                                              
+(15 rows)
 
 1: DROP VIEW wmc_cv CASCADE;
 DROP

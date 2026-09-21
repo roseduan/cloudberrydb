@@ -1,18 +1,18 @@
 
-# Copyright (c) 2021, PostgreSQL Global Development Group
+# Copyright (c) 2021-2023, PostgreSQL Global Development Group
 
 use strict;
 use warnings;
 
-use PostgresNode;
-use TestLib;
-use Test::More tests => 13;
+use PostgreSQL::Test::Cluster;
+use PostgreSQL::Test::Utils;
+use Test::More;
 
 program_help_ok('dropdb');
 program_version_ok('dropdb');
 program_options_handling_ok('dropdb');
 
-my $node = get_new_node('main');
+my $node = PostgreSQL::Test::Cluster->new('main');
 $node->init;
 $node->start;
 
@@ -30,3 +30,16 @@ $node->issues_sql_like(
 
 $node->command_fails([ 'dropdb', 'nonexistent' ],
 	'fails with nonexistent database');
+
+# check that invalid database can be dropped with dropdb
+$node->safe_psql(
+	'postgres', q(
+	CREATE DATABASE regression_invalid;
+	SET allow_system_table_mods = on;
+	UPDATE pg_database SET datconnlimit = -2 WHERE datname = 'regression_invalid';
+	RESET allow_system_table_mods;
+));
+$node->command_ok([ 'dropdb', 'regression_invalid' ],
+  'invalid database can be dropped');
+
+done_testing();

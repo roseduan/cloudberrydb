@@ -67,6 +67,7 @@ class GpRecoversegTestCase(GpTestCase):
         self.gpArrayMock.getDbList.side_effect = [[self.primary0], [self.primary0], [self.primary0]]
         self.gpArrayMock.segmentPairs = []
         self.gpArrayMock.hasMirrors = True
+        self.gpArrayMock.standbyCoordinator = None
         self.gpArrayMock.coordinator = self.gparray.coordinator
 
         self.config_provider_mock.loadSystemConfig.return_value = self.gpArrayMock

@@ -2654,6 +2654,7 @@ CCostModelGPDB::CostHashSequenceProject(CMemoryPool *mp, CExpressionHandle &expr
 		COrderSpec *pos = (*pdrgpos)[ul];
 		ulSortCols += pos->UlSortColumns();
 	}
+
 	// we process (sorted window of) input tuples to compute window function values
 	// Use at least 1 to account for the base cost of evaluating window functions
 	// even when there are no sort columns (e.g., no ORDER BY in the window spec)
@@ -2961,7 +2962,11 @@ CCostModelGPDB::CostParallelIndexScan(CMemoryPool *mp,
 	const CDouble dTableWidth =
 		CPhysicalScan::PopConvert(pop)->PstatsBaseTable()->Width();
 
-	const CDouble dIndexFilterCostUnit =
+	BOOL isNonBlock = CPhysicalScan::PopConvert(exprhdl.Pop())
+					->Ptabdesc()
+					->IsNonBlockTable();
+
+	CDouble dIndexFilterCostUnit =
 		pcmgpdb->GetCostModelParams()
 			->PcpLookup(CCostModelParamsGPDB::EcpIndexFilterCostUnit)
 			->Get();
@@ -2980,6 +2985,34 @@ CCostModelGPDB::CostParallelIndexScan(CMemoryPool *mp,
 	GPOS_ASSERT(0 < dIndexFilterCostUnit);
 	GPOS_ASSERT(0 < dIndexScanTupCostUnit);
 	GPOS_ASSERT(0 < dIndexScanTupRandomFactor);
+
+	if (isNonBlock)
+	{
+		// AO(or PAX) specific costs related to index-scan/index-only-scan:
+		//
+		//   * AO tables have a variable block size layout on disk (e.g. batch
+		//     insert creates larger block than single row insert). However,
+		//     this makes index scans tricky because the block identifier does
+		//     not directly map to a fixed offset in the relfile. Instead, an
+		//     additional abstraction layer, the block directory, is required
+		//     to map the block identifier to an offset inside the relfile.
+		//
+		//   * AO table blocks are loaded in-memory into a single varblock.
+		//     Heap blocks, however, support multiple in-memory instances and
+		//     fit in the page cache. That means random I/O on AO tables is
+		//     more susceptible to thrashing.
+		//
+		//   * AO tables in production often compress the blocks. That adds an
+		//     additional penalty for loading blocks that is exacerbated by a
+		//     poor page replacement algorithm. And, in the case of AO single
+		//     varblock, any time we have to revisit a block, it will always
+		//     have to be replaced and reloaded.
+		//
+		// Here an index filter cost is penalized more to provide a rudimentary
+		// way to account for these factors. Script cal_bitmap_test.py was used to
+		// identify a suitable cost.
+		dIndexFilterCostUnit = dIndexFilterCostUnit * 100;
+	}
 
 	CDouble dRowsIndex = pci->Rows();
 
