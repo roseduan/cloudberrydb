@@ -177,7 +177,13 @@ build_develop:
     # download umbrella repository
     git remote add origin https://code.hashdata.xyz/cloudberry/database/hashdata-lightning-umbrella.git
     git fetch origin --no-recurse-submodules --depth ${GIT_DEPTH}  --prune --quiet
-    git checkout -f main
+    
+    if [[ -n "${CI_MERGE_REQUEST_TARGET_BRANCH_NAME:-}" && "$CI_MERGE_REQUEST_TARGET_BRANCH_NAME" == rc/* ]]; then
+      UMBRELLA_BRANCH="$CI_MERGE_REQUEST_TARGET_BRANCH_NAME"
+    else
+      UMBRELLA_BRANCH="main"
+    fi
+    git checkout -f "${UMBRELLA_BRANCH}"
 
     rm -rf ${CI_PROJECT_DIR}/database
 
