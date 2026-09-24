@@ -20,6 +20,8 @@
 #include "gpopt/base/CDistributionSpecReplicatedWorkers.h"
 
 #include "gpopt/base/CDistributionSpecNonSingleton.h"
+#include "gpopt/base/CDistributionSpecReplicated.h"
+#include "gpopt/base/CDistributionSpecWorkerRandom.h"
 #include "gpopt/base/COptCtxt.h"
 #include "gpopt/base/CUtils.h"
 #include "gpopt/operators/CExpressionHandle.h"
@@ -36,11 +38,17 @@ using namespace gpopt;
 //
 //---------------------------------------------------------------------------
 CDistributionSpecReplicatedWorkers::CDistributionSpecReplicatedWorkers(
-	ULONG ulWorkers, BOOL ignore_broadcast_threshold)
+	ULONG ulWorkers, BOOL ignore_broadcast_threshold,
+	CDistributionSpec *pdsSegmentBase)
 	: m_ulWorkers(ulWorkers),
-	  m_ignore_broadcast_threshold(ignore_broadcast_threshold)
+	  m_ignore_broadcast_threshold(ignore_broadcast_threshold),
+	  m_pdsSegmentBase(pdsSegmentBase)
 {
 	GPOS_ASSERT(ulWorkers > 0);
+	if (nullptr != m_pdsSegmentBase)
+	{
+		m_pdsSegmentBase->AddRef();
+	}
 }
 
 //---------------------------------------------------------------------------
@@ -53,6 +61,7 @@ CDistributionSpecReplicatedWorkers::CDistributionSpecReplicatedWorkers(
 //---------------------------------------------------------------------------
 CDistributionSpecReplicatedWorkers::~CDistributionSpecReplicatedWorkers()
 {
+	CRefCount::SafeRelease(m_pdsSegmentBase);
 }
 
 //---------------------------------------------------------------------------
@@ -65,13 +74,14 @@ CDistributionSpecReplicatedWorkers::~CDistributionSpecReplicatedWorkers()
 //---------------------------------------------------------------------------
 CDistributionSpecReplicatedWorkers *
 CDistributionSpecReplicatedWorkers::PdsCreate(CMemoryPool *mp, ULONG ulWorkers,
-											  BOOL ignore_broadcast_threshold)
+											  BOOL ignore_broadcast_threshold,
+											  CDistributionSpec *pdsSegmentBase)
 {
 	GPOS_ASSERT(nullptr != mp);
 	GPOS_ASSERT(ulWorkers > 0);
 
 	return GPOS_NEW(mp)
-		CDistributionSpecReplicatedWorkers(ulWorkers, ignore_broadcast_threshold);
+		CDistributionSpecReplicatedWorkers(ulWorkers, ignore_broadcast_threshold, pdsSegmentBase);
 }
 
 //---------------------------------------------------------------------------
@@ -93,7 +103,10 @@ CDistributionSpecReplicatedWorkers::Matches(const CDistributionSpec *pds) const
 	const CDistributionSpecReplicatedWorkers *pdsReplicatedWorkers =
 		CDistributionSpecReplicatedWorkers::PdsConvert(pds);
 
-	return m_ulWorkers == pdsReplicatedWorkers->m_ulWorkers;
+	return m_ulWorkers == pdsReplicatedWorkers->m_ulWorkers &&
+		   ((nullptr == m_pdsSegmentBase && nullptr == pdsReplicatedWorkers->m_pdsSegmentBase) ||
+			(nullptr != m_pdsSegmentBase && nullptr != pdsReplicatedWorkers->m_pdsSegmentBase &&
+			 m_pdsSegmentBase->Matches(pdsReplicatedWorkers->m_pdsSegmentBase)));
 }
 
 //---------------------------------------------------------------------------
@@ -107,29 +120,47 @@ CDistributionSpecReplicatedWorkers::Matches(const CDistributionSpec *pds) const
 BOOL
 CDistributionSpecReplicatedWorkers::FSatisfies(const CDistributionSpec *pds) const
 {
-	// Direct match
-	if (Matches(pds))
-	{
-		return true;
-	}
-
-	// ReplicatedWorkers satisfies universal requirements
 	if (EdtAny == pds->Edt())
 	{
 		return true;
 	}
+
+	// ReplicatedWorkers satisfies ReplicatedWorkers if worker count matches,
+	// regardless of base distribution. E.g., a replicated table scan derives
+	// ReplicatedWorkers(N, base=StrictReplicated) which satisfies a join's
+	// requirement of ReplicatedWorkers(N, base=nullptr).
+	if (EdtReplicatedWorkers == pds->Edt())
+	{
+		const CDistributionSpecReplicatedWorkers *pdsReq =
+			CDistributionSpecReplicatedWorkers::PdsConvert(pds);
+		return m_ulWorkers == pdsReq->UlWorkers();
+	}
+	// ReplicatedWorkers is both worker-level parallel and a replicated
+	// distribution (data duplicated on every segment).  A NonSingleton
+	// requirement is satisfied only if it allows BOTH dimensions:
+	//   - FAllowWorker:     parent accepts worker-parallel inputs
+	//     (mirrors HashedWorker / WorkerRandom).
+	//   - FAllowReplicated: parent accepts replicated inputs
+	//     (mirrors CDistributionSpecReplicated; required so that
+	//     Parallel UNION ALL with FAllowReplicated=false can still
+	//     force a motion to deduplicate replicated children).
 	if (EdtNonSingleton == pds->Edt())
 	{
-		// A worker-level replicated distribution satisfies a NonSingleton
-		// requirement only when that requirement allows worker-level
-		// distribution AND allows replicated.  A request that disallows
-		// replicated (fAllowReplicated == false) -- e.g. the parallel hash
-		// join probe-side request, which keeps the outer partitioned -- must
-		// not be satisfied by a broadcast (ReplicatedWorkers) child.
-		const CDistributionSpecNonSingleton *pdsNonSingleton =
+		const CDistributionSpecNonSingleton *pdsNS =
 			CDistributionSpecNonSingleton::PdsConvert(pds);
-		return pdsNonSingleton->FAllowWorker() &&
-			   pdsNonSingleton->FAllowReplicated();
+		return pdsNS->FAllowWorker() && pdsNS->FAllowReplicated();
+	}
+
+	// ReplicatedWorkers(N) satisfies WorkerRandom[N, X]:
+	// - Segment level: replicated data is a superset of any distribution
+	// - Worker level: N workers collectively hold all segment data
+	// Parallel hash join uses shared hash tables, so workers cooperatively
+	// build one hash table from their portions — no broadcast needed.
+	if (EdtWorkerRandom == pds->Edt())
+	{
+		const CDistributionSpecWorkerRandom *pdsWorkerRandom =
+			CDistributionSpecWorkerRandom::PdsConvert(pds);
+		return m_ulWorkers == pdsWorkerRandom->UlWorkers();
 	}
 
 	return false;
@@ -192,6 +223,11 @@ IOstream &
 CDistributionSpecReplicatedWorkers::OsPrint(IOstream &os) const
 {
 	os << "REPLICATED_WORKERS(workers=" << m_ulWorkers << ")";
+	if (nullptr != m_pdsSegmentBase)
+	{
+		os << " base:";
+		m_pdsSegmentBase->OsPrint(os);
+	}
 	return os;
 }
 

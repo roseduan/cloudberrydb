@@ -30,6 +30,7 @@
 #include "gpos/base.h"
 
 #include "gpopt/base/CDistributionSpecWorkerRandom.h"
+#include "gpopt/base/CDistributionSpecReplicatedWorkers.h"
 #include "gpopt/base/CUtils.h"
 #include "gpopt/operators/CExpressionHandle.h"
 
@@ -57,11 +58,25 @@ CPhysicalParallelIndexScan::CPhysicalParallelIndexScan(
 	GPOS_ASSERT(ulParallelWorkers > 0);
 	GPOS_ASSERT(nullptr != m_pds);
 	// Create worker-level distribution
-	if (ulParallelWorkers > 0)
+	if (ulParallelWorkers > 0 && m_pds)
 	{
-		// Create worker-level random distribution using the table's distribution as base
-		// The base CPhysicalScan already sets up m_pds from the table descriptor
-		m_pdsWorkerDistribution = CDistributionSpecWorkerRandom::PdsCreateWorkerRandom(mp, ulParallelWorkers, m_pds);
+		if (CDistributionSpec::EdtStrictReplicated == m_pds->Edt() ||
+			CDistributionSpec::EdtTaintedReplicated == m_pds->Edt())
+		{
+			// Replicated table: each worker scans a portion of the segment's full data.
+			// ReplicatedWorkers triggers FDuplicateHazardDistributionSpec -> true,
+			// which restricts Gather to 1 segment (avoiding duplicate results).
+			// Pass m_pds as base to distinguish from BroadcastWorkers origin.
+			m_pdsWorkerDistribution = CDistributionSpecReplicatedWorkers::PdsCreate(
+				mp, ulParallelWorkers, false /*ignore_broadcast_threshold*/, m_pds);
+		}
+		else
+		{
+			// Create worker-level random distribution using the table's distribution as base
+			// The base CPhysicalScan already sets up m_pds from the table descriptor
+			m_pdsWorkerDistribution = CDistributionSpecWorkerRandom::PdsCreateWorkerRandom(mp, ulParallelWorkers, m_pds);
+		}
+		
 	}
 }
 
@@ -200,6 +215,32 @@ CPhysicalParallelIndexScan::EpetDistribution(CExpressionHandle & /*exprhdl*/,
 	if (nullptr != m_pdsWorkerDistribution && ped->FCompatible(m_pdsWorkerDistribution))
 	{
 		return CEnfdProp::EpetUnnecessary;
+	}
+
+	// For replicated table parallel scans: prohibit ALL segment-level distribution
+	// requirements. Only worker-level requests (from parallel-aware operators like
+	// ParallelHashJoin) should use this scan. Segment-level motions (HashDistribute,
+	// Broadcast, etc.) would make the ParallelIndexScan's plan the cheapest in the
+	// optimization context, but the parent's FValidContext would then reject it.
+	// Since ORCA keeps only ONE best plan per context, the valid regular IndexScan
+	// plan (which is more expensive) becomes unreachable. Prohibiting here ensures
+	// the regular IndexScan wins in all segment-level contexts.
+	if (nullptr != m_pdsWorkerDistribution &&
+		CDistributionSpec::EdtReplicatedWorkers == m_pdsWorkerDistribution->Edt())
+	{
+		const CDistributionSpecReplicatedWorkers *pdsRW =
+			CDistributionSpecReplicatedWorkers::PdsConvert(m_pdsWorkerDistribution);
+		if (pdsRW->FFromReplicatedTable())
+		{
+			CDistributionSpec::EDistributionType edtReq = ped->PdsRequired()->Edt();
+			if (CDistributionSpec::EdtWorkerRandom != edtReq &&
+				CDistributionSpec::EdtReplicatedWorkers != edtReq &&
+				CDistributionSpec::EdtHashedWorker != edtReq &&
+				CDistributionSpec::EdtAny != edtReq)
+			{
+				return CEnfdProp::EpetProhibited;
+			}
+		}
 	}
 
 	// Neither distribution satisfies the requirement

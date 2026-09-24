@@ -432,6 +432,16 @@ public:
 	static BOOL FHasParallelUnionAllOrPartSelectorChild(
 		COptimizationContextArray *pdrgpocChild);
 
+	// check if any child's best cost context is CPhysicalParallelTableScan
+	// on a replicated table.  Such a scan delivers EdtReplicatedWorkers,
+	// which uses PG's parallel page-share to split the replicated table's
+	// rows across workers within a slice -- incompatible with NL Join's
+	// per-row outer/inner consumption (worker subsets / worker-init races
+	// produce nondeterministic row counts).  NL variants use this to
+	// reject such combinations via FValidContext.
+	static BOOL FHasParallelReplicatedScanChild(
+		COptimizationContextArray *pdrgpocChild);
+
 	// check if optimization contexts is valid
 	virtual BOOL
 	FValidContext(CMemoryPool *,			   // mp

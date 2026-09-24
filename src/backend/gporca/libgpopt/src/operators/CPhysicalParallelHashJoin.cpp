@@ -38,6 +38,8 @@
 #include "gpopt/base/CDistributionSpecNonReplicated.h"
 #include "gpopt/base/CDistributionSpecReplicatedWorkers.h"
 #include "gpopt/base/CDistributionSpecWorkerRandom.h"
+#include "gpopt/base/CCostContext.h"
+#include "gpopt/base/CDrvdPropPlan.h"
 #include "gpopt/base/COptCtxt.h"
 #include "gpopt/base/CUtils.h"
 #include "gpopt/operators/CExpressionHandle.h"
@@ -300,13 +302,15 @@ CPhysicalParallelHashJoin::PdsRequiredReplicateWorkers(
 		}
 	}
 
-	// Fallback: request worker-level non-singleton so a partitioned probe
-	// (HashedWorker or WorkerRandom) can satisfy it without forcing a
-	// redistribute motion.  fAllowReplicated is false so a broadcast probe --
-	// whether segment-level Replicated or worker-level ReplicatedWorkers --
-	// cannot satisfy this request: the outer stays partitioned while only the
-	// inner (build) side is broadcast.
-	return GPOS_NEW(mp) CDistributionSpecNonSingleton(false /*fAllowReplicated*/,
+	// Fallback: request non-singleton so a partitioned probe (HashedWorker or
+	// WorkerRandom) can satisfy it without forcing a redistribute motion.
+	// fAllowReplicated is true: a replicated probe -- whether segment-level
+	// Replicated or worker-level ReplicatedWorkers -- is also accepted, because
+	// its segment-level duplication is later deduplicated by the duplicate-hazard
+	// machinery (single-segment read), so a replicated outer is a valid parallel
+	// probe against the broadcast (shared) build side.  Only a singleton outer is
+	// excluded, which would collapse the join to a single sender slice.
+	return GPOS_NEW(mp) CDistributionSpecNonSingleton(true /*fAllowReplicated*/,
 													 true /*fAllowWorker*/);
 }
 
@@ -411,6 +415,28 @@ CPhysicalParallelHashJoin::Ped(CMemoryPool *mp, CExpressionHandle &exprhdl,
 						CDistributionSpecWorkerRandom::PdsCreateWorkerRandom(
 							mp, ulWorkers, pdsMatch), dmatch);
 				}
+			}
+			else if (CDistributionSpec::EdtReplicatedWorkers == pdsFirst->Edt())
+			{
+				// Inner child is ReplicatedWorkers (replicated table with parallel scan).
+				// Request outer as WorkerRandom[N, Hashed(outer_key)] so that
+				// outer's ReplicatedWorkers(N) satisfies it directly (no motion needed).
+				CDistributionSpecReplicatedWorkers *pdsRepFirst =
+					CDistributionSpecReplicatedWorkers::PdsConvert(pdsFirst);
+				ULONG ulWorkers = pdsRepFirst->UlWorkers();
+
+				// Get the inner's requested hashed spec, create matching for outer
+				CDistributionSpecHashed *pdsHashedInnerReq =
+					PdshashedRequired(mp, child_index, ulOptReq);
+				ULONG ulFirstChild = (EceoRightToLeft == Eceo()) ? 1 : 0;
+				CDistributionSpecHashed *pdsHashedOuter =
+					PdshashedMatching(mp, pdsHashedInnerReq, ulFirstChild);
+				pdsHashedInnerReq->Release();
+				pdsHashedOuter->ComputeEquivHashExprs(mp, exprhdl);
+
+				return GPOS_NEW(mp) CEnfdDistribution(
+					CDistributionSpecWorkerRandom::PdsCreateWorkerRandom(
+						mp, ulWorkers, pdsHashedOuter), dmatch);
 			}
 		}
 
@@ -685,8 +711,6 @@ CPhysicalParallelHashJoin::FValidContext(
 	// If parent requires REWINDABLE (e.g., NL join inner child), reject early.
 	if (prsRequired->IsOriginNLJoin())
 	{
-		// Parent requires rewindability but ParallelHashJoin cannot provide it.
-		// Reject this plan so the optimizer can choose alternatives or add Spool.
 		return false;
 	}
 
@@ -714,7 +738,6 @@ CPhysicalParallelHashJoin::FValidContext(
 		// Validate extracted worker counts
 		if (0 == m_ulProbeWorkers || 0 == m_ulBuildWorkers)
 		{
-			// Invalid worker counts extracted - reject this optimization context
 			return false;
 		}
 	}
@@ -773,7 +796,8 @@ CPhysicalParallelHashJoin::FValidContext(
 				const CDistributionSpec::EDistributionType dtOuterDrvd =
 					pdpplanOuter->Pds()->Edt();
 				if (CDistributionSpec::EdtHashedWorker != dtOuterDrvd &&
-					CDistributionSpec::EdtWorkerRandom != dtOuterDrvd)
+					CDistributionSpec::EdtWorkerRandom != dtOuterDrvd &&
+					CDistributionSpec::EdtReplicatedWorkers != dtOuterDrvd)
 				{
 					return false;
 				}
@@ -782,13 +806,6 @@ CPhysicalParallelHashJoin::FValidContext(
 	}
 
 	// Lightweight pruning based on children required distributions (when available).
-	// Do NOT attempt to inspect derived child properties here. We only reject
-	// obviously incompatible contexts to reduce search:
-	//   - Disallow singleton/replicated requirements for either child (parallel hash
-	//     join expects segment-distributed inputs).
-	//   - The outer/probe side should allow parallelism: its required distribution
-	//     must be Either Any or WorkerRandom. If it is explicitly constrained to a
-	//     non-parallel distribution, prune this context.
 	if (nullptr != pdrgpocChild && pdrgpocChild->Size() >= 2)
 	{
 		CEnfdDistribution *pedOuter = (*pdrgpocChild)[0]->Prpp()->Ped();
@@ -812,43 +829,78 @@ CPhysicalParallelHashJoin::FValidContext(
 			return false;
 		}
 
-		// Outer/probe side must allow parallelism: require Any or WorkerRandom.
-		// A NonSingleton requirement that allows worker-level distribution is
-		// also acceptable: it is the outer requirement produced by a
-		// BroadcastWorkers request (see PdsRequiredReplicateWorkers), and a
-		// worker-parallel outer plan satisfies it without forcing a redistribute
-		// motion.  Without this, the BroadcastWorkers alternative is always
-		// rejected here and a small inner can never be broadcast in parallel.
 		BOOL fOuterNonSingletonAllowsWorker =
 			CDistributionSpec::EdtNonSingleton == dtOuter &&
 			CDistributionSpecNonSingleton::PdsConvert(pdsOuterReq)->FAllowWorker();
+		// Outer/probe side must allow parallelism
 		if (dtOuter != CDistributionSpec::EdtAny &&
 			dtOuter != CDistributionSpec::EdtWorkerRandom &&
 			dtOuter != CDistributionSpec::EdtHashedWorker &&
+			dtOuter != CDistributionSpec::EdtReplicatedWorkers &&
+			dtOuter != CDistributionSpec::EdtHashed &&
 			!fOuterNonSingletonAllowsWorker)
 		{
 			return false;
 		}
 
-		// Inner/build side validation:
-		// - We allow Any, WorkerRandom, or Hashed distributions
-		// - Hashed is allowed because parallel hash join can work when:
-		//   1. Both children have compatible segment-level hashed distributions
-		//   2. Workers share the hash table built from segment-local data
-		// - We only reject obviously incompatible distributions
-		//
-		// Note: We do NOT require inner to be WorkerRandom. The EpetDistribution()
-		// logic (lines 541-593) handles cases where inner has HASHED distribution
-		// and our derived WorkerRandom's base distribution satisfies parent requirements.
+		// Inner/build side validation
 		if (dtInner != CDistributionSpec::EdtAny &&
 			dtInner != CDistributionSpec::EdtWorkerRandom &&
 			dtInner != CDistributionSpec::EdtReplicatedWorkers &&
 			dtInner != CDistributionSpec::EdtHashed &&
-			dtInner != CDistributionSpec::EdtHashedWorker)
+			dtInner != CDistributionSpec::EdtHashedWorker &&
+			dtInner != CDistributionSpec::EdtNonSingleton)
 		{
-			// Inner child requires a distribution incompatible with parallel hash join
-			// (e.g., coordinator-only distribution, universal distribution, etc.)
 			return false;
+		}
+	}
+
+	// Verify that the selected child plans actually derive worker-level
+	// distributions. UlExtractWorkersFromGroup scans ALL expressions in the
+	// child group and may find a ParallelTableScan even when the context has
+	// selected a non-parallel operator (e.g. IndexScan) as the best plan.
+	// That causes each worker to execute the same IndexScan independently,
+	// producing duplicate rows. The derived distribution of PccBest() is the
+	// definitive check: only WorkerRandom / ReplicatedWorkers / HashedWorker
+	// are valid worker-level distributions.
+	if (nullptr != pdrgpocChild && pdrgpocChild->Size() >= 2)
+	{
+		COptimizationContext *pocOuter = (*pdrgpocChild)[0];
+		COptimizationContext *pocInner = (*pdrgpocChild)[1];
+
+		if (nullptr != pocOuter && nullptr != pocInner)
+		{
+			CCostContext *pccOuter = pocOuter->PccBest();
+			CCostContext *pccInner = pocInner->PccBest();
+
+			if (nullptr != pccOuter && nullptr != pccInner)
+			{
+				CDrvdPropPlan *pdpOuter = pccOuter->Pdpplan();
+				CDrvdPropPlan *pdpInner = pccInner->Pdpplan();
+
+				if (nullptr != pdpOuter && nullptr != pdpInner)
+				{
+					CDistributionSpec::EDistributionType dtOuter =
+						pdpOuter->Pds()->Edt();
+					CDistributionSpec::EDistributionType dtInner =
+						pdpInner->Pds()->Edt();
+
+					BOOL fOuterWorkerLevel =
+						dtOuter == CDistributionSpec::EdtWorkerRandom ||
+						dtOuter == CDistributionSpec::EdtReplicatedWorkers ||
+						dtOuter == CDistributionSpec::EdtHashedWorker;
+
+					BOOL fInnerWorkerLevel =
+						dtInner == CDistributionSpec::EdtWorkerRandom ||
+						dtInner == CDistributionSpec::EdtReplicatedWorkers ||
+						dtInner == CDistributionSpec::EdtHashedWorker;
+
+					if (!fOuterWorkerLevel || !fInnerWorkerLevel)
+					{
+						return false;
+					}
+				}
+			}
 		}
 	}
 

@@ -32,6 +32,7 @@
 #include "gpopt/base/CDistributionSpec.h"
 #include "gpopt/base/CDistributionSpecHashed.h"
 #include "gpopt/base/CDistributionSpecRandom.h"
+#include "gpopt/base/CDistributionSpecReplicatedWorkers.h"
 #include "gpopt/base/CDistributionSpecWorkerRandom.h"
 #include "gpopt/base/CDistributionSpecSingleton.h"
 #include "gpopt/base/CUtils.h"
@@ -83,9 +84,21 @@ CPhysicalParallelTableScan::CPhysicalParallelTableScan(CMemoryPool *mp,
 	// Create worker-level distribution based on table's segment distribution
 	if (ulParallelWorkers > 0 && nullptr != m_pds)
 	{
-		// Create worker-level random distribution using the table's distribution as base
-		// The base CPhysicalScan already sets up m_pds from the table descriptor
-		m_pdsWorkerDistribution = CDistributionSpecWorkerRandom::PdsCreateWorkerRandom(mp, ulParallelWorkers, m_pds);
+		if (CDistributionSpec::EdtStrictReplicated == m_pds->Edt() ||
+			CDistributionSpec::EdtTaintedReplicated == m_pds->Edt())
+		{
+			// Replicated table: each worker scans a portion of the segment's full data.
+			// ReplicatedWorkers triggers FDuplicateHazardDistributionSpec -> true,
+			// which restricts Gather to 1 segment (avoiding duplicate results).
+			// Pass m_pds as base to distinguish from BroadcastWorkers origin.
+			m_pdsWorkerDistribution = CDistributionSpecReplicatedWorkers::PdsCreate(
+				mp, ulParallelWorkers, false /*ignore_broadcast_threshold*/, m_pds);
+		}
+		else
+		{
+			// Non-replicated table: create WorkerRandom with table's distribution as base
+			m_pdsWorkerDistribution = CDistributionSpecWorkerRandom::PdsCreateWorkerRandom(mp, ulParallelWorkers, m_pds);
+		}
 	}
 }
 
@@ -214,8 +227,33 @@ CPhysicalParallelTableScan::EpetDistribution(CExpressionHandle & /*exprhdl*/,
 		return CEnfdProp::EpetUnnecessary;
 	}
 
-	// Neither distribution satisfies the requirement
-	// Motion enforcement will be needed on the output
+	// For replicated table parallel scans: prohibit ALL segment-level distribution
+	// requirements. Only worker-level requests (from parallel-aware operators like
+	// ParallelHashJoin) should use this scan. Segment-level motions (HashDistribute,
+	// Broadcast, etc.) would make the ParallelTableScan's plan the cheapest in the
+	// optimization context, but the parent's FValidContext would then reject it.
+	// Since ORCA keeps only ONE best plan per context, the valid regular TableScan
+	// plan (which is more expensive) becomes unreachable. Prohibiting here ensures
+	// the regular TableScan wins in all segment-level contexts.
+	if (nullptr != m_pdsWorkerDistribution &&
+		CDistributionSpec::EdtReplicatedWorkers == m_pdsWorkerDistribution->Edt())
+	{
+		const CDistributionSpecReplicatedWorkers *pdsRW =
+			CDistributionSpecReplicatedWorkers::PdsConvert(m_pdsWorkerDistribution);
+		if (pdsRW->FFromReplicatedTable())
+		{
+			CDistributionSpec::EDistributionType edtReq = ped->PdsRequired()->Edt();
+			if (CDistributionSpec::EdtWorkerRandom != edtReq &&
+				CDistributionSpec::EdtReplicatedWorkers != edtReq &&
+				CDistributionSpec::EdtHashedWorker != edtReq &&
+				CDistributionSpec::EdtAny != edtReq)
+			{
+				return CEnfdProp::EpetProhibited;
+			}
+		}
+	}
+
+	// Worker-level motion enforcement needed (e.g., HashDistributeWorkers)
 	return CEnfdProp::EpetRequired;
 }
 
@@ -284,6 +322,35 @@ CPhysicalParallelTableScan::FValidContext(CMemoryPool *,
 		// but ParallelTableScan cannot provide it
 		// Reject this plan to avoid the assertion failure later
 		return false;
+	}
+
+	/*
+	 * A parallel scan of a replicated table must not win a generic ANY
+	 * context.  ANY contexts are shared with consumers that depend on the
+	 * in-place replicated property: e.g. the inner side of a co-located
+	 * hash join reaches this scan through its child's ANY context and
+	 * needs StrictReplicated.  Since ORCA keeps one best plan per context,
+	 * letting the cheaper (cost / workers) parallel scan win ANY makes the
+	 * serial TableScan plan unreachable, its ReplicatedWorkers output can
+	 * only be consumed safely by a Gather, and the co-located join
+	 * collapses to a gather-to-singleton plan.  Segment-level requirements
+	 * are already prohibited in EpetDistribution; ANY cannot be handled
+	 * there because the engine skips the distribution enforcement check
+	 * for ANY requirements (CEngine::FCheckEnfdProps, fDistributionReqd).
+	 * Worker-level contexts requested by parallel joins/aggs stay valid.
+	 */
+	if (nullptr != m_pdsWorkerDistribution &&
+		CDistributionSpec::EdtReplicatedWorkers ==
+			m_pdsWorkerDistribution->Edt() &&
+		CDistributionSpec::EdtAny == prpp->Ped()->PdsRequired()->Edt())
+	{
+		const CDistributionSpecReplicatedWorkers *pdsRW =
+			CDistributionSpecReplicatedWorkers::PdsConvert(
+				m_pdsWorkerDistribution);
+		if (pdsRW->FFromReplicatedTable())
+		{
+			return false;
+		}
 	}
 
 	return true;

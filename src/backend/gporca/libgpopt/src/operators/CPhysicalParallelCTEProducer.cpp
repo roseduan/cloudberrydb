@@ -497,7 +497,7 @@ CPhysicalParallelCTEProducer::OsPrint(IOstream &os) const
 	os << "), Columns: [";
 	CUtils::OsPrintDrgPcr(os, m_pdrgpcr);
 	os << "]";
-
+	os << ", Parallel Workers: " << m_ulParallelWorkers;
 	return os;
 }
 

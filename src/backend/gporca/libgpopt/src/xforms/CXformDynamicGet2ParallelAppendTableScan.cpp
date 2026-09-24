@@ -93,12 +93,18 @@ CXformDynamicGet2ParallelAppendTableScan::Exfp(CExpressionHandle &exprhdl) const
 	CLogicalDynamicGet *popGet = CLogicalDynamicGet::PopConvert(exprhdl.Pop());
 	CTableDescriptor *ptabdesc = popGet->Ptabdesc();
 
-	// Don't use parallel append for replicated tables
+	// Don't use parallel append for replicated / master-only / mixed /
+	// iceberg tables.  This is a per-table distribution check: a
+	// hash-distributed partitioned fact stays parallelizable even when the
+	// query also joins a replicated dimension.  (Previously also gated by the
+	// query-global HasReplicatedTables(), which disabled parallel append for
+	// nearly every fact-vs-dimension join since TPC-DS dimensions are
+	// replicated; the parallel-fact append over a replicated-dim join is
+	// correct -- results are identical to serial.)
 	if (ptabdesc->GetRelDistribution() == IMDRelation::EreldistrReplicated ||
 		ptabdesc->GetRelDistribution() == IMDRelation::EreldistrMasterOnly ||
 		ptabdesc->RetrieveRelStorageType() == IMDRelation::ErelstorageMixedPartitioned ||
-		ptabdesc->RetrieveRelStorageType() == IMDRelation::ErelstorageIceberg ||
-		COptCtxt::PoctxtFromTLS()->HasReplicatedTables())
+		ptabdesc->RetrieveRelStorageType() == IMDRelation::ErelstorageIceberg)
 	{
 		return CXform::ExfpNone;
 	}

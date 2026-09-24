@@ -98,12 +98,9 @@ CXformIndexGet2ParallelIndexScan::Exfp(CExpressionHandle &exprhdl) const
 								 IMDRelation::ErelstorageMixedPartitioned;
 
 	// Don't use parallel scan for replicated tables
-	if (ptabdesc->GetRelDistribution() == IMDRelation::EreldistrReplicated ||
-		ptabdesc->GetRelDistribution() == IMDRelation::EreldistrMasterOnly ||
-		ptabdesc->RetrieveRelStorageType() == IMDRelation::ErelstorageIceberg ||
-		COptCtxt::PoctxtFromTLS()->HasReplicatedTables())
+	if (ptabdesc->GetRelDistribution() == IMDRelation::EreldistrMasterOnly ||
+		ptabdesc->RetrieveRelStorageType() == IMDRelation::ErelstorageIceberg)
 	{
-		//FIXME: Should we consider replicated tables.
 		return CXform::ExfpNone;
 	}
 

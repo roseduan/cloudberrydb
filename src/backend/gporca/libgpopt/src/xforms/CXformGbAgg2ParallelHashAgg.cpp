@@ -36,6 +36,7 @@
 #include "gpopt/operators/CPhysicalParallelHashAgg.h"
 #include "gpopt/xforms/CXformUtils.h"
 #include "naucrates/md/IMDAggregate.h"
+#include "naucrates/md/IMDRelation.h"
 
 // Use gpdbwrappers for parallel checks
 extern int max_parallel_workers_per_gather;
@@ -92,11 +93,6 @@ CXformGbAgg2ParallelHashAgg::Exfp(CExpressionHandle &exprhdl) const
 		return CXform::ExfpNone;
 	}
 
-	if (COptCtxt::PoctxtFromTLS()->HasReplicatedTables())
-	{
-		return CXform::ExfpNone;
-	}
-
 	if (!COptCtxt::PoctxtFromTLS()->HasParallelOperators())
 	{
 		return CXform::ExfpNone;
@@ -124,7 +120,12 @@ CXformGbAgg2ParallelHashAgg::Exfp(CExpressionHandle &exprhdl) const
 		return CXform::ExfpNone;
 	}
 
-	// High promise for parallel hash aggregation
+	// High promise for parallel hash aggregation.
+	// Replicated tables are now handled correctly via ReplicatedWorkers
+	// distribution: each segment's workers each hold a distinct subset of the
+	// replicated data so there is no intra-segment duplication, and
+	// CPhysicalAgg::PdsDerive propagates StrictReplicated upward so that the
+	// Gather motion only collects from one segment.
 	return CXform::ExfpHigh;
 }
 
@@ -193,6 +194,32 @@ CXformGbAgg2ParallelHashAgg::Transform(CXformContext *pxfctxt,
 
 	CMemoryPool *mp = pxfctxt->Pmp();
 	CLogicalGbAgg *popAgg = CLogicalGbAgg::PopConvert(pexpr->Pop());
+
+	// Skip parallel agg entirely when child subtree contains a replicated table.
+	// Replicated tables hold full data on every segment. The Local agg's
+	// FValidContext requires worker-level distribution from its child, but the
+	// optimizer may pick CPhysicalTableScan (segment-level Replicated) as best
+	// child — leaving no fallback and crashing PexprExtractPlan. Falling back
+	// to non-parallel HashAgg/StreamAgg is correct and safe for replicated tables.
+	if (popAgg->Egbaggtype() == COperator::EgbaggtypeGlobal && 
+		!CXformUtils::FMultiStageAgg(pexpr)) 
+	{
+		CExpression *pexprRel = (*pexpr)[0];
+		CTableDescriptorHashSet *ptds = pexprRel->DeriveTableDescriptor();
+		if (ptds)
+		{
+			CTableDescriptorHashSetIter iter(ptds);
+			while (iter.Advance())
+			{
+				const CTableDescriptor *ptd = iter.Get();
+				if (IMDRelation::EreldistrReplicated ==
+					ptd->GetRelDistribution())
+				{
+					return;
+				}
+			}
+		}
+	}
 	CColRefArray *colref_array = popAgg->Pdrgpcr();
 	colref_array->AddRef();
 

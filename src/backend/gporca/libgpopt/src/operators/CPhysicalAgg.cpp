@@ -551,6 +551,25 @@ CPhysicalAgg::PdsDerive(CMemoryPool *mp, CExpressionHandle &exprhdl) const
 		return GPOS_NEW(mp) CDistributionSpecStrictSingleton(
 			CDistributionSpecSingleton::EstMaster);
 	}
+	else if (CDistributionSpec::EdtReplicatedWorkers == pds->Edt())
+	{
+		// ReplicatedWorkers is replicated at segment-level
+		// but partitioned at worker-level within each segment.
+		// Apply the same safety check as StrictReplicated.
+		if (exprhdl.DeriveContainsOnlyReplicationSafeAggFuncs(1))
+		{
+			// Safe aggregate functions: keep ReplicatedWorkers.
+			// Workers already partition the data, can aggregate directly.
+			// After merging workers within a segment, each segment has the same result.
+			pds->AddRef();
+			return pds;
+		}
+
+		// Unsafe aggregate functions: degrade to TaintedReplicated.
+		// Results may depend on order, cannot guarantee consistency across workers.
+		return GPOS_NEW(mp) CDistributionSpecReplicated(
+			CDistributionSpec::EdtTaintedReplicated);
+	}
 	else if (CDistributionSpec::EdtStrictReplicated == pds->Edt())
 	{
 		// Aggregate functions that are not sensitive to the order of data (eg: sum, avg, min, max, count)

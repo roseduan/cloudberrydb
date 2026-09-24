@@ -33,9 +33,11 @@
 #include "gpopt/base/CDistributionSpecHashed.h"
 #include "gpopt/base/CDistributionSpecHashedWorker.h"
 #include "gpopt/base/CDistributionSpecSingleton.h"
+#include "gpopt/base/CDistributionSpecWorkerRandom.h"
 #include "gpopt/base/COptCtxt.h"
 #include "gpopt/operators/CExpressionHandle.h"
 #include "naucrates/md/IMDFunction.h"
+#include "naucrates/md/IMDRelation.h"
 
 using namespace gpopt;
 
@@ -187,6 +189,18 @@ CPhysicalParallelStreamAgg::PdsRequiredForLocal(
 	{
 		return PdsMaximalHashed(mp, m_pdrgpcrArgDQA);
 	}
+
+	/*
+	 * When the query contains replicated tables, request an explicit
+	 * worker-level distribution instead of ANY.  See the matching comment
+	 * in CPhysicalParallelHashAgg::PdsRequiredForLocal.
+	 */
+	if (COptCtxt::PoctxtFromTLS()->HasReplicatedTables())
+	{
+		return CDistributionSpecWorkerRandom::PdsCreateWorkerRandom(
+			mp, UlParallelWorkers());
+	}
+
 	// WorkerRandom distribution: each worker independently processes local data fragments
 	// This allows maximum parallelism for partial aggregation
 	return GPOS_NEW(mp) CDistributionSpecAny(this->Eopid());
@@ -310,14 +324,11 @@ CPhysicalParallelStreamAgg::FValidContext(
 			CDrvdPropPlan *pdpplanChild = pccBest->Pdpplan();
 			CDistributionSpec *pdsChild = pdpplanChild->Pds();
 
-			// Local aggregate requires worker-level distribution from child
-			// Reject segment-level distributions (Random, Hashed, Singleton, etc.)
+			// ReplicatedWorkers is also a valid worker-level distribution
 			if (CDistributionSpec::EdtWorkerRandom != pdsChild->Edt() &&
-				CDistributionSpec::EdtHashedWorker != pdsChild->Edt())
+				CDistributionSpec::EdtHashedWorker != pdsChild->Edt() &&
+				CDistributionSpec::EdtReplicatedWorkers != pdsChild->Edt())
 			{
-				// Child provides segment-level distribution, not worker-level
-				// This would prevent proper parallel execution within each segment
-				// Reject this plan
 				return false;
 			}
 		}
@@ -325,6 +336,5 @@ CPhysicalParallelStreamAgg::FValidContext(
 
 	return true;
 }
-
 
 // EOF

@@ -223,6 +223,19 @@ CPhysicalNLJoin::FValidContext(CMemoryPool *,			   // mp
 		return false;
 	}
 
+	// Reject CPhysicalParallelTableScan on a replicated table as either
+	// outer or inner: EdtReplicatedWorkers' page-share semantics
+	// mis-split the replicated relation's rows across workers in a slice,
+	// breaking NL's per-row outer/inner consumption (nondeterministic
+	// row counts, worker-init zero-row races).  The child group always
+	// has a non-parallel CPhysicalTableScan alternative for the same
+	// replicated relation, so rejecting the parallel-scan cost context
+	// here leaves a valid plan and avoids fallback to the PG planner.
+	if (FHasParallelReplicatedScanChild(pdrgpocChild))
+	{
+		return false;
+	}
+
 	return true;
 }
 

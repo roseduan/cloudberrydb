@@ -111,8 +111,7 @@ CXformImplementParallelSequence::Exfp(CExpressionHandle &exprhdl) const
 	{
 		CTableDescriptorHashSet *ptabdescset =
 			exprhdl.DeriveTableDescriptor(ul);
-		if (CXformUtils::FContainsForeignTable(ptabdescset) ||
-			CXformUtils::FContainsReplicatedTable(ptabdescset))
+		if (CXformUtils::FContainsForeignTable(ptabdescset))
 		{
 			return CXform::ExfpNone;
 		}

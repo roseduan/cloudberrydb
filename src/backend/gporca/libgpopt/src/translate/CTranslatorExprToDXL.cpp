@@ -20,6 +20,7 @@
 
 #include "gpos/common/CAutoTimer.h"
 #include "gpos/common/CHashMap.h"
+#include "gpopt/base/CDistributionSpecReplicatedWorkers.h"
 
 #include "gpopt/base/CCastUtils.h"
 #include "gpopt/base/CColRefSetIter.h"
@@ -6402,6 +6403,39 @@ CTranslatorExprToDXL::PdxlnMotion(CExpression *pexprMotion,
 	// construct a motion node
 	CDXLPhysicalMotion *motion = nullptr;
 	BOOL fDuplicateHazardMotion = CUtils::FDuplicateHazardMotion(pexprMotion);
+
+	// CBDB parallel: a duplicate-hazard Redistribute/Random Motion whose child
+	// derives ReplicatedWorkers that ORIGINATED FROM A REPLICATED-TABLE PARALLEL
+	// SCAN must NOT be elided into a Result + worker-granularity hash filter.
+	//
+	// PG's parallel page-share splits a replicated relation's rows across the
+	// workers within a segment, so such a ReplicatedWorkers input is replicated
+	// at the SEGMENT level but SPLIT across workers.  The elided filter routes
+	// rows at planNumSegments (segment x worker) granularity and assumes every
+	// worker holds a full copy, so it silently drops every row whose producing
+	// worker != its routed worker (TPC-DS Q24: only 191/N of the ssales groups
+	// survived with N workers per segment).
+	//
+	// Restrict this to FFromReplicatedTable() (base = StrictReplicated/Tainted),
+	// matching the F1 discriminator in CPhysicalParallelTableScan: a
+	// BroadcastWorkers enforcer ReplicatedWorkers (m_pdsSegmentBase == nullptr)
+	// is a deliberate motion ORCA's cost model chose and is left untouched.
+	//
+	// Keep fDuplicateHazardMotion itself true: GetInputSegIdsArray still reads a
+	// single input segment to dedup the segment-level replication.  Only suppress
+	// the filter elision (is_duplicate_sensitive) so a real Motion is emitted.
+	BOOL fElideToHashFilter = fDuplicateHazardMotion;
+	if (fElideToHashFilter)
+	{
+		CDistributionSpec *pdsChild =
+			CDrvdPropPlan::Pdpplan((*pexprMotion)[0]->PdpDerive())->Pds();
+		if (CDistributionSpec::EdtReplicatedWorkers == pdsChild->Edt() &&
+			CDistributionSpecReplicatedWorkers::PdsConvert(pdsChild)
+				->FFromReplicatedTable())
+		{
+			fElideToHashFilter = false;
+		}
+	}
 	switch (pexprMotion->Pop()->Eopid())
 	{
 		case COperator::EopPhysicalMotionGather:
@@ -6444,12 +6478,12 @@ CTranslatorExprToDXL::PdxlnMotion(CExpression *pexprMotion,
 			// decide whether the motion should be translated into result hash
 			// filter node or redistribute motion.
 			motion = GPOS_NEW(m_mp)
-				CDXLPhysicalRedistributeMotion(m_mp, fDuplicateHazardMotion);
+				CDXLPhysicalRedistributeMotion(m_mp, fElideToHashFilter);
 			break;
 
 		case COperator::EopPhysicalMotionRandom:
 			motion = GPOS_NEW(m_mp)
-				CDXLPhysicalRandomMotion(m_mp, fDuplicateHazardMotion);
+				CDXLPhysicalRandomMotion(m_mp, fElideToHashFilter);
 			break;
 
 		case COperator::EopPhysicalMotionHashDistributeWorkers:

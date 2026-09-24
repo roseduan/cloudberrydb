@@ -33,7 +33,11 @@
 #include "gpopt/base/CDistributionSpecHashed.h"
 #include "gpopt/base/CDistributionSpecRandom.h"
 #include "gpopt/base/CDistributionSpecSingleton.h"
+#include "gpopt/base/CDrvdPropPlan.h"
+#include "gpopt/base/CEnfdRewindability.h"
+#include "gpopt/base/CRewindabilitySpec.h"
 #include "gpopt/base/CUtils.h"
+#include "gpopt/operators/CExpressionHandle.h"
 #include "gpopt/metadata/CName.h"
 #include "gpopt/metadata/CTableDescriptor.h"
 #include "naucrates/statistics/CStatisticsUtils.h"
@@ -108,6 +112,18 @@ CPhysicalAppendTableScan::PppsDerive(CMemoryPool *mp, CExpressionHandle &) const
 	return pps;
 }
 
+//---------------------------------------------------------------------------
+//	@function:
+//		CPhysicalAppendTableScan::EpetRewindability
+//
+//	@doc:
+//		Return rewindability property enforcing type for this operator.
+//		AppendTableScan derives ErtRewindable but cannot provide
+//		ErtMarkRestore (Append with multiple children does not support
+//		mark/restore).  When a higher rewindability level is required,
+//		return EpetRequired so that ORCA inserts a Spool enforcer.
+//
+//---------------------------------------------------------------------------
 CEnfdProp::EPropEnforcingType
 CPhysicalAppendTableScan::EpetRewindability(CExpressionHandle &exprhdl,
 											const CEnfdRewindability *per) const

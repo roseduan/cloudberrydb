@@ -3169,9 +3169,12 @@ CTranslatorDXLToPlStmt::TranslateDXLMotion(
 	ULONG child_parallel_workers = ExtractParallelWorkersFromDXL(child_dxlnode);
 	if (child_parallel_workers > 1)
 	{
-		// Determine parallel workers based on enable_parallel and gang type
+		// Determine parallel workers based on gang type.
+		// SINGLETON_READER supports parallel for replicated table parallel scans
+		// (single segment, multiple workers within it).
 		bool supports_parallel = (sendslice->gangType == GANGTYPE_PRIMARY_READER ||
-		                          sendslice->gangType == GANGTYPE_PRIMARY_WRITER);
+		                          sendslice->gangType == GANGTYPE_PRIMARY_WRITER ||
+		                          sendslice->gangType == GANGTYPE_SINGLETON_READER);
 
 		if (supports_parallel)
 		{
@@ -3179,8 +3182,7 @@ CTranslatorDXLToPlStmt::TranslateDXLMotion(
 		}
 		else
 		{
-			// Disable parallel for: non-PRIMARY gang types
-			// (SINGLETON_READER, ENTRYDB_READER, UNALLOCATED)
+			// Disable parallel for: ENTRYDB_READER, UNALLOCATED
 			sendslice->parallel_workers = 0;
 		}
 	}

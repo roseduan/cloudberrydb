@@ -1,0 +1,1619 @@
+-- Test ORCA parallel execution with replicated tables
+--
+-- start_matchsubs
+--
+-- # the segment picked by a one-time filter to emit the replicated copy
+-- # is not deterministic across runs
+-- m/One-Time Filter: \(gp_execution_segment\(\) = \d+\)/
+-- s/gp_execution_segment\(\) = \d+/gp_execution_segment() = SEGID/
+--
+-- end_matchsubs
+-- start_ignore
+drop schema if exists orca_repl cascade;
+NOTICE:  schema "orca_repl" does not exist, skipping
+-- end_ignore
+create schema orca_repl;
+set search_path=orca_repl, public;
+set parallel_setup_cost=0;
+set max_parallel_workers_per_gather=2;
+set enable_parallel = on;
+set optimizer = on;
+-- Replicated-Replicated join
+drop table if exists rep_a, rep_b;
+NOTICE:  table "rep_a" does not exist, skipping
+NOTICE:  table "rep_b" does not exist, skipping
+create table rep_a (id int, val text) distributed replicated;
+create table rep_b (id int, data int) distributed replicated;
+insert into rep_a select i, 'v' || i from generate_series(1, 10) i;
+insert into rep_b select i, i*10 from generate_series(1, 5000) i;
+analyze rep_a;
+analyze rep_b;
+explain (verbose, costs off) select * from rep_a join rep_b on rep_a.id = rep_b.id;
+                                  QUERY PLAN                                   
+-------------------------------------------------------------------------------
+ Gather Motion 2:1  (slice1; segments: 2)
+   Output: rep_a.id, rep_a.val, rep_b.id, rep_b.data
+   ->  Parallel Hash Join
+         Output: rep_a.id, rep_a.val, rep_b.id, rep_b.data
+         Hash Cond: (rep_b.id = rep_a.id)
+         ->  Parallel Seq Scan on orca_repl.rep_b
+               Output: rep_b.id, rep_b.data
+         ->  Parallel Hash
+               Output: rep_a.id, rep_a.val
+               ->  Parallel Seq Scan on orca_repl.rep_a
+                     Output: rep_a.id, rep_a.val
+ Settings: enable_parallel = 'on', optimizer = 'on', parallel_setup_cost = '0'
+ Optimizer: GPORCA
+(13 rows)
+
+select * from rep_a join rep_b on rep_a.id = rep_b.id order by rep_a.id;
+ id | val | id | data 
+----+-----+----+------
+  1 | v1  |  1 |   10
+  2 | v2  |  2 |   20
+  3 | v3  |  3 |   30
+  4 | v4  |  4 |   40
+  5 | v5  |  5 |   50
+  6 | v6  |  6 |   60
+  7 | v7  |  7 |   70
+  8 | v8  |  8 |   80
+  9 | v9  |  9 |   90
+ 10 | v10 | 10 |  100
+(10 rows)
+
+-- Distributed-Replicated join
+drop table if exists rep_t, dist_t;
+NOTICE:  table "rep_t" does not exist, skipping
+NOTICE:  table "dist_t" does not exist, skipping
+create table rep_t (id int, val text) distributed replicated;
+create table dist_t (id int, info text) distributed by (id);
+insert into rep_t select i, 'v' || i from generate_series(1, 10) i;
+insert into dist_t select i, 'info' || i from generate_series(1, 5000) i;
+analyze rep_t;
+analyze dist_t;
+explain (verbose, costs off) select * from dist_t join rep_t on dist_t.id = rep_t.id;
+                                  QUERY PLAN                                   
+-------------------------------------------------------------------------------
+ Gather Motion 6:1  (slice1; segments: 6)
+   Output: dist_t.id, dist_t.info, rep_t.id, rep_t.val
+   ->  Parallel Hash Join
+         Output: dist_t.id, dist_t.info, rep_t.id, rep_t.val
+         Hash Cond: (dist_t.id = rep_t.id)
+         ->  Parallel Seq Scan on orca_repl.dist_t
+               Output: dist_t.id, dist_t.info
+         ->  Parallel Hash
+               Output: rep_t.id, rep_t.val
+               ->  Parallel Seq Scan on orca_repl.rep_t
+                     Output: rep_t.id, rep_t.val
+ Settings: enable_parallel = 'on', optimizer = 'on', parallel_setup_cost = '0'
+ Optimizer: GPORCA
+(13 rows)
+
+select * from dist_t join rep_t on dist_t.id = rep_t.id order by dist_t.id;
+ id |  info  | id | val 
+----+--------+----+-----
+  1 | info1  |  1 | v1
+  2 | info2  |  2 | v2
+  3 | info3  |  3 | v3
+  4 | info4  |  4 | v4
+  5 | info5  |  5 | v5
+  6 | info6  |  6 | v6
+  7 | info7  |  7 | v7
+  8 | info8  |  8 | v8
+  9 | info9  |  9 | v9
+ 10 | info10 | 10 | v10
+(10 rows)
+
+-- Anti Semi Join (NOT IN) with replicated inner table
+drop table if exists notin_outer, notin_inner_repl;
+NOTICE:  table "notin_outer" does not exist, skipping
+NOTICE:  table "notin_inner_repl" does not exist, skipping
+create table notin_outer(a int, b int) with(parallel_workers=2) distributed by (a);
+create table notin_inner_repl(c2 int) with(parallel_workers=2) distributed replicated;
+insert into notin_outer select i, i+1 from generate_series(1, 1000) i;
+insert into notin_inner_repl values (1), (2), (3), (null), (5), (null), (10), (20);
+analyze notin_outer;
+analyze notin_inner_repl;
+-- NOT IN with nullable inner key
+explain (costs off) select * from notin_outer where a not in (select c2 from notin_inner_repl);
+                        QUERY PLAN                        
+----------------------------------------------------------
+ Gather Motion 6:1  (slice1; segments: 6)
+   ->  Parallel Hash Left Anti Semi (Not-In) Join
+         Hash Cond: (notin_outer.a = notin_inner_repl.c2)
+         ->  Parallel Seq Scan on notin_outer
+         ->  Parallel Hash
+               ->  Parallel Seq Scan on notin_inner_repl
+ Optimizer: GPORCA
+(7 rows)
+
+select * from notin_outer where a not in (select c2 from notin_inner_repl);
+ a | b 
+---+---
+(0 rows)
+
+-- NOT IN with non-null inner key filter
+explain (costs off) select * from notin_outer where a not in (select c2 from notin_inner_repl where c2 is not null);
+                        QUERY PLAN                        
+----------------------------------------------------------
+ Gather Motion 6:1  (slice1; segments: 6)
+   ->  Parallel Hash Left Anti Semi (Not-In) Join
+         Hash Cond: (notin_outer.a = notin_inner_repl.c2)
+         ->  Parallel Seq Scan on notin_outer
+         ->  Parallel Hash
+               ->  Parallel Seq Scan on notin_inner_repl
+                     Filter: (NOT (c2 IS NULL))
+ Optimizer: GPORCA
+(8 rows)
+
+select * from notin_outer where a not in (select c2 from notin_inner_repl where c2 is not null);
+  a   |  b   
+------+------
+    4 |    5
+    7 |    8
+    8 |    9
+   16 |   17
+   18 |   19
+   19 |   20
+   22 |   23
+   24 |   25
+   27 |   28
+   29 |   30
+   34 |   35
+   37 |   38
+   39 |   40
+   41 |   42
+   42 |   43
+   45 |   46
+   51 |   52
+   53 |   54
+   54 |   55
+   55 |   56
+   59 |   60
+   60 |   61
+   65 |   66
+   66 |   67
+   70 |   71
+   75 |   76
+   77 |   78
+   80 |   81
+   81 |   82
+   84 |   85
+   90 |   91
+   92 |   93
+   93 |   94
+   94 |   95
+   97 |   98
+   99 |  100
+  101 |  102
+  102 |  103
+  103 |  104
+  104 |  105
+  109 |  110
+  113 |  114
+  115 |  116
+  118 |  119
+  120 |  121
+  126 |  127
+  127 |  128
+  129 |  130
+  130 |  131
+  131 |  132
+  139 |  140
+  140 |  141
+  142 |  143
+  143 |  144
+  146 |  147
+  147 |  148
+  151 |  152
+  163 |  164
+  165 |  166
+  180 |  181
+  182 |  183
+  183 |  184
+  185 |  186
+  187 |  188
+  190 |  191
+  192 |  193
+  193 |  194
+  197 |  198
+  203 |  204
+  207 |  208
+  211 |  212
+  215 |  216
+  219 |  220
+  223 |  224
+  224 |  225
+  225 |  226
+  229 |  230
+  239 |  240
+  241 |  242
+  244 |  245
+  247 |  248
+  251 |  252
+  252 |  253
+  256 |  257
+  257 |  258
+  258 |  259
+  260 |  261
+  261 |  262
+  262 |  263
+  266 |  267
+  267 |  268
+  270 |  271
+  272 |  273
+  274 |  275
+  279 |  280
+  282 |  283
+  287 |  288
+  291 |  292
+  294 |  295
+  296 |  297
+  298 |  299
+  301 |  302
+  304 |  305
+  308 |  309
+  315 |  316
+  319 |  320
+  322 |  323
+  325 |  326
+  326 |  327
+  329 |  330
+  331 |  332
+  334 |  335
+  335 |  336
+  338 |  339
+  341 |  342
+  344 |  345
+  345 |  346
+  346 |  347
+  348 |  349
+  350 |  351
+  352 |  353
+  354 |  355
+  355 |  356
+  356 |  357
+  358 |  359
+  360 |  361
+  361 |  362
+  362 |  363
+  363 |  364
+  364 |  365
+  366 |  367
+  379 |  380
+  381 |  382
+  391 |  392
+  393 |  394
+  394 |  395
+  404 |  405
+  410 |  411
+  414 |  415
+  416 |  417
+  418 |  419
+  421 |  422
+  422 |  423
+  424 |  425
+  428 |  429
+  435 |  436
+  436 |  437
+  437 |  438
+  438 |  439
+  439 |  440
+  444 |  445
+  446 |  447
+  455 |  456
+  456 |  457
+  457 |  458
+  458 |  459
+  459 |  460
+  461 |  462
+  465 |  466
+  466 |  467
+  470 |  471
+  471 |  472
+  473 |  474
+  476 |  477
+  479 |  480
+  482 |  483
+  485 |  486
+  486 |  487
+  487 |  488
+  490 |  491
+  491 |  492
+  493 |  494
+  494 |  495
+  495 |  496
+  500 |  501
+  501 |  502
+  502 |  503
+  509 |  510
+  512 |  513
+  513 |  514
+  514 |  515
+  515 |  516
+  516 |  517
+  519 |  520
+  520 |  521
+  522 |  523
+  524 |  525
+  525 |  526
+  531 |  532
+  535 |  536
+  541 |  542
+  548 |  549
+  550 |  551
+  556 |  557
+  558 |  559
+  560 |  561
+  563 |  564
+  564 |  565
+  565 |  566
+  575 |  576
+  580 |  581
+  581 |  582
+  582 |  583
+  586 |  587
+  590 |  591
+  603 |  604
+  604 |  605
+  607 |  608
+  611 |  612
+  612 |  613
+  613 |  614
+  616 |  617
+  617 |  618
+  620 |  621
+  626 |  627
+  628 |  629
+  635 |  636
+  640 |  641
+  650 |  651
+  652 |  653
+  655 |  656
+  656 |  657
+  657 |  658
+  658 |  659
+  662 |  663
+  663 |  664
+  664 |  665
+  670 |  671
+  671 |  672
+  672 |  673
+  673 |  674
+  675 |  676
+  678 |  679
+  691 |  692
+  697 |  698
+  700 |  701
+  702 |  703
+  708 |  709
+  721 |  722
+  723 |  724
+  726 |  727
+  729 |  730
+  731 |  732
+  738 |  739
+  741 |  742
+  742 |  743
+  744 |  745
+  746 |  747
+  749 |  750
+  751 |  752
+  752 |  753
+  754 |  755
+  755 |  756
+  756 |  757
+  757 |  758
+  761 |  762
+  770 |  771
+  772 |  773
+  779 |  780
+  783 |  784
+  785 |  786
+  787 |  788
+  794 |  795
+  798 |  799
+  800 |  801
+  801 |  802
+  802 |  803
+  803 |  804
+  808 |  809
+  810 |  811
+  817 |  818
+  819 |  820
+  821 |  822
+  826 |  827
+  832 |  833
+  833 |  834
+  841 |  842
+  844 |  845
+  847 |  848
+  849 |  850
+  850 |  851
+  851 |  852
+  852 |  853
+  853 |  854
+  854 |  855
+  858 |  859
+  859 |  860
+  862 |  863
+  863 |  864
+  864 |  865
+  867 |  868
+  871 |  872
+  872 |  873
+  873 |  874
+  874 |  875
+  875 |  876
+  880 |  881
+  881 |  882
+  884 |  885
+  885 |  886
+  887 |  888
+  888 |  889
+  891 |  892
+  892 |  893
+  893 |  894
+  896 |  897
+  902 |  903
+  910 |  911
+  911 |  912
+  913 |  914
+  917 |  918
+  919 |  920
+  920 |  921
+  921 |  922
+  923 |  924
+  932 |  933
+  934 |  935
+  940 |  941
+  949 |  950
+  951 |  952
+  955 |  956
+  956 |  957
+  958 |  959
+  963 |  964
+  968 |  969
+  973 |  974
+  976 |  977
+  978 |  979
+  979 |  980
+  980 |  981
+  988 |  989
+  989 |  990
+  992 |  993
+  995 |  996
+  999 | 1000
+ 1000 | 1001
+    6 |    7
+    9 |   10
+   11 |   12
+   13 |   14
+   14 |   15
+   17 |   18
+   21 |   22
+   25 |   26
+   28 |   29
+   32 |   33
+   33 |   34
+   43 |   44
+   52 |   53
+   56 |   57
+   58 |   59
+   62 |   63
+   63 |   64
+   67 |   68
+   73 |   74
+   82 |   83
+   85 |   86
+   96 |   97
+  100 |  101
+  105 |  106
+  106 |  107
+  107 |  108
+  108 |  109
+  110 |  111
+  111 |  112
+  112 |  113
+  116 |  117
+  117 |  118
+  119 |  120
+  121 |  122
+  123 |  124
+  125 |  126
+  128 |  129
+  132 |  133
+  133 |  134
+  135 |  136
+  137 |  138
+  138 |  139
+  141 |  142
+  144 |  145
+  145 |  146
+  153 |  154
+  154 |  155
+  156 |  157
+  161 |  162
+  164 |  165
+  172 |  173
+  173 |  174
+  175 |  176
+  176 |  177
+  177 |  178
+  179 |  180
+  186 |  187
+  188 |  189
+  189 |  190
+  195 |  196
+  198 |  199
+  200 |  201
+  204 |  205
+  205 |  206
+  209 |  210
+  210 |  211
+  212 |  213
+  218 |  219
+  221 |  222
+  230 |  231
+  233 |  234
+  236 |  237
+  237 |  238
+  238 |  239
+  240 |  241
+  242 |  243
+  245 |  246
+  246 |  247
+  253 |  254
+  254 |  255
+  255 |  256
+  263 |  264
+  264 |  265
+  268 |  269
+  275 |  276
+  284 |  285
+  285 |  286
+  286 |  287
+  288 |  289
+  290 |  291
+  295 |  296
+  297 |  298
+  299 |  300
+  306 |  307
+  309 |  310
+  310 |  311
+  311 |  312
+  312 |  313
+  313 |  314
+  314 |  315
+  318 |  319
+  320 |  321
+  328 |  329
+  333 |  334
+  336 |  337
+  337 |  338
+  342 |  343
+  347 |  348
+  349 |  350
+  357 |  358
+  359 |  360
+  365 |  366
+  367 |  368
+  369 |  370
+  370 |  371
+  371 |  372
+  372 |  373
+  373 |  374
+  374 |  375
+  378 |  379
+  380 |  381
+  383 |  384
+  384 |  385
+  389 |  390
+  390 |  391
+  395 |  396
+  397 |  398
+  399 |  400
+  403 |  404
+  406 |  407
+  412 |  413
+  413 |  414
+  415 |  416
+  419 |  420
+  420 |  421
+  423 |  424
+  425 |  426
+  426 |  427
+  427 |  428
+  429 |  430
+  433 |  434
+  443 |  444
+  447 |  448
+  449 |  450
+  451 |  452
+  452 |  453
+  454 |  455
+  460 |  461
+  462 |  463
+  464 |  465
+  467 |  468
+  469 |  470
+  472 |  473
+  474 |  475
+  475 |  476
+  480 |  481
+  481 |  482
+  484 |  485
+  488 |  489
+  498 |  499
+  503 |  504
+  505 |  506
+  506 |  507
+  508 |  509
+  510 |  511
+  511 |  512
+  521 |  522
+  526 |  527
+  530 |  531
+  533 |  534
+  536 |  537
+  537 |  538
+  539 |  540
+  542 |  543
+  543 |  544
+  547 |  548
+  549 |  550
+  552 |  553
+  553 |  554
+  555 |  556
+  561 |  562
+  562 |  563
+  566 |  567
+  567 |  568
+  571 |  572
+  572 |  573
+  573 |  574
+  574 |  575
+  576 |  577
+  577 |  578
+  578 |  579
+  584 |  585
+  587 |  588
+  589 |  590
+  592 |  593
+  593 |  594
+  594 |  595
+  596 |  597
+  598 |  599
+  600 |  601
+  601 |  602
+  605 |  606
+  609 |  610
+  610 |  611
+  614 |  615
+  615 |  616
+  618 |  619
+  619 |  620
+  621 |  622
+  622 |  623
+  623 |  624
+  624 |  625
+  627 |  628
+  629 |  630
+  631 |  632
+  634 |  635
+  637 |  638
+  648 |  649
+  649 |  650
+  651 |  652
+  660 |  661
+  661 |  662
+  666 |  667
+  668 |  669
+  676 |  677
+  677 |  678
+  679 |  680
+  682 |  683
+  684 |  685
+  686 |  687
+  688 |  689
+  690 |  691
+  692 |  693
+  695 |  696
+  696 |  697
+  699 |  700
+  701 |  702
+  703 |  704
+  704 |  705
+  705 |  706
+  707 |  708
+  709 |  710
+  710 |  711
+  711 |  712
+  713 |  714
+  715 |  716
+  718 |  719
+  720 |  721
+  725 |  726
+  727 |  728
+  728 |  729
+  730 |  731
+  732 |  733
+  733 |  734
+  736 |  737
+  739 |  740
+  745 |  746
+  747 |  748
+  750 |  751
+  753 |  754
+  758 |  759
+  759 |  760
+  762 |  763
+  765 |  766
+  771 |  772
+  775 |  776
+  777 |  778
+  778 |  779
+  781 |  782
+  788 |  789
+  791 |  792
+  792 |  793
+  793 |  794
+  795 |  796
+  796 |  797
+  797 |  798
+  804 |  805
+  805 |  806
+  806 |  807
+  809 |  810
+  811 |  812
+  814 |  815
+  815 |  816
+  820 |  821
+  823 |  824
+  827 |  828
+  830 |  831
+  831 |  832
+  834 |  835
+  835 |  836
+  842 |  843
+  845 |  846
+  846 |  847
+  869 |  870
+  876 |  877
+  878 |  879
+  882 |  883
+  886 |  887
+  889 |  890
+  890 |  891
+  895 |  896
+  897 |  898
+  898 |  899
+  899 |  900
+  901 |  902
+  903 |  904
+  905 |  906
+  912 |  913
+  914 |  915
+  916 |  917
+  925 |  926
+  926 |  927
+  928 |  929
+  929 |  930
+  930 |  931
+  931 |  932
+  935 |  936
+  936 |  937
+  937 |  938
+  938 |  939
+  942 |  943
+  945 |  946
+  946 |  947
+  947 |  948
+  948 |  949
+  950 |  951
+  953 |  954
+  957 |  958
+  961 |  962
+  962 |  963
+  970 |  971
+  971 |  972
+  975 |  976
+  981 |  982
+  983 |  984
+  986 |  987
+  991 |  992
+  997 |  998
+   12 |   13
+   15 |   16
+   23 |   24
+   26 |   27
+   30 |   31
+   31 |   32
+   35 |   36
+   36 |   37
+   38 |   39
+   40 |   41
+   44 |   45
+   46 |   47
+   47 |   48
+   48 |   49
+   49 |   50
+   50 |   51
+   57 |   58
+   61 |   62
+   64 |   65
+   68 |   69
+   69 |   70
+   71 |   72
+   72 |   73
+   74 |   75
+   76 |   77
+   78 |   79
+   79 |   80
+   83 |   84
+   86 |   87
+   87 |   88
+   88 |   89
+   89 |   90
+   91 |   92
+   95 |   96
+   98 |   99
+  114 |  115
+  122 |  123
+  124 |  125
+  134 |  135
+  136 |  137
+  148 |  149
+  149 |  150
+  150 |  151
+  152 |  153
+  155 |  156
+  157 |  158
+  158 |  159
+  159 |  160
+  160 |  161
+  162 |  163
+  166 |  167
+  167 |  168
+  168 |  169
+  169 |  170
+  170 |  171
+  171 |  172
+  174 |  175
+  178 |  179
+  181 |  182
+  184 |  185
+  191 |  192
+  194 |  195
+  196 |  197
+  199 |  200
+  201 |  202
+  202 |  203
+  206 |  207
+  208 |  209
+  213 |  214
+  214 |  215
+  216 |  217
+  217 |  218
+  220 |  221
+  222 |  223
+  226 |  227
+  227 |  228
+  228 |  229
+  231 |  232
+  232 |  233
+  234 |  235
+  235 |  236
+  243 |  244
+  248 |  249
+  249 |  250
+  250 |  251
+  259 |  260
+  265 |  266
+  269 |  270
+  271 |  272
+  273 |  274
+  276 |  277
+  277 |  278
+  278 |  279
+  280 |  281
+  281 |  282
+  283 |  284
+  289 |  290
+  292 |  293
+  293 |  294
+  300 |  301
+  302 |  303
+  303 |  304
+  305 |  306
+  307 |  308
+  316 |  317
+  317 |  318
+  321 |  322
+  323 |  324
+  324 |  325
+  327 |  328
+  330 |  331
+  332 |  333
+  339 |  340
+  340 |  341
+  343 |  344
+  351 |  352
+  353 |  354
+  368 |  369
+  375 |  376
+  376 |  377
+  377 |  378
+  382 |  383
+  385 |  386
+  386 |  387
+  387 |  388
+  388 |  389
+  392 |  393
+  396 |  397
+  398 |  399
+  400 |  401
+  401 |  402
+  402 |  403
+  405 |  406
+  407 |  408
+  408 |  409
+  409 |  410
+  411 |  412
+  417 |  418
+  430 |  431
+  431 |  432
+  432 |  433
+  434 |  435
+  440 |  441
+  441 |  442
+  442 |  443
+  445 |  446
+  448 |  449
+  450 |  451
+  453 |  454
+  463 |  464
+  468 |  469
+  477 |  478
+  478 |  479
+  483 |  484
+  489 |  490
+  492 |  493
+  496 |  497
+  497 |  498
+  499 |  500
+  504 |  505
+  507 |  508
+  517 |  518
+  518 |  519
+  523 |  524
+  527 |  528
+  528 |  529
+  529 |  530
+  532 |  533
+  534 |  535
+  538 |  539
+  540 |  541
+  544 |  545
+  545 |  546
+  546 |  547
+  551 |  552
+  554 |  555
+  557 |  558
+  559 |  560
+  568 |  569
+  569 |  570
+  570 |  571
+  579 |  580
+  583 |  584
+  585 |  586
+  588 |  589
+  591 |  592
+  595 |  596
+  597 |  598
+  599 |  600
+  602 |  603
+  606 |  607
+  608 |  609
+  625 |  626
+  630 |  631
+  632 |  633
+  633 |  634
+  636 |  637
+  638 |  639
+  639 |  640
+  641 |  642
+  642 |  643
+  643 |  644
+  644 |  645
+  645 |  646
+  646 |  647
+  647 |  648
+  653 |  654
+  654 |  655
+  659 |  660
+  665 |  666
+  667 |  668
+  669 |  670
+  674 |  675
+  680 |  681
+  681 |  682
+  683 |  684
+  685 |  686
+  687 |  688
+  689 |  690
+  693 |  694
+  694 |  695
+  698 |  699
+  706 |  707
+  712 |  713
+  714 |  715
+  716 |  717
+  717 |  718
+  719 |  720
+  722 |  723
+  724 |  725
+  734 |  735
+  735 |  736
+  737 |  738
+  740 |  741
+  743 |  744
+  748 |  749
+  760 |  761
+  763 |  764
+  764 |  765
+  766 |  767
+  767 |  768
+  768 |  769
+  769 |  770
+  773 |  774
+  774 |  775
+  776 |  777
+  780 |  781
+  782 |  783
+  784 |  785
+  786 |  787
+  789 |  790
+  790 |  791
+  799 |  800
+  807 |  808
+  812 |  813
+  813 |  814
+  816 |  817
+  818 |  819
+  822 |  823
+  824 |  825
+  825 |  826
+  828 |  829
+  829 |  830
+  836 |  837
+  837 |  838
+  838 |  839
+  839 |  840
+  840 |  841
+  843 |  844
+  848 |  849
+  855 |  856
+  856 |  857
+  857 |  858
+  860 |  861
+  861 |  862
+  865 |  866
+  866 |  867
+  868 |  869
+  870 |  871
+  877 |  878
+  879 |  880
+  883 |  884
+  894 |  895
+  900 |  901
+  904 |  905
+  906 |  907
+  907 |  908
+  908 |  909
+  909 |  910
+  915 |  916
+  918 |  919
+  922 |  923
+  924 |  925
+  927 |  928
+  933 |  934
+  939 |  940
+  941 |  942
+  943 |  944
+  944 |  945
+  952 |  953
+  954 |  955
+  959 |  960
+  960 |  961
+  964 |  965
+  965 |  966
+  966 |  967
+  967 |  968
+  969 |  970
+  972 |  973
+  974 |  975
+  977 |  978
+  982 |  983
+  984 |  985
+  985 |  986
+  987 |  988
+  990 |  991
+  993 |  994
+  994 |  995
+  996 |  997
+  998 |  999
+(994 rows)
+
+-- Left Outer Join with replicated table
+drop table if exists loj_dist, loj_repl;
+NOTICE:  table "loj_dist" does not exist, skipping
+NOTICE:  table "loj_repl" does not exist, skipping
+create table loj_dist(a int, b int) with(parallel_workers=2) distributed by (a);
+create table loj_repl(c int, d int) with(parallel_workers=2) distributed replicated;
+insert into loj_dist select i, i+1 from generate_series(1, 1000) i;
+insert into loj_repl select i, i*10 from generate_series(1, 5000) i;
+analyze loj_dist;
+analyze loj_repl;
+-- Distributed left join replicated (replicated as inner)
+explain (costs off) select * from loj_dist left join loj_repl on loj_dist.a = loj_repl.c;
+                   QUERY PLAN                    
+-------------------------------------------------
+ Gather Motion 6:1  (slice1; segments: 6)
+   ->  Parallel Hash Left Join
+         Hash Cond: (loj_dist.a = loj_repl.c)
+         ->  Parallel Seq Scan on loj_dist
+         ->  Parallel Hash
+               ->  Parallel Seq Scan on loj_repl
+ Optimizer: GPORCA
+(7 rows)
+
+-- Replicated left join distributed (replicated as outer)
+explain (costs off) select * from loj_repl left join loj_dist on loj_repl.c = loj_dist.a;
+                              QUERY PLAN                               
+-----------------------------------------------------------------------
+ Gather Motion 2:1  (slice1; segments: 2)
+   ->  Parallel Hash Left Join
+         Hash Cond: (loj_repl.c = loj_dist.a)
+         ->  Parallel Seq Scan on loj_repl
+         ->  Parallel Hash
+               ->  Broadcast Workers Motion 6:2  (slice2; segments: 6)
+                     ->  Parallel Seq Scan on loj_dist
+ Optimizer: GPORCA
+(8 rows)
+
+-- Left Semi Join (IN / EXISTS) with replicated inner table
+drop table if exists semi_dist, semi_repl;
+NOTICE:  table "semi_dist" does not exist, skipping
+NOTICE:  table "semi_repl" does not exist, skipping
+create table semi_dist(a int, b int) with(parallel_workers=2) distributed by (a);
+create table semi_repl(c int, d int) with(parallel_workers=2) distributed replicated;
+insert into semi_dist select i, i+1 from generate_series(1, 5000) i;
+insert into semi_repl select i, i*10 from generate_series(1, 20) i;
+analyze semi_dist;
+analyze semi_repl;
+-- IN subquery: distributed outer, replicated inner
+explain (costs off) select * from semi_dist where a in (select c from semi_repl);
+                    QUERY PLAN                    
+--------------------------------------------------
+ Gather Motion 6:1  (slice1; segments: 6)
+   ->  Parallel Hash Semi Join
+         Hash Cond: (semi_dist.a = semi_repl.c)
+         ->  Parallel Seq Scan on semi_dist
+         ->  Parallel Hash
+               ->  Parallel Seq Scan on semi_repl
+ Optimizer: GPORCA
+(7 rows)
+
+select * from semi_dist where a in (select c from semi_repl);
+ a  | b  
+----+----
+  2 |  3
+  3 |  4
+  4 |  5
+  7 |  8
+  8 |  9
+ 16 | 17
+ 18 | 19
+ 19 | 20
+  5 |  6
+  6 |  7
+  9 | 10
+ 10 | 11
+ 11 | 12
+ 13 | 14
+ 14 | 15
+ 17 | 18
+  1 |  2
+ 12 | 13
+ 15 | 16
+ 20 | 21
+(20 rows)
+
+-- EXISTS subquery: distributed outer, replicated inner
+explain (costs off) select * from semi_dist where exists (select c from semi_repl where semi_dist.a = semi_repl.c);
+                    QUERY PLAN                    
+--------------------------------------------------
+ Gather Motion 6:1  (slice1; segments: 6)
+   ->  Parallel Hash Semi Join
+         Hash Cond: (semi_dist.a = semi_repl.c)
+         ->  Parallel Seq Scan on semi_dist
+               Filter: (NOT (a IS NULL))
+         ->  Parallel Hash
+               ->  Parallel Seq Scan on semi_repl
+ Optimizer: GPORCA
+(8 rows)
+
+select * from semi_dist where exists (select c from semi_repl where semi_dist.a = semi_repl.c);
+ a  | b  
+----+----
+  2 |  3
+  3 |  4
+  4 |  5
+  7 |  8
+  8 |  9
+ 16 | 17
+ 18 | 19
+ 19 | 20
+  1 |  2
+ 12 | 13
+ 15 | 16
+ 20 | 21
+  5 |  6
+  6 |  7
+  9 | 10
+ 10 | 11
+ 11 | 12
+ 13 | 14
+ 14 | 15
+ 17 | 18
+(20 rows)
+
+-- Replicated outer, distributed inner (should not use parallel semi join)
+explain (costs off) select * from semi_repl where c in (select a from semi_dist);
+                            QUERY PLAN                            
+------------------------------------------------------------------
+ Gather Motion 6:1  (slice1; segments: 6)
+   ->  Parallel Hash Join
+         Hash Cond: (semi_dist.a = semi_repl.c)
+         ->  HashAggregate
+               Group Key: semi_dist.a
+               ->  Redistribute Motion 6:6  (slice2; segments: 6)
+                     Hash Key: semi_dist.a
+                     Hash Module: 3
+                     ->  Parallel Seq Scan on semi_dist
+         ->  Parallel Hash
+               ->  Parallel Seq Scan on semi_repl
+ Optimizer: GPORCA
+(12 rows)
+
+select * from semi_repl where c in (select a from semi_dist);
+ c  |  d  
+----+-----
+ 13 | 130
+  9 |  90
+ 17 | 170
+ 12 | 120
+ 20 | 200
+  1 |  10
+ 19 | 190
+  2 |  20
+  7 |  70
+ 16 | 160
+ 10 | 100
+  5 |  50
+  6 |  60
+ 11 | 110
+ 14 | 140
+ 15 | 150
+ 18 | 180
+  3 |  30
+  8 |  80
+  4 |  40
+(20 rows)
+
+-- Parallel HashAgg with replicated table
+-- Should NOT produce single-stage ParallelHashAgg on replicated table
+explain (costs off) select c, count(*) from semi_repl group by c;
+                         QUERY PLAN                         
+------------------------------------------------------------
+ Gather Motion 6:1  (slice1; segments: 6)
+   ->  Finalize HashAggregate
+         Group Key: c
+         ->  Redistribute Motion 2:6  (slice2; segments: 2)
+               Hash Key: c
+               Hash Module: 3
+               ->  Streaming Partial HashAggregate
+                     Group Key: c
+                     ->  Parallel Seq Scan on semi_repl
+ Optimizer: GPORCA
+(10 rows)
+
+select c, count(*) from semi_repl group by c;
+ c  | count 
+----+-------
+ 15 |     1
+  2 |     1
+ 16 |     1
+  7 |     1
+ 19 |     1
+  1 |     1
+ 12 |     1
+ 20 |     1
+  9 |     1
+ 13 |     1
+ 17 |     1
+  3 |     1
+ 18 |     1
+  4 |     1
+  8 |     1
+ 11 |     1
+ 10 |     1
+  6 |     1
+ 14 |     1
+  5 |     1
+(20 rows)
+
+-- Parallel GroupAgg (StreamAgg) with replicated table
+set optimizer_enable_hashagg = off;
+set optimizer_enable_parallel_hashagg=off;
+explain (costs off) select c, count(*) from semi_repl group by c;
+                             QUERY PLAN                             
+--------------------------------------------------------------------
+ Gather Motion 6:1  (slice1; segments: 6)
+   ->  Finalize GroupAggregate
+         Group Key: c
+         ->  Sort
+               Sort Key: c
+               ->  Redistribute Motion 2:6  (slice2; segments: 2)
+                     Hash Key: c
+                     Hash Module: 3
+                     ->  Partial GroupAggregate
+                           Group Key: c
+                           ->  Sort
+                                 Sort Key: c
+                                 ->  Parallel Seq Scan on semi_repl
+ Optimizer: GPORCA
+(14 rows)
+
+select c, count(*) from semi_repl group by c;
+ c  | count 
+----+-------
+ 15 |     1
+  1 |     1
+ 12 |     1
+ 20 |     1
+  9 |     1
+ 13 |     1
+ 17 |     1
+  5 |     1
+  6 |     1
+ 10 |     1
+ 11 |     1
+ 14 |     1
+  3 |     1
+  4 |     1
+  8 |     1
+ 18 |     1
+  2 |     1
+  7 |     1
+ 16 |     1
+ 19 |     1
+(20 rows)
+
+reset optimizer_enable_parallel_hashagg;
+reset optimizer_enable_hashagg;
+-- Index Scan on replicated table
+drop table if exists repl_idx;
+NOTICE:  table "repl_idx" does not exist, skipping
+create table repl_idx(a int, b int, c text) with (parallel_workers=2) distributed replicated;
+create index repl_idx_a_idx on repl_idx(a);
+insert into repl_idx select i, i, 'text_'||i from generate_series(1, 10000) i;
+analyze repl_idx;
+-- parallel index scan on replicated table
+explain (verbose, costs off) select * from repl_idx where a < 1000;
+                                  QUERY PLAN                                   
+-------------------------------------------------------------------------------
+ Gather Motion 2:1  (slice1; segments: 2)
+   Output: a, b, c
+   ->  Parallel Index Scan using repl_idx_a_idx on orca_repl.repl_idx
+         Output: a, b, c
+         Index Cond: (repl_idx.a < 1000)
+ Settings: enable_parallel = 'on', optimizer = 'on', parallel_setup_cost = '0'
+ Optimizer: GPORCA
+(7 rows)
+
+select count(*) from repl_idx where a < 1000;
+ count 
+-------
+   999
+(1 row)
+
+vacuum repl_idx;
+-- parallel index-only scan on replicated table (all columns covered by index)
+explain (verbose, costs off) select a from repl_idx where a < 1000;
+                                  QUERY PLAN                                   
+-------------------------------------------------------------------------------
+ Gather Motion 2:1  (slice1; segments: 2)
+   Output: a
+   ->  Parallel Index Only Scan using repl_idx_a_idx on orca_repl.repl_idx
+         Output: a
+         Index Cond: (repl_idx.a < 1000)
+ Settings: enable_parallel = 'on', optimizer = 'on', parallel_setup_cost = '0'
+ Optimizer: GPORCA
+(7 rows)
+
+-- should NOT use index only scan (column c not covered by index)
+explain (verbose, costs off) select c from repl_idx where a < 1000;
+                                  QUERY PLAN                                   
+-------------------------------------------------------------------------------
+ Gather Motion 2:1  (slice1; segments: 2)
+   Output: c
+   ->  Parallel Index Scan using repl_idx_a_idx on orca_repl.repl_idx
+         Output: c
+         Index Cond: (repl_idx.a < 1000)
+ Settings: enable_parallel = 'on', optimizer = 'on', parallel_setup_cost = '0'
+ Optimizer: GPORCA
+(7 rows)
+
+-- UNION ALL with replicated tables
+drop table if exists ua_repl1, ua_repl2;
+NOTICE:  table "ua_repl1" does not exist, skipping
+NOTICE:  table "ua_repl2" does not exist, skipping
+create table ua_repl1 (id int, val text) distributed replicated;
+create table ua_repl2 (id int, val text) distributed replicated;
+insert into ua_repl1 select i, 'a' || i from generate_series(1, 3) i;
+insert into ua_repl2 select i, 'b' || i from generate_series(4, 6) i;
+analyze ua_repl1;
+analyze ua_repl2;
+-- Basic UNION ALL: two replicated tables
+explain (costs off) select * from ua_repl1 union all select * from ua_repl2;
+                         QUERY PLAN                          
+-------------------------------------------------------------
+ Gather Motion 6:1  (slice1; segments: 6)
+   ->  Parallel Append
+         ->  Result
+               One-Time Filter: (gp_execution_segment() = 0)
+               ->  Seq Scan on ua_repl1
+         ->  Result
+               One-Time Filter: (gp_execution_segment() = 2)
+               ->  Seq Scan on ua_repl2
+ Optimizer: GPORCA
+(9 rows)
+
+select * from ua_repl1 union all select * from ua_repl2 order by id;
+ id | val 
+----+-----
+  1 | a1
+  2 | a2
+  3 | a3
+  4 | b4
+  5 | b5
+  6 | b6
+(6 rows)
+
+-- UNION ALL with filter
+select * from ua_repl1 where id > 1 union all select * from ua_repl2 where id < 6 order by id;
+ id | val 
+----+-----
+  2 | a2
+  3 | a3
+  4 | b4
+  5 | b5
+(4 rows)
+
+-- UNION (deduplicate) with replicated tables
+explain (costs off) select id from ua_repl1 union select id from ua_repl2;
+                                  QUERY PLAN                                   
+-------------------------------------------------------------------------------
+ Gather Motion 3:1  (slice1; segments: 3)
+   ->  GroupAggregate
+         Group Key: ua_repl1.id
+         ->  Sort
+               Sort Key: ua_repl1.id
+               ->  Redistribute Motion 6:3  (slice2; segments: 6)
+                     Hash Key: ua_repl1.id
+                     ->  Parallel Append
+                           ->  Result
+                                 One-Time Filter: (gp_execution_segment() = 0)
+                                 ->  Seq Scan on ua_repl1
+                           ->  Result
+                                 One-Time Filter: (gp_execution_segment() = 1)
+                                 ->  Seq Scan on ua_repl2
+ Optimizer: GPORCA
+(15 rows)
+
+select id from ua_repl1 union select id from ua_repl2 order by id;
+ id 
+----
+  1
+  2
+  3
+  4
+  5
+  6
+(6 rows)
+
+-- UNION ALL: replicated + distributed
+drop table if exists ua_dist;
+NOTICE:  table "ua_dist" does not exist, skipping
+create table ua_dist (id int, val text) distributed by (id);
+insert into ua_dist select i, 'd' || i from generate_series(10, 12) i;
+analyze ua_dist;
+explain (costs off) select * from ua_repl1 union all select * from ua_dist;
+                         QUERY PLAN                          
+-------------------------------------------------------------
+ Gather Motion 6:1  (slice1; segments: 6)
+   ->  Parallel Append
+         ->  Result
+               One-Time Filter: (gp_execution_segment() = 2)
+               ->  Seq Scan on ua_repl1
+         ->  Parallel Seq Scan on ua_dist
+ Optimizer: GPORCA
+(7 rows)
+
+select * from ua_repl1 union all select * from ua_dist order by id;
+ id | val 
+----+-----
+  1 | a1
+  2 | a2
+  3 | a3
+ 10 | d10
+ 11 | d11
+ 12 | d12
+(6 rows)
+
+-- UNION ALL: replicated + constant values
+explain (costs off) select * from ua_repl1 union all select 100, 'const';
+                         QUERY PLAN                          
+-------------------------------------------------------------
+ Gather Motion 6:1  (slice1; segments: 6)
+   ->  Parallel Append
+         ->  Result
+               One-Time Filter: (gp_execution_segment() = 1)
+               ->  Seq Scan on ua_repl1
+         ->  Result
+               One-Time Filter: (gp_execution_segment() = 2)
+               ->  Result
+ Optimizer: GPORCA
+(9 rows)
+
+select * from ua_repl1 union all select 100, 'const' order by id;
+ id  |  val  
+-----+-------
+   1 | a1
+   2 | a2
+   3 | a3
+ 100 | const
+(4 rows)
+
+-- UNION ALL inside subquery with aggregation
+select count(*) from (select * from ua_repl1 union all select * from ua_repl2) t;
+ count 
+-------
+     6
+(1 row)
+
+-- cleanup
+reset enable_parallel;
+reset max_parallel_workers_per_gather;
+reset parallel_setup_cost;
+reset optimizer;
+-- start_ignore
+drop schema orca_repl cascade;
+NOTICE:  drop cascades to 14 other objects
+DETAIL:  drop cascades to table rep_a
+drop cascades to table rep_b
+drop cascades to table rep_t
+drop cascades to table dist_t
+drop cascades to table notin_outer
+drop cascades to table notin_inner_repl
+drop cascades to table loj_dist
+drop cascades to table loj_repl
+drop cascades to table semi_dist
+drop cascades to table semi_repl
+drop cascades to table repl_idx
+drop cascades to table ua_repl1
+drop cascades to table ua_repl2
+drop cascades to table ua_dist
+-- end_ignore

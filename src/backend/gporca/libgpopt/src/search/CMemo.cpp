@@ -322,7 +322,7 @@ CMemo::PexprExtractPlan(CMemoryPool *mp, CGroup *pgroupRoot,
 		poc = pgroupRoot->PocLookupBest(mp, ulSearchStages, prppInput);
 		GPOS_ASSERT(nullptr != poc);
 
-		pgexprBest = pgroupRoot->PgexprBest(poc);
+		pgexprBest = poc->PgexprBest();
 		if (nullptr != pgexprBest)
 		{
 			cost = poc->PccBest()->Cost();
@@ -383,6 +383,13 @@ CMemo::PexprExtractPlan(CMemoryPool *mp, CGroup *pgroupRoot,
 
 		CExpression *pexprChild =
 			PexprExtractPlan(mp, pgroupChild, prppChild, ulSearchStages);
+		if (nullptr == pexprChild)
+		{
+			// Child plan extraction failed — propagate NULL upward.
+			// CEngine::PexprExtractPlan will raise ExmiNoPlanFound.
+			pdrgpexpr->Release();
+			return nullptr;
+		}
 		pdrgpexpr->Append(pexprChild);
 	}
 

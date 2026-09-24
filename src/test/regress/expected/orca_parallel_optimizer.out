@@ -335,7 +335,7 @@ explain (verbose, costs off) select * from t1  join t2  on t1.a = t2.d;
                      Output: t1.a, t1.b
                      ->  Parallel Seq Scan on orca_parallel.t1
                            Output: t1.a, t1.b
- Settings: enable_parallel = 'on', parallel_setup_cost = '0'
+ Settings: enable_parallel = 'on', optimizer = 'on', parallel_setup_cost = '0'
  Optimizer: GPORCA
 (15 rows)
 

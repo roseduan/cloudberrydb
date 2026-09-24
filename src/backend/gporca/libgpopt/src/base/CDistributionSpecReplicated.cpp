@@ -103,7 +103,8 @@ CDistributionSpecReplicated::FSatisfies(const CDistributionSpec *pdss) const
 			return false;
 		}
 
-		if (EdtReplicatedWorkers == pdss->Edt())
+		if (EdtReplicatedWorkers == pdss->Edt() ||
+			EdtHashedWorker == pdss->Edt())
 		{
 			return false;
 		}

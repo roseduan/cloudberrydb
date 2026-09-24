@@ -200,6 +200,24 @@ CPhysicalParallelHashAgg::PdsRequiredForLocal(
 	{
 		return PdsMaximalHashed(mp, m_pdrgpcrArgDQA);
 	}
+
+	/*
+	 * When the query contains replicated tables, request an explicit
+	 * worker-level distribution instead of ANY.  A replicated table's
+	 * parallel scan may only win worker-level contexts (see
+	 * CPhysicalParallelTableScan::FValidContext): in the shared ANY
+	 * context the serial scan wins, so fishing worker input out of ANY
+	 * would make this local aggregate reject its child in FValidContext
+	 * and lose the parallel plan.  An explicit WorkerRandom request opens
+	 * a worker-level context where the parallel scan of the replicated
+	 * table stays available (ReplicatedWorkers satisfies WorkerRandom).
+	 */
+	if (COptCtxt::PoctxtFromTLS()->HasReplicatedTables())
+	{
+		return CDistributionSpecWorkerRandom::PdsCreateWorkerRandom(
+			mp, UlParallelWorkers());
+	}
+
 	// WorkerRandom distribution: each worker independently processes local data fragments
 	// This allows maximum parallelism for partial aggregation
 	return GPOS_NEW(mp) CDistributionSpecAny(this->Eopid());
@@ -333,7 +351,8 @@ CPhysicalParallelHashAgg::FValidContext(
 			// Local aggregate requires worker-level distribution from child
 			// Reject segment-level distributions (Random, Hashed, Singleton, etc.)
 			if (CDistributionSpec::EdtWorkerRandom != pdsChild->Edt() &&
-				CDistributionSpec::EdtHashedWorker != pdsChild->Edt())
+				CDistributionSpec::EdtHashedWorker != pdsChild->Edt() &&
+				CDistributionSpec::EdtReplicatedWorkers != pdsChild->Edt())
 			{
 				// Child provides segment-level distribution, not worker-level
 				// This would prevent proper parallel execution within each segment

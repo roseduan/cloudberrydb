@@ -35,6 +35,7 @@
 #include "gpopt/operators/CPhysicalParallelStreamAgg.h"
 #include "gpopt/operators/CPhysicalStreamAgg.h"
 #include "gpopt/xforms/CXformUtils.h"
+#include "naucrates/md/IMDRelation.h"
 
 // Use gpdbwrappers for parallel checks
 extern int max_parallel_workers_per_gather;
@@ -94,6 +95,9 @@ CXformGbAgg2ParallelStreamAgg::Exfp(CExpressionHandle &exprhdl) const
 		return CXform::ExfpNone;
 	}
 
+	// Replicated tables are now handled correctly via ReplicatedWorkers
+	// distribution in PdsDerive and FValidContext, no need to disable here.
+
 	CLogicalGbAgg *popAgg = CLogicalGbAgg::PopConvert(exprhdl.Pop());
 	CColRefArray *colref_array = popAgg->Pdrgpcr();
 
@@ -132,6 +136,31 @@ CXformGbAgg2ParallelStreamAgg::Transform(CXformContext *pxfctxt,
 
 	CMemoryPool *mp = pxfctxt->Pmp();
 	CLogicalGbAgg *popAgg = CLogicalGbAgg::PopConvert(pexpr->Pop());
+
+	// Skip single-stage Global parallel agg for replicated tables.
+	// Each segment holds the full data; a single-stage parallel agg would
+	// have every worker scan the full table, producing duplicate results
+	// in Gather. Only two-stage (Local + Global) is correct.
+	if (popAgg->Egbaggtype() == COperator::EgbaggtypeGlobal &&
+		!CXformUtils::FMultiStageAgg(pexpr))
+	{
+		CExpression *pexprRel = (*pexpr)[0];
+		CTableDescriptorHashSet *ptds = pexprRel->DeriveTableDescriptor();
+		if (ptds)
+		{
+			CTableDescriptorHashSetIter iter(ptds);
+			while (iter.Advance())
+			{
+				const CTableDescriptor *ptd = iter.Get();
+				if (IMDRelation::EreldistrReplicated ==
+					ptd->GetRelDistribution())
+				{
+					return;
+				}
+			}
+		}
+	}
+
 	CColRefArray *colref_array = popAgg->Pdrgpcr();
 	colref_array->AddRef();
 

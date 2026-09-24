@@ -339,6 +339,25 @@ CGroup::PocLookup(CMemoryPool *mp, CReqdPropPlan *prpp,
 	{
 		ShtAcc shta(Sht(), *poc);
 		pocFound = shta.Find();
+
+		// If duplicate matching contexts exist in the same bucket,
+		// prefer the one with a valid best cost context.
+		// This can happen when identical optimization requests are
+		// inserted before the equality-relevant fields (e.g.,
+		// equivalent hash expressions) are fully populated.
+		if (nullptr != pocFound && nullptr == pocFound->PccBest())
+		{
+			COptimizationContext *pocNext = shta.Next(pocFound);
+			while (nullptr != pocNext)
+			{
+				if (nullptr != pocNext->PccBest())
+				{
+					pocFound = pocNext;
+					break;
+				}
+				pocNext = shta.Next(pocNext);
+			}
+		}
 	}
 	poc->Release();
 

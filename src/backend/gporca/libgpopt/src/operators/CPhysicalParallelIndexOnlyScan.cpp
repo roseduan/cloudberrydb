@@ -32,6 +32,7 @@
 #include "gpopt/base/CDistributionSpec.h"
 #include "gpopt/base/CDistributionSpecHashed.h"
 #include "gpopt/base/CDistributionSpecRandom.h"
+#include "gpopt/base/CDistributionSpecReplicatedWorkers.h"
 #include "gpopt/base/CDistributionSpecWorkerRandom.h"
 #include "gpopt/base/CDistributionSpecSingleton.h"
 #include "gpopt/base/CUtils.h"
@@ -66,9 +67,22 @@ CPhysicalParallelIndexOnlyScan::CPhysicalParallelIndexOnlyScan(
 {
 	GPOS_ASSERT(ulParallelWorkers > 0);
 	GPOS_ASSERT(nullptr != m_pds);
-	m_pdsWorkerDistribution =
-		CDistributionSpecWorkerRandom::PdsCreateWorkerRandom(
-			mp, ulParallelWorkers, m_pds);
+
+	if (ulParallelWorkers > 0 && m_pds)
+	{
+		if (CDistributionSpec::EdtStrictReplicated == m_pds->Edt() ||
+			CDistributionSpec::EdtTaintedReplicated == m_pds->Edt())
+		{
+			m_pdsWorkerDistribution = CDistributionSpecReplicatedWorkers::PdsCreate(
+				mp, ulParallelWorkers, false /*ignore_broadcast_threshold*/, m_pds);
+		}
+		else
+		{
+			m_pdsWorkerDistribution =
+				CDistributionSpecWorkerRandom::PdsCreateWorkerRandom(mp,
+																	 ulParallelWorkers, m_pds);
+		}
+	}
 }
 
 //---------------------------------------------------------------------------
@@ -205,6 +219,32 @@ CPhysicalParallelIndexOnlyScan::EpetDistribution(
 		ped->FCompatible(m_pdsWorkerDistribution))
 	{
 		return CEnfdProp::EpetUnnecessary;
+	}
+
+	// For replicated table parallel scans: prohibit ALL segment-level distribution
+	// requirements. Only worker-level requests (from parallel-aware operators like
+	// ParallelHashJoin) should use this scan. Segment-level motions (HashDistribute,
+	// Broadcast, etc.) would make the ParallelIndexOnlyScan's plan the cheapest in
+	// the optimization context, but the parent's FValidContext would then reject it.
+	// Since ORCA keeps only ONE best plan per context, the valid regular
+	// IndexOnlyScan plan (which is more expensive) becomes unreachable. Prohibiting
+	// here ensures the regular IndexOnlyScan wins in all segment-level contexts.
+	if (nullptr != m_pdsWorkerDistribution &&
+		CDistributionSpec::EdtReplicatedWorkers == m_pdsWorkerDistribution->Edt())
+	{
+		const CDistributionSpecReplicatedWorkers *pdsRW =
+			CDistributionSpecReplicatedWorkers::PdsConvert(m_pdsWorkerDistribution);
+		if (pdsRW->FFromReplicatedTable())
+		{
+			CDistributionSpec::EDistributionType edtReq = ped->PdsRequired()->Edt();
+			if (CDistributionSpec::EdtWorkerRandom != edtReq &&
+				CDistributionSpec::EdtReplicatedWorkers != edtReq &&
+				CDistributionSpec::EdtHashedWorker != edtReq &&
+				CDistributionSpec::EdtAny != edtReq)
+			{
+				return CEnfdProp::EpetProhibited;
+			}
+		}
 	}
 
 	return CEnfdProp::EpetRequired;

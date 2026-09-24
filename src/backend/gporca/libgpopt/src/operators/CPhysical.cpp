@@ -21,9 +21,11 @@
 #include "gpopt/base/CDistributionSpecHashed.h"
 #include "gpopt/base/CDistributionSpecRandom.h"
 #include "gpopt/base/CDistributionSpecReplicated.h"
+#include "gpopt/base/CDistributionSpecReplicatedWorkers.h"
 #include "gpopt/base/CDistributionSpecSingleton.h"
 #include "gpopt/base/CDistributionSpecUniversal.h"
 #include "gpopt/base/CDrvdPropPlan.h"
+#include "gpopt/base/COptCtxt.h"
 #include "gpopt/base/CReqdPropPlan.h"
 #include "gpopt/operators/CExpression.h"
 #include "gpopt/operators/CExpressionHandle.h"
@@ -461,6 +463,30 @@ CPhysical::PdsUnary(CMemoryPool *mp, CExpressionHandle &exprhdl,
 	if (nullptr != pds)
 	{
 		return pds;
+	}
+
+	/*
+	 * Pass worker-level distribution requirements through instead of
+	 * degrading them to ANY.  A worker-level distribution cannot be
+	 * equivalently established by enforcing a motion on this operator's
+	 * output: the native form -- a parallel scan whose workers co-scan
+	 * the relation in place -- exists only at the leaf, so the request
+	 * must reach the scan group to open a worker-level context there.
+	 * Degrading to ANY leaves only the "worker motion above this
+	 * operator" plan, which redistributes serially-scanned rows.  The
+	 * callers of PdsUnary (Filter, Assert) do not define new columns,
+	 * so specs carrying hash expressions are safe to pass through.
+	 * Scoped to queries with replicated tables, where the serial scan
+	 * wins the ANY context (CPhysicalParallelTableScan::FValidContext)
+	 * and worker input is reachable only through an explicit request.
+	 */
+	if (COptCtxt::PoctxtFromTLS()->HasReplicatedTables() &&
+		(CDistributionSpec::EdtWorkerRandom == pdsRequired->Edt() ||
+		 CDistributionSpec::EdtReplicatedWorkers == pdsRequired->Edt() ||
+		 CDistributionSpec::EdtHashedWorker == pdsRequired->Edt()))
+	{
+		pdsRequired->AddRef();
+		return pdsRequired;
 	}
 
 	// operator does not have distribution requirements, required distribution
@@ -1096,6 +1122,74 @@ CPhysical::FHasParallelUnionAllOrPartSelectorChild(
 		COperator::EOperatorId eopid = pgexprChild->Pop()->Eopid();
 		if (COperator::EopPhysicalParallelUnionAll == eopid ||
 			COperator::EopPhysicalParallelPartitionSelector == eopid)
+		{
+			return true;
+		}
+	}
+
+	return false;
+}
+
+
+//---------------------------------------------------------------------------
+//	@function:
+//		CPhysical::FHasParallelReplicatedScanChild
+//
+//	@doc:
+//		Check if any child's best cost context delivers EdtReplicatedWorkers
+//		that originated from a replicated table scan.  PG's parallel page-share
+//		splits a replicated relation's rows across workers within a slice;
+//		under NL Join's per-row consumption this produces nondeterministic
+//		row counts (under/double-count, worker-init zero-row races).  NL
+//		variants use this helper to reject such combinations in their
+//		FValidContext.
+//
+//		FFromReplicatedTable() distinguishes the two RepWorkers sources:
+//		  - CPhysicalParallelTableScan(replicated) sets m_pdsSegmentBase to
+//		    the table's StrictReplicated spec -> FFromReplicatedTable=true
+//		  - CPhysicalMotionBroadcastWorkers leaves m_pdsSegmentBase=nullptr
+//		    -> FFromReplicatedTable=false (deliberate enforcer motion, do
+//		    not reject; ORCA's cost model picks it intentionally)
+//
+//---------------------------------------------------------------------------
+BOOL
+CPhysical::FHasParallelReplicatedScanChild(
+	COptimizationContextArray *pdrgpocChild)
+{
+	if (nullptr == pdrgpocChild)
+	{
+		return false;
+	}
+
+	for (ULONG ul = 0; ul < pdrgpocChild->Size(); ul++)
+	{
+		COptimizationContext *pocChild = (*pdrgpocChild)[ul];
+		if (nullptr == pocChild)
+		{
+			continue;
+		}
+
+		CCostContext *pccBest = pocChild->PccBest();
+		if (nullptr == pccBest)
+		{
+			continue;
+		}
+
+		CDrvdPropPlan *pdpplan = pccBest->Pdpplan();
+		if (nullptr == pdpplan)
+		{
+			continue;
+		}
+
+		CDistributionSpec *pds = pdpplan->Pds();
+		if (nullptr == pds ||
+			CDistributionSpec::EdtReplicatedWorkers != pds->Edt())
+		{
+			continue;
+		}
+
+		if (CDistributionSpecReplicatedWorkers::PdsConvert(pds)
+				->FFromReplicatedTable())
 		{
 			return true;
 		}

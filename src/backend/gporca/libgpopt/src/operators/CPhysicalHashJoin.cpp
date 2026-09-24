@@ -303,7 +303,7 @@ CPhysicalHashJoin::PdsMatch(CMemoryPool *mp, CDistributionSpec *pds,
 			{
 				GPOS_ASSERT(1 == ulSourceChildIndex);
 				return GPOS_NEW(mp) CDistributionSpecNonSingleton(
-					true /*fAllowReplicated*/, false /*fAllowWorker*/);
+					true /*fAllowReplicated*/, true /*fAllowWorker*/);
 			}
 
 			GPOS_ASSERT(0 == ulSourceChildIndex);
@@ -349,7 +349,7 @@ CPhysicalHashJoin::PdsMatch(CMemoryPool *mp, CDistributionSpec *pds,
 				}
 				// inner child is replicated, request outer child to have non-singleton distribution
 				return GPOS_NEW(mp) CDistributionSpecNonSingleton(
-					true /*fAllowReplicated*/, false /*fAllowWorker*/);
+					true /*fAllowReplicated*/, true /*fAllowWorker*/);
 			}
 
 			GPOS_ASSERT(0 == ulSourceChildIndex);
@@ -836,7 +836,7 @@ CPhysicalHashJoin::PdsRequiredReplicate(
 				CDistributionSpec::EdtTaintedReplicated == pdsInner->Edt() ||
 				CDistributionSpec::EdtReplicatedWorkers == pdsInner->Edt());
 	return GPOS_NEW(mp) CDistributionSpecNonSingleton(
-		true /*fAllowReplicated*/, false /*fAllowWorker*/);
+		true /*fAllowReplicated*/, true /*fAllowWorker*/);
 }
 
 
@@ -1226,9 +1226,39 @@ CPhysicalHashJoin::FValidContext(CMemoryPool *,  // mp
 					{
 						CDistributionSpec *pds = pdpplan->Pds();
 						if (CDistributionSpec::EdtWorkerRandom == pds->Edt() ||
-							CDistributionSpec::EdtHashedWorker == pds->Edt())
+							CDistributionSpec::EdtHashedWorker == pds->Edt() ||
+							CDistributionSpec::EdtReplicatedWorkers == pds->Edt())
 						{
+							// Regular HashJoin cannot handle worker-level input
 							return false;
+						}
+					}
+					// If the child is a motion, check its child's
+					// distribution. Motions convert worker-level
+					// distributions to segment-level, hiding parallel
+					// operators from the direct check above.
+					// Exception: when child's required distribution is
+					// Singleton, the motion is a Gather which properly
+					// collects all worker data into a single stream.
+					CDistributionSpec *pdsRequired =
+						pocChild->Prpp()->Ped()->PdsRequired();
+					if (CDistributionSpec::EdtSingleton != pdsRequired->Edt() &&
+						nullptr != pccBest->Pgexpr() &&
+						CUtils::FPhysicalMotion(pccBest->Pgexpr()->Pop()))
+					{
+						COptimizationContextArray *pdrgpocMotion = pccBest->Pdrgpoc();
+						if (nullptr != pdrgpocMotion && pdrgpocMotion->Size() > 0)
+						{
+							CCostContext *pccChild = (*pdrgpocMotion)[0]->PccBest();
+							if (nullptr != pccChild &&
+								nullptr != pccChild->Pdpplan())
+							{
+								CDistributionSpec *pdsChild = pccChild->Pdpplan()->Pds();
+								if (CDistributionSpec::EdtReplicatedWorkers == pdsChild->Edt())
+								{
+									return false;
+								}
+							}
 						}
 					}
 				}

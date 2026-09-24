@@ -109,10 +109,8 @@ CXformIndexOnlyGet2ParallelIndexOnlyScan::Exfp(
 							 ptabdesc->RetrieveRelStorageType() ==
 								 IMDRelation::ErelstorageMixedPartitioned;
 
-	if (ptabdesc->GetRelDistribution() == IMDRelation::EreldistrReplicated ||
-		ptabdesc->GetRelDistribution() == IMDRelation::EreldistrMasterOnly ||
-		ptabdesc->RetrieveRelStorageType() == IMDRelation::ErelstorageIceberg ||
-		COptCtxt::PoctxtFromTLS()->HasReplicatedTables())
+	if (ptabdesc->GetRelDistribution() == IMDRelation::EreldistrMasterOnly ||
+		ptabdesc->RetrieveRelStorageType() == IMDRelation::ErelstorageIceberg)
 	{
 		return CXform::ExfpNone;
 	}
