@@ -3820,6 +3820,17 @@ CCostModelGPDB::Cost(
 	GPOS_ASSERT(nullptr != pci);
 
 	COperator::EOperatorId op_id = exprhdl.Pop()->Eopid();
+	// Make the parallel partition selector cost-neutral (no local
+	// per-tuple toll -- return only the child subtree cost) so a DPE plan ties
+	// the equivalent no-selector plan on cost instead of costing the toll more
+	// and losing the strict FBetterThan comparison.  The tie is then resolved
+	// in favor of DPE by a tie-break rule in CCostContext::FBetterThan.  Unlike
+	// returning 0, this preserves the child (dimension) subtree cost, so plan
+	// comparisons above/within the DPE plan stay meaningful.
+	if (op_id == COperator::EopPhysicalParallelPartitionSelector)
+	{
+		return CostChildren(m_mp, exprhdl, pci, m_cost_model_params);
+	}
 	if (op_id == COperator::EopPhysicalComputeScalar)
 	{
 		return CostComputeScalar(m_mp, exprhdl, pci, m_cost_model_params, this);

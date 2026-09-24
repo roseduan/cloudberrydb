@@ -177,6 +177,10 @@ public:
 
 	BOOL ContainsAnyConsumers() const;
 
+	// does this spec carry any propagator (partition selector)?  used to
+	// prefer a dynamic-partition-elimination plan on a cost tie
+	BOOL ContainsAnyPropagators() const;
+
 	// equality check to determine compatibility of derived & required properties
 	BOOL Equals(const CPartitionPropagationSpec *ppps) const;
 

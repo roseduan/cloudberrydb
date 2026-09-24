@@ -20,6 +20,7 @@
 #include "gpopt/base/CDrvdPropCtxtPlan.h"
 #include "gpopt/base/CDrvdPropCtxtRelational.h"
 #include "gpopt/base/CDrvdPropPlan.h"
+#include "gpopt/base/CPartitionPropagationSpec.h"
 #include "gpopt/base/COptCtxt.h"
 #include "gpopt/cost/ICostModel.h"
 #include "gpopt/exception.h"
@@ -491,6 +492,23 @@ CCostContext::FBetterThan(const CCostContext *pcc) const
 	}
 
 	// otherwise, we need to break tie in cost values
+
+	// RULE 0: on a cost tie, prefer the plan that carries a partition selector
+	// (dynamic partition elimination).  The cost model never credits the
+	// partitions pruned at runtime, so a DPE plan only ties -- never beats --
+	// the no-selector plan; break the tie toward DPE.
+	{
+		BOOL this_has_prop = Pdpplan()->Ppps()->ContainsAnyPropagators();
+		BOOL pcc_has_prop = pcc->Pdpplan()->Ppps()->ContainsAnyPropagators();
+		if (this_has_prop && !pcc_has_prop)
+		{
+			return true;
+		}
+		if (!this_has_prop && pcc_has_prop)
+		{
+			return false;
+		}
+	}
 
 	// RULE 1: a partitioned plan is better than a non-partitioned
 	// one to optimize CPU consumption

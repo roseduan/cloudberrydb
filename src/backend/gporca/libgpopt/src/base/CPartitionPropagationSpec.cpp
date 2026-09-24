@@ -562,4 +562,27 @@ CPartitionPropagationSpec::ContainsAnyConsumers() const
 	return false;
 }
 
+// does this spec carry any propagator (partition selector)?
+BOOL
+CPartitionPropagationSpec::ContainsAnyPropagators() const
+{
+	if (nullptr == m_part_prop_spec_infos)
+	{
+		return false;
+	}
+
+	UlongToSPartPropSpecInfoMapIter hmulpi(m_part_prop_spec_infos);
+	while (hmulpi.Advance())
+	{
+		const SPartPropSpecInfo *info = hmulpi.Value();
+
+		if (info->m_type == CPartitionPropagationSpec::EpptPropagator)
+		{
+			return true;
+		}
+	}
+
+	return false;
+}
+
 // EOF
