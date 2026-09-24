@@ -3029,6 +3029,13 @@ CTranslatorDXLToPlStmt::TranslateDXLParallelHash(
 		plan->parallel_aware = true;
 		plan->parallel_safe = true;
 		hash->sync_barrier = true;
+		// ExecHashTableCreate sizes a parallel-aware (shared) hash from
+		// node->rows_total ("total rows across all worker copies"), not from
+		// the per-worker left_plan->plan_rows.  ORCA previously left this 0,
+		// so ExecChooseHashTableSize fell back to ntuples=1000 and the hash
+		// oversized its buckets to the statement_mem budget (issue #431).
+		// Each of the recvslice's workers contributes left_plan->plan_rows.
+		hash->rows_total = left_plan->plan_rows * recvslice->parallel_workers;
 	}
 	else
 	{

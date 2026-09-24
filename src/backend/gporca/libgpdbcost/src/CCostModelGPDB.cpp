@@ -624,12 +624,14 @@ CCostModelGPDB::CostParallelCTEProducer(CMemoryPool *mp, CExpressionHandle &expr
 	}
 
 	GPOS_ASSERT(ulWorkers > 0);
+	// Calculate parallel efficiency (decreases with more workers)
+	CDouble dParallelEfficiency = CalculateParallelEfficiency(ulWorkers);
 	COperator::EOperatorId op_id = popChild->Eopid();
 	if (COperator::EopPhysicalSpool != op_id &&
 		COperator::EopPhysicalSort != op_id)
 	{
 		// no materialize needed
-		return CCost(cost/ulWorkers);
+		return CCost(cost/(ulWorkers * dParallelEfficiency));
 	}
 
 	// a materialize (spool) node is added during DXL->PlStmt translation,
@@ -643,9 +645,6 @@ CCostModelGPDB::CostParallelCTEProducer(CMemoryPool *mp, CExpressionHandle &expr
 
 	// Calculate base scan cost
 	CDouble dBaseCost = pci->Rows() * pci->Width() * dMaterializeCostUnit;
-
-	// Calculate parallel efficiency (decreases with more workers)
-	CDouble dParallelEfficiency = CalculateParallelEfficiency(ulWorkers);
 
 	// Parallel scan cost = base cost / (workers * efficiency)
 	CDouble dParallelCost = dBaseCost / (ulWorkers * dParallelEfficiency);
@@ -1069,7 +1068,7 @@ CCostModelGPDB::CostParallelSequence(CMemoryPool *mp, CExpressionHandle &exprhdl
 	CCost costChild =
 		CostChildren(mp, exprhdl, pci, pcmgpdb->GetCostModelParams());
 
-	return CCost((costLocal + costChild)/ulWorkers);
+	return CCost((costLocal / ulWorkers) + costChild);
 }
 
 
