@@ -923,7 +923,7 @@ bgw_job_stat_next_start(BgwJobStat *jobstat, BgwJob *job,
  * NOT registered in time_series--1.0.sql.  The isolation2 setup.sql
  * does the CREATE FUNCTION for this symbol so it never lands in a
  * user-installed catalog.  Mirrors the pattern around
- * bgw_job_set_scheduler_test_hook / bgw_job_set_job_entrypoint_function_name.
+ * bgw_job_entrypoint_internal / bgw_job_set_job_entrypoint_function_name.
  */
 PG_FUNCTION_INFO_V1(ts_test_bgw_job_stat_set_next_start);
 Datum

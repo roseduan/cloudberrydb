@@ -512,11 +512,29 @@ test_job_dispatcher(BgwJob *job)
 	return false;
 }
 
+/*
+ * Executor handed to bgw_job_entrypoint_internal() for this suite: route the
+ * synthetic test_job_* proc_names locally, everything else to the real
+ * execution path.
+ */
+static JobResult
+test_job_execute(BgwJob *job)
+{
+	return test_job_dispatcher(job) ? JOB_SUCCESS : JOB_FAILURE_IN_EXECUTION;
+}
+
+/*
+ * Worker entry point for the mock-time suite.  The scheduler started by
+ * bgw_db_scheduler_test_main() registers its job workers under this name (see
+ * bgw_job_set_job_entrypoint_function_name), so a worker only reaches
+ * test_job_execute when a mock scheduler launched it; production workers keep
+ * running bgw_job_entrypoint and never see any of this.
+ */
 Datum
 bgw_job_execute_test(PG_FUNCTION_ARGS)
 {
 	timer_set(&ts_mock_timer);
-	bgw_job_set_scheduler_test_hook(test_job_dispatcher);
 
-	return bgw_job_entrypoint(fcinfo);
+	bgw_job_entrypoint_internal(test_job_execute);
+	PG_RETURN_VOID();
 }

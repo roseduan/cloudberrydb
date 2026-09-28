@@ -75,7 +75,12 @@ typedef enum JobResult
 } JobResult;
 
 typedef bool job_main_func(void);
-typedef bool (*scheduler_test_hook_type)(BgwJob *job);
+
+/*
+ * Executor used by bgw_job_entrypoint_internal().  Production passes
+ * bgw_job_execute_real; the mock-time test suite passes its own dispatcher.
+ */
+typedef JobResult (*bgw_job_execute_fn) (BgwJob *job);
 
 extern BackgroundWorkerHandle *bgw_job_start(BgwJob *job, Oid user_oid);
 
@@ -93,12 +98,11 @@ extern bool bgw_job_update_by_id(int32 job_id, BgwJob *job);
 extern void bgw_job_permission_check(BgwJob *job, const char *cmd);
 extern void bgw_job_validate_job_owner(Oid owner);
 
-extern JobResult bgw_job_execute(BgwJob *job);
 extern JobResult bgw_job_execute_real(BgwJob *job);
 extern void bgw_job_run_config_check(Oid check, int32 job_id, Jsonb *config);
 
 extern Datum bgw_job_entrypoint(PG_FUNCTION_ARGS);
-extern void bgw_job_set_scheduler_test_hook(scheduler_test_hook_type hook);
+extern void bgw_job_entrypoint_internal(bgw_job_execute_fn execute);
 extern void bgw_job_set_job_entrypoint_function_name(char *func_name);
 
 extern void bgw_job_validate_schedule_interval(Interval *schedule_interval);

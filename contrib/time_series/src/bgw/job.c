@@ -57,7 +57,6 @@
 #include "scheduler.h"
 #include "../include/bgw/timer.h"
 
-static scheduler_test_hook_type scheduler_test_hook = NULL;
 static char *job_entrypoint_function_name = "bgw_job_entrypoint";
 
 /*
@@ -964,7 +963,19 @@ bgw_job_execute_real(BgwJob * job)
 				(errcode(ERRCODE_UNDEFINED_FUNCTION),
 				 errmsg("policy procedure %s.%s(int4, jsonb) not found",
 						NameStr(job->fd.proc_schema),
-						NameStr(job->fd.proc_name))));
+						NameStr(job->fd.proc_name)),
+		/*
+		 * The synthetic jobs of the mock-time suite have no SQL procedure
+		 * behind them; they only run when a mock scheduler launched the
+		 * worker through bgw_job_execute_test.  Reaching the real executor
+		 * with one of those names means a wall-clock scheduler picked the row
+		 * up instead, so say that rather than leaving a bare "not found".
+		 */
+				 strncmp(NameStr(job->fd.proc_name), "bgw_test_job_",
+						 strlen("bgw_test_job_")) == 0 ?
+				 errhint("This is a mock-time test job; it has no SQL "
+						 "procedure and only runs under the test scheduler. "
+						 "A wall-clock scheduler must not pick it up.") : 0));
 	}
 	prokind = get_func_prokind(proc);
 
@@ -1039,25 +1050,6 @@ bgw_job_execute_real(BgwJob * job)
 	}
 
 	return JOB_SUCCESS;
-}
-
-/*
- * bgw_job_execute -- entry point with test-hook interception.
- *
- * In USE_ASSERT_CHECKING builds, mock-time tests can install a
- * scheduler_test_hook to dispatch by job proc_name.  The hook's default calls
- * bgw_job_execute_real to avoid recursion back into itself.
- * Replaces ts_cm_functions->job_execute cross-module dispatch.
- */
-JobResult
-bgw_job_execute(BgwJob * job)
-{
-#ifdef USE_ASSERT_CHECKING
-	if (scheduler_test_hook != NULL)
-		return scheduler_test_hook(job) ? JOB_SUCCESS : JOB_FAILURE_IN_EXECUTION;
-#endif
-
-	return bgw_job_execute_real(job);
 }
 
 /*
@@ -1149,6 +1141,26 @@ bgw_job_get_funcid(BgwJob * job)
  */
 extern Datum
 bgw_job_entrypoint(PG_FUNCTION_ARGS)
+{
+	bgw_job_entrypoint_internal(bgw_job_execute_real);
+	PG_RETURN_VOID();
+}
+
+/*
+ * bgw_job_entrypoint_internal -- the entry point's body, with the executor
+ * passed in.
+ *
+ * Production always runs bgw_job_execute_real().  The mock-time test suite
+ * registers its worker under a different bgw_function_name (see
+ * bgw_job_set_job_entrypoint_function_name) and passes its own executor, so
+ * the synthetic test jobs stay entirely inside test/mock_time/ and this file
+ * carries no test-only branch.  The executor is a parameter rather than a
+ * hook variable inspected here on purpose: which one runs is then decided at
+ * background-worker registration time, by function name, where it is visible
+ * in the logs and cannot be silently compiled out by a build flag.
+ */
+void
+bgw_job_entrypoint_internal(bgw_job_execute_fn execute)
 {
 	Oid			db_oid = DatumGetObjectId(MyBgworkerEntry->bgw_main_arg);
 	BgwParams	params;
@@ -1242,7 +1254,7 @@ bgw_job_entrypoint(PG_FUNCTION_ARGS)
 		zero_guc("max_parallel_workers");
 		zero_guc("max_parallel_maintenance_workers");
 
-		res = bgw_job_execute(job);
+		res = execute(job);
 
 		/* The job is responsible for committing or aborting its own txns */
 		if (IsTransactionState())
@@ -1373,8 +1385,6 @@ bgw_job_entrypoint(PG_FUNCTION_ARGS)
 		pfree(job);
 		job = NULL;
 	}
-
-	PG_RETURN_VOID();
 }
 
 /*
@@ -1614,15 +1624,6 @@ bgw_run_job(PG_FUNCTION_ARGS)
 	pfree(job);
 
 	PG_RETURN_VOID();
-}
-
-/*
- * bgw_job_set_scheduler_test_hook -- preserved as-is
- */
-void
-bgw_job_set_scheduler_test_hook(scheduler_test_hook_type hook)
-{
-	scheduler_test_hook = hook;
 }
 
 /*
