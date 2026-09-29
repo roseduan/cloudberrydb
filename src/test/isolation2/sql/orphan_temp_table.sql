@@ -31,5 +31,20 @@
 2: select * from test_temp_table_cleanup;
 2q:
 
+-- Session 2's temp namespace is dropped by RemoveTempRelationsCallback() while
+-- its backend runs proc_exit, and that only starts once the client socket is
+-- closed.  "2q:" waits for the client side to go away, not for the server-side
+-- cleanup to commit, so poll instead of racing it.  A real leak still fails the
+-- test: the loop gives up after 30s and the count below reports 1.
+3: DO $$
+DECLARE n int; /* in func */
+BEGIN /* in func */
+    FOR i IN 1..300 LOOP /* in func */
+        SELECT count(*) INTO n FROM pg_class WHERE relname = 'test_temp_table_cleanup'; /* in func */
+        EXIT WHEN n = 0; /* in func */
+        PERFORM pg_sleep(0.1); /* in func */
+    END LOOP; /* in func */
+END; /* in func */
+$$;
 3: select count(*) from pg_class where relname = 'test_temp_table_cleanup';
 3q:
