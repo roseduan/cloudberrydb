@@ -2533,9 +2533,15 @@ ExecParallelPrepHashTableForUnmatched(HashJoinState *hjstate)
 		return false;
 	}
 
-	/* Now we are alone with this batch. */
+	/*
+	 * Now we are alone with this batch, in the sense that we are the only
+	 * process that will scan it for unmatched tuples.  Don't assert on the
+	 * participant count, though: a straggler that has not processed this
+	 * batch yet can still BarrierAttach() for an instant before it notices
+	 * the phase and detaches again.  The safe form of that check is inside
+	 * BarrierArriveAndDetachExceptLast(), which holds the spinlock.
+	 */
 	Assert(BarrierPhase(&batch->batch_barrier) == PHJ_BATCH_SCAN);
-	Assert(BarrierParticipants(&batch->batch_barrier) == 1);
 
 	/*
 	 * Has another process decided to give up early and command all processes
