@@ -122,7 +122,6 @@ typedef struct PlanBuildContext
 	int *map;/* scan mapping col*/
 
 	/* reader */
-	bool pipeline;
 	GArrowRecordBatchReader *reader;
 
 	/* hashjoin related */
@@ -191,6 +190,18 @@ typedef struct PlanBuildContext
 	Index am_oid;
 	GArrowSchema* relation_schema;
 
+	/*
+	 * Identity-project elimination.  build_project_options() records here
+	 * whether every projection expression is a bare passthrough (its string
+	 * form equals its output name, which in arrow is true exactly for
+	 * field_ref) together with those names.  BuildProject() then compares
+	 * them against the schema of the node the project would sit on -- which
+	 * is only known after the agg/limit/filter blocks have moved `current`.
+	 */
+	bool proj_all_passthrough;
+	const gchar **proj_names;
+	gsize proj_length;
+
 	/* ShareScanNode fields */
 	bool is_sharescan;
 	int gp_session_id;
@@ -231,6 +242,24 @@ static void *get_foreign_next_batch(PlanState *node);
 static void *get_current_next_batch(PlanState *node);
 static GList* build_sort_keys(PlanState *planstate, GArrowSchema *schema);
 static GArrowProjectNodeOptions* build_project_options(List *targetList, PlanBuildContext *pcontext);
+static bool ProjectIsIdentity(GArrowExecuteNode *input, PlanBuildContext *pcontext);
+/*
+ * Why a child could not be spliced into its parent's Arrow plan.  Only used to
+ * attribute the un-merged boundaries in the Debug_print_plan tally, so the next
+ * round of work can be aimed at whichever reason actually dominates.
+ */
+typedef enum ChildMergeVerdict
+{
+	CHILD_MERGEABLE = 0,
+	CHILD_NO_ESTATE,			/* child was never vectorized */
+	CHILD_NO_PLAN,				/* vectorized but built no Arrow plan */
+	CHILD_DEFERRED,				/* build postponed to first ExecuteVecPlan */
+	CHILD_XSLICE_SHARESCAN		/* cross-slice ShareInputScan handshake */
+} ChildMergeVerdict;
+
+static bool ChildMergeable(PlanState *child_ps, VecExecuteState *child_estate);
+static ChildMergeVerdict ChildMergeVerdictOf(PlanState *child_ps,
+											 VecExecuteState *child_estate);
 static GArrowProjectNodeOptions* build_agg_project_options(List *targetList, List *aggInfos, PlanBuildContext *pcontext);
 static GArrowProjectNodeOptions* build_windowagg_project_options(List *targetList, List *aggInfos, PlanBuildContext *pcontext);
 static GArrowProjectNodeOptions* build_windowhashagg_project_options(List *targetList, List *aggInfos, PlanBuildContext *pcontext);
@@ -257,8 +286,11 @@ static void BuildMaterializePlan(PlanBuildContext *pcontext, VecExecuteState *es
 static GArrowStoreType to_arrow_storetype(StoreType type);
 static void BuildShareScanPlan(PlanBuildContext *pcontext, VecExecuteState *estate);
 static bool HasPaxScanInSubtree(PlanState *planstate);
+static bool SubtreeHasDatasetScan(PlanState *planstate);
 static bool HasSameSliceShareScanInSubtree(PlanState *planstate);
 static bool QueryHasSameSliceShareScan(PlanState *planstate);
+static bool QueryHasAnyShareInputScan(PlanState *planstate);
+static int  CountReceivingMotionsInSlice(PlanState *planstate);
 static bool CanUsePushPipeline(PlanBuildContext *pcontext);
 
 static int plan_num = 0;
@@ -368,6 +400,91 @@ HasPaxScanInSubtree(PlanState *planstate)
  * below; the two walkers have to agree, or the VEC-DIAG-CTX log reports a
  * different answer from the one the branch below actually took.
  */
+/*
+ * SubtreeHasDatasetScan
+ *		Will this plan contain an Arrow Dataset ScanNode?
+ *
+ * BuildSink() needs this to decide whether SinkNode backpressure is safe to
+ * arm: such a scan runs inline inside StartProducing() when the plan has no
+ * thread pool, so pausing it parks the one thread that could drain the sink
+ * and lift the pause (TPC-DS q31/q74/q79).
+ *
+ * This deliberately does NOT reuse HasPaxScanInSubtree(), whose two properties
+ * are both wrong for that question:
+ *
+ *	- It keys off VecExecuteState.push_pipeline, a mutable flag that
+ *	  PostBuildVecPlan() clears on every child it splices.  Children finish
+ *	  ExecInitNode() before their parent, so by the time the parent reaches
+ *	  BuildSink() the flag is already gone -- while the ScanNode it stood for
+ *	  is now physically inside the parent's plan.  Ask the plan shape instead:
+ *	  a SeqScan over a relation whose AM is a registered Arrow dataset is
+ *	  exactly what BuildScanNode() turns into a ScanNode.
+ *
+ *	- It descends only lefttree/righttree, so a scan under an Append or a
+ *	  Sequence is invisible to it.  Mirror HasSameSliceShareScanInSubtree()
+ *	  below, which descends the type-specific child arrays for the same reason.
+ *
+ * Motion is not crossed: children below it execute in a different process, so
+ * their scans are not in this plan.
+ */
+static bool
+SubtreeHasDatasetScan(PlanState *planstate)
+{
+	int			i;
+
+	if (planstate == NULL)
+		return false;
+
+	if (IsA(planstate, MotionState))
+		return false;
+
+	if (IsA(planstate, SeqScanState))
+	{
+		Relation	rel = ((ScanState *) planstate)->ss_currentRelation;
+
+		if (rel != NULL && garrow_dataset_is_registered(rel->rd_rel->relam))
+			return true;
+	}
+
+	if (IsA(planstate, SequenceState))
+	{
+		SequenceState *sstate = (SequenceState *) planstate;
+
+		for (i = 0; i < sstate->numSubplans; i++)
+			if (SubtreeHasDatasetScan(sstate->subplans[i]))
+				return true;
+	}
+
+	if (IsA(planstate, AppendState))
+	{
+		AppendState *astate = (AppendState *) planstate;
+
+		for (i = 0; i < astate->as_nplans; i++)
+			if (SubtreeHasDatasetScan(astate->appendplans[i]))
+				return true;
+	}
+
+	if (IsA(planstate, MergeAppendState))
+	{
+		MergeAppendState *mstate = (MergeAppendState *) planstate;
+
+		for (i = 0; i < mstate->ms_nplans; i++)
+			if (SubtreeHasDatasetScan(mstate->mergeplans[i]))
+				return true;
+	}
+
+	if (IsA(planstate, SubqueryScanState))
+	{
+		SubqueryScanState *substate = (SubqueryScanState *) planstate;
+
+		if (SubtreeHasDatasetScan(substate->subplan))
+			return true;
+	}
+
+	return SubtreeHasDatasetScan(planstate->lefttree) ||
+		SubtreeHasDatasetScan(planstate->righttree);
+}
+
 static bool
 HasSameSliceShareScanInSubtree(PlanState *planstate)
 {
@@ -528,6 +645,163 @@ QueryHasSameSliceShareScan(PlanState *planstate)
 	foreach(lc, stmt->subplans)
 	{
 		if (plan_has_same_slice_share_walker((Plan *) lfirst(lc)))
+			return true;
+	}
+
+	return false;
+}
+
+/*
+ * Does the query contain any ShareInputScan at all, cross-slice included?
+ *
+ * plan_has_same_slice_share_walker answers a narrower question on purpose --
+ * it skips cross_slice share scans because those were safe for the context
+ * choice it guards.  They are not safe for yield mode: see the note on
+ * VecExecuteState.yield_unsafe.  Same whole-query walk and the same
+ * reasoning about why a subtree-only test is not enough.
+ */
+static bool
+plan_has_any_share_walker(Plan *plan)
+{
+	ListCell   *lc;
+
+	if (plan == NULL)
+		return false;
+
+	if (IsA(plan, ShareInputScan))
+		return true;
+
+	if (IsA(plan, Sequence))
+	{
+		foreach(lc, ((Sequence *) plan)->subplans)
+		{
+			if (plan_has_any_share_walker((Plan *) lfirst(lc)))
+				return true;
+		}
+	}
+
+	if (IsA(plan, Append))
+	{
+		foreach(lc, ((Append *) plan)->appendplans)
+		{
+			if (plan_has_any_share_walker((Plan *) lfirst(lc)))
+				return true;
+		}
+	}
+
+	if (IsA(plan, MergeAppend))
+	{
+		foreach(lc, ((MergeAppend *) plan)->mergeplans)
+		{
+			if (plan_has_any_share_walker((Plan *) lfirst(lc)))
+				return true;
+		}
+	}
+
+	if (IsA(plan, SubqueryScan))
+	{
+		if (plan_has_any_share_walker(((SubqueryScan *) plan)->subplan))
+			return true;
+	}
+
+	return plan_has_any_share_walker(plan->lefttree) ||
+		plan_has_any_share_walker(plan->righttree);
+}
+
+/*
+ * How many Motion nodes does the locally executing slice read from?
+ *
+ * Each one becomes its own Acero SourceNode, and in yield mode a single
+ * thread drives them all -- SourceNode::RunYieldLoop blocks inside
+ * generator_().result(), which for a Motion source ends up in
+ * RecvTupleChunkFromAnyUDPIFC.  Parked on one Motion, the thread is not
+ * draining the others; their per-connection receive queues fill, the receiver
+ * stops acknowledging, and those senders block in SendChunkUDPIFC waiting for
+ * window credit that will not come.  Nothing breaks the cycle.
+ *
+ * Seen on TPC-DS q58 at SF1000 on PG16.9, intermittently (5 of 6 runs with
+ * the default capacity-based flow control, 1 of 6 with loss_advance, which
+ * advances on timeout and so usually escapes).  At the hang: slice1 has three
+ * Redistribute Motions under it (slices 2, 5 and 8); 32 QEs of slice1 parked
+ * in receiveChunksUDPIFC while 32 of slice2 and 14 of slice5 sat in
+ * SendChunkUDPIFC's poll().  Kernel side confirmed the data had arrived and
+ * nobody was reading it: Send-Q zero everywhere, Recv-Q up to 39 KB.
+ *
+ * One Motion is fine -- the thread blocks on it and that is the only thing it
+ * has to do.  Two or more cannot be interleaved by one thread, so yield mode
+ * is not usable for such a slice.  Stops at Motion boundaries: a Motion's own
+ * subtree belongs to the child slice, not this one.
+ */
+static int
+CountReceivingMotionsInSlice(PlanState *planstate)
+{
+	int			n = 0;
+	ListCell   *lc;
+
+	if (planstate == NULL)
+		return 0;
+
+	if (IsA(planstate, MotionState))
+		return 1;				/* its subtree is the child slice's business */
+
+	if (IsA(planstate, AppendState))
+	{
+		AppendState *a = (AppendState *) planstate;
+		for (int i = 0; i < a->as_nplans; i++)
+			n += CountReceivingMotionsInSlice(a->appendplans[i]);
+	}
+	else if (IsA(planstate, MergeAppendState))
+	{
+		MergeAppendState *m = (MergeAppendState *) planstate;
+		for (int i = 0; i < m->ms_nplans; i++)
+			n += CountReceivingMotionsInSlice(m->mergeplans[i]);
+	}
+	else if (IsA(planstate, SequenceState))
+	{
+		SequenceState *q = (SequenceState *) planstate;
+		for (int i = 0; i < q->numSubplans; i++)
+			n += CountReceivingMotionsInSlice(q->subplans[i]);
+	}
+	else if (IsA(planstate, SubqueryScanState))
+	{
+		n += CountReceivingMotionsInSlice(((SubqueryScanState *) planstate)->subplan);
+	}
+
+	foreach(lc, planstate->initPlan)
+	{
+		SubPlanState *sps = (SubPlanState *) lfirst(lc);
+		n += CountReceivingMotionsInSlice(sps->planstate);
+	}
+	foreach(lc, planstate->subPlan)
+	{
+		SubPlanState *sps = (SubPlanState *) lfirst(lc);
+		n += CountReceivingMotionsInSlice(sps->planstate);
+	}
+
+	n += CountReceivingMotionsInSlice(outerPlanState(planstate));
+	n += CountReceivingMotionsInSlice(innerPlanState(planstate));
+	return n;
+}
+
+static bool
+QueryHasAnyShareInputScan(PlanState *planstate)
+{
+	PlannedStmt	   *stmt;
+	ListCell	   *lc;
+
+	if (planstate == NULL || planstate->state == NULL)
+		return false;
+
+	stmt = planstate->state->es_plannedstmt;
+	if (stmt == NULL)
+		return false;
+
+	if (plan_has_any_share_walker(stmt->planTree))
+		return true;
+
+	foreach(lc, stmt->subplans)
+	{
+		if (plan_has_any_share_walker((Plan *) lfirst(lc)))
 			return true;
 	}
 
@@ -2059,6 +2333,31 @@ BuildVecPlan(PlanState *planstate, VecExecuteState *estate)
 	PlanBuildContext pcontext;
 	bool support_parallel = true;
 
+	/*
+	 * VEC-YIELD-GUARD: decide before anything is built.
+	 *
+	 * BuildSink arms SinkNode backpressure off enable_vec_pipeline alone, and
+	 * the first BuildSink calls happen while this function is still walking
+	 * the tree -- long before the ExecContext choice further down.  A plan
+	 * that ends up in batch mode with backpressure armed self-deadlocks: the
+	 * batch path is start() then wait(), so nobody reads the sink until wait()
+	 * returns and a backpressure pause can never be answered.  That is what
+	 * the note on the yield branch in ExecuteVecPlan warns about.  Computing
+	 * this flag late was enough to hang TPC-DS q22 and q24 -- both fine with
+	 * the pipeline off, and fine before this guard existed.
+	 *
+	 * So the answer has to be known here, and BuildSink has to honour it.
+	 */
+	{
+		bool		share_unsafe = QueryHasAnyShareInputScan(planstate);
+		int			nmotion = CountReceivingMotionsInSlice(planstate);
+
+		estate->yield_unsafe = enable_vec_yield_guard && (share_unsafe || nmotion >= 2);
+		if (estate->yield_unsafe)
+			elog(DEBUG1, "VEC-YIELD-GUARD pid=%d slice=%d share=%d motions=%d -> batch mode, no backpressure",
+				 MyProcPid, currentSliceId, share_unsafe ? 1 : 0, nmotion);
+	}
+
 	/* init PlanBuildContext*/
 	pcontext.agginfos = NULL;
 	pcontext.keys = NULL;
@@ -2076,7 +2375,6 @@ BuildVecPlan(PlanState *planstate, VecExecuteState *estate)
 	pcontext.plan = NULL;
 	pcontext.map = NULL;
 	pcontext.sinktype = Plain;
-	pcontext.pipeline = false;
 
 	pcontext.is_hashjoin = false;
 	pcontext.is_nestloopjoin = false;
@@ -2221,8 +2519,7 @@ BuildVecPlan(PlanState *planstate, VecExecuteState *estate)
 			pcontext.is_cross_slice = vmatstate->is_cross_slice;
 			pcontext.is_producer = vmatstate->is_producer;
 			pcontext.ready = vmatstate->ready;
-			pcontext.pipeline = false;
-			pcontext.sinktype = Plain;
+					pcontext.sinktype = Plain;
 		}
 		break;
 		case T_ResultState:
@@ -2320,8 +2617,7 @@ BuildVecPlan(PlanState *planstate, VecExecuteState *estate)
 		break;
 		case T_AppendState:
 		{
-			pcontext.pipeline = false;
-			pcontext.sinktype = Plain;
+					pcontext.sinktype = Plain;
 			pcontext.is_append = true;	
 		}
 		break;
@@ -2332,9 +2628,7 @@ BuildVecPlan(PlanState *planstate, VecExecuteState *estate)
 	/*
 	 * Execution mode selection:
 	 * 1. push_pipeline: PAX ScanNode async in thread pool + backpressure
-	 * 2. pipeline: ConsumingSinkNode pull-based, single-threaded, for
-	 *    SourceNode callback plans (CBDB code must stay on main thread)
-	 * 3. batch: start + wait (fallback)
+	 * 2. batch: start + wait, with yield mode when backpressure is armed
 	 */
 	/* Non-scan top nodes inherit parallel_scan from child PAX scans */
 	if (!pcontext.parallel_scan && enable_vec_pipeline)
@@ -2343,8 +2637,7 @@ BuildVecPlan(PlanState *planstate, VecExecuteState *estate)
 	if (CanUsePushPipeline(&pcontext))
 	{
 		pcontext.sinktype = Plain;
-		pcontext.pipeline = false;
-	}
+		}
 
 	/*
 	 * Thread pool allocation:
@@ -2405,6 +2698,12 @@ BuildVecPlan(PlanState *planstate, VecExecuteState *estate)
 			 pcontext.is_sharescan ? 1 : 0, pcontext.is_producer ? 1 : 0,
 			 pcontext.is_cross_slice ? 1 : 0, pcontext.parallel_scan ? 1 : 0);
 	}
+
+	/*
+	 * VEC-YIELD-SHARESCAN-GUARD: decide here, while planstate is in hand, and
+	 * carry it to ExecuteVecPlan on the estate -- that function only receives
+	 * the VecExecuteState.
+	 */
 
 	if (CanUsePushPipeline(&pcontext) &&
 		!QueryHasSameSliceShareScan(planstate))	/* VEC-SHARESCAN-QUERYWIDE */
@@ -2508,16 +2807,11 @@ BuildVecPlan(PlanState *planstate, VecExecuteState *estate)
 	estate->slot = planstate->ps_ResultTupleSlot;
 	garrow_store_ptr(estate->plan, pcontext.plan);
 
-	/* read from result queue for consuming sink */
-	estate->pipeline = pcontext.pipeline;
 	estate->push_pipeline = CanUsePushPipeline(&pcontext);
 	estate->has_callback_source = pcontext.has_callback_source;
-	if (enable_vec_pipeline && !estate->push_pipeline && !estate->pipeline)
+	if (enable_vec_pipeline && !estate->push_pipeline)
 		elog(DEBUG1, "Backpressure: yield mode (not push_pipeline)");
-	if (pcontext.pipeline)
-		estate->resqueue = NIL;
-	else
-		garrow_store_ptr(estate->reader, pcontext.reader);
+	garrow_store_ptr(estate->reader, pcontext.reader);
 
 	if (Debug_print_plan)
 	{
@@ -2680,7 +2974,6 @@ BuildJoinPlan(PlanBuildContext *pcontext, VecExecuteState *estate)
 static void
 BuildSequencePlan(PlanBuildContext *pcontext, VecExecuteState *estate)
 {
-	bool pipeline;
 
 	GList *sources = NULL;
 	g_autoptr(GError) error = NULL;
@@ -2700,11 +2993,6 @@ BuildSequencePlan(PlanBuildContext *pcontext, VecExecuteState *estate)
 	last_source = BuildSource(pcontext);
 	sources = garrow_list_append_ptr(sources, last_source);
 
-	/*
-	 * save the origin value of pcontext->pipeline, and reset later
-	 */
-	pipeline = pcontext->pipeline;
-	pcontext->pipeline = false;
 	for (int i = 0; i < ss->numSubplans -1; ++i)
 	{
 		g_autoptr(GArrowExecuteNode) source = NULL;
@@ -2713,8 +3001,6 @@ BuildSequencePlan(PlanBuildContext *pcontext, VecExecuteState *estate)
 		source = BuildSource(pcontext);
 		sources = garrow_list_append_ptr(sources, source);
 	}
-	/* reset pipeline */
-	pcontext->pipeline = pipeline;
 
 	options = garrow_sequence_node_options_new();
 	sequence_node = garrow_execute_plan_build_sequence_node(pcontext->plan,
@@ -2775,18 +3061,10 @@ FreeVecExecuteState(VecExecuteState *estate)
 		estate->plan = NULL;
 	}
 
-	if (!estate->pipeline)
+	if (estate->reader)
 	{
-		if (estate->reader)
-		{
-			glib_autoptr_cleanup_GArrowRecordBatchReader(&estate->reader);
-			estate->reader = NULL;
-		}
-	}
-	else if (estate->resqueue != NIL)
-	{
-		list_free(estate->resqueue);
-		estate->resqueue = NIL;
+		glib_autoptr_cleanup_GArrowRecordBatchReader(&estate->reader);
+		estate->reader = NULL;
 	}
 
 	if (estate->arrow_node_to_planstate != NIL)
@@ -2813,6 +3091,29 @@ FreeVecExecuteState(VecExecuteState *estate)
  * flag stays false for them.
  */
 static __thread bool vec_is_plan_driver_thread = false;
+
+/*
+ * VecShareLockWaitTick
+ *
+ * Installed into Arrow as the callback that decides whether a shared-file
+ * store should keep waiting for the writer slice's lock.  The wait used to be
+ * a bare F_SETLKW inside garrow_execute_plan_start(): a writer that never
+ * finished left this backend parked in the kernel, deaf to statement_timeout
+ * and pg_cancel_backend, with the dispatcher stuck in checkDispatchResult().
+ *
+ * This runs on whichever thread is waiting -- with push_pipeline that can be
+ * an Arrow thread-pool worker, not the plan driver -- so it must stay safe off
+ * the main thread.  Reading InterruptPending is: it is a volatile
+ * sig_atomic_t, and reporting "stop waiting" by returning false does not
+ * longjmp out of C++.  Arrow turns the false into a Cancelled status,
+ * ExecuteVecPlan raises it as an ordinary error on the driver thread, and
+ * CHECK_FOR_INTERRUPTS() then unwinds the usual way with the real reason.
+ */
+static gboolean
+VecShareLockWaitTick(gpointer user_data pg_attribute_unused())
+{
+	return InterruptPending ? FALSE : TRUE;
+}
 
 /*
  * VEC-CANCEL-FIX: give PostgreSQL a chance to act on a pending interrupt.
@@ -2851,6 +3152,12 @@ ExecuteVecPlan(VecExecuteState *estate)
 	g_autoptr(GError) error = NULL;
 
 	vec_is_plan_driver_thread = true;	/* VEC-CANCEL-FIX */
+
+	/*
+	 * Re-arm every time: the callback is process-global in Arrow, and a plan
+	 * that finished may have cleared it.
+	 */
+	garrow_set_host_cancel_callback(VecShareLockWaitTick, NULL);
 
 	/*
 	 * Build deferred by PostBuildVecPlan(): exec params referenced by this
@@ -2913,39 +3220,7 @@ ExecuteVecPlan(VecExecuteState *estate)
 
 		return ExecStoreBatch(estate->slot, batch);
 	}
-	else if (estate->pipeline)
-	{
-		while (true)
-		{
-			/* Return queued batches first */
-			if (list_length(estate->resqueue) > 0)
-			{
-				batch = (GArrowRecordBatch *)linitial(estate->resqueue);
-				estate->resqueue = list_delete_first(estate->resqueue);
-				return ExecStoreBatch(estate->slot, batch);
-			}
-
-			/* Start or continue producing */
-			if (!estate->started)
-			{
-				bool isok;
-				isok = garrow_execute_plan_pipeline_start(estate->plan, &error);
-				if (!isok || error)
-					elog(ERROR, "Start execution plan error: %s.",
-						 error ? error->message : "unknown");
-				estate->started = true;
-			}
-			else
-			{
-				if (garrow_execute_plan_is_stop(estate->plan))
-					return NULL;
-				garrow_execute_plan_pipeline_continue(estate->plan, &error);
-				if (error)
-					elog(ERROR, "Continue pipeline execution plan error: %s.", error->message);
-			}
-		}
-	}
-	else if (enable_vec_pipeline)
+	else if (enable_vec_pipeline && !estate->yield_unsafe)
 	{
 		/*
 		 * Yield mode with backpressure.  Single-threaded by design, so it
@@ -3147,19 +3422,6 @@ build_sort_keys(PlanState *planstate, GArrowSchema *schema)
 	return keys;
 }
 
-/*
- * Should be called by arrow plan, the function is a producer of
- * #GArrowRecordBatch that be consumed by PG plan.
- */
-static void
-consumer(void *tc, void *rb)
-{
-	VecExecuteState *estate = (VecExecuteState *)tc;
-	GArrowRecordBatch *result = GARROW_RECORD_BATCH(rb);
-
-	estate->resqueue = lappend(estate->resqueue, result);
-}
-
 void static
 BuildSink(GArrowExecuteNode *input, VecExecuteState *estate, PlanBuildContext *pcontext)
 {
@@ -3177,7 +3439,29 @@ BuildSink(GArrowExecuteNode *input, VecExecuteState *estate, PlanBuildContext *p
 		case Plain:
 		{
 			options = garrow_sink_node_options_new();
-			if (enable_vec_pipeline && backpressure_memory_mb > 0)
+			/*
+			 * A Dataset ScanNode with no thread pool scans inline inside
+			 * StartProducing(), so pausing it parks the one thread that could
+			 * drain the sink and lift the pause: the query then hangs with no
+			 * way back.  TPC-DS q31/q74/q79 did exactly that with
+			 * enable_vec_pipeline on and pool_threads=0.  Leave backpressure
+			 * off for those plans -- which is how they already behave with
+			 * enable_vec_pipeline off, so it costs nothing that was working.
+			 *
+			 * Callback SourceNode plans keep it: they yield on pause instead
+			 * of blocking, and ExecuteVecPlan's yield mode drives them.
+			 *
+			 * The test has to look at the whole subtree, not at whether this
+			 * node built a ScanNode itself: MergeChildren splices a child's
+			 * ScanNode into this plan after BuildSink has already run.
+			 * SubtreeHasDatasetScan() stops at Motion, which is exactly the
+			 * plan boundary we care about; see its header for why it asks the
+			 * plan shape rather than reusing HasPaxScanInSubtree().
+			 */
+			if (enable_vec_pipeline && !estate->yield_unsafe &&
+				backpressure_memory_mb > 0 &&
+				(estate->exectx != NULL ||
+				 !SubtreeHasDatasetScan(pcontext->planstate)))
 			{
 				/*
 				 * Memory-based backpressure on SinkNode for ALL plans
@@ -3213,34 +3497,14 @@ BuildSink(GArrowExecuteNode *input, VecExecuteState *estate, PlanBuildContext *p
 
 		}
 		break;
-		case Consuming:
-		{
-			g_autoptr(GArrowSchema) output_schema = NULL;
-			g_autoptr(GArrowConsumingSinkNodeOptions) coptions = NULL;
-
-			Assert(pcontext->pipeline);
-			output_schema = garrow_execute_node_get_output_schema(input);
-			coptions = garrow_consuming_sink_node_options_new(output_schema,
-															  consumer,
-															  estate);
-			sink = garrow_execute_plan_build_consuming_sink_node(pcontext->plan,
-																 input,
-																 coptions,
-																 &error);
-		}
-		break;
-
 		default:
 			elog(ERROR, "Build arrow plan from (%d) type is not support yet.",
 					nodeTag(plan));
 	}
 
-	if (!pcontext->pipeline)
-	{
-		sinkreader = garrow_sink_node_options_get_reader(
-						GARROW_SINK_NODE_OPTIONS(options), schema);
-		garrow_store_ptr(pcontext->reader, sinkreader);
-	}
+	sinkreader = garrow_sink_node_options_get_reader(
+					GARROW_SINK_NODE_OPTIONS(options), schema);
+	garrow_store_ptr(pcontext->reader, sinkreader);
 
 	if (error)
 		elog(ERROR, "Failed to create sink node, cause: %s", error->message);
@@ -3534,14 +3798,9 @@ BuildSource(PlanBuildContext *pcontext)
 		elog(ERROR, "Failed to create callback reader for source node, cause: %s.", error->message);
 
 	options = garrow_source_node_options_new_record_batch_reader(reader);
-	if (!pcontext->pipeline || !pcontext->is_left_schema)
-		source = garrow_execute_plan_build_source_node(pcontext->plan,
-													   options,
-													  &error);
-	else
-		source = garrow_execute_plan_build_pipeline_source_node(pcontext->plan,
-																options,
-															   &error);
+	source = garrow_execute_plan_build_source_node(pcontext->plan,
+												   options,
+												   &error);
 	if (error)
 		elog(ERROR, "Failed to create source node, cause: %s.", error->message);
 
@@ -3654,6 +3913,10 @@ BuildProject(List *targetList, List *qualList, GArrowExecuteNode *input, PlanBui
 	pcontext->sonic_target_segment_passthrough = false;
 	pcontext->sonic_target_segment_col_name = NULL;
 
+	pcontext->proj_all_passthrough = false;
+	pcontext->proj_names = NULL;
+	pcontext->proj_length = 0;
+
 	if (targetList)
 		project_options = build_project_options(targetList, pcontext);
 
@@ -3728,7 +3991,8 @@ BuildProject(List *targetList, List *qualList, GArrowExecuteNode *input, PlanBui
 		garrow_store_ptr(current, filter_node);
 	}
 
-	if (targetList)
+	if (targetList && !(enable_vec_identity_project_elision &&
+						ProjectIsIdentity(current, pcontext)))
 	{
 		project = garrow_execute_plan_build_project_node(pcontext->plan,
 														 current,
@@ -4439,6 +4703,68 @@ build_windowhashagg_project_options(List *targetList, List *aggInfos, PlanBuildC
 	return garrow_move_ptr(options);
 }
 
+/*
+ * Is the pending projection a no-op?
+ *
+ * A ProjectNode that emits exactly its input's fields, in order, under their
+ * own names copies every batch for nothing.  Arrow keeps such a node in the
+ * plan, so it costs an ExecNode, a thread hop and a full batch copy per
+ * batch.  TPC-DS builds thousands of them: a scan's column-selection project
+ * whose scan already applied the column map, and the project a Sort/Limit
+ * emits over an Agg output it does not actually change.
+ *
+ * The test is deliberately literal.  build_project_options() already knows
+ * whether every expression is a passthrough; all that is left is to check the
+ * names line up one-for-one with the fields of `input`, which is only
+ * settled once the agg/limit/filter nodes have been built.
+ *
+ * One projection is never a no-op, however identical it looks: the one sitting
+ * directly on a bridge source node.  MergeChildren splices a child plan in by
+ * rewiring the source's consumer to the child's last node, so after the splice
+ * that consumer sees the child's own field names.  A ProjectNode survives this
+ * because arrow binds its expressions to field positions when the node is
+ * built and re-labels the output with the declared names -- it is a naming
+ * barrier, not a copy.  Drop it and a consumer that resolves columns by name
+ * at run time fails: TPC-DS q23 died with "Nonexistent sort key column:
+ * c_last_name(att1)" in TopKNode once its ProjectNode was elided.
+ *
+ * A ScanNode is a source too but is never spliced -- it is already the real
+ * producer -- so projections on top of a scan stay eligible, which is where
+ * most of the eliminated nodes come from.
+ */
+static bool
+ProjectIsIdentity(GArrowExecuteNode *input, PlanBuildContext *pcontext)
+{
+	g_autoptr(GArrowSchema) schema = NULL;
+	const gchar *kind;
+	gsize i;
+
+	if (input == NULL || !pcontext->proj_all_passthrough ||
+		pcontext->proj_length == 0 || pcontext->proj_names == NULL)
+		return false;
+
+	kind = garrow_execute_node_get_kind_name(input);
+	if (kind != NULL &&
+		(strcmp(kind, "SourceNode") == 0 ||
+		 strcmp(kind, "SharedSourceNode") == 0))
+		return false;
+
+	schema = garrow_execute_node_get_output_schema(input);
+	if (schema == NULL ||
+		(gsize) garrow_schema_n_fields(schema) != pcontext->proj_length)
+		return false;
+
+	for (i = 0; i < pcontext->proj_length; i++)
+	{
+		g_autoptr(GArrowField) field = garrow_schema_get_field(schema, i);
+
+		if (field == NULL ||
+			strcmp(pcontext->proj_names[i], garrow_field_get_name(field)) != 0)
+			return false;
+	}
+	return true;
+}
+
 static GArrowProjectNodeOptions *
 build_project_options(List *targetList, PlanBuildContext *pcontext)
 {
@@ -4448,6 +4774,7 @@ build_project_options(List *targetList, PlanBuildContext *pcontext)
 	int				i = 0;
 	ListCell	   *l;
 	const gchar		  **names;
+	bool			all_passthrough = true;
 
 	length = list_length(targetList);
 	names = palloc(length * sizeof(gchar *));
@@ -4470,6 +4797,20 @@ build_project_options(List *targetList, PlanBuildContext *pcontext)
 		}
 		else
 			names[i] = (gchar *)GetUniqueAttrName(tle->resname, i + 1);
+
+		/*
+		 * Passthrough detection for ProjectIsIdentity(): arrow prints a
+		 * field_ref as the bare field name, so an expression whose string
+		 * form equals the output name can only be field_ref(name).
+		 */
+		{
+			g_autofree gchar *exprstr =
+				garrow_expression_to_string(arrow_expr);
+
+			if (exprstr == NULL || strcmp(exprstr, names[i]) != 0)
+				all_passthrough = false;
+		}
+
 		expressions = garrow_list_append_ptr(expressions, arrow_expr);
 		i++;
 	}
@@ -4507,15 +4848,22 @@ build_project_options(List *targetList, PlanBuildContext *pcontext)
 		options = garrow_project_node_options_new(expressions,
 												  (gchar**)names_extended,
 												  length + 1);
-		pfree(names_extended);
+		pcontext->proj_names = names_extended;
+		pcontext->proj_length = length + 1;
 	}
 	else
 	{
 		options = garrow_project_node_options_new(expressions,
 												  (gchar**)names,
 												  length);
+		pcontext->proj_names = names;
+		pcontext->proj_length = length;
 	}
-	pfree(names);
+	/*
+	 * names / names_extended are handed to pcontext for ProjectIsIdentity();
+	 * both live in the per-plan memory context, so there is nothing to free.
+	 */
+	pcontext->proj_all_passthrough = all_passthrough;
 	pcontext->append_filed_index = 0;
 
 	if (DEBUG1 >= log_min_messages)
@@ -6769,45 +7117,41 @@ is_cross_slice_share_input_scan(PlanState *ps)
 }
 
 /*
- * merge_child_is_xslice_sharescan
- *    True if any of ps's MergeChildren-merge children is a cross-slice
- *    ShareInputScan.  Mirrors the child-collection switch in
- *    PostBuildVecPlan() so that the two stay in lockstep.
+ * ChildMergeVerdictOf
+ *    May this child's Arrow plan be spliced into its parent's plan, and if
+ *    not, why not?  ChildMergeable() is the yes/no form; the verdict itself
+ *    is what the Debug_print_plan tally attributes un-merged boundaries by.
+ *
+ * Three cases keep a child out.  It may have no VecExecuteState or no plan at
+ * all.  Its build may be deferred to the first ExecuteVecPlan() call, so there
+ * is nothing to splice yet.  Or it may be a cross-slice ShareInputScan, whose
+ * producer and consumer slices coordinate through GP's ConditionVariable
+ * handshake inside ExecVecShareInputScan(): splicing it away means that
+ * ExecProcNode never fires, the producer never writes its ".ready" file, and
+ * the consumer's Arrow SharedSourceNode::SyncReader() waits for a file that
+ * will not appear.
+ *
+ * In every case the parent keeps the bridge source BuildVecPlan() already
+ * built for that input, so the child still runs the ordinary way.
  */
-static bool
-merge_child_is_xslice_sharescan(PlanState *ps)
+static ChildMergeVerdict
+ChildMergeVerdictOf(PlanState *child_ps, VecExecuteState *child_estate)
 {
-	int i;
+	if (child_estate == NULL)
+		return CHILD_NO_ESTATE;
+	if (child_estate->plan == NULL)
+		return CHILD_NO_PLAN;
+	if (child_estate->build_deferred)
+		return CHILD_DEFERRED;
+	if (child_ps != NULL && is_cross_slice_share_input_scan(child_ps))
+		return CHILD_XSLICE_SHARESCAN;
+	return CHILD_MERGEABLE;
+}
 
-	if (IsA(ps, SubqueryScanState))
-		return is_cross_slice_share_input_scan(((SubqueryScanState *) ps)->subplan);
-	else if (IsA(ps, SequenceState))
-	{
-		SequenceState *seqState = (SequenceState *) ps;
-
-		for (i = 0; i < seqState->numSubplans; i++)
-			if (is_cross_slice_share_input_scan(seqState->subplans[i]))
-				return true;
-		return false;
-	}
-	else if (IsA(ps, AppendState))
-	{
-		AppendState *appendState = (AppendState *) ps;
-
-		for (i = 0; i < appendState->as_nplans; i++)
-			if (is_cross_slice_share_input_scan(appendState->appendplans[i]))
-				return true;
-		return false;
-	}
-	else if (IsA(ps, HashJoinState))
-		return is_cross_slice_share_input_scan(ps->lefttree) ||
-			   (ps->righttree &&
-				is_cross_slice_share_input_scan(ps->righttree->lefttree));
-	else if (IsA(ps, NestLoopState))
-		return is_cross_slice_share_input_scan(ps->lefttree) ||
-			   is_cross_slice_share_input_scan(ps->righttree);
-	else
-		return is_cross_slice_share_input_scan(ps->lefttree);
+static bool
+ChildMergeable(PlanState *child_ps, VecExecuteState *child_estate)
+{
+	return ChildMergeVerdictOf(child_ps, child_estate) == CHILD_MERGEABLE;
 }
 
 static void
@@ -6900,9 +7244,13 @@ PostBuildVecPlan(PlanState *ps, VecExecuteState *estate)
 	TraceNodeInfo* info;
 	GArrowExecutePlan *target_plan;
 	VecExecuteState *target_state;
-	List *child_estates = NIL;  /* List of VecExecuteState* */
+	List *child_estates = NIL;  /* List of VecExecuteState*, NULL-padded */
+	List *child_pstates = NIL;  /* the matching PlanState*, same length */
 	ListCell *lc;
-	VecExecuteState *child_estate;
+	ListCell *lc2;
+	GList *child_plans = NULL;
+	int nmerge = 0;
+	int nskip[CHILD_XSLICE_SHARESCAN + 1] = {0};
 	int i;
 
 	/*
@@ -6935,43 +7283,19 @@ PostBuildVecPlan(PlanState *ps, VecExecuteState *estate)
 	target_plan = target_state->plan;
 
 	/*
-	 * Cross-slice ShareInputScan synchronizes its producer and consumer
-	 * slices through GP's ConditionVariable coordination performed in
-	 * ExecVecShareInputScan() (the node's ExecProcNode): the consumer waits
-	 * for the producer (shareinput_reader_waitready_vec) and the producer
-	 * notifies after materializing (shareinput_writer_notifyready_vec).
-	 *
-	 * MergeChildren splices a child's Arrow plan directly into this node's
-	 * plan; afterwards only this (parent) boundary runs ExecuteVecPlan and the
-	 * spliced child's ExecProcNode never fires.  For a cross-slice
-	 * ShareInputScan that skips the GP-level wait/notify, so the consumer's
-	 * Arrow SharedSourceNode::SyncReader() looks for the producer's ".ready"
-	 * file before the producer slice has created it and fails with
-	 * "ready file not found ... bug in cross-slice synchronization".
-	 *
-	 * Leave such a child un-merged: BuildVecPlan() above already built a bridge
-	 * source (BuildSource -> ExecProcNode) for it, so ExecVecShareInputScan
-	 * still runs and the coordination is preserved.  The whole merge for this
-	 * node is skipped because MergeChildren pairs children positionally with
-	 * the target's source nodes and cannot drop a single child.  Both the
-	 * consumer (e.g. under a Result) and the producer (e.g. under a Sequence)
-	 * must stay un-merged: a consumer boundary that waits would otherwise hang
-	 * on a producer whose notify was merged away.
-	 */
-	if (merge_child_is_xslice_sharescan(ps))
-		return;
-
-	/*
-	 * Collect child VecExecuteStates into a list based on node type.
-	 * Different node types store their children in different places.
+	 * Collect the children in the order MergeChildren pairs them with this
+	 * plan's source nodes, keeping each child's PlanState alongside so the
+	 * per-child mergeability test below can look at it.  Entries are never
+	 * dropped -- a child with no VecExecuteState contributes NULL -- because
+	 * the pairing is positional.
 	 */
 	if (IsA(ps, SubqueryScanState))
 	{
 		/* SubqueryScan: child is in subplan */
 		SubqueryScanState *subqueryState = (SubqueryScanState *) ps;
-		child_estate = GetVecExecuteState(subqueryState->subplan);
-		if (child_estate)
-			child_estates = lappend(child_estates, child_estate);
+		child_pstates = lappend(child_pstates, subqueryState->subplan);
+		child_estates = lappend(child_estates,
+								GetVecExecuteState(subqueryState->subplan));
 	}
 	else if (IsA(ps, SequenceState))
 	{
@@ -6979,9 +7303,9 @@ PostBuildVecPlan(PlanState *ps, VecExecuteState *estate)
 		SequenceState *seqState = (SequenceState *) ps;
 		for (i = seqState->numSubplans - 1; i >= 0; i--)
 		{
-			child_estate = GetVecExecuteState(seqState->subplans[i]);
-			if (child_estate)
-				child_estates = lappend(child_estates, child_estate);
+			child_pstates = lappend(child_pstates, seqState->subplans[i]);
+			child_estates = lappend(child_estates,
+									GetVecExecuteState(seqState->subplans[i]));
 		}
 	}
 	else if (IsA(ps, AppendState))
@@ -6990,179 +7314,130 @@ PostBuildVecPlan(PlanState *ps, VecExecuteState *estate)
 		AppendState *appendState = (AppendState *) ps;
 		for (i = 0; i < appendState->as_nplans; i++)
 		{
-			child_estate = GetVecExecuteState(appendState->appendplans[i]);
-			if (child_estate)
-				child_estates = lappend(child_estates, child_estate);
+			child_pstates = lappend(child_pstates, appendState->appendplans[i]);
+			child_estates = lappend(child_estates,
+									GetVecExecuteState(appendState->appendplans[i]));
 		}
 	}
 	else if (IsA(ps, HashJoinState) || IsA(ps, NestLoopState))
 	{
-		/* Join nodes: left and right children */
-		VecExecuteState *left_estate = GetVecExecuteState(ps->lefttree);
-		VecExecuteState *right_estate;
+		/* Join nodes: left and right children; HashJoin skips the Hash node */
+		PlanState  *right_ps = IsA(ps, HashJoinState) ? ps->righttree->lefttree
+													  : ps->righttree;
 
-		/* HashJoin needs to skip the Hash node */
-		if (IsA(ps, HashJoinState))
-			right_estate = GetVecExecuteState(ps->righttree->lefttree);
-		else
-			right_estate = GetVecExecuteState(ps->righttree);
-
-		if (left_estate)
-			child_estates = lappend(child_estates, left_estate);
-		if (right_estate)
-			child_estates = lappend(child_estates, right_estate);
+		child_pstates = lappend(child_pstates, ps->lefttree);
+		child_estates = lappend(child_estates, GetVecExecuteState(ps->lefttree));
+		child_pstates = lappend(child_pstates, right_ps);
+		child_estates = lappend(child_estates, GetVecExecuteState(right_ps));
 	}
-	else
+	else if (ps->lefttree != NULL)
 	{
-		child_estate = GetVecExecuteState(ps->lefttree);
-		if (child_estate)
-			child_estates = lappend(child_estates, child_estate);
+		child_pstates = lappend(child_pstates, ps->lefttree);
+		child_estates = lappend(child_estates, GetVecExecuteState(ps->lefttree));
 	}
+	/*
+	 * A leaf (a scan) has no input, so it has no merge boundary at all.  The
+	 * NULL-padding above exists to keep the positional pairing with the
+	 * target's source nodes honest for nodes that do have inputs; padding a
+	 * leaf would invent a boundary that no source node corresponds to.
+	 */
 
 	if (child_estates == NIL)
+	{
+		list_free(child_pstates);
 		return;
-
-	/*
-	 * A deferred child has no Arrow plan yet (see the build deferral at
-	 * the top).  MergeChildren pairs children positionally with the
-	 * target's source nodes and cannot drop a single child, so leave this
-	 * node entirely un-merged: BuildVecPlan() above already built bridge
-	 * sources (BuildSource -> ExecProcNode) that drive such children, and
-	 * the child builds its own plan on its first ExecuteVecPlan() call.
-	 */
-	foreach(lc, child_estates)
-	{
-		if (((VecExecuteState *) lfirst(lc))->build_deferred)
-			return;
 	}
 
 	/*
-	 * Merge child plans into target_plan.  Both branches below funnel into
-	 * garrow_execute_plan_merge_children().  The join case is kept separate
-	 * only because it needs to peek at left/right by position (and may bail
-	 * out if the left side is missing); the non-join case can simply iterate
-	 * over child_estates in order.
+	 * Decide per child whether its Arrow plan may be spliced in, and build
+	 * the child list MergeChildren consumes: the plan for a mergeable child,
+	 * NULL for one that must keep running on its own.  MergeChildren leaves
+	 * the source node paired with a NULL alone, so BuildVecPlan's bridge
+	 * (BuildSource -> ExecProcNode) still drives that child.
+	 *
+	 * Until this became per-child, a single un-mergeable child left the whole
+	 * node un-merged -- which is why a cross-slice ShareInputScan anywhere
+	 * under a node broke the pipeline for all of its siblings too.
 	 */
-	result = target_plan;
-
-	if (IsA(ps, HashJoinState) || IsA(ps, NestLoopState))
+	forboth(lc, child_estates, lc2, child_pstates)
 	{
-		/* Join nodes: merge left and right via the unified N-ary API. */
-		g_autoptr(GArrowExecutePlan) left_plan = NULL;
-		g_autoptr(GArrowExecutePlan) right_plan = NULL;
-		GList *child_plans = NULL;
-		VecExecuteState *left_estate = NULL;
-		VecExecuteState *right_estate = NULL;
+		VecExecuteState *source_estate = (VecExecuteState *) lfirst(lc);
+		PlanState  *child_ps = (PlanState *) lfirst(lc2);
+		g_autoptr(GArrowExecutePlan) source_plan = NULL;
+		ChildMergeVerdict v = ChildMergeVerdictOf(child_ps, source_estate);
 
-		if (list_length(child_estates) >= 1)
+		if (v == CHILD_MERGEABLE)
 		{
-			left_estate = (VecExecuteState *) linitial(child_estates);
-			if (left_estate->plan)
-				left_plan = garrow_copy_ptr(left_estate->plan);
-		}
-
-		if (list_length(child_estates) >= 2)
-		{
-			right_estate = (VecExecuteState *) lsecond(child_estates);
-			if (right_estate->plan)
-				right_plan = garrow_copy_ptr(right_estate->plan);
-		}
-
-		if (left_plan == NULL || right_plan == NULL)
-		{
-			list_free(child_estates);
-			return;
-		}
-
-		/*
-		 * No child-plan swap needed for RIGHT_SEMI/ANTI.  Both ORCA
-		 * (CTranslatorDXLToPlStmt swaps DXL children) and the PG planner
-		 * produce PG-canonical layout: outer=probe, inner=Hash(build/emit).
-		 * Standard merge order (left_plan=lefttree→inputs[0], right_plan=
-		 * righttree→inputs[1]) already puts build at Arrow right (inputs[1]).
-		 *
-		 * Fold the children's arrow_node_to_planstate / arrow_node_num into
-		 * estate only after the null-check commits us to the merge.  Calling
-		 * MergeArrowNodeToPlanStateFromSource before the check (as an earlier
-		 * refactor did) bumps estate->arrow_node_num and mutates the last
-		 * TraceNodeInfo on the early-return path, leaving the count out of sync
-		 * with both the un-merged plan and the time_collector re-sized below.
-		 * Both left_plan and right_plan are non-NULL here, so both estates
-		 * exist and carry a plan.
-		 */
-		MergeArrowNodeToPlanStateFromSource(&arrow_node_to_planstate, left_estate, estate);
-		MergeArrowNodeToPlanStateFromSource(&arrow_node_to_planstate, right_estate, estate);
-
-		/* garrow_list_append_ptr steals the ref from each autoptr. */
-		child_plans = garrow_list_append_ptr(child_plans, left_plan);
-		child_plans = garrow_list_append_ptr(child_plans, right_plan);
-
-		result = garrow_execute_plan_merge_children(target_plan, child_plans, &error);
-		garrow_list_free_ptr(&child_plans);
-		if (error)
-		{
-			elog(LOG, "Failed to merge plan, cause: %s", error->message);
-			list_free(child_estates);
-			return;
-		}
-	}
-	else
-	{
-		/* Other nodes: merge all children at once via merge_children. */
-		GList *child_plans = NULL;
-
-		/*
-		 * First pass: collect every child plan and verify none is NULL.
-		 * Defer MergeArrowNodeToPlanStateFromSource until all plans are
-		 * confirmed present -- it mutates estate->arrow_node_num and the
-		 * last TraceNodeInfo, so calling it here (before a later child is
-		 * found to lack a plan) would leave estate in the same inconsistent
-		 * partial state guarded against in the join branch above.
-		 */
-		foreach(lc, child_estates)
-		{
-			VecExecuteState *source_estate = (VecExecuteState *) lfirst(lc);
-			g_autoptr(GArrowExecutePlan) source_plan = NULL;
-
-			if (source_estate->plan == NULL)
-			{
-				garrow_list_free_ptr(&child_plans);
-				list_free(child_estates);
-				return;
-			}
-
 			source_plan = garrow_copy_ptr(source_estate->plan);
-			child_plans = garrow_list_append_ptr(child_plans, source_plan);
+			nmerge++;
 		}
-
-		/*
-		 * Second pass: all child plans are present, so it is now safe to
-		 * fold each child's arrow_node_to_planstate / arrow_node_num into
-		 * estate.
-		 */
-		foreach(lc, child_estates)
+		else
 		{
-			VecExecuteState *source_estate = (VecExecuteState *) lfirst(lc);
-			MergeArrowNodeToPlanStateFromSource(&arrow_node_to_planstate, source_estate, estate);
+			nskip[v]++;
+			/*
+			 * Also name the child, so the tally can separate boundaries that
+			 * are unavoidable by construction (a Motion is a different slice
+			 * in a different process -- no Arrow plan can span it) from the
+			 * ones that are merely unimplemented.
+			 */
+			if (Debug_print_plan)
+				elog(LOG, "vec plan merge skip: parent plan(%d) child tag(%d) reason(%d)",
+					 ps->plan->plan_node_id,
+					 child_ps && child_ps->plan ? (int) nodeTag(child_ps->plan) : -1,
+					 (int) v);
 		}
+		/* garrow_list_append_ptr steals the ref; NULL means "skip this one" */
+		child_plans = garrow_list_append_ptr(child_plans, source_plan);
+	}
 
-		/* Merge all child plans at once */
-		result = garrow_execute_plan_merge_children(target_plan, child_plans, &error);
+	/*
+	 * One line per merge boundary, so a single Debug_print_plan run yields both
+	 * the post-change numbers (nmerge) and the pre-change ones: before partial
+	 * merge a node spliced either all of its children or none, so a boundary
+	 * counted as merged back then is exactly one where nmerge == total.
+	 */
+	if (Debug_print_plan)
+		elog(LOG, "vec plan merge for plan(%d) tag(%d): %d/%d children spliced "
+			 "(noestate=%d noplan=%d deferred=%d xslice=%d)",
+			 ps->plan->plan_node_id, (int) nodeTag(ps->plan),
+			 nmerge, list_length(child_estates),
+			 nskip[CHILD_NO_ESTATE], nskip[CHILD_NO_PLAN],
+			 nskip[CHILD_DEFERRED], nskip[CHILD_XSLICE_SHARESCAN]);
 
-		/*
-		 * garrow_list_append_ptr stole a +1 ref from each source_plan into
-		 * the GList cell, so we must drop those refs (and free the cells)
-		 * after the merge is done.  Skipping this would leak N plan refs
-		 * per PostBuildVecPlan invocation.
-		 */
+	if (nmerge == 0)
+	{
 		garrow_list_free_ptr(&child_plans);
+		list_free(child_estates);
+		list_free(child_pstates);
+		return;
+	}
 
-		if (error)
-		{
-			elog(LOG, "Failed to merge child plans, cause: %s", error->message);
-			list_free(child_estates);
-			return;
-		}
+	/*
+	 * Only now, with the set of children to splice settled, fold their
+	 * arrow_node_to_planstate / arrow_node_num into estate.
+	 * MergeArrowNodeToPlanStateFromSource mutates estate->arrow_node_num and
+	 * the last TraceNodeInfo, so doing it for a child that turns out not to
+	 * be merged would leave the counts out of sync with the plan.
+	 */
+	forboth(lc, child_estates, lc2, child_pstates)
+	{
+		VecExecuteState *source_estate = (VecExecuteState *) lfirst(lc);
+
+		if (ChildMergeable((PlanState *) lfirst(lc2), source_estate))
+			MergeArrowNodeToPlanStateFromSource(&arrow_node_to_planstate,
+												source_estate, estate);
+	}
+
+	result = garrow_execute_plan_merge_children(target_plan, child_plans,
+											   true /* allow_missing_children */,
+											   &error);
+	garrow_list_free_ptr(&child_plans);
+	if (error)
+	{
+		elog(LOG, "Failed to merge child plans, cause: %s", error->message);
+		list_free(child_estates);
+		list_free(child_pstates);
+		return;
 	}
 
 	/*
@@ -7170,7 +7445,7 @@ PostBuildVecPlan(PlanState *ps, VecExecuteState *estate)
 	 * by show_vec_merge_info as "Vec Plan Merge:  N children" at EXPLAIN VERBOSE
 	 * time, a regression footprint for the splice path (see explain.c).
 	 */
-	estate->merged_child_count = list_length(child_estates);
+	estate->merged_child_count = nmerge;
 
 	/*
 	 * MergeChildren replaced every one of this plan's bridge sources with
@@ -7183,8 +7458,20 @@ PostBuildVecPlan(PlanState *ps, VecExecuteState *estate)
 	{
 		bool		has_cb = false;
 
-		foreach(lc, child_estates)
-			has_cb |= ((VecExecuteState *) lfirst(lc))->has_callback_source;
+		forboth(lc, child_estates, lc2, child_pstates)
+		{
+			VecExecuteState *child = (VecExecuteState *) lfirst(lc);
+
+			/*
+			 * A child left un-merged keeps this plan's bridge source, which
+			 * is a callback source by construction -- so a partial merge
+			 * cannot regain push_pipeline eligibility.
+			 */
+			if (!ChildMergeable((PlanState *) lfirst(lc2), child))
+				has_cb = true;
+			else
+				has_cb |= child->has_callback_source;
+		}
 		estate->has_callback_source = has_cb;
 	}
 
@@ -7196,14 +7483,19 @@ PostBuildVecPlan(PlanState *ps, VecExecuteState *estate)
 	 * PushGenerator queue, causing OOM (Q2: 20GB in 51s).  The parent
 	 * plan now drives those ScanNodes via the merged plan.
 	 */
-	foreach(lc, child_estates)
+	forboth(lc, child_estates, lc2, child_pstates)
 	{
 		VecExecuteState *merged_child = (VecExecuteState *) lfirst(lc);
-		if (merged_child && merged_child->push_pipeline)
+
+		/* An un-merged child still executes its own plan -- leave it alone. */
+		if (!ChildMergeable((PlanState *) lfirst(lc2), merged_child))
+			continue;
+		if (merged_child->push_pipeline)
 			merged_child->push_pipeline = false;
 	}
 
 	list_free(child_estates);
+	list_free(child_pstates);
 
 	/*
 	 * list_concat in PG14 memcpys list2's elements into list1's flat

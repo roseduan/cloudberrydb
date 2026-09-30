@@ -2005,6 +2005,36 @@ is_hash_expr_vectorable(Expr *expr, void *context)
 				}
 			}
 			break;
+		case T_RelabelType:
+			{
+				RelabelType *relexpr = (RelabelType *) expr;
+				Oid			argtype = exprType((Node *) relexpr->arg);
+				Oid			restype = relexpr->resulttype;
+
+				/*
+				 * A RelabelType is a binary-coercion cast: the datum itself is
+				 * unchanged.  Hashing through it is only safe when the source
+				 * and result types hash to the same value, otherwise the
+				 * vectorized motion would route a row to a different segment
+				 * than the row engine does.
+				 *
+				 * text and varchar qualify: both use hashtext on the same
+				 * varlena payload and both map to the Arrow string type.
+				 * bpchar deliberately does NOT -- hashbpchar ignores trailing
+				 * blanks while the Arrow string hash does not, so a
+				 * bpchar->text relabel would silently mis-route.
+				 */
+				if (!is_type_vectorable(restype))
+					return false;
+				if (!((restype == TEXTOID || restype == VARCHAROID) &&
+					  (argtype == TEXTOID || argtype == VARCHAROID)))
+				{
+					FALLBACK_LOG("Hash expression relabel %u->%u not hash-compatible",
+								 argtype, restype);
+					return false;
+				}
+			}
+			break;
 		default:
 			FALLBACK_LOG("Hash expression not support %s", nodeToString(expr));
 			return false;

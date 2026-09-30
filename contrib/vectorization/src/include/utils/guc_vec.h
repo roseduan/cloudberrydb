@@ -72,7 +72,11 @@ extern bool enable_sonic_motion_direct_send;
  * of the normal Arrow hash join, when the join type / key / payload types are
  * supported. Off forces all hash joins onto the normal Arrow hash join path. */
 extern bool enable_sonic_hashjoin;
+/* drop ProjectNodes that emit their input unchanged; off keeps the no-op
+ * projections so the two shapes can be compared. */
+extern bool enable_vec_identity_project_elision;
 /* backpressure for vectorized execution (push_pipeline / yield / SinkNode) */
+extern bool enable_vec_yield_guard;
 extern bool enable_vec_pipeline;
 extern int backpressure_memory_mb;
 /*

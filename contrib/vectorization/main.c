@@ -282,7 +282,7 @@ _PG_init(void)
                             "0 means disabled (no spill).",
                             NULL,
                             &hashjoin_spill_memory_mb,
-                            512,
+                            4096,
                             0, INT_MAX,
                             PGC_USERSET,
                             GUC_GPDB_NEED_SYNC,
@@ -293,11 +293,32 @@ _PG_init(void)
                             "0 means disabled (no spill).",
                             NULL,
                             &winagg_spill_memory_mb,
-                            512,
+                            4096,
                             0, INT_MAX,
                             PGC_USERSET,
                             GUC_GPDB_NEED_SYNC,
                             NULL, NULL, NULL);
+
+    DefineCustomBoolVariable("vector.enable_vec_identity_project_elision",
+                             "Skip Arrow ProjectNodes whose projection emits the "
+                             "input fields unchanged, in order, under their own names.",
+                             NULL,
+                             &enable_vec_identity_project_elision,
+                             true,
+                             PGC_USERSET,
+                             GUC_GPDB_NEED_SYNC,
+                             NULL, NULL, NULL);
+
+    DefineCustomBoolVariable("vector.enable_vec_yield_guard",
+                             "Keep yield mode away from plan shapes that deadlock it: "
+                             "a ShareInputScan anywhere in the query, or a slice that "
+                             "reads from two or more Motions.",
+                             NULL,
+                             &enable_vec_yield_guard,
+                             true,
+                             PGC_USERSET,
+                             GUC_GPDB_NEED_SYNC,
+                             NULL, NULL, NULL);
 
     DefineCustomBoolVariable("vector.enable_vec_pipeline",
                              "Enable pipeline execution mode for vectorized scan nodes.",
@@ -309,12 +330,14 @@ _PG_init(void)
                              NULL, NULL, NULL);
 
     DefineCustomIntVariable("vector.backpressure_memory_mb",
-                            "Memory budget (MB) per SinkNode queue for backpressure. "
-                            "Batch count watermarks are auto-calculated from this and schema width.",
+                            "Bytes of queued output a SinkNode may hold before it pauses "
+                            "its sources, in MB.  Production resumes once the queue falls "
+                            "below a quarter of it.  0 disables backpressure, leaving "
+                            "vector.enable_vec_pipeline to select yield mode alone.",
                             NULL,
                             &backpressure_memory_mb,
                             256,
-                            1, 8192,
+                            0, 8192,
                             PGC_USERSET,
                             GUC_GPDB_NEED_SYNC,
                             NULL, NULL, NULL);
@@ -325,7 +348,7 @@ _PG_init(void)
                             "partitions are spilled to disk. 0 means disabled.",
                             NULL,
                             &sonicagg_spill_memory_mb,
-                            512,
+                            4096,
                             0, INT_MAX,
                             PGC_USERSET,
                             GUC_GPDB_NEED_SYNC,

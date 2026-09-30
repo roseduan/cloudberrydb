@@ -43,16 +43,29 @@ int control_global_memory_resource = 5;
 bool enable_vector_memory_resource = false;
 int pool_threads = 0;
 bool print_fallback_log = false;
-int hashjoin_spill_memory_mb = 512;
-int winagg_spill_memory_mb = 512;
-int sonicagg_spill_memory_mb = 512;
+int hashjoin_spill_memory_mb = 4096;
+int winagg_spill_memory_mb = 4096;
+int sonicagg_spill_memory_mb = 4096;
 int topk_bound_threshold = 2000;
 bool enable_topk_runtime_filter = true;
 int limit_hashagg_max_total = 1000;
 bool enable_sonic_motion_direct_send = false;
 bool enable_sonic_hashjoin = false;
 
+/*
+ * Drop ProjectNodes that emit their input unchanged.  Kept as a switch so a
+ * plan can be captured with and without the elision for comparison.
+ */
+bool enable_vec_identity_project_elision = true;
+
 /* backpressure for vectorized execution (push_pipeline / yield / SinkNode) */
+/*
+ * Keep yield mode away from plan shapes that deadlocked it (a ShareInputScan
+ * anywhere, or a slice reading two or more Motions).  Kept as a switch so the
+ * cost of the guard can be measured against the shapes it protects.
+ */
+bool enable_vec_yield_guard = true;
+
 bool enable_vec_pipeline = false;
 int backpressure_memory_mb = 256;
 

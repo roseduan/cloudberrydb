@@ -45,7 +45,6 @@ typedef struct VecExecuteState
 	int time_collector_plan_id;
 	bool started; /* plan execution has been started */
 	TupleTableSlot *slot; /* slot for plan result*/
-	bool pipeline;
 	bool push_pipeline;	/* ScanNode push mode with backpressure */
 	/*
 	 * True when this estate's (possibly merged) Arrow plan contains a
@@ -56,9 +55,29 @@ typedef struct VecExecuteState
 	 * so ExecuteVecPlan demotes push_pipeline to yield mode when set.
 	 */
 	bool has_callback_source;
+
+	/*
+	 * VEC-YIELD-GUARD: this plan shape cannot be driven by yield mode's single
+	 * thread -- it contains a ShareInputScan, or the local slice reads from two
+	 * or more Motions.  Either way one blocking wait starves another.
+	 *
+	 * Yield mode drives the whole Acero plan from one thread that blocks inside
+	 * generator_().result().  A ShareInputScan reader parks in
+	 * shareinput_reader_waitready_vec until its producer signals ready, and the
+	 * producer's own plan can be parked in a Motion receive at the same time.
+	 * Neither thread can advance the other, so the two wait forever.  Observed
+	 * on TPC-DS q75/q14/q58 at SF1000 on PG16.9: 64 QEs in IPC/ShareInputScan
+	 * against 98 in IPC/Interconnect, whole query at 3% CPU until the statement
+	 * timeout fired.
+	 *
+	 * The existing same-slice guards (HasSameSliceShareScanInSubtree,
+	 * QueryHasSameSliceShareScan) do not cover this: they deliberately ignore
+	 * cross_slice share scans, and a cross-slice one is exactly what puts a
+	 * Motion between producer and consumer to close the cycle.
+	 */
+	bool yield_unsafe;
 	int yield_remaining;	/* batches available from yielded SourceNode */
 	GArrowRecordBatchReader *reader;
-	List *resqueue;
 	GArrowExecuteContext *exectx;
 	/*
 	 * Number of child arrow plans spliced into this node by
