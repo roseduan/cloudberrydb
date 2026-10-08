@@ -90,6 +90,7 @@ static bool gopher_connect_hdfs_disable_getstate = false;
 static bool gphdfs_configure_router = false;
 static bool gopher_hash_connect_hdfs_router = false;
 static bool gopher_enable_update_oss_context = false;
+static bool gopher_enable_file_meta_cache = false;
 static int gopher_master_port = 6789;
 
 /*
@@ -209,6 +210,19 @@ _PG_init(void)
 							&gopher_enable_update_oss_context,
 							false,
 							PGC_SIGHUP,
+							0,
+							NULL, NULL, NULL);
+
+	DefineCustomBoolVariable("pg_gophermeta.gopher_enable_file_meta_cache",
+							"Enable the GopherMeta file meta blob cache "
+							"(ORC tails / Parquet footers).",
+							"Off by default: when off, openFile does not look the blob "
+							"up at all, so a workload that never reads it pays nothing. "
+							"The datalake_fdw side has its own GUC "
+							"(datalake.enable_file_meta_cache) and both must be on.",
+							&gopher_enable_file_meta_cache,
+							false,
+							PGC_POSTMASTER,
 							0,
 							NULL, NULL, NULL);
 
@@ -433,6 +447,7 @@ gophermeta_main(Datum main_arg)
 	ossConfig.segmentIdx = GpIdentity.segindex;
 	ossConfig.hdfs_list_connect_master_port = gopher_master_port;
 	ossConfig.plasmaSizeMb = gopher_plasma_size_mb;
+	ossConfig.enableFileMetaCache = gopher_enable_file_meta_cache;
 	GetGopherServerOssLogLevel(&ossConfig);
 
 	rc = gopherStartServer(workDir, &ossConfig, NULL, GOPHER_SERVER_WARNING, false);
