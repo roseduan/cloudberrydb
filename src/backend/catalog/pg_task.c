@@ -35,6 +35,7 @@
 #include "catalog/indexing.h"
 #include "catalog/pg_task.h"
 #include "postmaster/bgworker.h"
+#include "storage/lmgr.h"
 #include "task/pg_cron.h"
 #include "utils/builtins.h"
 #include "utils/rel.h"
@@ -112,6 +113,21 @@ TaskUpdate(Oid jobid, const char *schedule,
 	memset(values, 0, sizeof(values));
 	memset(nulls, false, sizeof(nulls));
 	memset(doreplace, false, sizeof(doreplace));
+
+	/*
+	 * Lock the job before reading the row we are about to rewrite.  The table
+	 * lock below is self-compatible and table_close drops it anyway, so it
+	 * leaves the snapshot-to-commit window open, and the catalog settles
+	 * competing writers to one object by failing the loser at commit rather
+	 * than making it wait: two concurrent ALTER TASKs on one job raise
+	 * "could not serialize access due to concurrent catalog update".  This is
+	 * the definition half of the job's lock: this rewrites the pg_task row and
+	 * nothing in the run history, so it does not exclude the cron launcher.
+	 * Shared, not database-scoped: pg_task is a shared catalog and one task is
+	 * addressable from every database.
+	 */
+	LockSharedObject(TaskRelationId, jobid, TASK_LOCK_DEFINITION,
+					 AccessExclusiveLock);
 
 	pg_task = table_open(TaskRelationId, RowExclusiveLock);
 
@@ -203,6 +219,38 @@ GetTaskJobId(const char *jobname, const char *username)
 	table_close(pg_task, AccessShareLock);
 
 	return jobid;
+}
+
+/*
+ * TaskExists
+ *		Does a job with this id still have a row in pg_task?
+ *
+ * Callers that hold the job's lock get a stable answer; without it the job can
+ * be dropped the moment this returns.
+ */
+bool
+TaskExists(Oid jobid)
+{
+	Relation	pg_task;
+	HeapTuple	tup;
+	SysScanDesc scanDescriptor = NULL;
+	ScanKeyData scanKey[1];
+	bool		found;
+
+	pg_task = table_open(TaskRelationId, AccessShareLock);
+
+	ScanKeyInit(&scanKey[0], Anum_pg_task_jobid, BTEqualStrategyNumber,
+				F_OIDEQ, ObjectIdGetDatum(jobid));
+
+	scanDescriptor = systable_beginscan(pg_task, TaskJobIdIndexId,
+										true, NULL, 1, scanKey);
+	tup = systable_getnext(scanDescriptor);
+	found = HeapTupleIsValid(tup);
+
+	systable_endscan(scanDescriptor);
+	table_close(pg_task, AccessShareLock);
+
+	return found;
 }
 
 /*

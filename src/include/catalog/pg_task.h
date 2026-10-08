@@ -53,6 +53,25 @@ CATALOG(pg_task,9637,TaskRelationId) BKI_SHARED_RELATION
 
 typedef FormData_pg_task *Form_pg_task;
 
+/*
+ * Object-lock subids under (TaskRelationId, jobid).
+ *
+ * Writers of a job serialize on an object lock keyed by its jobid, because a
+ * table lock is released by table_close while the window that matters runs from
+ * a statement's snapshot to its commit.  Splitting that key by what the writer
+ * actually rewrites keeps the exclusion no wider than the conflict: a writer of
+ * the job's definition and a writer of its run history touch disjoint rows in
+ * disjoint catalogs, so they have no reason to wait for each other.  Sharing one
+ * key made them wait, and since the cron launcher is a single process serving
+ * every job, an open transaction holding a job's definition lock stalled the
+ * whole scheduler.
+ *
+ * A writer that rewrites both -- DROP TASK, or dropping a database's jobs --
+ * takes both, definition first.  Nothing takes them in the other order.
+ */
+#define TASK_LOCK_DEFINITION	0
+#define TASK_LOCK_RUN_HISTORY	1
+
 DECLARE_UNIQUE_INDEX(pg_task_jobname_username_index, 8915, TaskJobNameUserNameIndexId, on pg_task using btree(jobname text_ops, username text_ops));
 DECLARE_UNIQUE_INDEX_PKEY(pg_task_jobid_index, 8916, TaskJobIdIndexId, on pg_task using btree(jobid oid_ops));
 
@@ -64,6 +83,8 @@ extern Oid TaskCreate(const char *schedule, const char *command,
 extern void TaskUpdate(Oid jobid, const char *schedule,
 					   const char *command, const char *database,
 					   const char *username, bool *active);
+
+extern bool TaskExists(Oid jobid);
 
 extern Oid GetTaskJobId(const char *jobname, const char *username);
 

@@ -39,6 +39,7 @@
 #include "executor/spi.h"
 #include "postmaster/postmaster.h"
 #include "postmaster/bgworker.h"
+#include "storage/lmgr.h"
 #include "storage/lock.h"
 #include "task/job_metadata.h"
 #include "task/pg_cron.h"
@@ -62,6 +63,7 @@ static void InvalidateJobCacheCallback(Datum argument, Oid relationId);
 static void InvalidateJobCache(void);
 static CronJob *TupleToCronJob(TupleDesc tupleDescriptor, HeapTuple heapTuple);
 static Oid GetRoleOidIfCanLogin(char *username);
+static Oid LookupTaskIdByName(const char *jobname, const char *username);
 static entry *ParseSchedule(char *scheduleText);
 static bool TryParseInterval(char *scheduleText, uint32 *secondsInterval);
 
@@ -291,6 +293,51 @@ UnscheduleCronJob(const char *jobname, const char *username, Oid taskid, bool mi
 	Form_pg_task	task = NULL;
 	Oid				jobid = InvalidOid;
 
+	/*
+	 * Lock the job before reading the row we are about to delete.  The table
+	 * lock is self-compatible and released by table_close, so it does not
+	 * cover the snapshot-to-commit window in which a concurrent writer of the
+	 * same job -- another DROP, an ALTER -- wins commit-time arbitration and
+	 * leaves this one with "could not serialize access due to concurrent
+	 * catalog update".  This is the definition half only; the caller deletes
+	 * the run history through RemoveTaskRunHistoryByJobId, which takes the
+	 * history half afterwards.
+	 *
+	 * A caller that named the job instead of passing its id has to resolve the
+	 * name first, and the name-to-id mapping can change while we wait for the
+	 * lock -- the same hazard RangeVarGetRelidExtended handles for relations.
+	 * Follow it: look the name up, lock what it pointed at, look it up again,
+	 * and if it now points elsewhere drop the lock and start over.  The scan
+	 * below still selects by whatever the caller passed, so a name lookup that
+	 * finds nothing keeps reaching the existing not-found handling.
+	 */
+	if (OidIsValid(taskid))
+		LockSharedObject(TaskRelationId, taskid, TASK_LOCK_DEFINITION,
+						 AccessExclusiveLock);
+	else if (jobname != NULL)
+	{
+		Oid		locked = InvalidOid;
+
+		for (;;)
+		{
+			Oid		named = LookupTaskIdByName(jobname, username);
+
+			if (named == locked)
+				break;			/* stable, or both invalid: nothing to lock */
+
+			if (OidIsValid(locked))
+				UnlockSharedObject(TaskRelationId, locked,
+								   TASK_LOCK_DEFINITION, AccessExclusiveLock);
+
+			locked = named;
+			if (!OidIsValid(locked))
+				break;
+
+			LockSharedObject(TaskRelationId, locked, TASK_LOCK_DEFINITION,
+							 AccessExclusiveLock);
+		}
+	}
+
 	pg_task = table_open(TaskRelationId, RowExclusiveLock);
 
 	if (OidIsValid(taskid)) {
@@ -349,6 +396,41 @@ UnscheduleCronJob(const char *jobname, const char *username, Oid taskid, bool mi
 		elog(ERROR, "could not find pid of pg_cron launcher process");
 	if (kill(cron_pid, SIGHUP) < 0)
 		elog(DEBUG3, "kill(%ld,%d) failed: %m", (long) cron_pid, SIGHUP);
+
+	return jobid;
+}
+
+/*
+ * LookupTaskIdByName returns the job id a (jobname, username) pair currently
+ * names, or InvalidOid when the pair names nothing.  Callers use it to find
+ * what to lock; the mapping can change the moment the lock is released, so a
+ * caller that needs it to hold must re-check after locking.
+ */
+static Oid
+LookupTaskIdByName(const char *jobname, const char *username)
+{
+	Relation	pg_task;
+	SysScanDesc scanDescriptor;
+	ScanKeyData scanKey[2];
+	HeapTuple	heapTuple;
+	Oid			jobid = InvalidOid;
+
+	pg_task = table_open(TaskRelationId, AccessShareLock);
+
+	ScanKeyInit(&scanKey[0], Anum_pg_task_jobname,
+				BTEqualStrategyNumber, F_TEXTEQ, CStringGetTextDatum(jobname));
+	ScanKeyInit(&scanKey[1], Anum_pg_task_username,
+				BTEqualStrategyNumber, F_TEXTEQ, CStringGetTextDatum(username));
+
+	scanDescriptor = systable_beginscan(pg_task, TaskJobNameUserNameIndexId,
+										true, NULL, 2, scanKey);
+
+	heapTuple = systable_getnext(scanDescriptor);
+	if (HeapTupleIsValid(heapTuple))
+		jobid = ((Form_pg_task) GETSTRUCT(heapTuple))->jobid;
+
+	systable_endscan(scanDescriptor);
+	table_close(pg_task, AccessShareLock);
 
 	return jobid;
 }
