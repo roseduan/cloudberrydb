@@ -25,11 +25,23 @@ SERVER basic_catalog_server
 OPTIONS (
     catalog_name 'hive_location',
     default_namespace 'default',
-    enable_metadata_cache 'true',
-    metadata_cache_ttl '300',
-    auto_refresh_metadata 'true',
+    metadata_cache '5',
     warehouse_location_prefix 's3a://warehouse/hive_location/'
 );
+
+-- The deprecated cache options (enable_metadata_cache / metadata_cache_ttl /
+-- auto_refresh_metadata) are unrecognized now: the DDL must still succeed --
+-- they are ignored like any other unknown option -- so dumps from older
+-- clusters restore cleanly.  metadata_cache alone controls caching.
+CREATE FOREIGN CATALOG deprecated_options_catalog
+SERVER basic_catalog_server
+OPTIONS (
+    catalog_name 'hive_location',
+    enable_metadata_cache 'true',
+    metadata_cache_ttl '300',
+    auto_refresh_metadata 'true'
+);
+DROP CATALOG deprecated_options_catalog;
 
 -- Create test volume server
 CREATE SERVER basic_volume_server

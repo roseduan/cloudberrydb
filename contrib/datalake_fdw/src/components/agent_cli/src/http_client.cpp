@@ -129,6 +129,8 @@ HttpResponse HttpClient::execute(const HttpRequest& request) {
 
 HttpResponse HttpClient::perform_request_with_retry(const HttpRequest& request) {
     HttpResponse response;
+    /* Retries shorten this copy's timeout as the shared budget below drains. */
+    HttpRequest attempt_request = request;
     int attempts = 0;
     int max_attempts = 1;
     if (config_.max_retries > 1) {
@@ -154,8 +156,28 @@ HttpResponse HttpClient::perform_request_with_retry(const HttpRequest& request) 
      */
     constexpr int CONN_REFUSED_EXTRA_ATTEMPTS = 60;
 
+    /*
+     * Retries share ONE time budget instead of each getting the full request
+     * timeout.  They used to multiply it: an agent that stopped answering --
+     * observed for real when its gophermeta worker ran out of file
+     * descriptors -- burned request_timeout (300s) per attempt, so the SQL
+     * statement sat there for a quarter of an hour before the first error
+     * word reached the user.  From the client's seat that is indistinguishable
+     * from a hang.
+     *
+     * Retrying is still worth it for failures that come back fast (a refused
+     * connection while the agent is still binding its port returns in
+     * milliseconds, which is what the escalation below is for).  What is not
+     * worth it is trying again after the peer has already had the entire
+     * budget and produced nothing.
+     */
+    const auto deadline = std::chrono::steady_clock::now() +
+                          std::chrono::seconds(request.timeout > 0
+                                               ? request.timeout
+                                               : config_.request_timeout_seconds);
+
     while (attempts < max_attempts) {
-        response = perform_single_request(request);
+        response = perform_single_request(attempt_request);
 
         if (response.curl_code == CURLE_OK && response.status_code < 500) {
             break;
@@ -167,13 +189,45 @@ HttpResponse HttpClient::perform_request_with_retry(const HttpRequest& request) 
         }
 
         attempts++;
-        if (attempts < max_attempts) {
+
+        /*
+         * A non-idempotent request may only be replayed when the connection
+         * could not be established at all -- the one failure mode where the
+         * server provably never saw it.  Any other failure (5xx, timeout,
+         * connection lost mid-request) leaves the outcome to the caller.
+         */
+        if (!request.idempotent && response.curl_code != CURLE_COULDNT_CONNECT) {
+            LOG_ERROR("Request failed and is not idempotent, not retrying. Status: " +
+                      std::to_string(response.status_code) + ", curl_code: " +
+                      std::to_string(response.curl_code));
+            break;
+        }
+
+        auto remaining = std::chrono::duration_cast<std::chrono::milliseconds>(
+                deadline - std::chrono::steady_clock::now());
+
+        if (attempts < max_attempts &&
+            remaining.count() > (long) config_.retry_delay_ms) {
             LOG_WARN("Request failed (attempt " + std::to_string(attempts) + "/" +
                      std::to_string(max_attempts) + "), retrying in " +
                      std::to_string(config_.retry_delay_ms) + "ms. Status: " +
                      std::to_string(response.status_code) + ", curl_code: " +
                      std::to_string(response.curl_code));
             std::this_thread::sleep_for(std::chrono::milliseconds(config_.retry_delay_ms));
+
+            /*
+             * Never let the next attempt outlive the shared budget; curl
+             * treats a timeout of 0 as "no limit", so clamp to at least 1s.
+             */
+            auto left = std::chrono::duration_cast<std::chrono::seconds>(
+                    deadline - std::chrono::steady_clock::now());
+            attempt_request.timeout = left.count() > 1 ? (int) left.count() : 1;
+        } else if (attempts < max_attempts) {
+            LOG_ERROR("Request failed after " + std::to_string(attempts) +
+                      " attempt(s); time budget exhausted, not retrying. Status: " +
+                      std::to_string(response.status_code) + ", curl_code: " +
+                      std::to_string(response.curl_code));
+            break;
         } else {
             LOG_ERROR("Request failed after " + std::to_string(attempts) + " attempts");
         }

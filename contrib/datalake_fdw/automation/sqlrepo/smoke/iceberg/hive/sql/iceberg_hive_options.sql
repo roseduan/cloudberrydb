@@ -33,9 +33,7 @@ SERVER hiveopt_catalog_server
 OPTIONS (
     catalog_name 'hive_test_cat',
     default_namespace 'default',
-    enable_metadata_cache 'true',
-    metadata_cache_ttl '600',
-    auto_refresh_metadata 'true',
+    metadata_cache '10',
     warehouse_location_prefix 's3://warehouse/hive_test/'
 );
 

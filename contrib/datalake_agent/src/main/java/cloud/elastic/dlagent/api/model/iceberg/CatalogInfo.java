@@ -45,7 +45,7 @@ import java.util.Map;
 @NoArgsConstructor
 public class CatalogInfo {
 
-    /** Catalog type: hive / hadoop / s3 / polaris. */
+    /** Catalog type: hive / hadoop / s3 / polaris / rest. */
     private String serverType;
 
     /** When set, CatalogInfo is loaded from {@code gphive.conf[serverName]}; otherwise from SQL OPTIONS. */
@@ -75,6 +75,30 @@ public class CatalogInfo {
     private String clientId;
     private String clientSecret;
     private String scope;
+
+    /** Generic REST catalog fields. */
+    private String url;
+    private String signingName;
+
+    /**
+     * Which proprietary maintenance API this deployment serves, if any.  The
+     * Iceberg REST spec defines none, so it is declared per server rather
+     * than implied by the catalog type; absent means none.
+     */
+    private String maintenanceApi;
+    private String endpoint;
+    private String prefix;
+    private String region;
+    private String accessKeyId;
+    private String secretAccessKey;
+    private Boolean pathStyleAccess;
+
+    /**
+     * Ask the catalog to vend data-plane credentials? Null means unset, which
+     * the catalog treats as enabled -- vending is the default for a REST
+     * catalog that scopes keys per table.
+     */
+    private Boolean vendedCredentials;
 
     /** Any extra catalog-related keys (pass-through for hadoop rpc protection etc.). */
     private Map<String, String> extraProperties = new HashMap<>();

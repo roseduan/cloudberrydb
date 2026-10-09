@@ -2,6 +2,7 @@ package cloud.elastic.dlagent.service.rest;
 
 import lombok.extern.slf4j.Slf4j;
 import org.apache.iceberg.exceptions.AlreadyExistsException;
+import org.apache.iceberg.exceptions.CommitStateUnknownException;
 import org.apache.iceberg.exceptions.NoSuchNamespaceException;
 import org.apache.iceberg.exceptions.NoSuchTableException;
 import org.springframework.http.HttpStatus;
@@ -57,6 +58,29 @@ public class IcebergExceptionHandler {
         errorResponse.put("error", error);
 
         return ResponseEntity.status(HttpStatus.NOT_FOUND).body(errorResponse);
+    }
+
+    /**
+     * A commit whose reply was lost and whose outcome could not be learned
+     * from the table either.  424 (not 5xx) on purpose: the caller's transport
+     * retries a 5xx, and retrying a commit that may already be applied is
+     * exactly what must not happen here.
+     */
+    @ExceptionHandler(CommitStateUnknownException.class)
+    public ResponseEntity<Map<String, Object>> handleCommitStateUnknown(CommitStateUnknownException e) {
+        log.error("Commit state unknown: {}", e.getMessage(), e);
+
+        Map<String, Object> errorResponse = new HashMap<>();
+        Map<String, Object> error = new HashMap<>();
+        error.put("message", "Iceberg commit result unknown: the catalog stopped answering while a commit "
+                + "was in flight and the table state could not be re-read; the data may or may not have "
+                + "been committed — verify the table before re-running the statement");
+        error.put("type", "CommitStateUnknownException");
+        error.put("code", 424);
+        error.put("stack", getStackTrace(e));
+        errorResponse.put("error", error);
+
+        return ResponseEntity.status(HttpStatus.FAILED_DEPENDENCY).body(errorResponse);
     }
 
     /**

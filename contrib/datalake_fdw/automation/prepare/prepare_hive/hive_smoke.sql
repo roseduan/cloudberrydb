@@ -84,7 +84,12 @@ INSERT INTO test_scientific VALUES (1, 1.23E-10, 1.23E100);
 -- Edge case: date time boundary
 DROP TABLE IF EXISTS test_datetime;
 CREATE TABLE test_datetime (id int, old_date date, ts timestamp) STORED AS ORC;
-INSERT INTO test_datetime VALUES (1, '1970-01-01', '1970-01-01 00:00:00');
+-- Typed literals, not bare strings: this file is loaded by spark-sql (see the
+-- hive category Makefile), whose default ANSI store-assignment policy refuses
+-- to assign a string to a date/timestamp column.  spark-sql stops at the first
+-- error, so the bare-string form silently skipped every table declared below
+-- and surfaced much later as "(0 rows)" diffs.  Hive accepts both forms.
+INSERT INTO test_datetime VALUES (1, DATE '1970-01-01', TIMESTAMP '1970-01-01 00:00:00');
 
 -- ============================================================
 -- Compressed TEXTFILE tables for hive_text_compressed test.

@@ -25,9 +25,8 @@ typedef struct IcebergForeignCatalogOptions
 {
 	char *catalog_name;			 /* DATALAKE_ICEBERG_CATALOG_NAME */
 	char *default_namespace;		/* DATALAKE_ICEBERG_CATALOG_DEFAULT_NAMESPACE */
-	bool enable_metadata_cache;	 /* DATALAKE_ICEBERG_CATALOG_ENABLE_METADATA_CACHE */
-	int metadata_cache_ttl;		 /* DATALAKE_ICEBERG_CATALOG_METADATA_CACHE_TTL */
-	bool auto_refresh_metadata;	 /* DATALAKE_ICEBERG_CATALOG_AUTO_REFRESH_METADATA */
+	int metadata_cache;			 /* DATALAKE_ICEBERG_CATALOG_METADATA_CACHE;
+								  * minutes, 0 = no caching */
 	char *warehouse_location_prefix; /* DATALAKE_ICEBERG_CATALOG_WAREHOUSE_LOCATION_PREFIX */
 } IcebergForeignCatalogOptions;
 

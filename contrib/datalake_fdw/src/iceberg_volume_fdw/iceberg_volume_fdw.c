@@ -907,10 +907,234 @@ parseVolumeOption(dataLakeOptions *opt, IcebergVolumeOptions* vopt)
 }
 
 /*
- * parseCatalogPropertiesOption
- *     Parse Polaris catalog_properties JSON to fill dataLakeOptions.
+ * Helpers for the versioned REST storage envelope.
+ */
+
+/* Return the string value of obj[key], or NULL when absent/empty/non-string. */
+static const char *
+envelopeGetString(json_t *obj, const char *key)
+{
+	json_t	   *val;
+
+	if (obj == NULL)
+		return NULL;
+	val = json_object_get(obj, key);
+	if (val == NULL || !json_is_string(val))
+		return NULL;
+	if (json_string_value(val)[0] == '\0')
+		return NULL;			/* empty string counts as absent */
+	return json_string_value(val);
+}
+
+/* Extract "bucket" from an s3://bucket/... style URI; NULL when unusable. */
+static char *
+bucketFromUri(const char *uri)
+{
+	const char *scheme_end;
+	const char *after_scheme;
+	const char *slash;
+
+	if (uri == NULL)
+		return NULL;
+	scheme_end = strstr(uri, "://");
+	if (scheme_end == NULL)
+		return NULL;
+	after_scheme = scheme_end + 3;
+	slash = strchr(after_scheme, '/');
+	if (slash == after_scheme)
+		return NULL;
+	if (slash)
+		return pnstrdup(after_scheme, slash - after_scheme);
+	return pstrdup(after_scheme);
+}
+
+/*
+ * parseRestEnvelope
+ *		Fill gopher options from a versioned REST storage envelope.
  *
- * Expected JSON format:
+ * Credential sources are mutually exclusive and tried in order:
+ * storage-credentials (longest prefix match on table-location, which must
+ * also cover metadata-location -- one gopher connection carries exactly one
+ * credential group), then the response config, then local-data-access.
+ * "Absent" moves to the next source; "present but broken" is a hard error:
+ * quietly falling back to static keys would paper over a catalog fault with
+ * credentials that may be broader than the vended ones.
+ */
+static void
+parseRestEnvelope(dataLakeOptions *opt, json_t *root)
+{
+	const char *table_location;
+	const char *metadata_location;
+	json_t	   *config;
+	json_t	   *local;
+	json_t	   *credentials;
+	json_t	   *cred_group = NULL;
+	const char *cred_source = NULL;
+	const char *value;
+
+	opt->gopher->gopherType = pstrdup("s3");
+
+	table_location = envelopeGetString(root, "table-location");
+	if (table_location == NULL)
+		elog(ERROR, "catalog-properties envelope has no table-location");
+	metadata_location = envelopeGetString(root, "metadata-location");
+	if (metadata_location == NULL)
+		elog(ERROR, "catalog-properties envelope has no metadata-location");
+
+	opt->gopher->bucket = bucketFromUri(table_location);
+	if (opt->gopher->bucket == NULL)
+		elog(ERROR, "cannot determine bucket from table-location \"%s\"",
+			 table_location);
+
+	config = json_object_get(root, "config");
+	if (config != NULL && !json_is_object(config))
+		config = NULL;
+	local = json_object_get(root, "local-data-access");
+	if (local != NULL && !json_is_object(local))
+		local = NULL;
+
+	/* endpoint: response config wins, local-data-access is the fallback. */
+	value = envelopeGetString(config, "s3.endpoint");
+	if (value == NULL)
+		value = envelopeGetString(local, "s3.endpoint");
+	if (value == NULL)
+		elog(ERROR, "no object storage endpoint: neither the catalog response "
+			 "nor local configuration provides s3.endpoint");
+
+	/*
+	 * Store the host WITHOUT its scheme and carry TLS in useHttps, matching
+	 * parseVolumeOption(): createHandle() composes scheme://host itself, so a
+	 * scheme left in here yields "http://http://host".  The failure is not
+	 * where you would look for it -- the connection is attempted, no request
+	 * is ever sent, and liboss2 reports the retry exhaustion as
+	 * FileDoesNotExistException on the object being read.
+	 */
+	if (pg_strncasecmp(value, "https://", 8) == 0)
+	{
+		opt->gopher->useHttps = true;
+		value += 8;
+	}
+	else if (pg_strncasecmp(value, "http://", 7) == 0)
+	{
+		opt->gopher->useHttps = false;
+		value += 7;
+	}
+	opt->gopher->host = pstrdup(value);
+
+	/* region: s3.region wins over client.region, same two-tier fallback. */
+	value = envelopeGetString(config, "s3.region");
+	if (value == NULL)
+		value = envelopeGetString(config, "client.region");
+	if (value == NULL)
+		value = envelopeGetString(local, "s3.region");
+	if (value == NULL)
+		value = envelopeGetString(local, "client.region");
+	if (value != NULL)
+		opt->gopher->region = pstrdup(value);
+
+	/* path style: strict boolean; anything else counts as absent. */
+	value = envelopeGetString(config, "s3.path-style-access");
+	if (value == NULL)
+		value = envelopeGetString(local, "s3.path-style-access");
+	if (value != NULL && pg_strcasecmp(value, "false") == 0)
+		opt->gopher->useVirtualHost = true;
+	else
+		opt->gopher->useVirtualHost = false;	/* default: path style */
+
+	/*
+	 * Credential group selection.
+	 */
+	credentials = json_object_get(root, "storage-credentials");
+	if (credentials != NULL && json_is_array(credentials) &&
+		json_array_size(credentials) > 0)
+	{
+		size_t		i;
+		size_t		best_len = 0;
+		json_t	   *best = NULL;
+		const char *best_prefix = NULL;
+
+		for (i = 0; i < json_array_size(credentials); i++)
+		{
+			json_t	   *cand = json_array_get(credentials, i);
+			const char *prefix = envelopeGetString(cand, "prefix");
+
+			if (prefix != NULL &&
+				strncmp(table_location, prefix, strlen(prefix)) == 0 &&
+				strlen(prefix) > best_len)
+			{
+				best_len = strlen(prefix);
+				best = cand;
+				best_prefix = prefix;
+			}
+		}
+		if (best == NULL)
+			elog(ERROR, "no storage-credentials prefix matches table-location \"%s\"",
+				 table_location);
+		if (strncmp(metadata_location, best_prefix, best_len) != 0)
+			elog(ERROR, "selected storage-credentials prefix \"%s\" does not cover "
+				 "metadata-location \"%s\"", best_prefix, metadata_location);
+		cred_group = json_object_get(best, "config");
+		if (cred_group == NULL || !json_is_object(cred_group))
+			elog(ERROR, "matched storage-credentials entry has no config object");
+		cred_source = "storage-credentials";
+	}
+	else if (config != NULL &&
+			 (json_object_get(config, "s3.access-key-id") != NULL ||
+			  json_object_get(config, "s3.secret-access-key") != NULL ||
+			  json_object_get(config, "s3.session-token") != NULL))
+	{
+		cred_group = config;
+		cred_source = "vended config";
+	}
+	else if (local != NULL &&
+			 (json_object_get(local, "s3.access-key-id") != NULL ||
+			  json_object_get(local, "s3.secret-access-key") != NULL))
+	{
+		cred_group = local;
+		cred_source = "local-data-access";
+	}
+
+	if (cred_group == NULL)
+		elog(ERROR, "no usable data-plane credentials: the catalog vended none "
+			 "and no static access_key_id/secret_access_key is configured");
+
+	/*
+	 * The chosen group must be complete in itself.  Half a pair is a
+	 * configuration or catalog fault; do NOT fall through to another
+	 * source (see function comment).
+	 */
+	{
+		const char *ak = envelopeGetString(cred_group, "s3.access-key-id");
+		const char *sk = envelopeGetString(cred_group, "s3.secret-access-key");
+		const char *token = envelopeGetString(cred_group, "s3.session-token");
+
+		if (ak == NULL || sk == NULL)
+			elog(ERROR, "incomplete data-plane credentials from %s: missing %s",
+				 cred_source,
+				 ak == NULL ? "s3.access-key-id" : "s3.secret-access-key");
+
+		opt->gopher->accessKey = pstrdup(ak);
+		opt->gopher->secretKey = pstrdup(sk);
+		if (token != NULL)
+			opt->gopher->sessionToken = pstrdup(token);
+	}
+
+	/* Which sources fed the connection; values deliberately not logged. */
+	elog(DEBUG1, "rest envelope: bucket from table-location, credentials from %s%s, "
+		 "endpoint from %s", cred_source,
+		 opt->gopher->sessionToken != NULL ? " (with session token)" : "",
+		 envelopeGetString(config, "s3.endpoint") != NULL ?
+		 "response config" : "local-data-access");
+}
+
+/*
+ * parseCatalogPropertiesOption
+ *     Parse catalog_properties JSON to fill dataLakeOptions.
+ *
+ * Two payload generations share this carrier.  A versioned REST storage
+ * envelope (has "envelope-version") takes the parseRestEnvelope path; the
+ * legacy Polaris payload keeps its original parsing below, untouched:
+ *
  * {
  *   "config": {
  *     "s3.endpoint": "http://host:port",
@@ -989,6 +1213,7 @@ parseCatalogPropertiesOption(dataLakeOptions *opt, const char *catalog_propertie
 	json_t		   *config;
 	json_t		   *credentials;
 	json_t		   *val;
+	bool			is_rest_envelope;
 	bool			fill_gaps_only = (vopt != NULL);
 
 	/*
@@ -1024,8 +1249,17 @@ parseCatalogPropertiesOption(dataLakeOptions *opt, const char *catalog_propertie
 		elog(ERROR, "parseCatalogPropertiesOption: failed to parse JSON: %s", error.text);
 	}
 
+	is_rest_envelope = (json_object_get(root, "envelope-version") != NULL);
+
 	PG_TRY();
 	{
+		if (is_rest_envelope)
+		{
+			parseRestEnvelope(opt, root);
+		}
+		else
+		{
+
 		/*
 		 * S3 is the only object-storage backend reachable via Iceberg REST
 		 * catalog responses today. Pass "s3" — iceberg-gopher accepts it as
@@ -1190,6 +1424,7 @@ parseCatalogPropertiesOption(dataLakeOptions *opt, const char *catalog_propertie
 			if (opt->gopher->bucket == NULL)
 				elog(ERROR, "parseCatalogPropertiesOption: could not determine bucket from catalog properties");
 		}
+		}						/* end legacy payload branch */
 	}
 	PG_CATCH();
 	{
@@ -1380,9 +1615,15 @@ icebergVolumeBeginForeignModify(ModifyTableState *mtstate,
 
 	/*
 	 * Take catalog_properties from fdw_private when the planner put them
-	 * there.  Only overwrite on a hit: on the modify path the iceberg AM has
-	 * already placed the dispatched properties on this state, and fdw_private
-	 * carries none, so assigning unconditionally would erase them.
+	 * there.  Even with a volume, we need table-location for the correct data
+	 * path.
+	 *
+	 * Only overwrite on a hit: on the modify path the native iceberg AM calls
+	 * this with a NULL fdw_private and has already placed the dispatched
+	 * properties on this state itself (iceberg_modify_init) -- the #410
+	 * catalog properties for a volume-backed table, the REST storage envelope
+	 * for a volume-less one.  An unconditional assignment would erase either,
+	 * leaving a REST write with no credentials at all.
 	 */
 	{
 		const char *props = extractCatalogProperties(fdw_private);

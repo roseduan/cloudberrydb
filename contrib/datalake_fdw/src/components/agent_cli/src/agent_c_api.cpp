@@ -22,6 +22,7 @@ extern "C" {
 #include "lib/stringinfo.h"
 #include "utils/memutils.h"
 #include "agent_cjson_builder.hpp"
+#include "src/am_iceberg/include/pg_iceberg_guc.h"
 }
 
 /* Save PG log-level macros and undef so they don't break C++ enum definitions */
@@ -192,8 +193,10 @@ static agent_cli_status_t func_name(agent_cli_handle_t handle, \
                                     const char* table_name, \
                                     const char* request_json, \
                                     agent_cli_response_t* response) { \
+    last_error_message.clear(); \
     if (auto status = validate_params(handle, "handle")) return status; \
     if (auto status = validate_params(response, "response")) return status; \
+    if (auto status = validate_params(table_name, "table_name")) return status; \
     try { \
         auto* context = static_cast<AgentContext*>(handle); \
         if (!context->client) { \
@@ -219,6 +222,7 @@ static agent_cli_status_t func_name(agent_cli_handle_t handle, \
 static agent_cli_status_t func_name(agent_cli_handle_t handle, \
                                     const char* request_json, \
                                     agent_cli_response_t* response) { \
+    last_error_message.clear(); \
     if (auto status = validate_params(handle, "handle")) return status; \
     if (auto status = validate_params(request_json, "request_json")) return status; \
     if (auto status = validate_params(response, "response")) return status; \
@@ -254,6 +258,7 @@ AGENT_CLI_OP_WITH_TABLE(agent_cli_commit_file_groups_internal, commit_file_group
 AGENT_CLI_OP_WITH_TABLE(agent_cli_commit_append_internal, commit_append)
 AGENT_CLI_OP_WITH_TABLE(agent_cli_commit_update_internal, commit_update)
 AGENT_CLI_OP_WITH_TABLE(agent_cli_commit_rewrite_internal, commit_rewrite)
+AGENT_CLI_OP_WITH_TABLE(agent_cli_submit_maintenance_internal, submit_maintenance)
 AGENT_CLI_OP_WITH_TABLE(agent_cli_append_table_internal, append_table)
 AGENT_CLI_OP_WITH_TABLE(agent_cli_update_table_internal, update_table)
 AGENT_CLI_OP_WITH_TABLE(agent_cli_truncate_table_internal, truncate_table)
@@ -296,7 +301,7 @@ agent_cli_wrapper_init_config(const char* server_url, const char* prefix,
     config->server_url = pstrdup(server_url);
     config->namespace_name = pstrdup(namespace_name);
     config->auth_token = NULL;
-    config->request_timeout_seconds = 300;
+    config->request_timeout_seconds = pg_iceberg_agent_request_timeout;
     config->connect_timeout_seconds = 60;
     config->max_retries = 3;
     config->retry_delay_ms = 1000;
@@ -356,6 +361,23 @@ agent_cli_wrapper_set_interrupt_callback(AgentCliHandle* handle, agent_cli_inter
 }
 
 /*
+ * The message a failed operation should report.
+ *
+ * agent_cli_get_error_string() only names the status code ("Network error"),
+ * which is useless when the failure happened before any request went out --
+ * a null argument, or an exception thrown while composing the URL.  Those
+ * paths do record what actually went wrong in last_error_message, and the
+ * caller has no other way to see it, so prefer it whenever it is set.
+ */
+static const char *
+agent_cli_failure_detail(agent_cli_status_t status)
+{
+    if (!last_error_message.empty())
+        return last_error_message.c_str();
+    return agent_cli_get_error_string(status);
+}
+
+/*
  * Macro for the repetitive wrapper pattern:
  *   validate handle → call internal → store status/error
  */
@@ -367,7 +389,7 @@ void wrapper_name(AgentCliHandle* handle, const char* table_name, const char* js
     handle->lastStatus = internal_name(handle->handle, table_name, json, handle->currentResponse); \
     handle->responseValid = true; \
     if (handle->lastStatus != AGENT_CLI_SUCCESS) \
-        handle->lastErrorMessage = pstrdup(agent_cli_get_error_string(handle->lastStatus)); \
+        handle->lastErrorMessage = pstrdup(agent_cli_failure_detail(handle->lastStatus)); \
 }
 
 #define WRAPPER_NO_TABLE_OP(wrapper_name, internal_name) \
@@ -378,7 +400,7 @@ void wrapper_name(AgentCliHandle* handle, const char* json) \
     handle->lastStatus = internal_name(handle->handle, json, handle->currentResponse); \
     handle->responseValid = true; \
     if (handle->lastStatus != AGENT_CLI_SUCCESS) \
-        handle->lastErrorMessage = pstrdup(agent_cli_get_error_string(handle->lastStatus)); \
+        handle->lastErrorMessage = pstrdup(agent_cli_failure_detail(handle->lastStatus)); \
 }
 
 /* Table operations */
@@ -402,6 +424,7 @@ WRAPPER_TABLE_OP(agent_cli_wrapper_commit_file_groups, agent_cli_commit_file_gro
 WRAPPER_TABLE_OP(agent_cli_wrapper_commit_append, agent_cli_commit_append_internal)
 WRAPPER_TABLE_OP(agent_cli_wrapper_commit_update, agent_cli_commit_update_internal)
 WRAPPER_TABLE_OP(agent_cli_wrapper_commit_rewrite, agent_cli_commit_rewrite_internal)
+WRAPPER_TABLE_OP(agent_cli_wrapper_submit_maintenance, agent_cli_submit_maintenance_internal)
 WRAPPER_TABLE_OP(agent_cli_wrapper_append_table, agent_cli_append_table_internal)
 WRAPPER_TABLE_OP(agent_cli_wrapper_update_table, agent_cli_update_table_internal)
 WRAPPER_TABLE_OP(agent_cli_wrapper_truncate_table, agent_cli_truncate_table_internal)

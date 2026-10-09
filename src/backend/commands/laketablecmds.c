@@ -204,6 +204,57 @@ validate_table_type(const char *table_type)
 }
 
 /*
+ * lake_table_catalog_is_rest
+ *		Does this foreign catalog sit on a server of type 'rest'?
+ *
+ * The backend cannot link against the contrib predicate
+ * (checkIsRestCatalog), so the server's type option is read directly
+ * through the syscache + foreign.h.
+ *
+ * Both spellings must be honoured, and "server_type" is the one that
+ * matters most: it is what iceberg_catalog_fdw.md documents and what the
+ * automation suite writes, while the contrib side accepts either.  Reading
+ * only "type" here splits the two halves of the same decision -- the
+ * backend would demand a FOREIGN VOLUME (or quietly staple
+ * iceberg_default_volume onto the table) for a catalog that the runtime
+ * then drives down the REST path, which is the static-bucket override this
+ * catalog type exists to prevent.
+ */
+static bool
+lake_table_catalog_is_rest(Oid catalog_oid)
+{
+	HeapTuple	tuple;
+	Form_pg_foreign_catalog form;
+	Oid			server_oid;
+	ForeignServer *server;
+	ListCell   *lc;
+	const char *server_type = NULL;
+
+	tuple = SearchSysCache1(FOREIGNCATALOGOID, ObjectIdGetDatum(catalog_oid));
+	if (!HeapTupleIsValid(tuple))
+		ereport(ERROR,
+				(errcode(ERRCODE_UNDEFINED_OBJECT),
+				 errmsg("foreign catalog with OID %u does not exist", catalog_oid)));
+	form = (Form_pg_foreign_catalog) GETSTRUCT(tuple);
+	server_oid = form->fcserver;
+	ReleaseSysCache(tuple);
+
+	server = GetForeignServer(server_oid);
+	foreach(lc, server->options)
+	{
+		DefElem    *def = (DefElem *) lfirst(lc);
+
+		/* "type" wins when both are present, matching the contrib order. */
+		if (pg_strcasecmp(def->defname, "type") == 0)
+			return pg_strcasecmp(defGetString(def), "rest") == 0;
+		if (pg_strcasecmp(def->defname, "server_type") == 0)
+			server_type = defGetString(def);
+	}
+
+	return server_type != NULL && pg_strcasecmp(server_type, "rest") == 0;
+}
+
+/*
  * Validate foreign catalog exists
  */
 static Oid
@@ -294,6 +345,28 @@ ResolveLakeTableOptions(CreateLakeTableStmt *stmt,
 					 errhint("Set iceberg_default_catalog to an existing foreign catalog.")));
 	}
 
+	*catalog_oid_out = validate_foreign_catalog(catalog_name);
+
+	/*
+	 * Tables on a generic REST catalog use no volume at all: the bucket is
+	 * assigned per table by the catalog (only discoverable via loadTable)
+	 * and the object-storage credentials are vended per request, so there
+	 * is nothing a statically configured volume could contribute.  Letting
+	 * iceberg_default_volume sneak in here would silently override the
+	 * per-table bucket with a static one -- the exact failure this type
+	 * exists to fix -- so the volume machinery is bypassed, not defaulted.
+	 */
+	if (lake_table_catalog_is_rest(*catalog_oid_out))
+	{
+		if (stmt->foreign_volume != NULL && stmt->foreign_volume[0] != '\0')
+			ereport(ERROR,
+					(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+					 errmsg("tables on a REST catalog do not use a foreign volume"),
+					 errhint("Omit FOREIGN VOLUME; the catalog supplies the storage location.")));
+		*volume_oid_out = InvalidOid;
+		return;
+	}
+
 	/*
 	 * Determine volume name: use explicit value if provided, otherwise
 	 * fall back to the iceberg_default_volume GUC.
@@ -310,8 +383,6 @@ ResolveLakeTableOptions(CreateLakeTableStmt *stmt,
 							iceberg_default_volume),
 					 errhint("Set iceberg_default_volume to an existing foreign volume.")));
 	}
-
-	*catalog_oid_out = validate_foreign_catalog(catalog_name);
 
 	/*
 	 * A volume is required for every lake table, including tables on a

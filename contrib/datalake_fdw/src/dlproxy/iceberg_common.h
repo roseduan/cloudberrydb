@@ -9,5 +9,6 @@
 
 /* Function to parse fragment response from iceberg service */
 List *parseIcebergFragmentResponse(char *buffer, size_t buffer_size);
+char *extractCatalogPropertiesEnvelope(const char *buffer, size_t buffer_size);
 
 #endif /* ICEBERG_COMMON_H */

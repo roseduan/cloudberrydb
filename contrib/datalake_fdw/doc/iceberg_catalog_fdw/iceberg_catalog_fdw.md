@@ -58,12 +58,38 @@ OPTIONS (
 );
 ```
 
+A catalog that speaks the Iceberg REST protocol is configured on the same
+server object. Its tables carry no FOREIGN VOLUME — the catalog assigns each
+table a location and vends credentials for it — so the storage endpoint that
+a volume would otherwise supply is given here instead:
+
+```sql
+CREATE SERVER xsky_catalog_server
+FOREIGN DATA WRAPPER iceberg_catalog_fdw
+OPTIONS (
+    type 'rest',
+    url 'http://s3tables.example.com:8060/iceberg',
+    endpoint 'http://s3tables.example.com:8060',
+    region 'us-east-1',
+    signing_name 's3tables',
+    path_style_access 'true'
+);
+```
+
 #### Catalog Server Options
 
 | Option | Description | Example |
 |--------|-------------|---------|
-| `server_type` | Type of catalog server | `'hive'` |
-| `hive_metastore_uri` | Hive Metastore connection URI | `'thrift://hive-metastore:9083'` |
+| `type` | Type of catalog server: `hive`, `rest`, `polaris` or `hadoop`. Also spelled `server_type`; when both are present `type` wins. | `'rest'` |
+| `hive_metastore_uri` | Hive Metastore connection URI (`hive` only) | `'thrift://hive-metastore:9083'` |
+| `url` | Base URL of the REST catalog, including its `/iceberg`-style path prefix (`rest`, `polaris`) | `'http://host:8060/iceberg'` |
+| `endpoint` | Object-storage endpoint the segments read and write through. Required for a REST catalog, which has no FOREIGN VOLUME to take it from. | `'http://host:8060'` |
+| `region` | Region for the storage endpoint, and the SigV4 signing region | `'us-east-1'` |
+| `signing_name` | SigV4 service name. Platform-specific and **not** `s3` for an S3-Tables-style catalog — signing with the wrong name is accepted by the catalog but yields credentials that do not work. | `'s3tables'` |
+| `path_style_access` | Address buckets as a path rather than a subdomain | `'true'` |
+| `vended_credentials` | Ask the catalog to vend per-table storage credentials. Unset means on. Set `off` to use the static keys on the user mapping instead — weaker isolation, so it is an explicit opt-out and never an automatic fallback. Settable here or on the user mapping; the user mapping wins. | `'off'` |
+| `polaris_server_realm` | Value of the `Polaris-Realm` header, for a multi-tenant Polaris deployment. Lets `type 'rest'` reach a Polaris catalog. | `'TENANT-A'` |
+| `maintenance_api` | Declares that the platform offers a maintenance API to which VACUUM can be delegated. The only accepted value is `s3tables`; without it, VACUUM on a REST table is refused rather than silently doing nothing. | `'s3tables'` |
 
 ### 2. User Mapping for Catalog
 
@@ -76,6 +102,44 @@ OPTIONS (
 );
 ```
 
+For a REST catalog, the user mapping carries the credentials used to
+**authenticate to the catalog itself**. These are not the credentials the
+segments use to read data — those are vended per table by the catalog, unless
+`vended_credentials 'off'` says otherwise, in which case `access_key_id` /
+`secret_access_key` serve both purposes:
+
+```sql
+-- SigV4 (XSKY S3 Tables, AWS S3 Tables)
+CREATE USER MAPPING FOR current_user
+SERVER xsky_catalog_server
+OPTIONS (
+    auth_method 'sigv4',
+    access_key_id 'AK...',
+    secret_access_key 'SK...'
+);
+
+-- OAuth2 (Polaris)
+CREATE USER MAPPING FOR current_user
+SERVER polaris_catalog_server
+OPTIONS (
+    auth_method 'oauth2',
+    client_id 'root',
+    client_secret 's3cr3t',
+    scope 'PRINCIPAL_ROLE:ALL'
+);
+```
+
+#### Catalog User Mapping Options
+
+| Option | Description | Example |
+|--------|-------------|---------|
+| `auth_method` | How to authenticate to the catalog: `sigv4`, `oauth2`, `none`, or `simple`/Kerberos for Hive | `'sigv4'` |
+| `access_key_id`, `secret_access_key` | Static keys. Required by `sigv4`; also the data-plane credentials when `vended_credentials` is `off`. | `'AK...'` |
+| `client_id`, `client_secret`, `scope` | OAuth2 client credentials (`oauth2`) | `'root'` |
+| `vended_credentials` | Same switch as on the server, and takes precedence over it. `off` without static keys is rejected at resolution time rather than falling back silently. | `'off'` |
+| `username` | Hive user name (`simple`) | `'hive_user'` |
+| `krb_service_principal`, `krb_client_principal`, `krb_client_keytab` | Kerberos identity for a Hive metastore | - |
+
 ### 3. Foreign Catalog Creation
 
 ```sql
@@ -84,9 +148,7 @@ SERVER example_catalog_server
 OPTIONS (
     catalog_name 'hive_location',
     default_namespace 'default',
-    enable_metadata_cache 'true',
-    metadata_cache_ttl '300',
-    auto_refresh_metadata 'true',
+    metadata_cache '5',
     warehouse_location_prefix 's3a://warehouse/hive_location/'
 );
 ```
@@ -97,10 +159,15 @@ OPTIONS (
 |--------|-------------|---------|---------|
 | `catalog_name` | Catalog identifier | - | `'hive_location'` |
 | `default_namespace` | Default namespace | `'default'` | `'default'` |
-| `enable_metadata_cache` | Enable metadata caching | `'false'` | `'true'` |
-| `metadata_cache_ttl` | Cache TTL in seconds | `'300'` | `'300'` |
-| `auto_refresh_metadata` | Auto refresh metadata | `'false'` | `'true'` |
+| `metadata_cache` | How long (in **minutes**) a resolved metadata head may be reused before the external catalog is asked again; the catalog-level default for the per-table option of the same name. `0` or unset = no caching, every read fetches the latest head. It only delays visibility of commits made by *other* engines; this cluster's own writes are always visible immediately. It does not cache file contents (manifests, metadata.json) — those are cached by gopher, independently of this option. | `'0'` | `'5'` |
+| `prefix` | Path segment the REST catalog expects between `/v1/` and `namespaces` (`rest`). Defaults to `catalog_name`. | `catalog_name` | `'ice-bucket'` |
 | `warehouse_location_prefix` | Base warehouse path | - | `'s3a://warehouse/hive_location/'` |
+
+> **Deprecated:** `enable_metadata_cache`, `metadata_cache_ttl` (seconds) and
+> `auto_refresh_metadata` are no longer recognized (they had never taken effect
+> in any released version). A DDL that still carries them succeeds with the
+> options ignored. Migrate `metadata_cache_ttl '300'` to `metadata_cache '5'`
+> (minutes).
 
 ### 4. Volume Server Setup
 
@@ -199,6 +266,23 @@ SELECT iceberg_toolkit.catalog_fdw(
     's3_warehouse'
 );
 ```
+
+On a REST catalog the last two arguments — the volume server and volume name
+— are passed empty, because such a table has no FOREIGN VOLUME: the catalog
+assigns its location and vends the credentials for it.
+
+```sql
+SELECT iceberg_toolkit.catalog_fdw(
+    'create_table', 'default', 'my_rest_table', '{ ... }',
+    'xsky_catalog_server', 'xsky_production',
+    '', ''
+);
+```
+
+The same asymmetry shows up in DDL: `CREATE ICEBERG TABLE ... VOLUME v` is
+rejected on a REST catalog, and `iceberg_default_volume` is bypassed rather
+than applied, so a statically configured bucket can never override the
+per-table one the catalog handed out.
 
 ### Schema Definition Format
 

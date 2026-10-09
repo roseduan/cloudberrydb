@@ -95,27 +95,42 @@ Response AgentClient::commit_file_groups(const std::string& table_name,
                                           const std::string& request_json,
                                           const RequestConfig* request_config) {
     std::string url = build_url(build_table_endpoint(table_name, "commitFileGroups"));
-    return execute_request("POST", url, request_json, request_config);
+    return execute_request("POST", url, request_json, request_config, /* idempotent */ false);
 }
 
 Response AgentClient::commit_append(const std::string& table_name,
                                     const std::string& request_json,
                                     const RequestConfig* request_config) {
     std::string url = build_url(build_table_endpoint(table_name, "commitAppend"));
-    return execute_request("POST", url, request_json, request_config);
+    return execute_request("POST", url, request_json, request_config, /* idempotent */ false);
 }
 
 Response AgentClient::commit_update(const std::string& table_name,
                                     const std::string& request_json,
                                     const RequestConfig* request_config) {
     std::string url = build_url(build_table_endpoint(table_name, "commitUpdate"));
-    return execute_request("POST", url, request_json, request_config);
+    return execute_request("POST", url, request_json, request_config, /* idempotent */ false);
 }
 
 Response AgentClient::commit_rewrite(const std::string& table_name,
                                      const std::string& request_json,
                                      const RequestConfig* request_config) {
     std::string url = build_url(build_table_endpoint(table_name, "commitRewrite"));
+    return execute_request("POST", url, request_json, request_config, /* idempotent */ false);
+}
+
+/*
+ * Ask the storage platform to compact this table.  Submission only: the job
+ * runs on the platform's own schedule and this returns as soon as it is
+ * queued, so the reply says whether the request was accepted, not whether
+ * any files were merged.  Idempotent in the sense that matters here -- the
+ * platform allows one job per (table, type) and answers 409 for a second,
+ * so a replayed request cannot start a duplicate compaction.
+ */
+Response AgentClient::submit_maintenance(const std::string& table_name,
+                                         const std::string& request_json,
+                                         const RequestConfig* request_config) {
+    std::string url = build_url(build_table_endpoint(table_name, "submitMaintenance"));
     return execute_request("POST", url, request_json, request_config);
 }
 
@@ -180,7 +195,8 @@ Response AgentClient::get_snapshots(const std::string& table_name,
 Response AgentClient::execute_request(const std::string& method,
                                      const std::string& url,
                                      const std::string& json_data,
-                                     const RequestConfig* request_config) {
+                                     const RequestConfig* request_config,
+                                     bool idempotent) {
     total_requests_++;
 
     LOG_INFO("HTTP " + method + " " + url);
@@ -189,6 +205,7 @@ Response AgentClient::execute_request(const std::string& method,
     request.method = method;
     request.url = url;
     request.body = json_data;
+    request.idempotent = idempotent;
     request.timeout = config_.request_timeout_seconds;
     request.connect_timeout = config_.connect_timeout_seconds;
     if (request_config) {

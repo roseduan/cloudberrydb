@@ -160,7 +160,8 @@ public class BaseConfigurationFactory implements ConfigurationFactory {
             additionalProperties.forEach(configuration::set);
         }
 
-        if (!catalogType.toLowerCase().equals("polaris")) {
+        if (!catalogType.equalsIgnoreCase("polaris")
+                && !catalogType.equalsIgnoreCase("rest")) {
             // add all site files as URL resources to the configuration, no resources will be added from the classpath
             LOG.debug("Using config file {} for server {} configuration", configFies, serverName);
             String[] files = configFies.split("0");

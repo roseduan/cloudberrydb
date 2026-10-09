@@ -99,8 +99,14 @@ if [ -n "${CATEGORY_FILTER}" ]; then
         exit 1
     fi
 else
-    # Run all categories
-    FEATURE_CATEGORIES=$(find "${SQLREPO_DIR}/feature" -mindepth 1 -maxdepth 1 -type d -exec basename {} \;)
+    # Run all categories, in a fixed order.  find returns directories in
+    # whatever order the filesystem hands them over, so without the sort the
+    # suites run in a different sequence on different machines -- and these
+    # suites are not independent: one that leaves the storage endpoint wedged
+    # (feature/negative points at an unreachable host on purpose) slows down
+    # whichever suite happens to follow it.  A failure that depends on the
+    # order is one nobody can reproduce.
+    FEATURE_CATEGORIES=$(find "${SQLREPO_DIR}/feature" -mindepth 1 -maxdepth 1 -type d -exec basename {} \; | sort)
 
     if [ -z "${FEATURE_CATEGORIES}" ]; then
         log_error "No feature test categories found in ${SQLREPO_DIR}/feature"

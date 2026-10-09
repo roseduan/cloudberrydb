@@ -29,7 +29,7 @@ public interface IcebergCatalogFactory {
     /**
      * Create an Iceberg catalog based on catalog type and configuration
      *
-     * @param catalogType Type of catalog (hive, hadoop, s3, polaris)
+     * @param catalogType Type of catalog (hive, hadoop, s3, polaris, rest)
      * @param catalogConfig Catalog configuration properties
      * @param volumeConfig Volume configuration properties
      * @return Initialized IcebergCatalog

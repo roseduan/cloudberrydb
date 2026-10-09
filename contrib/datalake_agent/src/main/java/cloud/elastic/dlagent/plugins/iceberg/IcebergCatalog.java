@@ -76,6 +76,39 @@ public interface IcebergCatalog {
                     Map<String, String> properties) throws Exception;
 
     /**
+     * Loads the table for its metadata alone: the returned {@link Table} answers
+     * every metadata accessor (schema, specs, snapshots, current metadata
+     * location) but carries no storage access -- reading data through it, or
+     * committing to it, is a caller bug and fails loudly.
+     *
+     * <p>Exists for the endpoints that only relay metadata (head resolution,
+     * exists-check, DDL responses): a credential-vending catalog can answer
+     * them from a single catalog request, without building the FileIO whose
+     * construction is what forces extra requests.  Catalogs where loadTable is
+     * already single-stage simply keep it as this default.
+     */
+    default Table loadTableMetadataOnly(TableIdentifier tableId, String tableLocation,
+                                        Map<String, String> properties) throws Exception {
+        return loadTable(tableId, tableLocation, properties);
+    }
+
+    /**
+     * Creates the table and returns it for its metadata alone, with the same
+     * contract as {@link #loadTableMetadataOnly}.  For the DDL create endpoint,
+     * whose response is built entirely from the create response's metadata;
+     * write paths that commit through the created table keep using
+     * {@link #createTable}.
+     */
+    default Table createTableMetadataOnly(
+            TableIdentifier identifier,
+            Schema schema,
+            PartitionSpec spec,
+            String location,
+            Map<String, String> properties) throws Exception {
+        return createTable(identifier, schema, spec, location, properties);
+    }
+
+    /**
      * Drops the table from this catalog.
      * If purge is true, delete all data and metadata files in the table.
      * Return true if the table was dropped, false if the table did not exist
@@ -98,5 +131,21 @@ public interface IcebergCatalog {
      */
     boolean createNamespace(String catalogName, String namespaceName,
                            Map<String, String> properties) throws Exception;
+
+    /**
+     * Releases whatever this catalog holds open -- most importantly its FileIO,
+     * which for GopherFileIO is a live connection to the gophermeta worker.
+     *
+     * <p>Called once per request by {@code IcebergCatalogReleaseFilter}, since a
+     * catalog's usable lifetime is exactly the request that asked for it: the
+     * returned {@link Table} draws on the catalog's FileIO, so nothing may be
+     * closed earlier, and nothing needs it afterwards.
+     *
+     * <p>The default is a no-op for implementations that hold no such resource.
+     * It deliberately declares no checked exception: a release that runs in a
+     * {@code finally} must not add a failure path of its own.
+     */
+    default void close() {
+    }
 }
 

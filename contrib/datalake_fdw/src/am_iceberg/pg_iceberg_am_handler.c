@@ -254,6 +254,26 @@ iceberg_modify_init(Relation rel, IcebergDMLState *state, CmdType operation,
 	fdwState->iceTable.catalog_properties =
 		pg_iceberg_take_modify_catalog_properties(RelationGetRelid(rel));
 
+	/*
+	 * REST catalog write: there is no FOREIGN VOLUME behind this table, so the
+	 * object-store connection is built from the storage envelope the catalog
+	 * vended, routed here with the plan (see pg_iceberg_am.h).  Preset it
+	 * before BeginForeignModify, which keeps a non-NULL value; a volume-backed
+	 * table finds no entry and follows its original path untouched.
+	 *
+	 * This never fights the carrier above for the field: that one is gated on
+	 * the table's volume naming a conf section, and a REST table has no volume
+	 * at all, so at most one of the two is ever non-NULL.  The envelope wins
+	 * if that ever stops holding -- it is the only place a REST write can get
+	 * object-store credentials from, so losing it fails the statement outright.
+	 */
+	{
+		char	   *envelope = pg_iceberg_peek_modify_envelope(RelationGetRelid(rel));
+
+		if (envelope != NULL)
+			fdwState->iceTable.catalog_properties = envelope;
+	}
+
 	resultRelInfo->ri_FdwState = (void *) fdwState;
 
 	modifyDesc->resultRelInfo = resultRelInfo;

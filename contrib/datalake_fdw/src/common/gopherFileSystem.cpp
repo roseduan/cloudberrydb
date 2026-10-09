@@ -35,6 +35,86 @@ extern "C" {
 #define GOPHER_BLOCK_SIZE (1024 * 1024 * gopher_local_blocksize_mb)
 
 /*
+ * Gopher hands back every object-store failure as one opaque string, so an
+ * expired credential reaches the user as a bare "InvalidAccessKeyId" with no
+ * indication of what to do about it.  Recognise the credential-class codes
+ * and return the advice that actually applies; NULL for everything else,
+ * which keeps the original message untouched.
+ *
+ * The two groups need different advice, and getting them confused is
+ * expensive.  A rejected (as opposed to expired) credential is most often
+ * OUR configuration: a catalog that vends per-requester credentials hands
+ * out unusable ones when the catalog request itself was not signed, and the
+ * whole failure then surfaces one layer down, on the data plane.
+ */
+/*
+ * The part of a gopher error that is safe to repeat.
+ *
+ * On a failed object write gopher hands back liboss2's whole diagnostic --
+ * summary line, then "Detailed Info", then the request that failed, headers
+ * and all.  Those headers carry `Authorization: AWS4-HMAC-SHA256 Credential=`
+ * and `x-amz-security-token`, so echoing the string verbatim writes live
+ * credentials into the server log and the client's terminal.  Keep the first
+ * line, which is the part that says what happened, and drop the rest.
+ */
+static char *
+gopherErrorSummary(const char *gopherError)
+{
+	const char *end;
+	size_t		len;
+
+	if (gopherError == NULL)
+		return pstrdup("");
+
+	end = strchr(gopherError, '\n');
+	len = (end != NULL) ? (size_t) (end - gopherError) : strlen(gopherError);
+
+	/* A single line can still be long; the tail of one is never the point. */
+	if (len > 300)
+		len = 300;
+
+	return pnstrdup(gopherError, len);
+}
+
+static const char *
+gopherCredentialHint(const char *gopherError)
+{
+	static const char *const expired[] = {
+		"ExpiredToken",
+		"TokenRefreshRequired",
+		"InvalidAccessKeyId",
+		"InvalidToken",
+	};
+	static const char *const rejected[] = {
+		"SignatureDoesNotMatch",
+		"AccessDenied",
+	};
+	size_t		i;
+
+	if (gopherError == NULL || gopherError[0] == '\0')
+		return NULL;
+
+	for (i = 0; i < lengthof(expired); i++)
+		if (strcasestr(gopherError, expired[i]) != NULL)
+			return "The object-store credentials are no longer valid. Credentials "
+				   "vended by an Iceberg REST catalog are short-lived and are not "
+				   "renewed mid-statement, so rerunning the statement obtains a "
+				   "fresh set. If it fails again, the statement runs longer than "
+				   "the catalog's credential lifetime.";
+
+	for (i = 0; i < lengthof(rejected); i++)
+		if (strcasestr(gopherError, rejected[i]) != NULL)
+			return "The object store rejected these credentials. If they were "
+				   "vended by the catalog, check that the catalog request is "
+				   "signed (auth_method, signing_name and region on the catalog "
+				   "server): a catalog that issues credentials per requester "
+				   "identity answers an unsigned request with credentials that "
+				   "cannot read anything.";
+
+	return NULL;
+}
+
+/*
  * GUC datalake.disable_cache_file (defined in datalake_fdw.c). Default OFF
  * (false) = caching enabled. Gates the gopher cache_strategy so the GUC
  * globally controls block caching for all datalake reads (incl. native
@@ -81,6 +161,7 @@ bool GopherFileSystem::checkCanceled(void)
  */
 int GopherFileSystem::createHandle(void *options)
 {
+	storageOptions *storageOpts = (storageOptions *) options;
 	gopherConfig *conf = buildGopherConfig(options);
 	if (conf == NULL)
 		throw Error("failed to build gopher config");
@@ -95,6 +176,40 @@ int GopherFileSystem::createHandle(void *options)
 
 	if (fs == NULL)
 		throw Error("failed to connect to gopher: %s.", gopherGetLastError());
+
+	/*
+	 * Vended temporary credentials carry a session token, which gopherConfig
+	 * cannot express (the connect wire format is unchanged on purpose).  The
+	 * complete credential group is pushed onto the fresh connection before
+	 * the first object access; ak/sk without their token would be rejected
+	 * by S3 anyway, so a push failure is fatal rather than a warning.  With
+	 * no token this is a no-op and the connection behaves exactly as before.
+	 */
+	if (storageOpts->sessionToken != NULL && storageOpts->sessionToken[0] != '\0')
+	{
+		if (gopherUpdateCredentials(fs, storageOpts->accessKey,
+									storageOpts->secretKey,
+									storageOpts->sessionToken) != 0)
+		{
+			const char *errmsg = gopherGetLastError();
+			const char *hint = gopherCredentialHint(errmsg);
+
+			destroyHandle();
+			fs = NULL;
+
+			/*
+			 * Error carries no separate hint field, so it goes inline; this
+			 * path is reached with a token in hand, which makes "expired"
+			 * much the likeliest explanation.
+			 */
+			if (hint != NULL)
+				throw Error("failed to push session credentials onto gopher connection: %s. %s",
+							errmsg, hint);
+
+			throw Error("failed to push session credentials onto gopher connection: %s.",
+						errmsg);
+		}
+	}
 
 	return 0;
 }
@@ -138,7 +253,31 @@ int GopherFileSystem::openFile(const char *path, int flag)
 	file = gopherOpenFile(fs, gopher_prefix.c_str(), flag, GOPHER_BLOCK_SIZE, NULL);
 	if (file == NULL)
 	{
-		elog(ERROR, "gopher open \"%s\" failed. error message:%s.", path, gopherGetLastError());
+		const char *gopherError = gopherGetLastError();
+		const char *hint = gopherCredentialHint(gopherError);
+
+		/*
+		 * This is where an expired credential lands on the read and write
+		 * paths alike, so it is the one worth explaining rather than just
+		 * echoing.
+		 */
+		/*
+		 * State the real condition rather than echoing gopher's wording.  A
+		 * 403 comes back from it as "FileDoesNotExistException ... does not
+		 * exist", which reads as a missing object and has already sent one
+		 * investigation chasing a file it thought had been deleted.  The raw
+		 * string is kept as detail, where it can still be searched for.
+		 */
+		if (hint != NULL)
+			ereport(ERROR,
+					(errcode(ERRCODE_FDW_ERROR),
+					 errmsg("cannot read \"%s\": object store rejected the credentials",
+							path),
+					 errdetail("%s", gopherErrorSummary(gopherError)),
+					 errhint("%s", hint)));
+
+		elog(ERROR, "gopher open \"%s\" failed. error message:%s.",
+			 path, gopherErrorSummary(gopherError));
 		return -1;
 	}
 	return 0;
@@ -220,6 +359,25 @@ int GopherFileSystem::closeFile() {
 		file = NULL;
 		int			save_errno = errno;
 		const char *save_errstr = strerror(save_errno);
+		const char *gopherError = gopherGetLastError();
+		const char *hint = gopherCredentialHint(gopherError);
+
+		/*
+		 * This is where a write fails: the data is streamed and the object is
+		 * only actually uploaded on close, so an expired credential surfaces
+		 * here rather than at open.  Worth recognising for the same reason as
+		 * the read path, and worth dropping errno for: gopher leaves it from
+		 * whatever ran last, so it prints things like "Is a named type file"
+		 * over what is really a 403 -- misleading in exactly the direction
+		 * that costs debugging time.
+		 */
+		if (hint != NULL)
+			ereport(ERROR,
+					(errcode(ERRCODE_FDW_ERROR),
+					 errmsg("cannot write \"%s\": object store rejected the credentials",
+							filePath.c_str()),
+					 errdetail("%s", gopherErrorSummary(gopherError)),
+					 errhint("%s", hint)));
 
 		/*
 		 * gopherGetLastError() is not updated on gopher's parameter-check
@@ -227,7 +385,8 @@ int GopherFileSystem::closeFile() {
 		 * message is actively misleading.  See Issue #404.
 		 */
 		elog(ERROR, "gopherCloseFile failed path \"%s\" return value %d errno %d (%s) error message:%s.",
-			filePath.c_str(), ret, save_errno, save_errstr, gopherGetLastError());
+			filePath.c_str(), ret, save_errno, save_errstr,
+			gopherErrorSummary(gopherError));
 	}
 	return ret;
 }

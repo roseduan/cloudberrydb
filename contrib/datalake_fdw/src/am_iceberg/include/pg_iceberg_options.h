@@ -89,8 +89,13 @@ typedef struct IcebergTableOptions
 	int  compression_level;	/* Parquet write compression level; -1 = codec default */
 	char *partition_by;		/* Iceberg partition columns from PARTITION BY, comma-separated */
 	int  metadata_cache;	/* External-catalog metadata cache TTL in minutes;
-							 * 0 = no cache (resolve latest head every time). Only
-							 * meaningful for external-catalog tables. */
+							 * 0 = no cache (resolve latest head every time);
+							 * negative = unset, inherit the FOREIGN CATALOG
+							 * option of the same name and unit.  Only
+							 * meaningful for external-catalog tables.  Resolve
+							 * it with resolve_metadata_cache_ttl_min() rather
+							 * than reading this field, so the inheritance
+							 * stays in one place. */
 } IcebergTableOptions;
 
 /*

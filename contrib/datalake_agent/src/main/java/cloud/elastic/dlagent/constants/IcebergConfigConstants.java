@@ -53,6 +53,16 @@ public final class IcebergConfigConstants {
         public static final String CLIENT_ID = "client_id";
         public static final String CLIENT_SECRET = "client_secret";
         public static final String SCOPE = "scope";
+        public static final String URL = "url";
+        public static final String SIGNING_NAME = "signing_name";
+        public static final String ENDPOINT = "endpoint";
+        public static final String MAINTENANCE_API = "maintenance_api";
+        public static final String PREFIX = "prefix";
+        public static final String REGION = "region";
+        public static final String ACCESS_KEY_ID = "access_key_id";
+        public static final String SECRET_ACCESS_KEY = "secret_access_key";
+        public static final String PATH_STYLE_ACCESS = "path_style_access";
+        public static final String VENDED_CREDENTIALS = "vended_credentials";
     }
 
     //builtin catalog rest api option
@@ -67,6 +77,7 @@ public final class IcebergConfigConstants {
     public static final String CATALOG_TYPE_HADOOP = "hadoop";
     public static final String CATALOG_TYPE_BUILDIN = "builtin";
     public static final String CATALOG_TYPE_POLARIS = "polaris";
+    public static final String CATALOG_TYPE_REST = "rest";
 
     // DATA domain: how to read/write Iceberg data + manifest files (storage/FileIO: s3 / hdfs / abfss).
     public static final class ICEBERG_VOLUME_CONFIG {

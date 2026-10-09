@@ -98,6 +98,7 @@ extern bool pg_iceberg_summary_int64(const char *summary_json, const char *key,
 
 /* Error handling */
 extern void check_fdw_execution_error(IcebergCatalogFdwState *fdwState, const char *error_prefix);
+extern char *pg_iceberg_extract_json_string(const char *body, const char *key);
 extern bool is_table_not_found_error(IcebergCatalogFdwState *fdwState);
 
 #endif /* __PG_ICEBERG_CATALOG_UTILS_H__ */

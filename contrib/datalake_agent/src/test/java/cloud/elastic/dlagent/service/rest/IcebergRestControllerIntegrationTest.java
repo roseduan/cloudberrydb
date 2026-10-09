@@ -38,6 +38,13 @@ public class IcebergRestControllerIntegrationTest {
 
     @BeforeEach
     public void setUp() {
+        /*
+         * These post to a real agent. Skip rather than fail where none is up:
+         * the routing and contract they used to pretend to cover now live in
+         * IcebergRestControllerWebTest, which needs nothing running.
+         */
+        AgentAvailability.assumeAgentRunning();
+        AgentAvailability.assumeStorageRunning();
         restTemplate = new RestTemplate();
         objectMapper = new ObjectMapper();
         // Adjust port if your application runs on different port
@@ -48,7 +55,7 @@ public class IcebergRestControllerIntegrationTest {
     @Test
     public void test1_TableExists_TableNotFound() throws Exception {
         // Arrange
-        String url = String.format("%s/%s/namespace/%s/tables/%s/exists", baseUrl, prefix, namespace, newTableName);
+        String url = String.format("%s/%s/tables/%s/exists", baseUrl, prefix, newTableName);
 
         Map<String, Object> request = createRequestConfig();
 
@@ -83,7 +90,7 @@ public class IcebergRestControllerIntegrationTest {
     @Test
     public void test2_CreateTable() throws Exception {
         // Arrange
-        String url = String.format("%s/%s/namespaces/%s/tables/create", baseUrl, prefix, namespace);
+        String url = String.format("%s/%s/tables/create", baseUrl, prefix);
 
         Map<String, Object> request = createRequestConfig();
         request.put("name", newTableName);
@@ -120,7 +127,7 @@ public class IcebergRestControllerIntegrationTest {
     @Test
     public void test3_TableExists_TableFound() throws Exception {
         // Arrange
-        String url = String.format("%s/%s/namespace/%s/tables/%s/exists", baseUrl, prefix, namespace, newTableName);
+        String url = String.format("%s/%s/tables/%s/exists", baseUrl, prefix, newTableName);
 
         Map<String, Object> request = createRequestConfig();
 
@@ -160,7 +167,7 @@ public class IcebergRestControllerIntegrationTest {
     @Test
     public void test4_LoadTable() throws Exception {
         // Arrange
-        String url = String.format("%s/%s/namespaces/%s/tables/%s/load", baseUrl, prefix, namespace, newTableName);
+        String url = String.format("%s/%s/tables/%s/load", baseUrl, prefix, newTableName);
 
         Map<String, Object> request = createRequestConfig();
 
@@ -196,6 +203,9 @@ public class IcebergRestControllerIntegrationTest {
      */
     private Map<String, Object> createRequestConfig() {
         Map<String, Object> request = new HashMap<>();
+
+        // Every table endpoint reads the namespace out of the body, not the URL.
+        request.put("namespace", namespace);
 
         // IcebergConfig (top level)
         Map<String, Object> icebergConfig = new HashMap<>();
@@ -287,7 +297,7 @@ public class IcebergRestControllerIntegrationTest {
     @Test
     public void test5_GetFragment() throws Exception {
         // Arrange
-        String url = String.format("%s/%s/namespace/%s/tables/%s/getFragment", baseUrl, prefix, namespace, newTableName);
+        String url = String.format("%s/%s/tables/%s/getFragment", baseUrl, prefix, newTableName);
 
         Map<String, Object> request = createRequestConfig();
 
@@ -328,7 +338,7 @@ public class IcebergRestControllerIntegrationTest {
     @Test
     public void test6_GetFragmentWithETag() throws Exception {
         // Arrange
-        String url = String.format("%s/%s/namespace/%s/tables/%s/getFragment", baseUrl, prefix, namespace, newTableName);
+        String url = String.format("%s/%s/tables/%s/getFragment", baseUrl, prefix, newTableName);
 
         Map<String, Object> request = createRequestConfig();
 
@@ -361,7 +371,7 @@ public class IcebergRestControllerIntegrationTest {
         
         // Step 1: Create table (following test2_CreateTable pattern)
         System.out.println("Step 1: Creating table for append test...");
-        String createUrl = String.format("%s/%s/namespaces/%s/tables/create", baseUrl, prefix, namespace);
+        String createUrl = String.format("%s/%s/tables/create", baseUrl, prefix);
         
         Map<String, Object> createRequest = createRequestConfig();
         createRequest.put("name", appendTableName);
@@ -383,7 +393,7 @@ public class IcebergRestControllerIntegrationTest {
                 
                 // Step 2: Append data to table
                 System.out.println("Step 2: Appending data to table...");
-                String appendUrl = String.format("%s/%s/namespace/%s/tables/%s/append", baseUrl, prefix, namespace, appendTableName);
+                String appendUrl = String.format("%s/%s/tables/%s/append", baseUrl, prefix, appendTableName);
                 
                 Map<String, Object> appendRequest = createRequestConfig();
                 
@@ -455,7 +465,7 @@ public class IcebergRestControllerIntegrationTest {
                         
                         // Step 3: Load table to verify data (following test4_LoadTable pattern)
                         System.out.println("Step 3: Loading table to verify appended data...");
-                        String loadUrl = String.format("%s/%s/namespaces/%s/tables/%s/load", baseUrl, prefix, namespace, appendTableName);
+                        String loadUrl = String.format("%s/%s/tables/%s/load", baseUrl, prefix, appendTableName);
                         
                         Map<String, Object> loadRequest = createRequestConfig();
                         HttpEntity<Map<String, Object>> loadEntity = new HttpEntity<>(loadRequest, headers);
@@ -511,7 +521,7 @@ public class IcebergRestControllerIntegrationTest {
         
         // Step 1: Create table first (following test7 pattern)
         System.out.println("Step 1: Creating table for empty fragments test...");
-        String createUrl = String.format("%s/%s/namespaces/%s/tables/create", baseUrl, prefix, namespace);
+        String createUrl = String.format("%s/%s/tables/create", baseUrl, prefix);
         
         Map<String, Object> createRequest = createRequestConfig();
         createRequest.put("name", appendTableName);
@@ -528,7 +538,7 @@ public class IcebergRestControllerIntegrationTest {
                 
                 // Step 2: Try to append with empty fragments
                 System.out.println("Step 2: Testing append with empty fragments...");
-                String appendUrl = String.format("%s/%s/namespace/%s/tables/%s/append", baseUrl, prefix, namespace, appendTableName);
+                String appendUrl = String.format("%s/%s/tables/%s/append", baseUrl, prefix, appendTableName);
 
                 Map<String, Object> appendRequest = createRequestConfig();
                 appendRequest.put("fragments", new ArrayList<>()); // Empty fragments list
@@ -570,7 +580,7 @@ public class IcebergRestControllerIntegrationTest {
                 System.out.println("Table already exists, proceeding with append test");
                 
                 // Still test the empty fragments append
-                String appendUrl = String.format("%s/%s/namespace/%s/tables/%s/append", baseUrl, prefix, namespace, appendTableName);
+                String appendUrl = String.format("%s/%s/tables/%s/append", baseUrl, prefix, appendTableName);
                 Map<String, Object> appendRequest = createRequestConfig();
                 appendRequest.put("fragments", new ArrayList<>());
                 HttpEntity<Map<String, Object>> appendEntity = new HttpEntity<>(appendRequest, headers);

@@ -37,6 +37,8 @@ int pg_iceberg_max_file_removals_per_vacuum = 100000;
 int pg_iceberg_max_compactions_per_vacuum = 100;
 
 /* Scan pushdown */
+int pg_iceberg_agent_request_timeout = 300;
+
 bool pg_iceberg_enable_predicate_pushdown = true;
 
 /* Batch column read/convert in the shared Parquet reader (kill-switch) */
@@ -96,6 +98,22 @@ pg_iceberg_init_gucs(void)
 							&pg_iceberg_autovacuum_naptime,
 							10 * 60, 1, INT_MAX / 1000,
 							PGC_SIGHUP, GUC_UNIT_S,
+							NULL, NULL, NULL);
+
+	/*
+	 * Upper bound on how long one statement can sit inside a single agent
+	 * call, retries included -- the whole budget is shared, not granted per
+	 * attempt.  This is the knob that decides how quickly a wedged agent
+	 * turns into an error the user can see, so it is deliberately settable:
+	 * an installation whose commits legitimately take minutes needs it high,
+	 * while an interactive one would rather fail fast.
+	 */
+	DefineCustomIntVariable("datalake.iceberg_agent_request_timeout",
+							"Time budget for one datalake agent request, retries included.",
+							NULL,
+							&pg_iceberg_agent_request_timeout,
+							300, 1, 86400,
+							PGC_USERSET, GUC_UNIT_S,
 							NULL, NULL, NULL);
 
 	/* 2. Logging and snapshot expiration */

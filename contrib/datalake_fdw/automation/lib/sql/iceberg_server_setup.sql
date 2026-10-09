@@ -52,9 +52,7 @@ CREATE FOREIGN CATALOG IF NOT EXISTS iceberg_catalog
     OPTIONS (
         catalog_name 'iceberg_catalog',
         default_namespace 'default',
-        enable_metadata_cache 'true',
-        metadata_cache_ttl '300',
-        auto_refresh_metadata 'true',
+        metadata_cache '5',
         warehouse_location_prefix 's3://warehouse/'
     );
 

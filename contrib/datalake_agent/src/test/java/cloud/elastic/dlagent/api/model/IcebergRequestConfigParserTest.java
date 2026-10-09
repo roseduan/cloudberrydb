@@ -87,6 +87,57 @@ public class IcebergRequestConfigParserTest {
         assertTrue(out.getFileIOProps().isEmpty());
     }
 
+    @Test
+    public void parse_restCatalogFieldsRoundTripThroughFlatMap() {
+        Map<String, Object> request = new HashMap<>();
+        Map<String, Object> iceberg = new HashMap<>();
+        Map<String, Object> catalog = new HashMap<>();
+        catalog.put("server_type", "rest");
+        catalog.put("url", "http://rest.example/catalog");
+        catalog.put("auth_method", "sigv4");
+        catalog.put("signing_name", "execute-api");
+        catalog.put("endpoint", "http://s3.example");
+        catalog.put("prefix", "warehouse");
+        catalog.put("region", "us-east-1");
+        catalog.put("access_key_id", "ak");
+        catalog.put("secret_access_key", "sk");
+        catalog.put("path_style_access", true);
+        iceberg.put("IcebergCatalogConfig", catalog);
+        request.put("IcebergConfig", iceberg);
+
+        Map<String, String> flat = parser.parse(request).toFlatPropertiesMap();
+        assertEquals("rest", flat.get("IcebergCatalogConfig.server_type"));
+        assertEquals("http://rest.example/catalog", flat.get("IcebergCatalogConfig.url"));
+        assertEquals("execute-api", flat.get("IcebergCatalogConfig.signing_name"));
+        assertEquals("true", flat.get("IcebergCatalogConfig.path_style_access"));
+        assertEquals("sk", flat.get("IcebergCatalogConfig.secret_access_key"));
+    }
+
+    @Test
+    public void parse_rejectsUnknownEnvelopeVersion() {
+        Map<String, Object> request = new HashMap<>();
+        Map<String, Object> envelope = new HashMap<>();
+        envelope.put("envelope-version", 2);
+        request.put("catalog-properties", envelope);
+
+        IllegalArgumentException error = org.junit.jupiter.api.Assertions.assertThrows(
+                IllegalArgumentException.class, () -> parser.parse(request));
+        assertTrue(error.getMessage().contains("envelope-version: 2"));
+    }
+
+    @Test
+    public void parse_rejectsEnvelopeWithoutRequiredLocations() {
+        Map<String, Object> request = new HashMap<>();
+        Map<String, Object> envelope = new HashMap<>();
+        envelope.put("envelope-version", 1);
+        envelope.put("table-location", "s3://bucket/table/");
+        request.put("catalog-properties", envelope);
+
+        IllegalArgumentException error = org.junit.jupiter.api.Assertions.assertThrows(
+                IllegalArgumentException.class, () -> parser.parse(request));
+        assertTrue(error.getMessage().contains("metadata-location is required"));
+    }
+
     // ---- catalog source selection -----------------------------------------
 
     @Test
@@ -148,6 +199,58 @@ public class IcebergRequestConfigParserTest {
         IcebergRequestConfig out = parser.parse(request);
 
         assertEquals("thrift://from-sql:9083", out.getCatalog().getHiveMetastoreUri());
+    }
+
+    @Test
+    public void parse_catalogMergesRestOnlyFieldsFromSiteFile() {
+        /*
+         * vended_credentials and maintenance_api were the two REST fields the
+         * merge did not carry.  No conf-file loader produces them today -- see
+         * the note on mergeCatalog -- so this pins the merge's own contract:
+         * whatever the file side supplies has to reach the merged catalog, or
+         * the day the loader learns these keys they would be dropped again
+         * with nothing to point at.
+         */
+        Map<String, Object> request = new HashMap<>();
+        Map<String, Object> ic = new HashMap<>();
+        Map<String, Object> catalog = new HashMap<>();
+        catalog.put("server_name", "restserver");
+        catalog.put("server_type", "rest");
+        ic.put("IcebergCatalogConfig", catalog);
+        request.put("IcebergConfig", ic);
+
+        CatalogInfo siteResult = new CatalogInfo();
+        siteResult.setVendedCredentials(Boolean.FALSE);
+        siteResult.setMaintenanceApi("s3tables");
+        when(siteLoader.loadHiveSite("restserver")).thenReturn(siteResult);
+
+        IcebergRequestConfig out = parser.parse(request);
+
+        assertEquals(Boolean.FALSE, out.getCatalog().getVendedCredentials());
+        assertEquals("s3tables", out.getCatalog().getMaintenanceApi());
+    }
+
+    @Test
+    public void parse_catalogSqlOptionWinsOverSiteFileForRestOnlyFields() {
+        Map<String, Object> request = new HashMap<>();
+        Map<String, Object> ic = new HashMap<>();
+        Map<String, Object> catalog = new HashMap<>();
+        catalog.put("server_name", "restserver");
+        catalog.put("server_type", "rest");
+        catalog.put("vended_credentials", Boolean.TRUE);
+        catalog.put("maintenance_api", "s3tables");
+        ic.put("IcebergCatalogConfig", catalog);
+        request.put("IcebergConfig", ic);
+
+        CatalogInfo siteResult = new CatalogInfo();
+        siteResult.setVendedCredentials(Boolean.FALSE);
+        siteResult.setMaintenanceApi("something-else");
+        when(siteLoader.loadHiveSite("restserver")).thenReturn(siteResult);
+
+        IcebergRequestConfig out = parser.parse(request);
+
+        assertEquals(Boolean.TRUE, out.getCatalog().getVendedCredentials());
+        assertEquals("s3tables", out.getCatalog().getMaintenanceApi());
     }
 
     // ---- volume source selection ------------------------------------------

@@ -111,6 +111,16 @@ public class IcebergRequestConfig {
         putIfNotNull(out, prefix + IcebergConfigConstants.ICEBERG_CATALOG_CONFIG.CLIENT_ID,              catalog.getClientId());
         putIfNotNull(out, prefix + IcebergConfigConstants.ICEBERG_CATALOG_CONFIG.CLIENT_SECRET,          catalog.getClientSecret());
         putIfNotNull(out, prefix + IcebergConfigConstants.ICEBERG_CATALOG_CONFIG.SCOPE,                  catalog.getScope());
+        putIfNotNull(out, prefix + IcebergConfigConstants.ICEBERG_CATALOG_CONFIG.URL,                    catalog.getUrl());
+        putIfNotNull(out, prefix + IcebergConfigConstants.ICEBERG_CATALOG_CONFIG.SIGNING_NAME,           catalog.getSigningName());
+        putIfNotNull(out, prefix + IcebergConfigConstants.ICEBERG_CATALOG_CONFIG.MAINTENANCE_API,        catalog.getMaintenanceApi());
+        putIfNotNull(out, prefix + IcebergConfigConstants.ICEBERG_CATALOG_CONFIG.ENDPOINT,               catalog.getEndpoint());
+        putIfNotNull(out, prefix + IcebergConfigConstants.ICEBERG_CATALOG_CONFIG.PREFIX,                 catalog.getPrefix());
+        putIfNotNull(out, prefix + IcebergConfigConstants.ICEBERG_CATALOG_CONFIG.REGION,                 catalog.getRegion());
+        putIfNotNull(out, prefix + IcebergConfigConstants.ICEBERG_CATALOG_CONFIG.ACCESS_KEY_ID,          catalog.getAccessKeyId());
+        putIfNotNull(out, prefix + IcebergConfigConstants.ICEBERG_CATALOG_CONFIG.SECRET_ACCESS_KEY,      catalog.getSecretAccessKey());
+        putIfNotNull(out, prefix + IcebergConfigConstants.ICEBERG_CATALOG_CONFIG.PATH_STYLE_ACCESS,      toStringOrNull(catalog.getPathStyleAccess()));
+        putIfNotNull(out, prefix + IcebergConfigConstants.ICEBERG_CATALOG_CONFIG.VENDED_CREDENTIALS,    toStringOrNull(catalog.getVendedCredentials()));
         if (catalog.getExtraProperties() != null) {
             out.putAll(catalog.getExtraProperties());
         }

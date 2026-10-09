@@ -18,12 +18,21 @@
 #define DATALAKEFDW_ICEBERG_KEY_CATALOG_NAME             "catalog_name"
 #define DATALAKEFDW_ICEBERG_KEY_SCOPE                    "scope"
 
+/* Generic REST catalog wire keys (C -> agent catalogConfig JSON). */
+#define DATALAKEFDW_ICEBERG_KEY_REST_URL                 "url"
+#define DATALAKEFDW_ICEBERG_KEY_REST_REGION              "region"
+#define DATALAKEFDW_ICEBERG_KEY_REST_SIGNING_NAME        "signing_name"
+#define DATALAKEFDW_ICEBERG_KEY_REST_ENDPOINT            "endpoint"
+#define DATALAKEFDW_ICEBERG_KEY_REST_PREFIX              "prefix"
+
 /* ========== Volume Config Keys ========== */
 #define DATALAKEFDW_ICEBERG_KEY_VOLUME_SERVER_TYPE       "volume_server_type"
 #define DATALAKEFDW_ICEBERG_KEY_VOLUME_ENDPOINT          "volume_endpoint"
 #define DATALAKEFDW_ICEBERG_KEY_VOLUME_REGION            "volume_region"
 #define DATALAKEFDW_ICEBERG_KEY_BUCKET_NAME              "bucket_name"
 #define DATALAKEFDW_ICEBERG_KEY_PATH_STYLE_ACCESS        "path_style_access"
+#define DATALAKEFDW_ICEBERG_KEY_MAINTENANCE_API          "maintenance_api"
+#define DATALAKEFDW_ICEBERG_KEY_REST_VENDED_CREDENTIALS  "vended_credentials"
 #define DATALAKEFDW_ICEBERG_KEY_ACCESS_KEY_ID            "access_key_id"
 #define DATALAKEFDW_ICEBERG_KEY_SECRET_ACCESS_KEY        "secret_access_key"
 #define DATALAKEFDW_ICEBERG_OPTION_LOCATION              "location"

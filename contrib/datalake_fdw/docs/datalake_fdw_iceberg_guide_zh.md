@@ -254,10 +254,124 @@ CREATE FOREIGN CATALOG polaris_catalog SERVER polaris_cat_srv
 OPTIONS (
     catalog_name 'production',
     default_namespace 'public',
-    enable_metadata_cache 'true',
-    metadata_cache_ttl '300'
+    metadata_cache '5'
 );
 ```
+
+#### 通用 REST Catalog（`type='rest'`）
+
+面向实现了 Iceberg REST 规范的存储平台（如星辰天合 XSKY OSG）。与 Polaris 的
+区别在于：Polaris 是带专有 admin API 的特定实现，`rest` 走标准协议，不假设任何
+厂商扩展。
+
+**与其他 catalog 最大的不同：不建 Volume。** REST catalog 在建表时为每张表分配
+自己的存储位置，并按请求下发临时凭证；一个静态配置的 Volume 既无法提供位置、
+也无法提供凭证，写进去反而会用固定 bucket 覆盖掉平台分配的那个。所以这类表
+`CREATE ICEBERG TABLE` 不带 `VOLUME`，写了会直接报错。
+
+```sql
+CREATE SERVER xsky_srv FOREIGN DATA WRAPPER iceberg_catalog_fdw
+OPTIONS (
+    type 'rest',
+    url 'http://10.14.8.253:8060/iceberg',   -- Iceberg REST 基址
+    endpoint 'http://10.14.8.253:8060',      -- 对象存储地址
+    region 'us-east-1',
+    signing_name 's3tables',                 -- SigV4 的 service 名
+    path_style_access 'true'
+);
+
+CREATE USER MAPPING FOR current_user SERVER xsky_srv
+OPTIONS (
+    auth_method 'sigv4',
+    access_key_id '<AK>',
+    secret_access_key '<SK>'
+);
+
+CREATE FOREIGN CATALOG xsky_cat SERVER xsky_srv
+OPTIONS (
+    catalog_name 'ice-tds',       -- 平台上的表桶名
+    default_namespace 'default',
+    prefix 'ice-tds'              -- REST 路由前缀，通常与 catalog_name 相同
+);
+
+-- 建表：没有 VOLUME 子句
+CREATE ICEBERG TABLE orders (id bigint, amount numeric) CATALOG xsky_cat;
+```
+
+REST Catalog 的 SERVER 选项：
+
+| 选项 | 必填 | 说明 |
+|------|------|------|
+| `url` | 是 | Iceberg REST 基址，`http://` 或 `https://`，不能带 userinfo |
+| `region` | sigv4 时必填 | 签名用的 region |
+| `signing_name` | 否 | SigV4 的 service 名；不填则用默认。XSKY 用 `s3tables` |
+| `endpoint` | 否 | 对象存储地址；不填时从 `url` 推导（仅当 catalog 与对象存储同址时成立，建议显式写） |
+| `path_style_access` | 否 | 默认 `true` |
+| `maintenance_api` | 否 | 平台的维护接口类型，目前只支持 `s3tables`；见 4.8 |
+| `vended_credentials` | 否 | 整套部署的默认值，语义见下面 USER MAPPING 表中的同名选项；USER MAPPING 写了以它为准 |
+| `polaris_server_realm` | 否 | **仅当这个 REST catalog 是 Polaris 部署时才需要**。作为 `Polaris-Realm` 请求头发出；不写则不发该头（其他平台不认识 realm，凭空造一个头不是无害的）。配了非默认 realm 的 Polaris 在缺这个头时会用 404 `MissingOrInvalidRealm` 拒掉 OAuth 取 token 的请求 |
+
+> **用 `type='rest'` 接 Polaris**：Polaris 是符合 Iceberg REST 规范的 catalog，
+> 用通用 rest 类型接得上，认证走 `auth_method 'oauth2'`。好处是**不需要配
+> FOREIGN VOLUME**——位置由 catalog 分配、凭证由它按表下发，而 `type='polaris'`
+> 目前仍要求配 volume。若该 Polaris 用了非默认 realm，补上 `polaris_server_realm`。
+
+USER MAPPING 选项：
+
+| 选项 | 说明 |
+|------|------|
+| `auth_method` | `sigv4` / `oauth2` / `none` |
+| `access_key_id` / `secret_access_key` | sigv4 认证，必须成对出现 |
+| `client_id` / `client_secret` | oauth2 认证，必须成对出现 |
+| `vended_credentials` | 默认 `on`。关闭后改用上面的静态密钥读写数据文件，隔离性更弱，因此只能显式关闭，不会自动回退。关闭还有一个副作用：扫描不必再向 catalog 索要凭证，配合 `metadata_cache` 可做到零请求，见下文 |
+
+> **`vended_credentials` 两个层级都能写**：SERVER 上是整套部署的默认值，
+> USER MAPPING 上是这个用户的取值，**写了就以 USER MAPPING 为准**。两边都不写
+> 默认 `on`。取值拼错（比如写成 `no`）会在 DDL 当场报错，不会被当成 `on` 放过去。
+>
+> 关成 `off` 却没有配静态密钥，会在解析时直接报错
+> `vended_credentials is "off" but no static credentials are configured`——
+> 无论这个 `off` 写在哪一层。
+
+> **凭证有效期**：平台下发的临时凭证有寿命，XSKY S3 Tables 与 Polaris 均为
+> 1 小时，并在响应里给出 `s3.session-token-expires-at-ms`。dlagent 缓存这组
+> 凭证时会读取该字段，在到期前就主动丢弃，因此缓存命中不会发出过期凭证。仍然
+> 可能失败的是**单条语句本身跑满一小时**——凭证在语句执行途中过期，重跑即可。
+
+> **扫描路径不再每次问 catalog**。一次扫描要向 catalog 要两样东西：表当前的
+> head，以及读数据用的存储凭证（segment 上没有 volume，凭证必须随 fragment 一起
+> 下发）。这两件事各有各的缓存，互不影响：
+>
+> | 要的东西 | 缓存在哪 | 由谁控制 |
+> |----------|----------|----------|
+> | 当前 head（metadata.json 位置） | PG 侧 `pg_iceberg_metadata` | 表选项 / catalog 选项 `metadata_cache`，同名同单位（见 4.8） |
+> | 存储凭证 + FileIO | dlagent 进程内，按 (连接, 表) 分条 | `dlagent.iceberg.file-io-cache-ttl`（默认 5 分钟） |
+>
+> 凭证缓存命中时，这次扫描**一个 catalog 请求都不发**——和 Polaris 表一样。
+> `file-io-cache-ttl` 只是上限（权限被回收后最多多久才察觉）；下限由凭证自带的
+> 过期时间兜底，所以把它调大不会导致发出过期凭证。缓存按表的 bucket 记账，
+> 表被删掉重建（REST catalog 会分配新 bucket）时下一次扫描会自动重新解析。
+
+> **想彻底不碰 catalog：`vended_credentials off` + `metadata_cache`**。上表两
+> 样东西各有一条免请求的路子，同时走通就是**每次查询零 catalog 请求**：
+>
+> - **凭证**：关掉 `vended_credentials` 后用的是 USER MAPPING 上的静态密钥，
+>   本来就在本地，不需要问任何人；
+> - **head**：`metadata_cache` 设成正数后，TTL 内直接用 PG 侧记着的那个；
+> - **bucket**：从 head 字符串里现成解析出来（每张表的桶名就写在它的
+>   metadata.json 路径里），也不需要问。
+>
+> 三样都不用问，这条链路就和读一张普通 Parquet 外表一样了。代价要说清楚，
+> 而且两条都不是这个组合新引入的，只是叠加后更明显：
+>
+> | 代价 | 来自哪个开关 | 具体表现 |
+> |------|-------------|---------|
+> | 看不到别的引擎的提交 | `metadata_cache` | TTL 到期前读不到 Spark 等外部引擎的新快照（本集群自己的写入不受影响，始终立刻可见） |
+> | 凭证长期且跨表 | `vended off` | 用的是一组固定的静态密钥，不是按表下发的临时凭证，权限隔离更弱 |
+>
+> 所以这是一次明确的取舍：拿**新鲜度**和**隔离性**换请求数。适合数据由本集群
+> 自己写、或者外部更新频率远低于 TTL 的场景；如果表会被别的引擎频繁改写，
+> 或者合规上要求按表隔离凭证，就不要这么配。
 
 #### Hadoop Catalog（`type='hadoop'`）
 
@@ -343,6 +457,7 @@ CREATE FOREIGN VOLUME s3_vol SERVER s3_vol_srv
 | `builtin` | s3 / hdfs | 内嵌目录服务 |
 | `hive` | s3 / hdfs | 元数据走 Hive Metastore |
 | `polaris` | s3 | 表数据物理路径由 Polaris 服务端下发，但**仍必须建 Volume**：QE 通过 Volume 的 endpoint 与 AK/SK 读写数据文件 |
+| `rest` | **不建 Volume** | 位置与凭证均由平台按表下发；写 VOLUME 会被拒绝 |
 | `hadoop` | s3 / hdfs | warehouse_location_prefix 必填 |
 | `s3` | s3 | 仅对象存储 |
 
@@ -350,16 +465,15 @@ CREATE FOREIGN VOLUME s3_vol SERVER s3_vol_srv
 
 | 选项 | 适用 | 说明 |
 |------|------|------|
-| `type` | 全部（SERVER） | `builtin` / `hive` / `polaris` / `hadoop` / `s3` |
-| `url` | hive / polaris（SERVER） | hive: `thrift://host:9083`；polaris: REST 地址 |
+| `type` | 全部（SERVER） | `builtin` / `hive` / `polaris` / `rest` / `hadoop` / `s3` |
+| `url` | hive / polaris / rest（SERVER） | hive: `thrift://host:9083`；polaris / rest: REST 地址 |
 | `polaris_server_realm` | Polaris（SERVER） | 发往 Polaris 的 `Polaris-Realm` 请求头；不设置时默认 `POLARIS`，需与服务端配置的 realm 一致（如 `default`） |
 | `server_name` | hive（SERVER） | 配置文件模式：未在 SQL OPTIONS 里写的连接配置从 `gphive.conf` 对应段补齐，SQL 里写了的优先（见 4.3 末尾"配置文件模式"） |
-| `catalog_name` | Hive / Polaris | 远端 catalog 名称 |
+| `catalog_name` | Hive / Polaris / REST | 远端 catalog 名称；REST 下即平台上的表桶名 |
 | `default_namespace` | 全部 | 默认命名空间 |
-| `enable_metadata_cache` | 全部 | 启用元数据缓存 |
-| `metadata_cache_ttl` | 全部 | 缓存 TTL（秒） |
-| `auto_refresh_metadata` | 全部 | 自动刷新 |
-| `warehouse_location_prefix` | Hive / Polaris / Hadoop / S3 | 仓库路径前缀；hadoop / s3 必填且带协议 |
+| `metadata_cache` | 全部 | head 缓存 TTL（**分钟**），该 catalog 下所有表的默认值，单表可用同名表选项覆盖；`0` 或不写 = 不缓存，每次都取最新 head。它只影响**别的引擎**的提交多久可见——本集群自己的写入始终立刻可见；也与 manifest / metadata.json 的文件缓存无关（那由 gopher 管）。旧选项 `enable_metadata_cache` / `metadata_cache_ttl`（秒）/ `auto_refresh_metadata` 已废弃：写了不报错、无效果（它们在任何已发布版本中都从未生效过）；迁移时把 `metadata_cache_ttl '300'` 改写为 `metadata_cache '5'` |
+| `warehouse_location_prefix` | Hive / Polaris / Hadoop / S3 | 仓库路径前缀；hadoop / s3 必填且带协议。REST 不用：位置由平台分配 |
+| `prefix` | REST（FOREIGN CATALOG） | REST 路由前缀，默认取 `catalog_name` |
 
 ### 4.3 Volume 配置
 
@@ -815,6 +929,7 @@ OPTIONS (
 | `table` | string | 在 catalog 中暴露的表名（默认与 PG 表名一致） |
 | `location` | string | **仅外部 catalog 有意义**。builtin（内部）catalog 建表若指定该项直接报错 `location option is not allowed for builtin iceberg tables`——内部表路径固定为 Volume `base_path` 本身。 |
 | `autovacuum_enabled` | bool | 是否参与 `datalake.iceberg_autovacuum` 自动 VACUUM（默认 `true`） |
+| `metadata_cache` | int | **仅外部 catalog 有意义**。本表 head 缓存的 TTL，单位**分钟**。不写则继承 catalog 同名选项；写 `0` 表示本表显式不缓存，每次扫描都取最新 head（优先级高于 catalog 选项）。详见 4.8 的优先级表 |
 
 > ⚠️ 未识别的 OPTION **不会报错而是被静默忽略**，注意拼写（如误写 `table_name`、`base_location` 将不生效）。
 
@@ -927,11 +1042,81 @@ VACUUM **不做**的事（容易误解）：
 后台 deletion queue（受 `iceberg_max_snapshot_age` /
 `iceberg_max_file_removals_per_vacuum` 控制）以及外部维护任务。
 
+#### REST Catalog 上的 VACUUM
+
+REST catalog 的表**不能由本地重写**：存储归平台所有，我们去改文件会和平台自己
+的乐观锁竞争。而 Iceberg REST 规范里没有维护接口，所以平台若提供合并能力，一定
+是在 catalog 协议之外另开的一套接口。
+
+因此默认行为是拒绝：
+
+```sql
+VACUUM orders;
+ERROR:  VACUUM is not supported on tables in an external REST catalog
+HINT:   If the platform serves a maintenance API, declare it on the catalog
+        server (OPTIONS (maintenance_api 's3tables')) and VACUUM will submit
+        the job. ...
+```
+
+平台若提供了维护接口，在 SERVER 上声明之后，VACUUM 改为**向平台提交合并作业**：
+
+```sql
+ALTER SERVER xsky_srv OPTIONS (ADD maintenance_api 's3tables');
+
+VACUUM orders;
+NOTICE:  iceberg: compaction submitted for "orders"
+DETAIL:  The platform runs the job on its own schedule. Until it finishes and
+         this database's metadata is refreshed, reads continue to use the
+         files the table has now.
+VACUUM
+```
+
+几个必须知道的行为:
+
+- **只提交，不等待**。作业在平台侧异步执行(实测数十秒到数分钟)，语句立即返回。
+  返回成功只代表"请求被接受"，不代表文件已经合并。
+- **不判断阈值**。是否值得合并由平台按自己的参数决定；对一张没什么可合并的表提交
+  会正常返回并且什么都不做。
+- **每张表每种类型同时只允许一个作业**。重复提交返回 409，我们把它当作提示而非
+  错误——"你要的维护正在发生"不该让批量脚本中断：
+
+  ```sql
+  VACUUM orders;   -- 上一个还在跑
+  NOTICE:  iceberg: a maintenance job is already running for "orders"
+  VACUUM
+  ```
+- **只提交 compaction**，不提交快照过期和孤儿清理——后两者会删文件，而正在进行的
+  扫描可能还引用着它们。
+
+- **合并完成后不需要在这边做任何事**。外部 catalog 上的表每次扫描都会去解析该
+  catalog 的当前 head（TTL 为 0 时即每次都取最新，设了 TTL 则在 TTL 内复用），
+  所以平台一提交合并快照，后续查询就读到合并后的文件。
+
+  生效的 TTL 按下面的优先级取，两个层级同名同单位：
+
+  | 来源 | 单位 | 说明 |
+  |------|------|------|
+  | 表选项 `metadata_cache` | **分钟** | 写了就以它为准，`0` 表示本表显式不缓存 |
+  | catalog 选项 `metadata_cache` | **分钟** | 表没写时的默认；`0` 或不写 = 不缓存 |
+
+> `maintenance_api` 只支持 `s3tables` 一个值，写错会在 `CREATE SERVER` /
+> `ALTER SERVER` 时就被拒绝，不会拖到 VACUUM 才报错。
+
 > **注意**：VACUUM 不能在事务块或 PL/pgSQL 函数内执行。
 
 ### 4.9 自动 VACUUM
 
-自动 VACUUM **默认开启**（`datalake.iceberg_autovacuum = on`，每 10 分钟检查一次）。
+自动 VACUUM 挂在 PG 原生 autovacuum 之后（`datalake.iceberg_autovacuum = on`，
+最小间隔 10 分钟）。
+
+> **它目前不做 compaction。** 名字容易让人误会：这个后台任务只消费删除队列——
+> `DROP TABLE` / `TRUNCATE` 之后遗留在对象存储上的文件由它异步删除。**小文件合并
+> 仍然只在手动 `VACUUM` 时发生。**
+>
+> 原因是 PG 的 autovacuum 靠死元组和插入计数来挑表，而 Iceberg 表的数据在外部
+> 存储上，这两个计数器恒为 0，所以这类表从来不会被选中（AO / PAX 表通过在 DML
+> 回调里上报统计解决了同样的问题）。在此之前，请按需要自行安排 `VACUUM`。
+
 调整间隔或关闭（需 superuser，修改后需 reload）：
 
 ```sql
@@ -1331,5 +1516,10 @@ DROP SERVER cat_server CASCADE;  -- 级联删除所有依赖对象
 | `invalid value for boolean option "%s": "%s"` | OPTION 取值不是布尔字面量 | 用 `true` / `false`，不要用 `0/1` 或 `yes/no` |
 | `failed to commit iceberg metadata for table %u after %d retries due to concurrent updates` | 并发写入冲突 CAS 重试 10 次仍失败（详见 4.12.4） | 把多笔写合并成一笔事务、降低并发写并发度，或排查是否有外部引擎同时在写同一张表 |
 | `not supported`（来自 pg_iceberg_am_handler.c） | 触发了 TID range scan 路径 | 改用基于普通列的谓词，避免 `ctid <@ ...` 之类查询 |
+| `tables on a REST catalog do not use a foreign volume` | REST catalog 建表时写了 `VOLUME` | 去掉 `VOLUME` 子句；位置由平台按表分配 |
+| `VACUUM is not supported on tables in an external REST catalog` | 平台未声明维护接口 | 平台若有维护 API，在 SERVER 上加 `maintenance_api 's3tables'`；否则到平台侧发起维护 |
+| `invalid value for option "maintenance_api"` | 取值拼写错误 | 目前只支持 `s3tables` |
+| `iceberg commit result unknown` | 提交的回复丢失，落库与否无法确认 | **先核实数据是否已在表中再决定是否重跑**——重跑一次已生效的提交会产生重复数据 |
+| 凭证过期类错误（`ExpiredToken` / `InvalidAccessKeyId`） | 平台下发的临时凭证已过期（XSKY 约 1 小时） | 重跑该语句；长事务请拆短 |
 | `API not supported for iceberg relations` | 调用了 heap-only API（多见于第三方扩展直接调内部 API，或 ANALYZE 内部 block API） | 见 4.12.3；避免该扩展直接作用于 iceberg 表 |
 | `ANALYZE on Iceberg tables refreshed pg_class.reltuples/relpages from Iceberg catalog metadata` | 不是错误，只是 NOTICE | ANALYZE 仅刷新 reltuples/relpages（供 ORCA 使用）；列级统计来自 Iceberg manifest，不做采样 |

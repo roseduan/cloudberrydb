@@ -15,7 +15,14 @@ typedef struct icebergTableInfo {
     const char* volumn_name;         /* Volume name for data access */
     const char* volumn_server_name;  /* Volume server name */
     const char* location;            /* pre-formatted data path from AM layer, must be non-NULL */
-    const char* catalog_properties;  /* Catalog config JSON (config + storage-credentials + table-location), NULL if volume specified */
+    /*
+     * Storage configuration JSON, NULL when a FOREIGN VOLUME supplies it.
+     * Two generations share this field and the segment tells them apart by
+     * the "envelope-version" key: the legacy Polaris payload (config +
+     * storage-credentials + table-location), and the versioned REST envelope,
+     * which a volume-less REST table always carries.
+     */
+    const char* catalog_properties;
     const char* compression;         /* Parquet write compression codec; NULL on non-AM volume path */
     int         compression_level;   /* Parquet write compression level; -1 = codec default */
     const char* partition_by;        /* Iceberg partition columns (comma-separated); NULL/empty when unpartitioned */

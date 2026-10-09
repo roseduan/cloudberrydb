@@ -58,9 +58,7 @@ BEGIN
         OPTIONS (
             catalog_name ''polaris_default_catalog'',
             default_namespace ''public'',
-            enable_metadata_cache ''true'',
-            metadata_cache_ttl ''300'',
-            auto_refresh_metadata ''true'',
+            metadata_cache ''5'',
             warehouse_location_prefix ''s3://warehouse/polaris/''
         )';
     RAISE NOTICE 'Polaris catalog with full options created';

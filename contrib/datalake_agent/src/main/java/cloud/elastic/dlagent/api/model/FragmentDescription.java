@@ -22,7 +22,11 @@ package cloud.elastic.dlagent.api.model;
 import lombok.Getter;
 import lombok.Setter;
 
+import com.fasterxml.jackson.annotation.JsonProperty;
+import com.fasterxml.jackson.annotation.JsonInclude;
+
 import java.util.List;
+import java.util.Map;
 
 @Getter
 @Setter
@@ -32,6 +36,9 @@ public class FragmentDescription {
     private List<CombinedTask> combinedTasks;
     private Long snapshotId;
     private boolean notModified;
+    @JsonInclude(JsonInclude.Include.NON_NULL)
+    @JsonProperty("catalog-properties")
+    private Map<String, Object> catalogProperties;
 
     public FragmentDescription(TableOptions tableOptions, List<CombinedTask> combinedTasks) {
         this.tableOptions = tableOptions;

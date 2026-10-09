@@ -192,7 +192,8 @@ REGRESS = setup \
         oss_read_new_text oss_read_text grammar_convert gphdfs_ignore_file gphdfs_custom \
         oss_read_new_text_limit_segment oss_read_orc_limit_segment oss_read_parquet_limit_segment oss_read_text_limit_segment \
 		iceberg_test iceberg_no_extension iceberg_am_misuse iceberg_site_config \
-		text_block_boundary file_meta_cache
+		text_block_boundary file_meta_cache \
+		iceberg_rest_catalog_ddl iceberg_rest_vacuum
 endif
 REGRESS_OPTS += --init-file=test/init_file
 

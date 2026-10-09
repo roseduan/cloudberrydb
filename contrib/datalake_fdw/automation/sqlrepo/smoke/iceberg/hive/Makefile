@@ -6,7 +6,12 @@ include $(PGXS)
 REGRESS = iceberg_hive iceberg_hive_deferred_commit iceberg_hive_options
 
 # Hive Metastore requires the "public" database to exist (PG schema maps to Hive DB).
-HIVE_BEELINE = beeline -u "jdbc:hive2://hiveserver2:10000" --silent=true
+# -n hive matters: without a user beeline connects anonymously, and creating
+# the database then dies in HDFS -- "Failed to create external path
+# hdfs://hadoop:8020/warehouse/public.db".  The recipe swallows that into a
+# "beeline unavailable" warning, so the real symptom appears later as
+# NoSuchNamespaceException: no database matching namespace "public".
+HIVE_BEELINE = beeline -u "jdbc:hive2://hiveserver2:10000" -n hive --silent=true
 MC_ALIAS_URL = http://minio:9000
 MC_ALIAS_KEY = admin
 MC_ALIAS_SECRET = admin12345

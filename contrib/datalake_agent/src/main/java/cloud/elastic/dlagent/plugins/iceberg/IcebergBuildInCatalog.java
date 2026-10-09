@@ -164,8 +164,38 @@ public class IcebergBuildInCatalog implements IcebergCatalog {
     }
 
     @Override
-    public boolean createNamespace(String catalogName, String namespaceName, 
+    public boolean createNamespace(String catalogName, String namespaceName,
                                   Map<String, String> properties) throws Exception {
         throw new UnsupportedOperationException("BuildIn catalog does not support createNamespace operation.");
+    }
+
+    /**
+     * Releases the GopherFileIO this request's catalog built.  Inheriting the
+     * interface's no-op default left one native connection open per write, the
+     * same leak {@code IcebergCatalogReleaseFilter} was added to stop on the
+     * rest path.
+     */
+    @Override
+    public void close() {
+        DlIcebergBuildInCatalog catalog = buildInCatalog;
+
+        buildInCatalog = null;
+        if (catalog != null) {
+            try {
+                catalog.close();
+            } catch (Exception e) {
+                /*
+                 * Exception everywhere a close() runs in a release path, even
+                 * where the narrower type provably suffices -- as it does here,
+                 * since DlIcebergBuildInCatalog.close() declares no checked
+                 * exception.  Uniformity is the point: the rule "a release
+                 * swallows everything" is one a reader can apply without
+                 * checking what the callee happens to declare today, and
+                 * without wondering why the sibling close() next door is
+                 * written differently.
+                 */
+                LOG.warn("Failed to close built-in iceberg catalog", e);
+            }
+        }
     }
 }

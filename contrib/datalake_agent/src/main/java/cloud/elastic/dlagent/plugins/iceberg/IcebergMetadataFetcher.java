@@ -75,6 +75,7 @@ import org.apache.iceberg.Transaction;
 import org.apache.iceberg.HasTableOperations;
 import org.apache.iceberg.StaticTableOperations;
 import org.apache.iceberg.exceptions.CommitFailedException;
+import org.apache.iceberg.exceptions.CommitStateUnknownException;
 import org.apache.iceberg.exceptions.NoSuchTableException;
 
 import java.io.IOException;
@@ -166,6 +167,7 @@ public class IcebergMetadataFetcher extends BasePlugin implements MetadataFetche
         } catch (NoSuchTableException e) {
             return new FragmentDescription(null, java.util.Collections.emptyList(), -1L);
         }
+        captureRestEnvelope(catalog);
 
         /* Get current snapshot ID (cheap: reads already-loaded metadata) */
         Snapshot currentSnapshot = table.currentSnapshot();
@@ -177,7 +179,9 @@ public class IcebergMetadataFetcher extends BasePlugin implements MetadataFetche
             try {
                 long ifSnapshotId = Long.parseLong(ifSnapshotStr);
                 if (snapshotId == ifSnapshotId) {
-                    return FragmentDescription.notModified(snapshotId);
+                    FragmentDescription description = FragmentDescription.notModified(snapshotId);
+                    description.setCatalogProperties(context.getCatalogProperties());
+                    return description;
                 }
             } catch (NumberFormatException e) {
                 /* ignore malformed header, proceed normally */
@@ -213,7 +217,9 @@ public class IcebergMetadataFetcher extends BasePlugin implements MetadataFetche
             throw e;
         }
 
-        return transformTasks(table, scanTasks, snapshotId);
+        FragmentDescription description = transformTasks(table, scanTasks, snapshotId);
+        description.setCatalogProperties(context.getCatalogProperties());
+        return description;
     }
 
     public List<Partition> getPartitions(String pattern) throws Exception {
@@ -448,7 +454,8 @@ public class IcebergMetadataFetcher extends BasePlugin implements MetadataFetche
      */
     public Map<String, Object> truncateAndReturnLocation() throws Exception {
         IcebergCatalog catalog = icebergClientWrapper.getIcebergCatalog(context);
-        Table table = catalog.loadTable(context.getDataSource());
+        /* no catalog commit below, but healLegacyTableProperties() commits */
+        Table table = CommitStateGuard.wrap(catalog.loadTable(context.getDataSource()));
         healLegacyTableProperties(table);
 
         Map<String, Object> result = new HashMap<>();
@@ -491,7 +498,8 @@ public class IcebergMetadataFetcher extends BasePlugin implements MetadataFetche
      */
     public String commitFileGroups() throws Exception {
         IcebergCatalog catalog = icebergClientWrapper.getIcebergCatalog(context);
-        Table table = catalog.loadTable(context.getDataSource());
+        /* no catalog commit below, but healLegacyTableProperties() commits */
+        Table table = CommitStateGuard.wrap(catalog.loadTable(context.getDataSource()));
         healLegacyTableProperties(table);
 
         // Use transaction: rewrite.commit() only writes manifests, NOT metadata.json
@@ -640,14 +648,21 @@ public class IcebergMetadataFetcher extends BasePlugin implements MetadataFetche
      */
     public String commitAppend() throws Exception {
         IcebergCatalog catalog = icebergClientWrapper.getIcebergCatalog(context);
-        Table table = catalog.loadTable(context.getDataSource());
+        Table table = CommitStateGuard.wrap(catalog.loadTable(context.getDataSource()));
         healLegacyTableProperties(table);
+        Snapshot base = table.currentSnapshot();
+        Set<String> newFilePaths = new HashSet<>();
         AppendFiles batchAppend = table.newAppend();
         for (Fragment fragment : context.getFragments()) {
             DataFile dataFile = icebergUtilities.transFileFromGpdb(fragment, table.spec(), table.io(), org.apache.iceberg.MetricsConfig.forTable(table));
             batchAppend.appendFile(dataFile);
+            newFilePaths.add(dataFile.path().toString());
         }
-        batchAppend.commit(); // normal commit — updates catalog
+        try {
+            batchAppend.commit(); // normal commit — updates catalog
+        } catch (CommitStateUnknownException unknown) {
+            return reconcileLostCommitReply(catalog, base, newFilePaths, unknown);
+        }
         TableMetadata metadata = ((HasTableOperations) table).operations().current();
         return metadata.metadataFileLocation();
     }
@@ -658,24 +673,115 @@ public class IcebergMetadataFetcher extends BasePlugin implements MetadataFetche
      */
     public String commitUpdate() throws Exception {
         IcebergCatalog catalog = icebergClientWrapper.getIcebergCatalog(context);
-        Table table = catalog.loadTable(context.getDataSource());
+        Table table = CommitStateGuard.wrap(catalog.loadTable(context.getDataSource()));
         healLegacyTableProperties(table);
+        Snapshot base = table.currentSnapshot();
+        Set<String> newFilePaths = new HashSet<>();
         RowDelta rowDelta = table.newRowDelta();
         for (Fragment fragment : context.getFragments()) {
             GpdbFragmentMetadata meta = (GpdbFragmentMetadata)fragment.getMetadata();
             if (meta.getContentType() == GpdbFragmentMetadata.ContentType.DATA_FILE) {
                 DataFile dataFile = icebergUtilities.transFileFromGpdb(fragment, table.spec(), table.io(), org.apache.iceberg.MetricsConfig.forTable(table));
                 rowDelta.addRows(dataFile);
+                newFilePaths.add(dataFile.path().toString());
             } else if (meta.getContentType() == GpdbFragmentMetadata.ContentType.POSITION_DELETE) {
                 DeleteFile deleteFile = icebergUtilities.transPosDeleteFromGpdb(
                         fragment, table.spec(), table.io(),
                         org.apache.iceberg.MetricsConfig.forPositionDelete(table));
                 rowDelta.addDeletes(deleteFile);
+                newFilePaths.add(deleteFile.path().toString());
             }
         }
-        rowDelta.commit(); // normal commit — updates catalog
+        try {
+            rowDelta.commit(); // normal commit — updates catalog
+        } catch (CommitStateUnknownException unknown) {
+            return reconcileLostCommitReply(catalog, base, newFilePaths, unknown);
+        }
         TableMetadata metadata = ((HasTableOperations) table).operations().current();
         return metadata.metadataFileLocation();
+    }
+
+    private static final int LOST_REPLY_RECONCILE_ATTEMPTS = 3;
+    private static final long LOST_REPLY_RECONCILE_DELAY_MS = 1000L;
+
+    /**
+     * The commit got no reply, so "succeeded" and "failed" are both live
+     * possibilities; the table itself is the arbiter (see
+     * {@link CommitStateGuard#commitLanded}).  Returns the metadata location
+     * when the commit turns out to have landed; throws
+     * {@link CommitFailedException} when it definitively did not (safe for
+     * retryRestCommit() to rerun); rethrows the original unknown when the
+     * table cannot be re-read conclusively.
+     */
+    private String reconcileLostCommitReply(IcebergCatalog catalog, Snapshot base,
+            Set<String> newFilePaths, CommitStateUnknownException unknown) throws Exception {
+        if (newFilePaths.isEmpty()) {
+            /* nothing file-based to look for -- the outcome cannot be verified */
+            throw unknown;
+        }
+        for (int attempt = 1; attempt <= LOST_REPLY_RECONCILE_ATTEMPTS; attempt++) {
+            /* give an in-flight server-side commit a moment to settle */
+            try {
+                Thread.sleep(LOST_REPLY_RECONCILE_DELAY_MS);
+            } catch (InterruptedException e) {
+                /*
+                 * Interrupted before the table could be consulted, so the
+                 * outcome is exactly as unknown as it was on entry -- say so.
+                 * Letting InterruptedException escape would report a plain
+                 * failure for a commit that may have landed.  Thread.sleep
+                 * clears the flag, so put it back for the container.
+                 */
+                Thread.currentThread().interrupt();
+                throw unknown;
+            }
+            Table fresh;
+            try {
+                fresh = catalog.loadTable(context.getDataSource());
+            } catch (Exception e) {
+                /*
+                 * Exception, not RuntimeException: loadTable() is declared to
+                 * throw it, and this method is too, so a checked failure would
+                 * sail past a narrower catch and leave the caller with a plain
+                 * error for a commit whose outcome is still unknown -- the one
+                 * answer that must never be given here, for the reason spelled
+                 * out on the snapshot-scan guard below.
+                 */
+                LOG.warn("commit outcome for {} still unknown: reload failed (attempt {}/{}): {}",
+                        context.getDataSource(), attempt, LOST_REPLY_RECONCILE_ATTEMPTS, e.toString());
+                continue;
+            }
+            Boolean landed;
+            try {
+                landed = CommitStateGuard.commitLanded(fresh, base, newFilePaths);
+            } catch (RuntimeException e) {
+                /*
+                 * commitLanded() walks the snapshot chain, and every step reads
+                 * a manifest from object storage -- a second connection that can
+                 * fail independently of the catalog reload just above.  Letting
+                 * that escape would replace the unknown-outcome exception with a
+                 * plain failure, which is the one answer that must never be
+                 * given here: the commit may well have landed, and the caller
+                 * would re-run it and duplicate the rows.
+                 */
+                LOG.warn("commit outcome for {} still unknown: snapshot scan failed (attempt {}/{}): {}",
+                        context.getDataSource(), attempt, LOST_REPLY_RECONCILE_ATTEMPTS, e.toString());
+                continue;
+            }
+            if (landed == null) {
+                LOG.warn("commit outcome for {} still unknown: snapshot history inconclusive (attempt {}/{})",
+                        context.getDataSource(), attempt, LOST_REPLY_RECONCILE_ATTEMPTS);
+                continue;
+            }
+            if (landed) {
+                LOG.warn("commit reply for {} was lost but the commit took effect; reporting success",
+                        context.getDataSource());
+                return ((HasTableOperations) fresh).operations().current().metadataFileLocation();
+            }
+            throw new CommitFailedException(unknown,
+                    "commit reply was lost and the commit did not take effect for %s",
+                    context.getDataSource());
+        }
+        throw unknown;
     }
 
     /**
@@ -684,7 +790,7 @@ public class IcebergMetadataFetcher extends BasePlugin implements MetadataFetche
      */
     public String commitRewrite() throws Exception {
         IcebergCatalog catalog = icebergClientWrapper.getIcebergCatalog(context);
-        Table table = catalog.loadTable(context.getDataSource());
+        Table table = CommitStateGuard.wrap(catalog.loadTable(context.getDataSource()));
         healLegacyTableProperties(table);
 
         Transaction txn = table.newTransaction();
@@ -703,13 +809,19 @@ public class IcebergMetadataFetcher extends BasePlugin implements MetadataFetche
             DataFile dataFile = icebergUtilities.transFileFromGpdb(fragment, table.spec(), table.io(), org.apache.iceberg.MetricsConfig.forTable(table));
             rewrite.deleteFile(dataFile);
         }
+        Set<String> newFilePaths = new HashSet<>();
         for (Fragment fragment : context.getFragments()) {
             DataFile dataFile = icebergUtilities.transFileFromGpdb(fragment, table.spec(), table.io(), org.apache.iceberg.MetricsConfig.forTable(table));
             rewrite.addFile(dataFile);
+            newFilePaths.add(dataFile.path().toString());
         }
 
-        rewrite.commit();
-        txn.commitTransaction(); // normal commit — updates catalog
+        try {
+            rewrite.commit();
+            txn.commitTransaction(); // normal commit — updates catalog
+        } catch (CommitStateUnknownException unknown) {
+            return reconcileLostCommitReply(catalog, startingSnapshot, newFilePaths, unknown);
+        }
 
         TableMetadata metadata = ((HasTableOperations) table).operations().current();
         return metadata.metadataFileLocation();
@@ -722,10 +834,28 @@ public class IcebergMetadataFetcher extends BasePlugin implements MetadataFetche
      */
     public FragmentDescription getFragmentsByUncommittedMetadata(
             String uncommittedMetadataLocation, long requestedSnapshotId) throws Exception {
-        // 1. Obtain FileIO WITHOUT a loadTable()/external-catalog round-trip
-        //    where possible (issue #393): Hive hands out its shared config
-        //    FileIO; vending catalogs (Polaris) use the TTL-cached vended one.
-        FileIO io = icebergClientWrapper.getScanFileIO(context);
+        FileIO io;
+        if ("rest".equals(context.getCatalogType())) {
+            /*
+             * A generic REST catalog needs one thing more than a FileIO: the
+             * storage envelope, since its segments have no volume to read
+             * credentials from.  Both come from the same TTL-cached entry, so
+             * a repeat scan reaches the catalog no more often than a Polaris
+             * one does -- and when it does, it is a single load-table call
+             * rather than the two-stage load, which only ever ran a second
+             * time to produce a FileIO.
+             */
+            IcebergRestCatalog.ScanStorage storage =
+                    icebergClientWrapper.getRestScanStorage(context, uncommittedMetadataLocation);
+            context.setCatalogProperties(
+                    storage.envelopeFor(uncommittedMetadataLocation));
+            io = storage.io();
+        } else {
+            // 1. Obtain FileIO WITHOUT a loadTable()/external-catalog round-trip
+            //    where possible (issue #393): Hive hands out its shared config
+            //    FileIO; vending catalogs (Polaris) use the TTL-cached vended one.
+            io = icebergClientWrapper.getScanFileIO(context);
+        }
 
         // 2. Build scannable Table using uncommitted metadata location
         //    StaticTableOperations reads the metadata.json internally
@@ -793,7 +923,38 @@ public class IcebergMetadataFetcher extends BasePlugin implements MetadataFetche
         long snapshotId = requestedSnapshotId > 0L
             ? requestedSnapshotId
             : (table.currentSnapshot() != null ? table.currentSnapshot().snapshotId() : 0L);
-        return transformTasks(table, scanTasks, snapshotId);
+        FragmentDescription description = transformTasks(table, scanTasks, snapshotId);
+        description.setCatalogProperties(context.getCatalogProperties());
+        return description;
+    }
+
+    /**
+     * FileIO for reading a pinned metadata.json, for the callers that need
+     * nothing else from the catalog.
+     *
+     * <p>{@link StaticTableOperations} reads the metadata document the caller
+     * names, so what the catalog is really being asked for here is storage
+     * access, not the table.  A generic REST catalog answers that from the
+     * cross-request cache, sparing these paths the load-table round trip; the
+     * other types keep loading, since for them building the catalog is either
+     * cheap or already cached and the load is what makes the FileIO.
+     *
+     * <p>No envelope is captured: both callers answer a coordinator-side
+     * describe, and nothing they produce is dispatched to a segment.
+     */
+    private FileIO pinnedMetadataFileIO(String metadataLocation) throws Exception {
+        if ("rest".equals(context.getCatalogType())) {
+            return icebergClientWrapper.getRestScanStorage(context, metadataLocation).io();
+        }
+        IcebergCatalog catalog = icebergClientWrapper.getIcebergCatalog(context);
+        return catalog.loadTable(context.getDataSource()).io();
+    }
+
+    private void captureRestEnvelope(IcebergCatalog catalog) {
+        if (catalog instanceof IcebergRestCatalog) {
+            context.setCatalogProperties(
+                    ((IcebergRestCatalog) catalog).catalogPropertiesEnvelope());
+        }
     }
 
     /**
@@ -813,10 +974,8 @@ public class IcebergMetadataFetcher extends BasePlugin implements MetadataFetche
      */
     public Map<String, Object> getSnapshotSchema(String metadataLocation, long snapshotId)
             throws Exception {
-        // Load table from catalog to get FileIO, then read pinned metadata.json.
-        IcebergCatalog catalog = icebergClientWrapper.getIcebergCatalog(context);
-        Table catalogTable = catalog.loadTable(context.getDataSource());
-        FileIO io = catalogTable.io();
+        // Get FileIO from the catalog, then read pinned metadata.json.
+        FileIO io = pinnedMetadataFileIO(metadataLocation);
 
         StaticTableOperations ops = new StaticTableOperations(metadataLocation, io);
         BaseTable table = new BaseTable(ops, context.getDataSource());
@@ -886,10 +1045,8 @@ public class IcebergMetadataFetcher extends BasePlugin implements MetadataFetche
      *         timestampMs, operation, schemaId, parentId, summaryJson)
      */
     public Map<String, Object> getSnapshots(String metadataLocation) throws Exception {
-        // Load table from catalog to get FileIO, then read pinned metadata.json.
-        IcebergCatalog catalog = icebergClientWrapper.getIcebergCatalog(context);
-        Table catalogTable = catalog.loadTable(context.getDataSource());
-        FileIO io = catalogTable.io();
+        // Get FileIO from the catalog, then read pinned metadata.json.
+        FileIO io = pinnedMetadataFileIO(metadataLocation);
 
         StaticTableOperations ops = new StaticTableOperations(metadataLocation, io);
         BaseTable table = new BaseTable(ops, context.getDataSource());

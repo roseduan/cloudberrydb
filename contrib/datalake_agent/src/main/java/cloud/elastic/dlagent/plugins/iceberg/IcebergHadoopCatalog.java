@@ -218,9 +218,28 @@ public class IcebergHadoopCatalog implements IcebergCatalog {
     }
 
     @Override
-    public boolean createNamespace(String catalogName, String namespaceName, 
+    public boolean createNamespace(String catalogName, String namespaceName,
                                   Map<String, String> properties) throws Exception {
         throw new UnsupportedOperationException("Hadoop catalog does not support createNamespace operation.");
+    }
+
+    /**
+     * Releases the FileIO iceberg's HadoopCatalog holds -- under gopher a
+     * GopherFileIO with a native connection.  This catalog is built fresh per
+     * request, so the interface's no-op default leaked one per write.
+     */
+    @Override
+    public void close() {
+        HadoopCatalog catalog = hadoopCatalog;
+
+        hadoopCatalog = null;
+        if (catalog != null) {
+            try {
+                catalog.close();
+            } catch (Exception e) {
+                LOG.warn("Failed to close Hadoop iceberg catalog", e);
+            }
+        }
     }
 }
 

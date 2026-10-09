@@ -91,6 +91,8 @@ public class IcebergRequestConfigParser {
             return out;
         }
 
+        validateCatalogPropertiesEnvelope(request);
+
         Map<String, Object> icebergConfig = mapOrNull(request.get(IcebergConfigConstants.ICEBERG_CONFIG));
 
         CatalogInfo catalog = resolveCatalog(icebergConfig);
@@ -177,6 +179,19 @@ public class IcebergRequestConfigParser {
      * Fill every null field of the SQL-parsed {@link CatalogInfo} from the
      * site-file one. Explicit per-field (no reflection) so the merged surface
      * stays reviewable. Returns the (mutated) SQL object.
+     *
+     * <p>The list is kept complete on purpose, but note what the file side can
+     * actually supply today: {@link SiteConfigLoader#loadHiveSite} types only
+     * the six hive keys (url, username, auth_method and the three krb ones) and
+     * drops everything else into extraProperties, so every REST field below --
+     * url, signing_name, endpoint, prefix, region, the static keys,
+     * path_style_access, vended_credentials, maintenance_api -- arrives null
+     * from a conf file and the SQL value stands alone. A REST catalog is
+     * configured inline, which is also the only branch
+     * {@code IcebergRestController.buildMetaConfig} offers it. Teaching the
+     * loader to type these is a feature (and needs an answer for `url`, which
+     * means the metastore URI to a hive server and the catalog URL to a REST
+     * one), not something this merge can do by itself.
      */
     private static CatalogInfo mergeCatalog(CatalogInfo sql, CatalogInfo file) {
         sql.setServerType(or(sql.getServerType(), file.getServerType()));
@@ -196,6 +211,16 @@ public class IcebergRequestConfigParser {
         sql.setClientId(or(sql.getClientId(), file.getClientId()));
         sql.setClientSecret(or(sql.getClientSecret(), file.getClientSecret()));
         sql.setScope(or(sql.getScope(), file.getScope()));
+        sql.setUrl(or(sql.getUrl(), file.getUrl()));
+        sql.setSigningName(or(sql.getSigningName(), file.getSigningName()));
+        sql.setEndpoint(or(sql.getEndpoint(), file.getEndpoint()));
+        sql.setPrefix(or(sql.getPrefix(), file.getPrefix()));
+        sql.setRegion(or(sql.getRegion(), file.getRegion()));
+        sql.setAccessKeyId(or(sql.getAccessKeyId(), file.getAccessKeyId()));
+        sql.setSecretAccessKey(or(sql.getSecretAccessKey(), file.getSecretAccessKey()));
+        sql.setPathStyleAccess(or(sql.getPathStyleAccess(), file.getPathStyleAccess()));
+        sql.setVendedCredentials(or(sql.getVendedCredentials(), file.getVendedCredentials()));
+        sql.setMaintenanceApi(or(sql.getMaintenanceApi(), file.getMaintenanceApi()));
         for (Map.Entry<String, String> extra : file.getExtraProperties().entrySet()) {
             sql.getExtraProperties().putIfAbsent(extra.getKey(), extra.getValue());
         }
@@ -273,7 +298,41 @@ public class IcebergRequestConfigParser {
         info.setClientId(stringOrNull(body.get(IcebergConfigConstants.ICEBERG_CATALOG_CONFIG.CLIENT_ID)));
         info.setClientSecret(stringOrNull(body.get(IcebergConfigConstants.ICEBERG_CATALOG_CONFIG.CLIENT_SECRET)));
         info.setScope(stringOrNull(body.get(IcebergConfigConstants.ICEBERG_CATALOG_CONFIG.SCOPE)));
+        info.setUrl(stringOrNull(body.get(IcebergConfigConstants.ICEBERG_CATALOG_CONFIG.URL)));
+        info.setSigningName(stringOrNull(body.get(IcebergConfigConstants.ICEBERG_CATALOG_CONFIG.SIGNING_NAME)));
+        info.setMaintenanceApi(stringOrNull(body.get(IcebergConfigConstants.ICEBERG_CATALOG_CONFIG.MAINTENANCE_API)));
+        info.setEndpoint(stringOrNull(body.get(IcebergConfigConstants.ICEBERG_CATALOG_CONFIG.ENDPOINT)));
+        info.setPrefix(stringOrNull(body.get(IcebergConfigConstants.ICEBERG_CATALOG_CONFIG.PREFIX)));
+        info.setRegion(stringOrNull(body.get(IcebergConfigConstants.ICEBERG_CATALOG_CONFIG.REGION)));
+        info.setAccessKeyId(stringOrNull(body.get(IcebergConfigConstants.ICEBERG_CATALOG_CONFIG.ACCESS_KEY_ID)));
+        info.setSecretAccessKey(stringOrNull(body.get(IcebergConfigConstants.ICEBERG_CATALOG_CONFIG.SECRET_ACCESS_KEY)));
+        info.setPathStyleAccess(booleanOrNull(body.get(IcebergConfigConstants.ICEBERG_CATALOG_CONFIG.PATH_STYLE_ACCESS)));
+        info.setVendedCredentials(booleanOrNull(body.get(IcebergConfigConstants.ICEBERG_CATALOG_CONFIG.VENDED_CREDENTIALS)));
         return info;
+    }
+
+    private static void validateCatalogPropertiesEnvelope(Map<String, Object> request) {
+        Map<String, Object> envelope = mapOrNull(request.get("catalog-properties"));
+        if (envelope == null) {
+            return;
+        }
+        Object rawVersion = envelope.get("envelope-version");
+        if (!(rawVersion instanceof Number)) {
+            throw new IllegalArgumentException(
+                    "catalog-properties envelope-version must be numeric");
+        }
+        int version = ((Number) rawVersion).intValue();
+        if (version != 1) {
+            throw new IllegalArgumentException(
+                    "Unsupported catalog-properties envelope-version: " + version);
+        }
+        for (String required : new String[] {"table-location", "metadata-location"}) {
+            Object value = envelope.get(required);
+            if (!(value instanceof String) || ((String) value).isEmpty()) {
+                throw new IllegalArgumentException(
+                        "catalog-properties " + required + " is required");
+            }
+        }
     }
 
     private VolumeInfo parseVolumeFromBody(Map<String, Object> body) {

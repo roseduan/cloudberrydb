@@ -625,7 +625,14 @@ build_fileio_config_json(ForeignServer *server,
     }
     else if (strcmp(type, "hdfs") == 0)
     {
+        /*
+         * hdfs_port is a separate option from hdfs_namenodes (which may or
+         * may not carry ":port" itself), so it has to be forwarded too: the
+         * agent needs host AND port to build fs.defaultFS for the
+         * authority-less "hdfs:///path" URIs that volume paths use.
+         */
         put_string_if_present(cfg, server->options, "hdfs_namenodes",         "namenodes");
+        put_string_if_present(cfg, server->options, "hdfs_port",              "port");
         put_string_if_present(cfg, server->options, "hdfs_auth_method",       "auth_method");
         put_string_if_present(cfg, server->options, "hadoop_rpc_protection",  "rpc_protection");
         put_string_if_present(cfg, server->options, "is_ha_supported",        "is_ha");

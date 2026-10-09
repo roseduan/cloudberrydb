@@ -25,6 +25,8 @@
 #include "nodes/makefuncs.h"
 #include "nodes/nodes.h"
 #include "nodes/parsenodes.h"
+#include "access/reloptions.h"
+#include "src/common/parser_option.h"
 #include "utils/builtins.h"
 #include "utils/memutils.h"
 #include "utils/rel.h"
@@ -142,6 +144,7 @@ const char * createListCatalogsRequestJson(IcebergCatalogFdwState* fdwState, Ice
 const char * createListNamespacesRequestJson(IcebergCatalogFdwState* fdwState, IcebergCatalogOptions *option, IcebergVolumeOptions *volumeOpt, IcebergCatalogRequest req);
 const char * createPlanFileGroupsRequestJson(IcebergCatalogFdwState* fdwState, IcebergCatalogOptions *option, IcebergVolumeOptions *volumeOpt, IcebergCatalogRequest req);
 const char * createCommitFileGroupsRequestJson(IcebergCatalogFdwState* fdwState, IcebergCatalogOptions *option, IcebergVolumeOptions *volumeOpt, IcebergCatalogRequest req);
+const char * createSubmitMaintenanceRequestJson(IcebergCatalogFdwState* fdwState, IcebergCatalogOptions *option, IcebergVolumeOptions *volumeOpt, IcebergCatalogRequest req);
 /*
  * iceberg_catalog_fdw_handler
  *	  FDW handler function
@@ -171,11 +174,101 @@ Datum iceberg_catalog_fdw_handler(PG_FUNCTION_ARGS)
 
 /*
  * iceberg_catalog_fdw_validator
- *	  Validate options given to the FDW
+ *	  Validate options given to the FDW.
+ *
+ * Three validation layers exist for the REST catalog type; this function
+ * implements the two that can run per object.  CREATE SERVER carries the
+ * "type" option, so when it says rest the full server-side option rules can
+ * run right here.  CREATE USER MAPPING carries no type and its keys are
+ * shared with other catalog types (hive also uses auth_method), so only the
+ * generically-safe pairing rules run here; everything that needs SERVER and
+ * USER MAPPING together waits for the first full resolution in
+ * getIcebergCatalogOptions().
  */
 Datum iceberg_catalog_fdw_validator(PG_FUNCTION_ARGS)
 {
-    PG_RETURN_VOID();
+	List	   *options = untransformRelOptions(PG_GETARG_DATUM(0));
+	Oid			catalog = PG_GETARG_OID(1);
+
+	if (catalog == ForeignTableRelationId)
+	{
+		/*
+		 * This wrapper backs FOREIGN CATALOG objects; it is not a scannable
+		 * FDW and deliberately leaves GetForeignRelSize/GetForeignPaths/
+		 * GetForeignPlan/IterateForeignScan unset.  Without this check the
+		 * DDL succeeds and the first SELECT dereferences those null
+		 * callbacks, taking down the coordinator with SIGSEGV and restarting
+		 * the cluster -- a typo in a server name should cost an error
+		 * message, not an outage.
+		 */
+		ereport(ERROR,
+				(errcode(ERRCODE_WRONG_OBJECT_TYPE),
+				 errmsg("cannot create a foreign table on an Iceberg catalog server"),
+				 errdetail("Server wrapper \"iceberg_catalog_fdw\" backs CREATE FOREIGN "
+						   "CATALOG; it cannot be scanned as a table."),
+				 errhint("Use CREATE ICEBERG TABLE for a table in this catalog, or name "
+						 "a datalake_fdw server to create a foreign table.")));
+	}
+
+	if (catalog == ForeignServerRelationId)
+	{
+		char	   *type = getStringOption(options, DATALAKE_ICEBERG_CATALOG_SERVER_TYPE);
+
+		/*
+		 * Same fallback the option parser applies: "server_type" is what the
+		 * documentation shows, so without it a REST server spelled the
+		 * documented way skips validateRestServerOptionList entirely and is
+		 * created with no "url" at all.
+		 */
+		if (type == NULL)
+			type = getStringOption(options, "server_type");
+
+		if (type != NULL &&
+			pg_strcasecmp(type, DATALAKE_ICEBERG_CATALOG_SERVER_TYPE_REST) == 0)
+		{
+			/* Runs the url/endpoint/path_style_access/empty-value rules. */
+			validateRestServerOptionList(options);
+		}
+	}
+	else if (catalog == UserMappingRelationId)
+	{
+		/*
+		 * client_id/client_secret live in option.c-private defines; the
+		 * strings are stable public option names, so use them directly.
+		 */
+		char	   *ak = getStringOption(options, DATALAKE_ICEBERG_CATALOG_REST_ACCESS_KEY_ID);
+		char	   *sk = getStringOption(options, DATALAKE_ICEBERG_CATALOG_REST_SECRET_ACCESS_KEY);
+		char	   *cid = getStringOption(options, "client_id");
+		char	   *csec = getStringOption(options, "client_secret");
+
+		char	   *vended = getStringOption(options,
+											 DATALAKE_ICEBERG_CATALOG_REST_VENDED_CREDENTIALS);
+
+		if ((ak == NULL) != (sk == NULL))
+			ereport(ERROR,
+					(errcode(ERRCODE_FDW_OPTION_NAME_NOT_FOUND),
+					 errmsg("options \"access_key_id\" and \"secret_access_key\" must be set together")));
+
+		/*
+		 * Spelling is safe to check without knowing the catalog type: no
+		 * other type defines this key, so a value here is always meant for
+		 * the rest one.
+		 */
+		if (vended != NULL &&
+			pg_strcasecmp(vended, "on") != 0 && pg_strcasecmp(vended, "off") != 0 &&
+			pg_strcasecmp(vended, "true") != 0 && pg_strcasecmp(vended, "false") != 0)
+			ereport(ERROR,
+					(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+					 errmsg("invalid value for option \"vended_credentials\": \"%s\"",
+							vended),
+					 errhint("Valid values are \"on\" and \"off\".")));
+		if ((cid == NULL) != (csec == NULL))
+			ereport(ERROR,
+					(errcode(ERRCODE_FDW_OPTION_NAME_NOT_FOUND),
+					 errmsg("options \"client_id\" and \"client_secret\" must be set together")));
+	}
+
+	PG_RETURN_VOID();
 }
 
 /* Old resource management functions removed - now handled by agent_cli_wrapper */
@@ -537,6 +630,12 @@ executeModifyOperation(IcebergCatalogFdwState *fdwState,
 			agent_cli_wrapper_commit_update(catalogState->agentHandle,
 											fdwState->request.tableName, jsonString);
 			break;
+		case ICEBERG_SUBMIT_MAINTENANCE:
+			jsonString = createSubmitMaintenanceRequestJson(fdwState, catalogState->catalogOption,
+														    catalogState->volumeOption, fdwState->request);
+			agent_cli_wrapper_submit_maintenance(catalogState->agentHandle,
+												  fdwState->request.tableName, jsonString);
+			break;
 		case ICEBERG_COMMIT_REWRITE:
 			jsonString = createCommitFileGroupsRequestJson(fdwState, catalogState->catalogOption,
 														   catalogState->volumeOption, fdwState->request);
@@ -597,6 +696,36 @@ createLoadTableRequestJson(IcebergCatalogFdwState* fdwState, IcebergCatalogOptio
         DATALAKEFDW_ICEBERG_KEY_METADATA_TIMESTAMP, (double) req.metadataTimestamp);
 
     char *json_string = agentcli_cJSON_PrintUnformatted(request);
+    agentcli_cJSON_Delete(request);
+    return json_string;
+}
+
+/*
+ * Ask the platform to compact this table.
+ *
+ * Carries only what identifies the table: the platform decides for itself
+ * which files are worth merging, using thresholds of its own, so sending our
+ * own would put two policies in disagreement over the same table.  A request
+ * against a table with nothing to merge is answered normally and does no
+ * work, which is why not filtering here costs nothing.
+ */
+const char *
+createSubmitMaintenanceRequestJson(IcebergCatalogFdwState* fdwState, IcebergCatalogOptions *option,
+                                   IcebergVolumeOptions *volumeOpt, IcebergCatalogRequest req)
+{
+    agentcli_cJSON *request = agentcli_cJSON_CreateObject();
+    agentcli_cJSON *icebergConfig;
+    char *json_string;
+
+    agentcli_cJSON_AddStringToObject(request, DATALAKEFDW_ICEBERG_KEY_NAMESPACE, req.nameSpace);
+    /* Only compaction for now: expire and orphan cleanup delete files, which
+     * would strand this database's pinned metadata until it is refreshed. */
+    agentcli_cJSON_AddStringToObject(request, "taskType", "compaction");
+
+    icebergConfig = createIcebergConfig(option, volumeOpt);
+    agentcli_cJSON_AddItemToObject(request, DATALAKEFDW_ICEBERG_KEY_ICEBERGCONFIG, icebergConfig);
+
+    json_string = agentcli_cJSON_PrintUnformatted(request);
     agentcli_cJSON_Delete(request);
     return json_string;
 }
@@ -1104,6 +1233,58 @@ addPolarisCatalogConfig(agentcli_cJSON *catalogConfig, IcebergCatalogOptions *op
 
 }
 
+/*
+ * Wire config for the generic REST catalog.  Sensitive values here (the
+ * credentials) travel to the agent only; log masking of this JSON is
+ * handled by maskSensitiveDataInJson on the request path.
+ */
+static void
+addRestCatalogConfig(agentcli_cJSON *catalogConfig, IcebergCatalogOptions *option)
+{
+	RestCatalogOptions *server = &option->catalog_server.rest;
+	RestUserMappingOptions *user = &option->catalog_user.rest;
+
+	if (server->url)
+		agentcli_cJSON_AddStringToObject(catalogConfig, DATALAKEFDW_ICEBERG_KEY_REST_URL, server->url);
+	if (server->region)
+		agentcli_cJSON_AddStringToObject(catalogConfig, DATALAKEFDW_ICEBERG_KEY_REST_REGION, server->region);
+	if (server->signing_name)
+		agentcli_cJSON_AddStringToObject(catalogConfig, DATALAKEFDW_ICEBERG_KEY_REST_SIGNING_NAME, server->signing_name);
+	if (server->endpoint)
+		agentcli_cJSON_AddStringToObject(catalogConfig, DATALAKEFDW_ICEBERG_KEY_REST_ENDPOINT, server->endpoint);
+	agentcli_cJSON_AddBoolToObject(catalogConfig, DATALAKEFDW_ICEBERG_KEY_PATH_STYLE_ACCESS,
+								   server->path_style_access);
+	if (server->maintenance_api)
+		agentcli_cJSON_AddStringToObject(catalogConfig,
+										 DATALAKEFDW_ICEBERG_KEY_MAINTENANCE_API,
+										 server->maintenance_api);
+	if (server->polaris_server_realm)
+		agentcli_cJSON_AddStringToObject(catalogConfig,
+										 DATALAKEFDW_ICEBERG_KEY_POLARIS_SERVER_REALM,
+										 server->polaris_server_realm);
+
+	if (user->auth_method)
+		agentcli_cJSON_AddStringToObject(catalogConfig, DATALAKEFDW_ICEBERG_KEY_AUTH_METHOD, user->auth_method);
+	if (user->access_key_id)
+		agentcli_cJSON_AddStringToObject(catalogConfig, DATALAKEFDW_ICEBERG_KEY_ACCESS_KEY_ID, user->access_key_id);
+	if (user->secret_access_key)
+		agentcli_cJSON_AddStringToObject(catalogConfig, DATALAKEFDW_ICEBERG_KEY_SECRET_ACCESS_KEY, user->secret_access_key);
+	if (user->client_id)
+		agentcli_cJSON_AddStringToObject(catalogConfig, DATALAKEFDW_ICEBERG_KEY_CLIENT_ID, user->client_id);
+	if (user->client_secret)
+		agentcli_cJSON_AddStringToObject(catalogConfig, DATALAKEFDW_ICEBERG_KEY_CLIENT_SECRET, user->client_secret);
+	if (user->scope)
+		agentcli_cJSON_AddStringToObject(catalogConfig, DATALAKEFDW_ICEBERG_KEY_SCOPE, user->scope);
+	agentcli_cJSON_AddBoolToObject(catalogConfig,
+								   DATALAKEFDW_ICEBERG_KEY_REST_VENDED_CREDENTIALS,
+								   user->vended_credentials);
+
+	if (option->foreign_catalog.catalog_name)
+		agentcli_cJSON_AddStringToObject(catalogConfig, DATALAKEFDW_ICEBERG_KEY_CATALOG_NAME, option->foreign_catalog.catalog_name);
+	if (option->foreign_catalog.prefix)
+		agentcli_cJSON_AddStringToObject(catalogConfig, DATALAKEFDW_ICEBERG_KEY_REST_PREFIX, option->foreign_catalog.prefix);
+}
+
 static agentcli_cJSON* createIcebergCatalogConfig(IcebergCatalogOptions *option)
 {
     agentcli_cJSON *catalogConfig = agentcli_cJSON_CreateObject();
@@ -1120,6 +1301,10 @@ static agentcli_cJSON* createIcebergCatalogConfig(IcebergCatalogOptions *option)
         {
             addPolarisCatalogConfig(catalogConfig, option);
         }
+		else if (pg_strcasecmp(option->catalog_server.server_type, DATALAKE_ICEBERG_CATALOG_SERVER_TYPE_REST) == 0)
+		{
+			addRestCatalogConfig(catalogConfig, option);
+		}
     }
 
     if (option->catalog_server.server_name && strlen(option->catalog_server.server_name) > 0)
@@ -1637,6 +1822,20 @@ copyResponseToFdwState(IcebergCatalogFdwState *fdwState, AgentCliHandle *handle)
     fdwState->response.responseBody = handle->currentResponse->response_body ? pstrdup(handle->currentResponse->response_body) : NULL;
     fdwState->response.responseSize = handle->currentResponse->response_size;
     fdwState->response.errorMessage = handle->currentResponse->error_message ? pstrdup(handle->currentResponse->error_message) : NULL;
+
+    /*
+     * A failure raised before the request went out (null argument, exception
+     * while composing the URL) leaves the response struct all zeroes -- no
+     * status, no body, no message -- and only the handle knows what happened.
+     * Without this the caller reports "HTTP Status: 0, CURL Code: 0" and
+     * nothing else, which says only that something went wrong somewhere.
+     */
+    if ((fdwState->response.errorMessage == NULL ||
+         fdwState->response.errorMessage[0] == '\0') &&
+        fdwState->response.httpStatus == 0 &&
+        handle->lastStatus != AGENT_CLI_SUCCESS &&
+        handle->lastErrorMessage != NULL)
+        fdwState->response.errorMessage = pstrdup(handle->lastErrorMessage);
     fdwState->response.totalTime = handle->currentResponse->total_time;
     fdwState->response.retryCount = handle->currentResponse->retry_count;
 

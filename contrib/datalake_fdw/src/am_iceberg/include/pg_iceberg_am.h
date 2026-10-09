@@ -193,6 +193,39 @@ extern void pg_iceberg_stash_modify_catalog_properties(Oid relid,
 extern char *pg_iceberg_take_modify_catalog_properties(Oid relid);
 
 /*
+ * Modify-time REST storage envelope, keyed by relid.  Same three carriers as
+ * the fragments cache above, and the same reason: a write on a REST catalog
+ * table has no FOREIGN VOLUME to draw object-store credentials from, so the
+ * envelope the catalog vended must reach every writer QE with the plan.
+ *
+ * Tag and layout of the plan carrier (ModifyTable.fdwPrivLists[i]):
+ *
+ *     [0] fragments JSON String, "" when the statement is an INSERT
+ *     [1] catalog properties String (issue #410), "" when the catalog vends none
+ *     [2] String(ICEBERG_MODIFY_PRIV_ENVELOPE_TAG)   (only when [3] follows)
+ *     [3] envelope JSON String
+ *
+ * Entries 2-3 are absent for every non-REST catalog, so those plans keep the
+ * exact two-element slot they had before.  The reader finds the pair by its
+ * tag, not by index, so a later entry added ahead of it does not silently
+ * hide the envelope -- see envelope_from_modify_priv().
+ */
+#define ICEBERG_MODIFY_PRIV_ENVELOPE_TAG	"iceberg:rest-envelope"
+
+extern void pg_iceberg_stash_modify_envelope(Oid relid, const char *envelope);
+extern char *pg_iceberg_peek_modify_envelope(Oid relid);
+
+/*
+ * QD-side producer for the above.  Returns NULL when `rel` is not on a REST
+ * catalog.  `fragments_json`, when non-NULL, is the merged get-fragments
+ * response already fetched for this statement; its envelope is reused so that
+ * INSERT -- which needs no fragments -- is the only write that pays a catalog
+ * round trip of its own.
+ */
+extern char *pg_iceberg_get_modify_rest_envelope(Relation rel,
+												 const char *fragments_json);
+
+/*
  * Process-local cache of ANALYZE-time fragment lists, keyed by relid.
  * Filled on the QE by the PgIcebergAnalyzeDispatch ExtensibleNode handler,
  * consumed by pg_iceberg_acquire_sample_rows (issue #352).

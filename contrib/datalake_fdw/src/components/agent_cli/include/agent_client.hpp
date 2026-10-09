@@ -99,6 +99,10 @@ public:
                             const std::string& request_json,
                             const RequestConfig* request_config = nullptr);
 
+    Response submit_maintenance(const std::string& table_name,
+                                const std::string& request_json,
+                                const RequestConfig* request_config = nullptr);
+
     Response append_table(const std::string& table_name,
                          const std::string& request_json,
                          const RequestConfig* request_config = nullptr);
@@ -166,7 +170,8 @@ private:
     Response execute_request(const std::string& method,
                            const std::string& url,
                            const std::string& json_data,
-                           const RequestConfig* request_config);
+                           const RequestConfig* request_config,
+                           bool idempotent = true);
     ErrorCode setErrorCode(int http_status, long curl_code);
 };
 

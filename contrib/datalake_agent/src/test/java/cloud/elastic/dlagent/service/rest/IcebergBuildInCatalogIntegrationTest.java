@@ -16,6 +16,7 @@ import java.util.List;
 import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.*;
+import static org.junit.jupiter.api.Assumptions.assumeTrue;
 
 /**
  * Integration test for IcebergBuildInCatalog using REST API calls
@@ -38,6 +39,13 @@ public class IcebergBuildInCatalogIntegrationTest {
 
     @BeforeEach
     public void setUp() {
+        /*
+         * These post to a real agent. Skip rather than fail where none is up:
+         * the routing and contract they used to pretend to cover now live in
+         * IcebergRestControllerWebTest, which needs nothing running.
+         */
+        AgentAvailability.assumeAgentRunning();
+        AgentAvailability.assumeStorageRunning();
         restTemplate = new RestTemplate();
         objectMapper = new ObjectMapper();
         // Adjust port if your application runs on different port
@@ -58,7 +66,7 @@ public class IcebergBuildInCatalogIntegrationTest {
     @Test
     public void test1_TableExists_TableNotFound() throws Exception {
         // Arrange
-        String url = String.format("%s/%s/namespace/%s/tables/%s/exists", baseUrl, prefix, namespace, newTableName);
+        String url = String.format("%s/%s/tables/%s/exists", baseUrl, prefix, newTableName);
 
         Map<String, Object> request = createBuildInCatalogRequestConfig("false", "");
 
@@ -81,7 +89,7 @@ public class IcebergBuildInCatalogIntegrationTest {
     @Test
     public void test2_CreateTable() throws Exception {
         // Arrange
-        String url = String.format("%s/%s/namespaces/%s/tables/create", baseUrl, prefix, namespace);
+        String url = String.format("%s/%s/tables/create", baseUrl, prefix);
 
         Map<String, Object> request = createBuildInCatalogRequestConfig("false", "");
         request.put("name", newTableName);
@@ -122,7 +130,7 @@ public class IcebergBuildInCatalogIntegrationTest {
     @Test
     public void test3_TableExists_TableFound() throws Exception {
         // Arrange
-        String url = String.format("%s/%s/namespace/%s/tables/%s/exists", baseUrl, prefix, namespace, newTableName);
+        String url = String.format("%s/%s/tables/%s/exists", baseUrl, prefix, newTableName);
 
         Map<String, Object> request = createBuildInCatalogRequestConfig("true", format_metadata_location());
 
@@ -151,7 +159,7 @@ public class IcebergBuildInCatalogIntegrationTest {
     @Test
     public void test4_LoadTable() throws Exception {
         // Arrange
-        String url = String.format("%s/%s/namespaces/%s/tables/%s/load", baseUrl, prefix, namespace, newTableName);
+        String url = String.format("%s/%s/tables/%s/load", baseUrl, prefix, newTableName);
 
         Map<String, Object> request = createBuildInCatalogRequestConfig("true", format_metadata_location());
 
@@ -192,7 +200,7 @@ public class IcebergBuildInCatalogIntegrationTest {
     @Test
     public void test5_GetFragment() throws Exception {
         // Arrange
-        String url = String.format("%s/%s/namespace/%s/tables/%s/getFragment", baseUrl, prefix, namespace, newTableName);
+        String url = String.format("%s/%s/tables/%s/getFragment", baseUrl, prefix, newTableName);
 
         Map<String, Object> request = createBuildInCatalogRequestConfig("true", format_metadata_location());
 
@@ -229,7 +237,7 @@ public class IcebergBuildInCatalogIntegrationTest {
     @Test
     public void test6_CreateTableWithCustomLocation() throws Exception {
         String customTableName = "buildin_custom_location_" + System.currentTimeMillis();
-        String url = String.format("%s/%s/namespaces/%s/tables/create", baseUrl, prefix, namespace);
+        String url = String.format("%s/%s/tables/create", baseUrl, prefix);
 
         Map<String, Object> request = createBuildInCatalogRequestConfig("false", format_metadata_location());
         request.put("name", customTableName);
@@ -261,61 +269,38 @@ public class IcebergBuildInCatalogIntegrationTest {
         }
     }
 
+    /**
+     * The builtin catalog does support dropTable -- it delegates rather than
+     * throwing, unlike renameTable -- so this drops the table created earlier
+     * in the sequence and expects it to work.
+     *
+     * <p>This replaces a test7 that claimed to prove both drop and rename were
+     * "unsupported operations". It proved neither: its URL carried a
+     * {@code /namespace/{ns}/} segment the controller never had, so it only
+     * ever measured the 404 of a missing route. Rename's absence from the REST
+     * surface is now asserted in IcebergRestControllerWebTest, where it costs
+     * no infrastructure.
+     */
     @Test
-    public void test7_TestUnsupportedOperations() throws Exception {
-        // Test dropTable operation (should be unsupported)
-        String dropUrl = String.format("%s/%s/namespace/%s/tables/%s/drop", baseUrl, prefix, namespace, newTableName);
-        
+    public void test7_DropTable() throws Exception {
+        String dropUrl = String.format("%s/%s/tables/%s/drop", baseUrl, prefix, newTableName);
+
         Map<String, Object> request = createBuildInCatalogRequestConfig("true", format_metadata_location());
-        request.put("purge", true);
+        request.put("namespace", namespace);
+        request.put("purgeRequested", true);
 
         HttpHeaders headers = new HttpHeaders();
         headers.setContentType(MediaType.APPLICATION_JSON);
         HttpEntity<Map<String, Object>> entity = new HttpEntity<>(request, headers);
 
-        try {
-            ResponseEntity<String> response = restTemplate.postForEntity(dropUrl, entity, String.class);
-            fail("Expected UnsupportedOperationException for dropTable");
-        } catch (HttpClientErrorException e) {
-            System.out.println("BuildInCatalog - Expected error for dropTable: " + e.getStatusCode());
-            assertTrue(e.getStatusCode() == HttpStatus.NOT_IMPLEMENTED || 
-                      e.getStatusCode() == HttpStatus.METHOD_NOT_ALLOWED ||
-                      e.getStatusCode() == HttpStatus.BAD_REQUEST);
-            
-            if (e.getResponseBodyAsString().contains("UnsupportedOperationException") ||
-                e.getResponseBodyAsString().contains("does not support dropTable")) {
-                System.out.println("✅ BuildInCatalog correctly rejects dropTable operation");
-            }
-        }
-
-        // Test renameTable operation (should be unsupported)
-        String renameUrl = String.format("%s/%s/namespace/%s/tables/%s/rename", baseUrl, prefix, namespace, newTableName);
-        
-        Map<String, Object> renameRequest = createBuildInCatalogRequestConfig("true", format_metadata_location());
-        renameRequest.put("newName", "renamed_" + newTableName);
-        
-        HttpEntity<Map<String, Object>> renameEntity = new HttpEntity<>(renameRequest, headers);
-
-        try {
-            ResponseEntity<String> response = restTemplate.postForEntity(renameUrl, renameEntity, String.class);
-            fail("Expected UnsupportedOperationException for renameTable");
-        } catch (HttpClientErrorException e) {
-            System.out.println("BuildInCatalog - Expected error for renameTable: " + e.getStatusCode());
-            assertTrue(e.getStatusCode() == HttpStatus.NOT_IMPLEMENTED || 
-                      e.getStatusCode() == HttpStatus.METHOD_NOT_ALLOWED ||
-                      e.getStatusCode() == HttpStatus.BAD_REQUEST);
-            
-            if (e.getResponseBodyAsString().contains("UnsupportedOperationException") ||
-                e.getResponseBodyAsString().contains("does not support renameTable")) {
-                System.out.println("✅ BuildInCatalog correctly rejects renameTable operation");
-            }
-        }
+        ResponseEntity<String> response = restTemplate.postForEntity(dropUrl, entity, String.class);
+        assertEquals(HttpStatus.NO_CONTENT, response.getStatusCode());
     }
 
     @Test
     public void test8_CreateTableWithoutWarehouseLocation() throws Exception {
         String noWarehouseTableName = "buildin_no_warehouse_" + System.currentTimeMillis();
-        String url = String.format("%s/%s/namespaces/%s/tables/create", baseUrl, prefix, namespace);
+        String url = String.format("%s/%s/tables/create", baseUrl, prefix);
 
         // Create request without warehouse location to test BuildInCatalog fallback
         Map<String, Object> request = createBuildInCatalogRequestConfigWithoutWarehouse();
@@ -350,6 +335,9 @@ public class IcebergBuildInCatalogIntegrationTest {
      */
     private Map<String, Object> createBuildInCatalogRequestConfig(String table_exists, String metadata_location_str) {
         Map<String, Object> request = new HashMap<>();
+
+        // Every table endpoint reads the namespace out of the body, not the URL.
+        request.put("namespace", namespace);
 
         // IcebergConfig for BuildInCatalog
         Map<String, Object> icebergConfig = new HashMap<>();

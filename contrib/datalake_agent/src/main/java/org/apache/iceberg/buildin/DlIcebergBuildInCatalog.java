@@ -40,13 +40,15 @@ import org.apache.thrift.TException;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import java.io.Closeable;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.stream.Collectors;
 
 
-public class DlIcebergBuildInCatalog extends BaseMetastoreCatalog implements SupportsNamespaces, Configurable {
+public class DlIcebergBuildInCatalog extends BaseMetastoreCatalog
+        implements SupportsNamespaces, Configurable, Closeable {
     public static final String LIST_ALL_TABLES = "list-all-tables";
     public static final String LIST_ALL_TABLES_DEFAULT = "false";
 
@@ -234,5 +236,27 @@ public class DlIcebergBuildInCatalog extends BaseMetastoreCatalog implements Sup
     @Override
     protected Map<String, String> properties() {
         return catalogProperties == null ? ImmutableMap.of() : catalogProperties;
+    }
+
+    /**
+     * Releases the FileIO built in {@link #initialize}.  Under gopher that is a
+     * GopherFileIO holding a native connection, and this catalog is built fresh
+     * per request, so leaving it open accumulates one connection per write.
+     *
+     * <p>Idempotent: the field is cleared first, so a second call finds nothing
+     * to do.
+     */
+    @Override
+    public void close() {
+        FileIO io = fileIO;
+
+        fileIO = null;
+        if (io != null) {
+            try {
+                io.close();
+            } catch (Exception e) {
+                LOG.warn("Failed to close FileIO of built-in catalog {}", name, e);
+            }
+        }
     }
 }

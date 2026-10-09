@@ -30,6 +30,8 @@ extern int pg_iceberg_max_file_removals_per_vacuum;
 extern int pg_iceberg_max_compactions_per_vacuum;
 
 /* Scan pushdown */
+extern int pg_iceberg_agent_request_timeout;
+
 extern bool pg_iceberg_enable_predicate_pushdown;
 
 /* Batch column read/convert in the shared Parquet reader (kill-switch) */

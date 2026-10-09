@@ -1,0 +1,7 @@
+{
+  "catalog-properties": {
+    "envelope-version": 2,
+    "table-location": "s3://fixture-bucket/table/",
+    "metadata-location": "s3://fixture-bucket/table/metadata/v1.metadata.json"
+  }
+}

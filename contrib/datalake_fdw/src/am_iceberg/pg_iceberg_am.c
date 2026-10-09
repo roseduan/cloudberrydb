@@ -547,15 +547,22 @@ iceberg_fetch_fragments_json(Relation rel, IcebergTableInfo *table_info,
 
 	if (allow_cache &&
 		pg_iceberg_tracker_get_table_state(RelationGetRelid(rel)) == NULL &&
-		table_info->opts != NULL && table_info->opts->table != NULL)
+		pg_iceberg_table_is_external(table_info))
 	{
 		/*
 		 * External-catalog table, not modified in this transaction, being read
 		 * by a plain SELECT (issue #393): resolve the head from the external
-		 * catalog bounded by the per-table metadata_cache TTL.  This is what
+		 * catalog bounded by the effective metadata-cache TTL.  This is what
 		 * lets a SELECT observe snapshots committed externally -- the agent
-		 * reuses the cached head while younger than the TTL (metadata_cache=0 =
-		 * always latest) and a refresh is persisted to pg_iceberg_metadata.
+		 * reuses the cached head while younger than the TTL (TTL 0 = always
+		 * latest) and a refresh is persisted to pg_iceberg_metadata.
+		 *
+		 * The external test is pg_iceberg_table_is_external() rather than an
+		 * inline "has a table OPTION": a REST table created without an OPTIONS
+		 * clause is still external, and testing for the option here is what
+		 * previously sent those tables down the branch below, which answers
+		 * from the locally stored location and so never sees an externally
+		 * committed snapshot.
 		 *
 		 * A table already tracked in this transaction must keep going through
 		 * the tracker instead, for Read-Your-Own-Writes; allow_cache is false
@@ -721,6 +728,34 @@ pg_iceberg_build_scan_am_private(Relation rel, struct PlanState *ps, int random_
 			load_result->catalog_properties = NULL;
 		}
 		pg_iceberg_free_load_table_result(load_result);
+	}
+	else if (!is_internal &&
+			 checkIsGenericRestCatalog(table_info->catalog_server_name,
+									   table_info->catalog_name))
+	{
+		/*
+		 * Generic REST catalog: the storage envelope arrives inside the
+		 * fragments response itself (merged interface), produced by the
+		 * same catalog observation the fragments came from -- a second
+		 * load_table here could see a different table generation.  It is
+		 * re-serialized as the single trailing String extractCatalog-
+		 * Properties() expects on the QE.
+		 *
+		 * Ahead of the generic branch below on purpose: that one resolves
+		 * properties from the table's FOREIGN VOLUME, and a REST table has
+		 * none, so letting it take this case would append nothing and the
+		 * envelope would never reach the segments.
+		 */
+		char	   *envelope;
+
+		envelope = extractCatalogPropertiesEnvelope(fragments,
+													strlen(fragments));
+		if (envelope == NULL)
+			ereport(ERROR,
+					(errcode(ERRCODE_FDW_ERROR),
+					 errmsg("agent fragments response carries no catalog-properties envelope"),
+					 errhint("The datalake agent version predates the REST catalog envelope; upgrade the agent.")));
+		am_private = lappend(am_private, makeString(envelope));
 	}
 	else
 	{
@@ -1068,6 +1103,188 @@ pg_iceberg_take_modify_fragments(Oid relid)
 	fragments = entry->fragments;
 	hash_search(modify_fragments_cache, &relid, HASH_REMOVE, NULL);
 	return fragments;
+}
+
+/* ----------------------------------------------------------------
+ * Modify-time REST storage envelope cache
+ *
+ * Same shape and flow as the fragments cache above (see pg_iceberg_am.h for
+ * the plan-carrier layout), with one deliberate difference: the consumer
+ * *peeks* instead of taking.  iceberg_modify_init can run more than once per
+ * statement on a QE -- a plan with several ModifyTable subplans over the same
+ * relation is the ordinary case -- and a take would leave the second writer
+ * with no credentials at all.  Staleness is not the risk it would be for
+ * fragments: every statement re-stashes through the planner (QD) or
+ * ExecutorStart (QE) hook before any writer runs, and the entry is replaced,
+ * not merged.
+ * ----------------------------------------------------------------
+ */
+typedef struct ModifyEnvelopeEntry
+{
+	Oid		relid;			/* hash key */
+	char   *envelope;		/* TopMemoryContext-allocated JSON */
+} ModifyEnvelopeEntry;
+
+static HTAB *modify_envelope_cache = NULL;
+
+void
+pg_iceberg_stash_modify_envelope(Oid relid, const char *envelope)
+{
+	ModifyEnvelopeEntry   *entry;
+	bool					found;
+	MemoryContext			oldcxt;
+
+	if (!OidIsValid(relid) || envelope == NULL || envelope[0] == '\0')
+		return;
+
+	if (modify_envelope_cache == NULL)
+	{
+		HASHCTL ctl;
+
+		MemSet(&ctl, 0, sizeof(ctl));
+		ctl.keysize = sizeof(Oid);
+		ctl.entrysize = sizeof(ModifyEnvelopeEntry);
+		ctl.hcxt = TopMemoryContext;
+
+		modify_envelope_cache = hash_create("iceberg modify envelope cache",
+											 16, &ctl,
+											 HASH_ELEM | HASH_BLOBS | HASH_CONTEXT);
+	}
+
+	entry = (ModifyEnvelopeEntry *) hash_search(modify_envelope_cache,
+												&relid, HASH_ENTER, &found);
+
+	/*
+	 * The envelope carries short-lived vended credentials, so the previous
+	 * statement's copy is released here rather than left to accumulate in
+	 * TopMemoryContext for the life of the backend.
+	 */
+	if (found && entry->envelope != NULL)
+		pfree(entry->envelope);
+
+	oldcxt = MemoryContextSwitchTo(TopMemoryContext);
+	entry->envelope = pstrdup(envelope);
+	MemoryContextSwitchTo(oldcxt);
+}
+
+char *
+pg_iceberg_peek_modify_envelope(Oid relid)
+{
+	ModifyEnvelopeEntry   *entry;
+
+	if (modify_envelope_cache == NULL || !OidIsValid(relid))
+		return NULL;
+
+	entry = (ModifyEnvelopeEntry *) hash_search(modify_envelope_cache,
+												&relid, HASH_FIND, NULL);
+	if (entry == NULL || entry->envelope == NULL)
+		return NULL;
+
+	/*
+	 * A copy in the caller's context, not the cached pointer: the next
+	 * statement's stash frees what it replaces, and the writer state that
+	 * received this envelope is not guaranteed to be torn down first.
+	 */
+	return pstrdup(entry->envelope);
+}
+
+char *
+pg_iceberg_get_modify_rest_envelope(Relation rel, const char *fragments_json)
+{
+	IcebergTableInfo	   *table_info;
+	IcebergLoadTableResult *load_result;
+	char				   *envelope = NULL;
+	const char			   *nameSpace;
+	const char			   *tableName;
+	const char			   *catalogName;
+
+	table_info = pg_iceberg_get_table_info(RelationGetRelid(rel));
+
+	/*
+	 * Generic REST only: Polaris writes go on drawing their credentials from
+	 * the FOREIGN VOLUME, and its load-table response carries no envelope at
+	 * all, so the protocol-axis predicate would turn every Polaris write into
+	 * a hard error here.
+	 */
+	if (!checkIsGenericRestCatalog(table_info->catalog_server_name,
+								   table_info->catalog_name))
+	{
+		pg_iceberg_free_table_info(table_info);
+		return NULL;
+	}
+
+	/*
+	 * UPDATE/DELETE already hold the merged get-fragments response; its
+	 * envelope describes the very snapshot those fragments came from, so
+	 * reusing it also keeps the write consistent with the scan.
+	 */
+	if (fragments_json != NULL)
+	{
+		envelope = extractCatalogPropertiesEnvelope(fragments_json,
+													strlen(fragments_json));
+		if (envelope != NULL)
+		{
+			pg_iceberg_free_table_info(table_info);
+			return envelope;
+		}
+	}
+
+	/*
+	 * Resolve the catalog-side identity the same way every other caller does.
+	 * A table created without an OPTIONS clause records neither namespace nor
+	 * table in pg_lake_table, so reading opts straight through sent a NULL
+	 * table name down to the agent client, where it surfaced as the useless
+	 * "table_name is null" -- while the read path, which resolves properly,
+	 * worked on the very same relation.
+	 */
+	nameSpace = pg_iceberg_resolve_namespace(
+		table_info->opts ? table_info->opts->namespace : NULL,
+		table_info->catalog_server_name,
+		table_info->catalog_name,
+		RelationGetNamespace(rel));
+
+	if (table_info->opts == NULL || table_info->opts->table == NULL)
+	{
+		tableName = pstrdup(RelationGetRelationName(rel));
+		catalogName = NULL;
+	}
+	else
+	{
+		tableName = table_info->opts->table;
+		catalogName = table_info->opts->catalog;
+	}
+
+	/* INSERT: one lightweight load-table call, no fragment listing. */
+	load_result = pg_iceberg_load_table(catalogName,
+										nameSpace,
+										tableName,
+										table_info->catalog_server_name,
+										table_info->catalog_name,
+										table_info->volume_server_name,
+										table_info->volume_name);
+
+	if (load_result == NULL)
+		ereport(ERROR,
+				(errcode(ERRCODE_UNDEFINED_OBJECT),
+				 errmsg("iceberg table \"%s.%s\" does not exist in external catalog \"%s\"",
+						nameSpace,
+						tableName,
+						table_info->catalog_name)));
+
+	if (load_result->rest_envelope != NULL)
+	{
+		envelope = pstrdup(load_result->rest_envelope);
+	}
+	else
+		ereport(ERROR,
+				(errcode(ERRCODE_FDW_ERROR),
+				 errmsg("agent load-table response carries no catalog-properties envelope"),
+				 errhint("The datalake agent version predates the REST catalog envelope; upgrade the agent.")));
+
+	pg_iceberg_free_load_table_result(load_result);
+	pg_iceberg_free_table_info(table_info);
+
+	return envelope;
 }
 
 /* ----------------------------------------------------------------
@@ -1595,6 +1812,25 @@ pg_iceberg_build_sample_am_private(Relation rel)
 	am_private = parseIcebergFragmentResponse(fragments, strlen(fragments));
 
 	/*
+	 * A REST catalog table has no FOREIGN VOLUME, so the QE builds its
+	 * object-store connection from the storage envelope instead.  The
+	 * envelope rides inside the same fragments response the QD shipped (the
+	 * merged interface), and has to be re-serialized here as the single
+	 * trailing String extractCatalogProperties() looks for -- before the
+	 * segment trailer below, which it skips over.  Without it sampling dies
+	 * with "neither volume nor catalog_properties provided".
+	 *
+	 * Absent for every other catalog type, which keep their volume.
+	 */
+	{
+		char	   *envelope = extractCatalogPropertiesEnvelope(fragments,
+															   strlen(fragments));
+
+		if (envelope != NULL)
+			am_private = lappend(am_private, makeString(envelope));
+	}
+
+	/*
 	 * Append an all-segments-selected trailer directly instead of calling
 	 * datalakeSelectRandomSegments(n, n).  That helper always returns all
 	 * ones for the n-of-n case anyway, but reaches it through need_random(),
@@ -1935,6 +2171,45 @@ pg_iceberg_begin_vacuum_scan(Relation rel,
 }
 
 /*
+ * Should VACUUM hand this table's compaction to the storage platform?
+ *
+ * True only for a generic REST catalog whose server declares a maintenance
+ * API.  Both halves matter: the REST part says the platform owns the storage
+ * and a client-side rewrite would race its optimistic locking, and the
+ * declaration says this particular deployment actually serves an API we can
+ * drive -- the same platform serves it only when its operator switches it
+ * on, so the protocol alone cannot answer the question.
+ *
+ * Submits and reports as a side effect when it returns true.
+ */
+static bool
+pg_iceberg_vacuum_delegated_to_platform(Relation rel)
+{
+	IcebergTableInfo   *table_info;
+	bool				delegated = false;
+
+	table_info = pg_iceberg_get_table_info(RelationGetRelid(rel));
+
+	/*
+	 * Deliberately not gated on is_internal.  A REST table created without an
+	 * OPTIONS clause has opts->table == NULL, which that flag reads as
+	 * "internal" -- see the matching qualification in
+	 * pg_iceberg_get_latest_metadata_location().  The catalog is what decides
+	 * who owns the storage, so ask it directly.
+	 */
+	if (checkIsGenericRestCatalog(table_info->catalog_server_name,
+								  table_info->catalog_name) &&
+		getCatalogMaintenanceApi(table_info->catalog_server_name) != NULL)
+	{
+		pg_iceberg_submit_platform_maintenance(rel, table_info);
+		delegated = true;
+	}
+
+	pg_iceberg_free_table_info(table_info);
+	return delegated;
+}
+
+/*
  * pg_iceberg_relation_vacuum:
  *
  * Tableam relation_vacuum entry point for Iceberg.  All QD↔QE coordination
@@ -1959,6 +2234,16 @@ pg_iceberg_relation_vacuum(Relation rel, struct VacuumParams *params,
 	int				i;
 
 	if (Gp_role != GP_ROLE_DISPATCH)
+		return;
+
+	/*
+	 * A platform that maintains the table itself is asked to, rather than
+	 * worked around.  This is a QD-only exchange -- one request, no rewrite
+	 * of our own -- so it returns before any of the dispatch machinery below,
+	 * which exists to spread file rewriting across segments we are not doing
+	 * here.
+	 */
+	if (pg_iceberg_vacuum_delegated_to_platform(rel))
 		return;
 
 	dispatch_node = (PgIcebergVacuumDispatchNode *)
@@ -2083,6 +2368,39 @@ pg_iceberg_relation_vacuum_get_dispatch_tasks(Relation rel, struct VacuumParams 
 	table_info = pg_iceberg_get_table_info(RelationGetRelid(rel));
 	is_internal =
 		(table_info->opts == NULL || table_info->opts->table == NULL);
+	/*
+	 * The Iceberg REST spec defines no maintenance endpoints, so a platform
+	 * that offers compaction at all offers it through an API of its own,
+	 * outside the catalog protocol -- and it owns the table's storage while
+	 * doing so, which a client-side rewrite would race on optimistic
+	 * locking.  Hence VACUUM is rejected here rather than half-supported.
+	 *
+	 * Reached only when the platform declared no maintenance API: a server
+	 * that declares one was handled on the QD before any dispatch task was
+	 * built (pg_iceberg_vacuum_delegated_to_platform).  So there is nothing
+	 * left to offer -- we may not rewrite the files, and we have no way to
+	 * ask the platform to.
+	 *
+	 * Deliberately does not promise that maintenance happens by itself:
+	 * platforms differ, and at least one requires every compaction to be
+	 * submitted explicitly through an administrative API.  Telling the user
+	 * it is "handled for you" would leave small files accumulating with
+	 * nobody looking.  Polaris keeps its existing rewrite path: it is
+	 * excluded by checkIsPolarisCatalog() being true only for "polaris".
+	 */
+	if (checkIsGenericRestCatalog(table_info->catalog_server_name,
+								  table_info->catalog_name))
+		ereport(ERROR,
+				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+				 errmsg("VACUUM is not supported on tables in an external REST catalog"),
+				 errdetail("The catalog platform owns this table's storage, so compaction "
+						   "and snapshot expiry have to run there; rewriting the files from "
+						   "here would race the platform's own maintenance."),
+				 errhint("If the platform serves a maintenance API, declare it on the "
+						 "catalog server (OPTIONS (maintenance_api 's3tables')) and VACUUM "
+						 "will submit the job. Otherwise request maintenance through the "
+						 "platform's own interface -- do not assume it runs by itself.")));
+
 	/* VACUUM rewrites the current head; never operate on a cached snapshot. */
 	metadata_location = pg_iceberg_get_latest_metadata_location(
 		RelationGetRelid(rel), table_info, false);

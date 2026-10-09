@@ -1012,7 +1012,7 @@ components:
         server_type:
           type: string
           description: iceberg catalog type
-          enum: [hive, hadoop, s3, polaris]
+          enum: [hive, hadoop, s3, polaris, rest]
           example: "hive"
         hive_metastore_uri:
           type: string
@@ -1025,7 +1025,7 @@ components:
         auth_method:
           type: string
           description: auth method
-          enum: [simple, kerberos]
+          enum: [simple, kerberos, sigv4, oauth2, none]
           example: "simple"
         krb_service_principal:
           type: string
@@ -1061,6 +1061,9 @@ components:
         polaris_server_url:
           type: string
           description: polaris server url
+        polaris_server_realm:
+          type: string
+          description: polaris realm header value
         client_id:
           type: string
           description: polaris client_id
@@ -1069,7 +1072,31 @@ components:
           description: polaris client_secret
         scope:
           type: string
-          description: polaris scope
+          description: OAuth2 scope
+        url:
+          type: string
+          description: REST catalog base URL
+        signing_name:
+          type: string
+          description: SigV4 signing service name
+        endpoint:
+          type: string
+          description: object storage endpoint fallback
+        prefix:
+          type: string
+          description: REST route prefix; defaults to catalog_name
+        region:
+          type: string
+          description: SigV4 and object storage region
+        access_key_id:
+          type: string
+          description: SigV4 and static data-plane access key
+        secret_access_key:
+          type: string
+          description: SigV4 and static data-plane secret key
+        path_style_access:
+          type: boolean
+          description: static object storage path-style access
 
     IcebergVolumeConfig:
       type: object

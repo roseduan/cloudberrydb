@@ -33,9 +33,7 @@ void freeIcebergConfigV2Options(IcebergOptions *options) {
 
 //     icebergOptions->foreign_catalog.catalog_name = pstrdup("production");
 //     icebergOptions->foreign_catalog.default_namespace = pstrdup("default");
-//     icebergOptions->foreign_catalog.enable_metadata_cache = true;
-//     icebergOptions->foreign_catalog.metadata_cache_ttl = 3600;
-//     icebergOptions->foreign_catalog.auto_refresh_metadata = true;
+//     icebergOptions->foreign_catalog.metadata_cache = 60;
 //     icebergOptions->foreign_catalog.warehouse_location_prefix = pstrdup("s3://warehouse/production/");
 
 //     icebergOptions->volume_server.server_type = pstrdup("hive");

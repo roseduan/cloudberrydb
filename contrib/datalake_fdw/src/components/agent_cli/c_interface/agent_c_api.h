@@ -91,6 +91,7 @@ void agent_cli_wrapper_commit_file_groups(AgentCliHandle* handle, const char* ta
 void agent_cli_wrapper_commit_append(AgentCliHandle* handle, const char* table_name, const char* json);
 void agent_cli_wrapper_commit_update(AgentCliHandle* handle, const char* table_name, const char* json);
 void agent_cli_wrapper_commit_rewrite(AgentCliHandle* handle, const char* table_name, const char* json);
+void agent_cli_wrapper_submit_maintenance(AgentCliHandle* handle, const char* table_name, const char* json);
 void agent_cli_wrapper_append_table(AgentCliHandle* handle, const char* table_name, const char* json);
 void agent_cli_wrapper_update_table(AgentCliHandle* handle, const char* table_name, const char* json);
 void agent_cli_wrapper_truncate_table(AgentCliHandle* handle, const char* table_name, const char* json);

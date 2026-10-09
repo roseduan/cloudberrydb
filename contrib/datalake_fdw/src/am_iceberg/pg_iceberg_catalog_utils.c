@@ -21,6 +21,8 @@
 #include "utils/json.h"
 #include "utils/jsonfuncs.h"
 
+#include <curl/curl.h>
+
 #include "../datalake_def.h"
 #include "src/common/iceberg_constants.h"
 #include "include/pg_iceberg_catalog_utils.h"
@@ -600,29 +602,32 @@ parse_statistics_response(char *json_response)
 }
 
 /*
- * extract_json_stack_trace
- *		Extract the "stack" field from JSON error response and convert
- *		JSON-escaped newlines (\n, \t) into real newlines/tabs so the
- *		Java stack trace prints readably in the PG log.
- *		Returns palloc'd string, or NULL if no stack found.
+ * pg_iceberg_extract_json_string
+ *		Read one string-valued field out of an agent response, converting the
+ *		JSON escapes (\n, \t, \\, \") back into real characters.
+ *
+ * A whole JSON parser is not warranted for this: the agent's error bodies are
+ * flat, the keys wanted are known, and the caller only ever needs the text to
+ * put in a message.  Returns palloc'd text, or NULL when the key is absent.
  */
-static char *
-extract_json_stack_trace(const char *body)
+char *
+pg_iceberg_extract_json_string(const char *body, const char *key)
 {
-	const char *stack_key = "\"stack\":\"";
+	char	   *needle;
 	const char *p;
 	const char *start;
 	const char *end;
 	StringInfoData buf;
 
-	if (!body)
+	if (!body || !key)
 		return NULL;
 
-	p = strstr(body, stack_key);
-	if (!p)
+	needle = psprintf("\"%s\":\"", key);
+	p = strstr(body, needle);
+	start = (p != NULL) ? p + strlen(needle) : NULL;
+	pfree(needle);
+	if (start == NULL)
 		return NULL;
-
-	start = p + strlen(stack_key);
 
 	/* Find the closing quote — skip escaped quotes */
 	end = start;
@@ -682,6 +687,112 @@ extract_json_stack_trace(const char *body)
 }
 
 /*
+ * extract_json_stack_trace
+ *		The agent's Java stack trace, unescaped so it prints readably.
+ */
+static char *
+extract_json_stack_trace(const char *body)
+{
+	return pg_iceberg_extract_json_string(body, "stack");
+}
+
+/*
+ * agent_credential_hint
+ *		Advice for an agent response that failed on object-store credentials,
+ *		or NULL when it failed on something else.
+ *
+ * Worth special-casing for two reasons.  The agent answers such a failure
+ * with a Java stack trace that embeds the object-store client's full request
+ * dump -- which is both unreadable and, because the dump includes
+ * X-Amz-Security-Token, a way to spill a live credential into the server log
+ * and the client's terminal.  And the condition is ordinary rather than
+ * exceptional: catalog-vended credentials are short-lived by design.
+ */
+static const char *
+agent_credential_hint(const char *responseBody)
+{
+	static const char *const expired[] = {
+		"ExpiredToken",
+		"TokenRefreshRequired",
+		"InvalidAccessKeyId",
+		"InvalidToken",
+	};
+	static const char *const rejected[] = {
+		"SignatureDoesNotMatch",
+		"AccessDenied",
+	};
+	size_t		i;
+
+	if (responseBody == NULL || responseBody[0] == '\0')
+		return NULL;
+
+	for (i = 0; i < lengthof(expired); i++)
+		if (strstr(responseBody, expired[i]) != NULL)
+			return "The object-store credentials are no longer valid. Credentials "
+				   "vended by an Iceberg REST catalog are short-lived and are not "
+				   "renewed mid-statement, so rerunning the statement obtains a "
+				   "fresh set. If it fails again, the statement runs longer than "
+				   "the catalog's credential lifetime.";
+
+	for (i = 0; i < lengthof(rejected); i++)
+		if (strstr(responseBody, rejected[i]) != NULL)
+			return "The object store rejected these credentials. If they were "
+				   "vended by the catalog, check that the catalog request is "
+				   "signed (auth_method, signing_name and region on the catalog "
+				   "server): a catalog that issues credentials per requester "
+				   "identity answers an unsigned request with credentials that "
+				   "cannot read anything.";
+
+	return NULL;
+}
+
+/*
+ * Operations that advance the catalog.  Replaying one that already applied
+ * duplicates its rows, which is what makes "did it apply?" worth answering
+ * carefully -- see commit_outcome_unknown() below.
+ */
+static bool
+operation_advances_catalog(IcebergCatalogOperation op)
+{
+	switch (op)
+	{
+		case ICEBERG_COMMIT_APPEND:
+		case ICEBERG_COMMIT_UPDATE:
+		case ICEBERG_COMMIT_DELETE:
+		case ICEBERG_COMMIT_REWRITE:
+		case ICEBERG_COMMIT_FILE_GROUPS:
+			return true;
+		default:
+			return false;
+	}
+}
+
+/*
+ * Did a commit request leave us unable to say whether it applied?
+ *
+ * The agent says so itself when it can (a 424 carrying
+ * CommitStateUnknownException), but that answer travels in a response body,
+ * and the case handled here is the one where no response arrives at all.
+ * Silence is not failure: the request was already on the wire, so the agent
+ * may have committed it and simply not finished answering -- measured at 380
+ * seconds against a 300-second budget when object storage was returning
+ * retryable errors during reconciliation.
+ *
+ * CURLE_COULDNT_CONNECT is deliberately excluded: no connection means the
+ * request provably never left, so that one really is a plain failure and is
+ * safe to re-run.  The transport draws the same line when deciding whether a
+ * non-idempotent request may be retried.
+ */
+static bool
+commit_outcome_unknown(IcebergCatalogFdwState *fdwState)
+{
+	return operation_advances_catalog(fdwState->catalogOperation) &&
+		fdwState->response.httpStatus == 0 &&
+		fdwState->response.curlCode != CURLE_COULDNT_CONNECT &&
+		fdwState->response.curlCode != 0;
+}
+
+/*
  * check_fdw_execution_error
  *		Verify if an FDW catalog operation succeeded and report errors if not.
  */
@@ -689,6 +800,74 @@ void
 check_fdw_execution_error(IcebergCatalogFdwState *fdwState, const char *error_prefix)
 {
 	StringInfoData errorBuf;
+	const char *credential_hint;
+
+	/*
+	 * A commit whose reply was lost and whose outcome the agent could not
+	 * re-read from the table either.  The one thing the user must know is
+	 * that this is not a failure: the data may well be in the table, so the
+	 * usual reflex of re-running the statement is exactly what can go wrong.
+	 * The Java stack trace below adds nothing to that and buries it.
+	 *
+	 * Checked ahead of the credential hint on purpose.  agent_credential_hint
+	 * looks for markers like "AccessDenied" anywhere in the body, stack trace
+	 * included, so a lost-reply commit that mentions one anywhere in its cause
+	 * chain would otherwise be reported as "credentials were rejected" -- a
+	 * hint whose advice is to re-run the statement.  Getting that wrong in
+	 * this direction duplicates data silently; getting it wrong in the other
+	 * direction only costs a less specific message.
+	 */
+	if (fdwState->lastStatus != ICEBERG_SUCCESS &&
+		commit_outcome_unknown(fdwState))
+		ereport(ERROR,
+				(errcode(ERRCODE_FDW_ERROR),
+				 errmsg("%s: iceberg commit result unknown", error_prefix),
+				 errdetail("The agent stopped answering while a commit was in flight "
+						   "(%s); the request had already been sent, so the "
+						   "statement's data may or may not have been committed.",
+						   fdwState->response.errorMessage != NULL &&
+						   fdwState->response.errorMessage[0] != '\0'
+						   ? fdwState->response.errorMessage : "no response"),
+				 errhint("Verify whether this statement's rows are in the table before "
+						 "re-running it: re-running a commit that was actually applied "
+						 "duplicates its rows.")));
+
+	if (fdwState->lastStatus != ICEBERG_SUCCESS &&
+		fdwState->response.responseBody != NULL &&
+		strstr(fdwState->response.responseBody, "CommitStateUnknownException") != NULL)
+		ereport(ERROR,
+				(errcode(ERRCODE_FDW_ERROR),
+				 errmsg("%s: iceberg commit result unknown", error_prefix),
+				 errdetail("The catalog stopped answering while a commit was in flight "
+						   "and the table state could not be re-read afterwards; the "
+						   "statement's data may or may not have been committed. No "
+						   "files were deleted."),
+				 errhint("Verify whether this statement's rows are in the table before "
+						 "re-running it: re-running a commit that was actually applied "
+						 "duplicates its rows.")));
+
+	/*
+	 * Handled before the generic path below, which would otherwise append the
+	 * whole Java stack trace -- see agent_credential_hint on why that is worse
+	 * than useless here.
+	 *
+	 * Deliberately does not name the layer that refused.  The same
+	 * InvalidAccessKeyId reaches us whether the object store turned down a
+	 * data request or the catalog turned down the request that would have
+	 * vended the credentials for it, and by this point the two are
+	 * indistinguishable -- both arrive as the agent's 500 with the provider's
+	 * body inside.  Claiming "object storage" when it was the catalog sends
+	 * the reader to the wrong place; the hint covers both.
+	 */
+	credential_hint = (fdwState->lastStatus != ICEBERG_SUCCESS)
+		? agent_credential_hint(fdwState->response.responseBody) : NULL;
+
+	if (credential_hint != NULL)
+		ereport(ERROR,
+				(errcode(ERRCODE_FDW_ERROR),
+				 errmsg("%s: credentials were rejected (HTTP %d)",
+						error_prefix, fdwState->response.httpStatus),
+				 errhint("%s", credential_hint)));
 
 	if (fdwState->lastStatus != ICEBERG_SUCCESS)
 	{

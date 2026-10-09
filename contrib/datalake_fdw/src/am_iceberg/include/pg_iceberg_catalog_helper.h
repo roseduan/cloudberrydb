@@ -17,6 +17,7 @@
 #include "commands/vacuum.h"
 #include "pg_iceberg_rewrite_plan.h"
 #include "../iceberg_catalog_fdw/iceberg_catalog_fdw.h"
+#include "pg_iceberg_catalog.h"
 
 typedef struct IcebergTableStatistics IcebergTableStatistics;
 
@@ -69,6 +70,16 @@ typedef struct IcebergLoadTableResult
 	 */
 	int64 timestamp;
 	bool timestamp_present;
+
+	/*
+	 * Verbatim "catalog-properties" storage envelope, present only for generic
+	 * REST catalogs.  Unlike catalog_properties above -- which this code
+	 * synthesizes from separate response fields in the legacy Polaris shape --
+	 * this is the agent's own envelope object, kept intact because the QE
+	 * distinguishes the two generations by its "envelope-version" key.
+	 * NULL for polaris / hive / builtin responses.
+	 */
+	char *rest_envelope;
 } IcebergLoadTableResult;
 
 /*
@@ -127,7 +138,7 @@ extern char *pg_iceberg_create_table(Relation relation,
 									 const char *volumeServer,
 									 const char *volumeName,
 									 const char *location,
-									 char **partition_spec_summary_out);
+									 IcebergLoadTableResult **created_out);
 
 /*
  * Load (resolve) an Iceberg table's current metadata head from the agent.
@@ -225,6 +236,9 @@ extern char *pg_iceberg_get_snapshots(Relation relation,
 									  const char *foreignCatalogName,
 									  const char *volumeServer,
 									  const char *volumeName);
+
+extern void pg_iceberg_submit_platform_maintenance(Relation rel,
+												   IcebergTableInfo *table_info);
 
 extern char *pg_iceberg_catalog_op(Relation relation,
 									 IcebergCatalogOperation op,

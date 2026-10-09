@@ -20,6 +20,13 @@ struct HttpRequest {
     std::map<std::string, std::string> headers;
     int timeout = 30;
     int connect_timeout = 10;
+    /*
+     * False for requests that must not be replayed blindly (Iceberg commits:
+     * a retried commit that already applied duplicates data).  Such requests
+     * are retried only when the connection could not be established at all,
+     * i.e. the server provably never saw them.
+     */
+    bool idempotent = true;
 };
 
 struct HttpResponse {

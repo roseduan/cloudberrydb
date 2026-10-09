@@ -29,6 +29,7 @@
 #include "utils/lsyscache.h"
 
 #include "../iceberg_catalog_fdw/iceberg_catalog_fdw.h"
+#include "../dlproxy/iceberg_common.h"
 #include "include/pg_iceberg_catalog_helper.h"
 #include "include/pg_iceberg_catalog.h"
 #include "include/pg_iceberg_catalog_utils.h"
@@ -555,12 +556,28 @@ extract_location_from_fdw_state(IcebergCatalogFdwState *fdwState)
 static IcebergLoadTableResult *
 extract_load_table_result_from_fdw_state(IcebergCatalogFdwState *fdwState)
 {
+	IcebergLoadTableResult *result;
+
 	/* Table not found is not an error — return NULL so callers can create it */
 	if (is_table_not_found_error(fdwState))
 		return NULL;
 
 	check_fdw_execution_error(fdwState, "Failed to load Iceberg table");
-	return parse_load_table_response(fdwState->response.responseBody);
+	result = parse_load_table_response(fdwState->response.responseBody);
+
+	/*
+	 * A generic REST catalog additionally returns its storage envelope under
+	 * "catalog-properties".  Keep it verbatim alongside the synthesized
+	 * legacy-shaped catalog_properties: the write path needs an envelope the
+	 * QE will recognize as such, and a non-REST response simply has no such
+	 * key, so this stays NULL there.
+	 */
+	if (result != NULL && fdwState->response.responseBody != NULL)
+		result->rest_envelope =
+			extractCatalogPropertiesEnvelope(fdwState->response.responseBody,
+											 strlen(fdwState->response.responseBody));
+
+	return result;
 }
 
 static char *
@@ -735,6 +752,127 @@ pg_iceberg_update_schema_op(const char *catalogName,
 	return extract_location_from_fdw_state(fdwState);
 }
 
+/*
+ * pg_iceberg_submit_platform_maintenance
+ *		Ask the storage platform to compact this table, and report what it said.
+ *
+ * Submission only.  The job runs on the platform's schedule; this returns as
+ * soon as it is queued, so what comes back says whether the request was
+ * accepted -- not whether any files were merged.  That is the honest shape
+ * for an API that is asynchronous by design, and it keeps VACUUM from
+ * blocking a session for as long as a compaction takes.
+ *
+ * A platform that already has a job for this table answers 409, and answers
+ * it the same way whether that job is running or finished.  A running one is
+ * not a failure -- the maintenance the caller asked for is already happening,
+ * and erroring would break a script that vacuums a list of tables for no
+ * reason.  A finished one is: it blocks every later submission for the table
+ * until someone clears it, so saying nothing would leave the user waiting on
+ * a job that cannot complete.  The agent tells the two apart.
+ */
+void
+pg_iceberg_submit_platform_maintenance(Relation rel, IcebergTableInfo *table_info)
+{
+	IcebergCatalogFdwState *fdwState;
+	const char	   *nameSpace;
+	const char	   *tableName;
+	const char	   *catalogName;
+	const char	   *relname = RelationGetRelationName(rel);
+
+	nameSpace = pg_iceberg_resolve_namespace(
+		table_info->opts ? table_info->opts->namespace : NULL,
+		table_info->catalog_server_name,
+		table_info->catalog_name,
+		RelationGetNamespace(rel));
+
+	if (table_info->opts == NULL || table_info->opts->table == NULL)
+	{
+		tableName = relname;
+		catalogName = NULL;
+	}
+	else
+	{
+		tableName = table_info->opts->table;
+		catalogName = table_info->opts->catalog;
+	}
+
+	fdwState = execute_catalog_op_via_fdw(ICEBERG_SUBMIT_MAINTENANCE,
+										  NULL,
+										  NULL,
+										  false,
+										  catalogName,
+										  nameSpace,
+										  tableName,
+										  table_info->catalog_server_name,
+										  table_info->catalog_name,
+										  NULL,
+										  NULL,
+										  NULL);
+
+	if (fdwState->response.httpStatus == 409)
+	{
+		const char *body = fdwState->response.responseBody;
+		char	   *conflict = pg_iceberg_extract_json_string(body,
+															  "maintenanceConflict");
+
+		/*
+		 * A job left behind in a terminal state answers 409 exactly like a
+		 * running one, and blocks every later submission for this table until
+		 * it is removed.  Reporting that as "already running" sends the user
+		 * off to wait for a job that will never finish, so it is an error --
+		 * the maintenance they asked for did not happen and will not happen
+		 * on its own.
+		 */
+		if (conflict != NULL && strcmp(conflict, "terminal") == 0)
+		{
+			char	   *state = pg_iceberg_extract_json_string(body, "jobStatus");
+			char	   *why = pg_iceberg_extract_json_string(body, "failureMessage");
+			char	   *where = pg_iceberg_extract_json_string(body, "deletePath");
+			StringInfoData detail;
+
+			initStringInfo(&detail);
+			appendStringInfo(&detail,
+							 "The platform allows one job per table and type, "
+							 "and this one is in state %s",
+							 state != NULL ? state : "unknown");
+			if (why != NULL && why[0] != '\0')
+				appendStringInfo(&detail, ": %s", why);
+			appendStringInfoString(&detail, ". Nothing was submitted.");
+
+			ereport(ERROR,
+					(errcode(ERRCODE_FDW_ERROR),
+					 errmsg("iceberg: \"%s\" has a maintenance job that "
+							"already finished and was not cleared", relname),
+					 errdetail("%s", detail.data),
+					 where != NULL
+					 ? errhint("Delete it on the storage platform, then run "
+							   "VACUUM again (DELETE %s).", where)
+					 : errhint("Delete it on the storage platform, then run "
+							   "VACUUM again.")));
+		}
+
+		ereport(NOTICE,
+				(errmsg("iceberg: a maintenance job is already running for \"%s\"",
+						relname),
+				 errdetail("The platform allows one job per table and type; "
+						   "this request was not submitted.")));
+		return;
+	}
+
+	check_fdw_execution_error(fdwState, "Failed to submit iceberg maintenance");
+
+	ereport(NOTICE,
+			(errmsg("iceberg: compaction submitted for \"%s\"", relname),
+			 errdetail("The platform runs the job on its own schedule; until it "
+					   "finishes, reads continue to use the files the table has "
+					   "now."),
+			 errhint("Nothing else is needed here: a scan of a table on an "
+					 "external catalog resolves that catalog's current head, so "
+					 "the compacted files are read as soon as the job lands -- "
+					 "within the table's metadata_cache TTL where one is set. "
+					 "Progress is visible through the storage platform.")));
+}
+
 IcebergLoadTableResult *
 pg_iceberg_load_table(const char *catalogName,
 					  const char *nameSpace,
@@ -792,6 +930,8 @@ pg_iceberg_free_load_table_result(IcebergLoadTableResult *result)
 		pfree(result->location);
 	if (result->partition_spec_summary != NULL)
 		pfree(result->partition_spec_summary);
+	if (result->rest_envelope != NULL)
+		pfree(result->rest_envelope);
 	pfree(result);
 }
 
@@ -951,7 +1091,7 @@ pg_iceberg_create_table(Relation relation,
 						const char *volumeServer,
 						const char *volumeName,
 						const char *location,
-						char **partition_spec_summary_out)
+						IcebergLoadTableResult **created_out)
 {
 	IcebergTableSchema	   *schema;
 	IcebergCatalogFdwState *fdwState;
@@ -978,26 +1118,14 @@ pg_iceberg_create_table(Relation relation,
 	result = extract_location_from_fdw_state(fdwState);
 
 	/*
-	 * The agent's create response also carries "partition-spec-summary" for
-	 * the table it actually created.  Surface it (when requested) so the
-	 * caller can verify it matches the declared PARTITION BY without a second
-	 * round-trip -- a builtin-catalog load_table needs a metadata location we
-	 * do not have yet, which is why the builtin path cannot simply refresh.
+	 * The agent's create response is a full load-table response: it also
+	 * carries "table-location" and "partition-spec-summary" for the table it
+	 * actually created.  Surface the parsed response (when requested) so the
+	 * caller can persist the location and verify the partition spec without a
+	 * second round-trip.
 	 */
-	if (partition_spec_summary_out != NULL)
-	{
-		IcebergLoadTableResult *created;
-
-		*partition_spec_summary_out = NULL;
-		created = parse_load_table_response(fdwState->response.responseBody);
-		if (created != NULL)
-		{
-			if (created->partition_spec_summary != NULL)
-				*partition_spec_summary_out =
-					pstrdup(created->partition_spec_summary);
-			pg_iceberg_free_load_table_result(created);
-		}
-	}
+	if (created_out != NULL)
+		*created_out = parse_load_table_response(fdwState->response.responseBody);
 
 	return result;
 }

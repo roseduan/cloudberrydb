@@ -6,6 +6,8 @@ import cloud.elastic.dlagent.api.model.IcebergRequestConfigParser;
 import cloud.elastic.dlagent.api.model.iceberg.IcebergRequestConfig;
 import cloud.elastic.dlagent.constants.IcebergConfigConstants;
 import cloud.elastic.dlagent.plugins.iceberg.utilities.IcebergUtilities;
+import cloud.elastic.dlagent.plugins.iceberg.S3TablesMaintenanceClient;
+import cloud.elastic.dlagent.plugins.iceberg.utilities.SensitiveDataRedactor;
 import cloud.elastic.dlagent.service.iceberg.IcebergService;
 import cloud.elastic.dlagent.service.iceberg.SchemaConverter;
 import cloud.elastic.dlagent.service.iceberg.SchemaOp;
@@ -233,6 +235,10 @@ public class IcebergRestController {
         // for its TTL window (the agent's clock is the single source of truth).
         response.put("metadata-timestamp", System.currentTimeMillis());
 
+        if (IcebergConfigConstants.CATALOG_TYPE_REST.equals(context.getCatalogType())) {
+            putRestEnvelope(response, context.getCatalogProperties());
+        }
+
         // Add config to response - static S3 configuration (non-sensitive)
         Map<String, String> config = new HashMap<>();
 
@@ -240,12 +246,14 @@ public class IcebergRestController {
         // GopherFileIO does not implement FileIO.properties() (throws
         // UnsupportedOperationException); treat as empty in that case — the
         // S3 config/credential fields below are optional response payload.
-        FileIO fileIO = icebergTable.io();
-        Map<String, String> ioProps;
-        try {
-            ioProps = fileIO.properties();
-        } catch (UnsupportedOperationException e) {
-            ioProps = java.util.Collections.emptyMap();
+        Map<String, String> ioProps = java.util.Collections.emptyMap();
+        if (!IcebergConfigConstants.CATALOG_TYPE_REST.equals(context.getCatalogType())) {
+            FileIO fileIO = icebergTable.io();
+            try {
+                ioProps = fileIO.properties();
+            } catch (UnsupportedOperationException e) {
+                ioProps = java.util.Collections.emptyMap();
+            }
         }
 
         // Extract S3 config from FileIO properties
@@ -262,7 +270,9 @@ public class IcebergRestController {
             config.put("client.region", ioProps.get("client.region"));
         }
         addResolvedVolumeConfig(config, properties);
-        response.put("config", config);
+        if (!IcebergConfigConstants.CATALOG_TYPE_REST.equals(context.getCatalogType())) {
+            response.put("config", config);
+        }
 
         // Add storage-credentials - sensitive credentials from FileIO
         Map<String, String> credConfig = new HashMap<>();
@@ -277,7 +287,8 @@ public class IcebergRestController {
         }
         addResolvedVolumeCredentials(credConfig, properties);
 
-        if (!credConfig.isEmpty()) {
+        if (!IcebergConfigConstants.CATALOG_TYPE_REST.equals(context.getCatalogType())
+                && !credConfig.isEmpty()) {
             List<Map<String, Object>> storageCredentials = new ArrayList<>();
             Map<String, Object> credential = new HashMap<>();
             credential.put("prefix", icebergTable.location());
@@ -1252,6 +1263,85 @@ public class IcebergRestController {
     }
 
     /**
+     * Ask the storage platform to run a maintenance job for this table.
+     *
+     * <p>Submission only, and deliberately so: the platform queues the job and
+     * runs it on its own schedule, so blocking here would tie a SQL session to
+     * a compaction measured in minutes.  The reply reports whether the request
+     * was accepted; 409 is passed through as-is because "a job already exists
+     * for this table" is the platform's own throttle rather than an error.
+     */
+    @PostMapping({
+        "/{prefix}/tables/{table}/submitMaintenance",
+        "/tables/{table}/submitMaintenance"
+    })
+    public ResponseEntity<?> submitMaintenance(
+            @PathVariable(value = "prefix", required = false) String prefix,
+            @PathVariable("table") String table,
+            @RequestBody Map<String, Object> request) throws Exception {
+
+        String namespace = (String) request.get("namespace");
+        if (namespace == null || namespace.trim().isEmpty()) {
+            throw new IllegalArgumentException("Namespace is required in request body");
+        }
+        String taskType = (String) request.getOrDefault("taskType", "compaction");
+
+        Map<String, String> properties = extractProperties(request);
+
+        String declared = properties.get(
+                catKey(IcebergConfigConstants.ICEBERG_CATALOG_CONFIG.MAINTENANCE_API));
+        if (declared == null || declared.isEmpty()) {
+            return createErrorResponse(
+                    "this catalog server declares no maintenance API",
+                    "BadRequestException", 400);
+        }
+        if (!"s3tables".equalsIgnoreCase(declared)) {
+            return createErrorResponse(
+                    "unsupported maintenance API \"" + declared + "\"",
+                    "BadRequestException", 400);
+        }
+
+        String endpoint = properties.get(
+                catKey(IcebergConfigConstants.ICEBERG_CATALOG_CONFIG.ENDPOINT));
+        String region = properties.get(
+                catKey(IcebergConfigConstants.ICEBERG_CATALOG_CONFIG.REGION));
+        String accessKey = properties.get(
+                catKey(IcebergConfigConstants.ICEBERG_CATALOG_CONFIG.ACCESS_KEY_ID));
+        String secretKey = properties.get(
+                catKey(IcebergConfigConstants.ICEBERG_CATALOG_CONFIG.SECRET_ACCESS_KEY));
+        String bucket = properties.get(
+                catKey(IcebergConfigConstants.ICEBERG_CATALOG_CONFIG.CATALOG_NAME));
+
+        if (endpoint == null || region == null || accessKey == null
+                || secretKey == null || bucket == null) {
+            return createErrorResponse(
+                    "maintenance needs endpoint, region, catalog_name and static "
+                    + "credentials on the catalog server; vended credentials are "
+                    + "scoped to the data plane and cannot sign this API",
+                    "BadRequestException", 400);
+        }
+
+        log.info("submitMaintenance {} for {}.{}", taskType, namespace, table);
+        S3TablesMaintenanceClient client =
+                new S3TablesMaintenanceClient(endpoint, region, accessKey, secretKey);
+        S3TablesMaintenanceClient.Result result =
+                client.submit(bucket, namespace, table, taskType);
+
+        Map<String, Object> body = new HashMap<>();
+        body.put("status", result.status);
+        body.put("body", result.body);
+        /*
+         * Top level on purpose: what the client worked out about a conflict is
+         * read by the SQL side, and inside the quoted body above it would be
+         * escaped past recognition.
+         */
+        if (result.details != null) {
+            body.putAll(result.details);
+        }
+        return ResponseEntity.status(result.status).body(body);
+    }
+
+    /**
      * Drop a table
      *
      * @param prefix Catalog prefix
@@ -1818,6 +1908,18 @@ public class IcebergRestController {
                          "dfs.namenode.rpc-address");
             putIfPresent(conf, cfg, "failover_proxy_provider",
                          "dfs.client.failover.proxy.provider");
+            /*
+             * A volume's paths are authority-less ("hdfs:///warehouse/..."):
+             * the namenode lives in the volume options, not in the URI.  With
+             * no fs.defaultFS, Hadoop cannot tell which cluster such a path
+             * belongs to and deleteFile() fails with "Failed to get file
+             * system", leaving the files orphaned -- the same class of bug the
+             * s3/s3a scheme handling above exists to prevent.
+             */
+            String defaultFs = hdfsDefaultFs(cfg);
+            if (defaultFs != null) {
+                conf.set("fs.defaultFS", defaultFs);
+            }
         } else if (FILEIO_TYPE_ABFSS.equals(type)) {
             // Minimal abfss support; expand if/when production paths hit it.
             putIfPresent(conf, cfg, "tenant_id", "fs.azure.account.oauth2.client.endpoint");
@@ -1827,6 +1929,52 @@ public class IcebergRestController {
         }
 
         return new HadoopFileIO(conf);
+    }
+
+    /**
+     * Default HDFS_PORT when the volume options give a bare host.
+     */
+    private static final String HDFS_DEFAULT_PORT = "8020";
+
+    /**
+     * Builds the {@code fs.defaultFS} value for an HDFS cleanup request.
+     *
+     * <p>HA deployments name a nameservice instead of a host, and the
+     * {@code dfs.*} properties set alongside resolve it; a plain deployment
+     * needs host and port, which reach us either spliced into
+     * {@code namenodes} or as the separate {@code port} option.  Returns null
+     * when neither is present, so the caller leaves fs.defaultFS alone rather
+     * than setting a broken value.
+     */
+    static String hdfsDefaultFs(Map<String, String> cfg) {
+        String nameservices = cfg.get("nameservices");
+        if (nameservices != null && !nameservices.isEmpty()) {
+            return "hdfs://" + nameservices;
+        }
+
+        String namenodes = cfg.get("namenodes");
+        if (namenodes == null || namenodes.isEmpty()) {
+            return null;
+        }
+        if (namenodes.indexOf(',') >= 0) {
+            /*
+             * Several namenodes and no nameservice to resolve them: there is
+             * no single authority to put in a URI.  Leave fs.defaultFS unset
+             * rather than build "hdfs://nn1:8020,nn2:8020", which Hadoop
+             * cannot parse -- a broken value fails louder but no later than
+             * the absent one, and it fails for a reason nobody can read.
+             */
+            return null;
+        }
+        if (namenodes.lastIndexOf(':') >= 0) {
+            return "hdfs://" + namenodes;
+        }
+
+        String port = cfg.get("port");
+        if (port == null || port.isEmpty()) {
+            port = HDFS_DEFAULT_PORT;
+        }
+        return "hdfs://" + namenodes + ":" + port;
     }
 
     private static void putIfPresent(Configuration conf,
@@ -2119,7 +2267,7 @@ public class IcebergRestController {
         }
 
         if (log.isDebugEnabled()) {
-            log.debug("Extracted properties: {}", properties);
+            log.debug("Extracted properties: {}", SensitiveDataRedactor.redact(properties));
         }
         return properties;
     }
@@ -2461,16 +2609,9 @@ public class IcebergRestController {
      * password / token / keytab (case-insensitive).
      */
     private static Map<String, String> redactSecrets(Map<String, String> props) {
-        java.util.LinkedHashMap<String, String> safe = new java.util.LinkedHashMap<>();
-        for (Map.Entry<String, String> e : props.entrySet()) {
-            String k = e.getKey().toLowerCase();
-            if (k.contains("secret") || k.contains("access_key") || k.contains("access-key")
-                    || k.contains("password") || k.contains("token") || k.contains("keytab")) {
-                safe.put(e.getKey(), "***");
-            } else {
-                safe.put(e.getKey(), e.getValue());
-            }
-        }
+        @SuppressWarnings("unchecked")
+        Map<String, String> safe = (Map<String, String>) (Map<?, ?>)
+                SensitiveDataRedactor.redact(props);
         return safe;
     }
 
@@ -2829,6 +2970,66 @@ public class IcebergRestController {
     }
 
     /**
+     * Writes a generic REST catalog's storage envelope into a load-table response.
+     *
+     * <p>The envelope goes in twice, on purpose. Its fields are flattened to the
+     * top level because that is the legacy Polaris layout the existing load-table
+     * parser reads, and it also travels whole under "catalog-properties" — the
+     * same key get-fragments uses — because the write path needs it in a shape
+     * the segment recognizes as an envelope: a volume-less INSERT has no
+     * fragments to ask for, so load-table is where its credentials come from.
+     *
+     * <p>A null envelope leaves the response untouched rather than writing null
+     * entries over the values derived from the table itself.
+     */
+    public static void putRestEnvelope(Map<String, Object> response, Map<String, Object> envelope) {
+        if (envelope == null) {
+            return;
+        }
+
+        response.put("metadata-location", envelope.get("metadata-location"));
+        response.put("table-location", envelope.get("table-location"));
+        if (envelope.containsKey("config")) {
+            response.put("config", envelope.get("config"));
+        }
+        if (envelope.containsKey("storage-credentials")) {
+            response.put("storage-credentials", envelope.get("storage-credentials"));
+        }
+        if (envelope.containsKey("local-data-access")) {
+            response.put("local-data-access", envelope.get("local-data-access"));
+        }
+        response.put("envelope-version", envelope.get("envelope-version"));
+        response.put("catalog-properties", envelope);
+    }
+
+    /** Copies the generic REST catalog allowlist into its runtime configuration. */
+    private void setRestInline(Configuration configuration, Map<String, String> properties) {
+        String[] keys = {
+            IcebergConfigConstants.ICEBERG_CATALOG_CONFIG.URL,
+            IcebergConfigConstants.ICEBERG_CATALOG_CONFIG.AUTH_METHOD,
+            IcebergConfigConstants.ICEBERG_CATALOG_CONFIG.SIGNING_NAME,
+            IcebergConfigConstants.ICEBERG_CATALOG_CONFIG.ENDPOINT,
+            IcebergConfigConstants.ICEBERG_CATALOG_CONFIG.PREFIX,
+            IcebergConfigConstants.ICEBERG_CATALOG_CONFIG.REGION,
+            IcebergConfigConstants.ICEBERG_CATALOG_CONFIG.ACCESS_KEY_ID,
+            IcebergConfigConstants.ICEBERG_CATALOG_CONFIG.SECRET_ACCESS_KEY,
+            IcebergConfigConstants.ICEBERG_CATALOG_CONFIG.PATH_STYLE_ACCESS,
+            IcebergConfigConstants.ICEBERG_CATALOG_CONFIG.VENDED_CREDENTIALS,
+            IcebergConfigConstants.ICEBERG_CATALOG_CONFIG.CLIENT_ID,
+            IcebergConfigConstants.ICEBERG_CATALOG_CONFIG.CLIENT_SECRET,
+            IcebergConfigConstants.ICEBERG_CATALOG_CONFIG.SCOPE,
+            IcebergConfigConstants.ICEBERG_CATALOG_CONFIG.WAREHOUSE_LOCATION_PERFIX,
+            IcebergConfigConstants.ICEBERG_CATALOG_CONFIG.POLARIS_SERVER_REALM
+        };
+        for (String key : keys) {
+            String value = properties.get(catKey(key));
+            if (value != null && !value.isEmpty()) {
+                configuration.set(key, value);
+            }
+        }
+    }
+
+    /**
      * Initialize Configuration for s3/s3a/hadoop catalog servers from the
      * single user-facing warehouse_location_prefix property.
      *
@@ -2915,6 +3116,9 @@ public class IcebergRestController {
         } else if (catalogType.equals(IcebergConfigConstants.CATALOG_TYPE_POLARIS)) {
             LOG.debug("meta: type=polaris, source=inline");
             setPolarisInline(configuration, properties);
+        } else if (catalogType.equals(IcebergConfigConstants.CATALOG_TYPE_REST)) {
+            LOG.debug("meta: type=rest, source=inline");
+            setRestInline(configuration, properties);
         } else if (catalogType.equals(IcebergConfigConstants.CATALOG_TYPE_S3)) {
             LOG.debug("meta: type={}, source=inline (warehouse)", catalogType);
             setCatalogWarehouseInline(configuration, properties, false);
@@ -2929,7 +3133,8 @@ public class IcebergRestController {
                     IcebergConfigConstants.CATALOG_TYPE_S3 + ", " +
                     IcebergConfigConstants.CATALOG_TYPE_HADOOP + ", " +
                     IcebergConfigConstants.CATALOG_TYPE_HIVE + ", " + IcebergConfigConstants.CATALOG_TYPE_BUILDIN + ", " +
-                    IcebergConfigConstants.CATALOG_TYPE_POLARIS + "]");
+                    IcebergConfigConstants.CATALOG_TYPE_POLARIS + ", " +
+                    IcebergConfigConstants.CATALOG_TYPE_REST + "]");
         }
     }
 
@@ -3111,15 +3316,22 @@ public class IcebergRestController {
             // and produce "default.<warehouse-url>" as the table identifier.
             String dataSource = namespace + "." + table;
             context.setDataSource(dataSource);
-        } else if (catalogServerType.equals(IcebergConfigConstants.CATALOG_TYPE_POLARIS)) {
+        } else if (catalogServerType.equals(IcebergConfigConstants.CATALOG_TYPE_POLARIS)
+                || catalogServerType.equals(IcebergConfigConstants.CATALOG_TYPE_REST)) {
             String catalogNameKey = IcebergConfigConstants.ICEBERG_CATALOG_CONFIG.ICEBERG_CATALOG_CONFIG_STRING + "." + 
             IcebergConfigConstants.ICEBERG_CATALOG_CONFIG.CATALOG_NAME;
             String catalogName = properties.getOrDefault(catalogNameKey, "");
             if (catalogName.isEmpty()) {
-                throw new IllegalStateException("iceberg polaris catalog catalog_name is empty, must specify catalog_name.");
+                String label = catalogServerType.equals(IcebergConfigConstants.CATALOG_TYPE_POLARIS)
+                        ? "polaris" : "REST";
+                throw new IllegalStateException("iceberg " + label
+                        + " catalog catalog_name is empty, must specify catalog_name.");
             }
             if (namespace.isEmpty()) {
-                throw new IllegalStateException("iceberg polaris catalog namespace is empty, must specify namespace.");
+                String label = catalogServerType.equals(IcebergConfigConstants.CATALOG_TYPE_POLARIS)
+                        ? "polaris" : "REST";
+                throw new IllegalStateException("iceberg " + label
+                        + " catalog namespace is empty, must specify namespace.");
             }
             String dataSource = catalogName + "." + namespace + "." + table;
             context.setDataSource(dataSource);

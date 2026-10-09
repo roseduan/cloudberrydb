@@ -40,6 +40,7 @@
 #include "parser/parsetree.h"
 #include "utils/builtins.h"
 #include "utils/lsyscache.h"
+#include "utils/memutils.h"
 #include "utils/rel.h"
 #include "utils/syscache.h"
 
@@ -54,6 +55,7 @@
 #define ICEBERG_CUSTOM_SCAN_NAME	"Iceberg Scan"
 
 static bool is_iceberg_relation(Oid relid);
+static void prepopulate_iceberg_file_index_map(List *fragments);
 
 /*
  * issue #333: walk the plan for ModifyTable nodes whose result relations
@@ -61,16 +63,102 @@ static bool is_iceberg_relation(Oid relid);
  * QE so the global file_id -> file_path map can be populated on writer-only
  * QEs.
  *
+ * The same carrier also ships the REST storage envelope: a write on a REST
+ * catalog table has no FOREIGN VOLUME to draw object-store credentials from,
+ * so what the catalog vended must travel with the plan.  That is why INSERT
+ * is walked too -- it needs no fragments, only the envelope.
+ *
  * Three carriers in the cache flow:
- *   - QD planner-time:   pg_iceberg_stash_modify_fragments(relid, fragments)
- *   - dispatched plan:   ModifyTable.fdwPrivLists[i] = list_make1(fragments)
+ *   - QD executor-time:  pg_iceberg_stash_modify_fragments/_envelope(relid, ...)
+ *   - dispatched plan:   ModifyTable.fdwPrivLists[i], layout in pg_iceberg_am.h
  *   - QE executor-time:  ExecutorStart_hook re-stashes from fdwPrivLists.
+ *
+ * The QD side runs at ExecutorStart rather than planner_hook, for the same
+ * reason IcebergBeginCustomScan recomputes the scan splits on every execution
+ * (see its comment): a PlannedStmt can be cached and re-executed -- PREPARE /
+ * EXECUTE, a generic plan, an SPI plan inside PL/pgSQL -- and the planner runs
+ * only once for all of those.  Producing the carrier at plan time therefore
+ * pinned both the snapshot AND the vended object-store credentials to the
+ * first execution, so a loop that outlived the credential TTL kept
+ * re-dispatching keys that had already expired.  ExecutorStart runs before
+ * InitPlan, hence before CdbDispatchPlan serialises the plan to the QEs, so
+ * refreshing here still reaches every segment.
+ */
+/*
+ * fdwPrivLists holds one entry per result relation, in the same order as
+ * resultRelations.  Standard PlanForeignModify fills it for foreign tables;
+ * for native iceberg-AM relations it is left NIL, so the slots have to be
+ * created before one can be assigned.
+ *
+ * Called only once something is actually going to be stored: INSERT reaches
+ * this walker now, and every INSERT in the database goes through it, so a
+ * plan with nothing to carry must come out byte-identical to before.  When
+ * PlanForeignModify already built the list this is a no-op and cannot
+ * overwrite what it put there.
+ *
+ * The list cells are allocated in the plan's own MemoryContext: for a cached
+ * plan this walker runs once per execution while the list has to live as long
+ * as the plan does, so the ambient (statement-scoped) context would leave
+ * mt->fdwPrivLists dangling as soon as the statement ended.
  */
 static void
-stash_modify_fragments_for_iceberg_modifies(PlannedStmt *stmt)
+ensure_modify_priv_slots(ModifyTable *mt, MemoryContext plancxt)
+{
+	MemoryContext	oldcxt;
+	int				rel_count;
+	int				i;
+
+	if (mt->fdwPrivLists != NIL)
+		return;
+
+	oldcxt = MemoryContextSwitchTo(plancxt);
+	rel_count = list_length(mt->resultRelations);
+	for (i = 0; i < rel_count; i++)
+		mt->fdwPrivLists = lappend(mt->fdwPrivLists, NIL);
+	MemoryContextSwitchTo(oldcxt);
+}
+
+/*
+ * Release the carrier this walker installed on a previous execution of the
+ * same cached plan.
+ *
+ * Freeing matters because the replacement is allocated in the plan's context,
+ * which for a cached plan is not reset between executions -- a PL/pgSQL loop
+ * would otherwise accumulate one fragments JSON (issue #362 sized these in
+ * hundreds of MB) plus one envelope per iteration for the life of the plan.
+ *
+ * Only the slot of an iceberg result relation reaches this, and datalake_fdw
+ * implements no PlanForeignModify, so nothing but this walker ever writes one.
+ * The List carrier of the pre-#362 layout is skipped rather than freed: it is
+ * only ever produced on a QE, which does not run this path.
+ */
+static void
+release_modify_priv_slot(List *priv)
+{
+	ListCell   *lc;
+
+	if (priv == NIL)
+		return;
+
+	foreach(lc, priv)
+	{
+		Node   *node = (Node *) lfirst(lc);
+
+		if (node == NULL || !IsA(node, String))
+			continue;
+		if (strVal(node) != NULL)
+			pfree(strVal(node));
+		pfree(node);
+	}
+	list_free(priv);
+}
+
+static void
+stash_modify_private_for_iceberg_modifies(PlannedStmt *stmt)
 {
 	ModifyTable	   *mt;
 	ListCell	   *lc;
+	MemoryContext	plancxt;
 	int				i;
 
 	if (stmt->planTree == NULL || !IsA(stmt->planTree, ModifyTable))
@@ -78,34 +166,37 @@ stash_modify_fragments_for_iceberg_modifies(PlannedStmt *stmt)
 
 	mt = (ModifyTable *) stmt->planTree;
 	if (mt->operation != CMD_INSERT &&
-		mt->operation != CMD_UPDATE && mt->operation != CMD_DELETE)
+		mt->operation != CMD_UPDATE &&
+		mt->operation != CMD_DELETE)
 		return;
 
 	/*
 	 * fdwPrivLists holds one entry per result relation, in the same order
 	 * as resultRelations.  Standard PlanForeignModify fills it for foreign
 	 * tables; for native iceberg-AM relations the slot is NIL.  We fill
-	 * those slots here so the dispatched plan carries two things: the
-	 * fragment list (UPDATE/DELETE only) and the catalog properties, which
-	 * every operation needs because the segments cannot ask the agent for
-	 * them (issue #410).
+	 * those slots here so the dispatched plan carries what the segments
+	 * cannot ask the agent for themselves: the fragment list (UPDATE/DELETE
+	 * only), the catalog properties every operation needs (issue #410), and,
+	 * on a REST catalog, the storage envelope.
+	 *
+	 * Whatever is stored into the plan has to live exactly as long as the plan
+	 * does.  For a one-shot plan that is the ambient context anyway; for a
+	 * cached one it is the CachedPlan's context, which outlives this
+	 * statement.
 	 */
-	if (mt->fdwPrivLists == NIL)
-	{
-		int rel_count = list_length(mt->resultRelations);
-
-		for (i = 0; i < rel_count; i++)
-			mt->fdwPrivLists = lappend(mt->fdwPrivLists, NIL);
-	}
+	plancxt = GetMemoryChunkContext(mt);
 
 	i = 0;
 	foreach(lc, mt->resultRelations)
 	{
 		Index	rti = lfirst_int(lc);
 		Oid		relid;
-		char   *fragments_json;
+		char   *fragments_json = NULL;
 		char   *catalog_properties;
+		char   *envelope;
 		Relation rel;
+		List   *priv = NIL;
+		MemoryContext oldcxt;
 
 		if (rti == 0 || rti > list_length(stmt->rtable))
 		{
@@ -122,30 +213,54 @@ stash_modify_fragments_for_iceberg_modifies(PlannedStmt *stmt)
 		}
 
 		rel = table_open(relid, NoLock);
-		/* 0 is the current snapshot; a modify never time-travels. */
-		fragments_json = (mt->operation == CMD_INSERT)
-			? NULL
-			: pg_iceberg_list_data_fragments_json(rel, 0);
+
+		/*
+		 * INSERT touches no existing file, so it never lists fragments: that
+		 * listing is what issue #362 had to make cheap, and paying it here
+		 * would undo that for the commonest write.
+		 *
+		 * 0 is the current snapshot; a modify never time-travels.
+		 */
+		if (mt->operation == CMD_UPDATE || mt->operation == CMD_DELETE)
+			fragments_json = pg_iceberg_list_data_fragments_json(rel, 0);
+
 		catalog_properties = pg_iceberg_get_catalog_properties_json(rel);
+		envelope = pg_iceberg_get_modify_rest_envelope(rel, fragments_json);
 		table_close(rel, NoLock);
 
-		/* QD-local consumers read it from the cache, same as the QEs will. */
+		/* QD-local caches first; these live in the statement's context. */
 		if (catalog_properties != NULL)
 			pg_iceberg_stash_modify_catalog_properties(relid, catalog_properties);
 
-		if (fragments_json != NULL || catalog_properties != NULL)
+		if (fragments_json != NULL)
 		{
-			ListCell *prev_cell = list_nth_cell(mt->fdwPrivLists, i);
 			List	 *fragments;
 
-			if (fragments_json != NULL)
-			{
-				/* QD-local consumers need the parsed (delete-sharing) form. */
-				fragments = parseIcebergFragmentResponse(fragments_json,
-														 strlen(fragments_json));
-				pg_iceberg_stash_modify_fragments(relid, fragments);
-			}
+			/* QD-local consumers need the parsed (delete-sharing) form. */
+			fragments = parseIcebergFragmentResponse(fragments_json,
+													 strlen(fragments_json));
+			pg_iceberg_stash_modify_fragments(relid, fragments);
 
+			/*
+			 * The QD used to reach this through the ExecutorStart hook's
+			 * restash pass, which no longer runs here now that the QD
+			 * produces the carrier directly.
+			 */
+			prepopulate_iceberg_file_index_map(fragments);
+		}
+
+		if (envelope != NULL)
+			pg_iceberg_stash_modify_envelope(relid, envelope);
+
+		/*
+		 * Everything spliced into the plan is built in the plan's context and
+		 * owns its own copy of the strings; the originals above belong to the
+		 * statement and go away with it.
+		 */
+		oldcxt = MemoryContextSwitchTo(plancxt);
+
+		if (fragments_json != NULL || catalog_properties != NULL)
+		{
 			/*
 			 * Splice the fragments into ModifyTable.fdwPrivLists so they get
 			 * dispatched with the plan.  Ship the raw JSON (one String node)
@@ -157,15 +272,57 @@ stash_modify_fragments_for_iceberg_modifies(PlannedStmt *stmt)
 			 * The slot is one list per relation (per ModifyTable contract),
 			 * holding the fragments JSON then the catalog properties; the
 			 * consumer unwraps both in
-			 * restash_iceberg_modify_fragments_from_plan.  Either may be
+			 * restash_iceberg_modify_private_from_plan.  Either may be
 			 * absent -- INSERT has no fragments, a builtin catalog vends no
 			 * properties -- and an absent one travels as an empty string so
 			 * the positions stay fixed.
 			 */
-			lfirst(prev_cell) = list_make2(
-				makeString(fragments_json != NULL ? fragments_json : ""),
-				makeString(catalog_properties != NULL ? catalog_properties : ""));
+			priv = list_make2(
+				makeString(pstrdup(fragments_json != NULL ? fragments_json : "")),
+				makeString(pstrdup(catalog_properties != NULL ? catalog_properties : "")));
 		}
+
+		if (envelope != NULL)
+		{
+			/*
+			 * Positions 0-1 stay the fragments and catalog-properties slots
+			 * even when both are empty, so the pre-existing consumer keeps
+			 * reading each where it always did; the tagged pair after them is
+			 * what a non-REST plan omits entirely.
+			 *
+			 * The placeholders are empty strings rather than NULL because the
+			 * consumer treats slot 1 as the catalog properties positionally:
+			 * shifting the tag into that slot would have it stashed as the
+			 * properties of a REST write, which has none.
+			 */
+			if (priv == NIL)
+				priv = list_make2(makeString(pstrdup("")),
+								  makeString(pstrdup("")));
+
+			priv = lappend(priv,
+						   makeString(pstrdup(ICEBERG_MODIFY_PRIV_ENVELOPE_TAG)));
+			priv = lappend(priv, makeString(pstrdup(envelope)));
+		}
+
+		MemoryContextSwitchTo(oldcxt);
+
+		/*
+		 * Drop what a previous execution of this same cached plan left here,
+		 * then install whatever this execution produced -- including nothing.
+		 * Nothing has read the old carrier yet this statement: this walker
+		 * runs ahead of InitPlan.
+		 *
+		 * The clear happens even when priv is NIL, which is the whole point of
+		 * refreshing here: an execution that finds no fragments (the table has
+		 * since been emptied) must not re-dispatch the previous execution's
+		 * file list, and on a REST catalog must not re-dispatch its
+		 * credentials once they are past their TTL.  Leaving the slot NIL is
+		 * exactly what a freshly planned statement would carry.
+		 */
+		ensure_modify_priv_slots(mt, plancxt);
+		release_modify_priv_slot(
+			(List *) lfirst(list_nth_cell(mt->fdwPrivLists, i)));
+		lfirst(list_nth_cell(mt->fdwPrivLists, i)) = priv;
 
 		i++;
 	}
@@ -445,7 +602,12 @@ iceberg_planner_hook(Query *parse,
 		lfirst(lc) = replace_iceberg_seqscan(sub, stmt->rtable);
 	}
 
-	stash_modify_fragments_for_iceberg_modifies(stmt);
+	/*
+	 * The write-side carrier is deliberately NOT built here; see the comment
+	 * above stash_modify_private_for_iceberg_modifies.  It is produced from
+	 * the ExecutorStart hook so that a cached PlannedStmt re-dispatches fresh
+	 * fragments and fresh vended credentials on every execution.
+	 */
 
 	/*
 	 * Time travel: resolve and inject the fragment list for every
@@ -514,8 +676,50 @@ prepopulate_iceberg_file_index_map(List *fragments)
 		datalake_iceberg_file_index_map, fragments);
 }
 
+/*
+ * Read the tagged envelope entry out of one fdwPrivLists slot; NULL when the
+ * plan carries none (every non-REST catalog, and any pre-envelope plan).
+ * See pg_iceberg_am.h for the layout this matches.
+ */
+static char *
+envelope_from_modify_priv(List *priv)
+{
+	int		i;
+
+	/*
+	 * Search for the tag rather than reading it at a fixed offset.  The
+	 * positional prefix ahead of the pair has already grown once -- issue #410
+	 * added the catalog properties at slot 1, pushing the tag from 1 to 2 --
+	 * and a pair that must still be found at a hardcoded index gains nothing
+	 * from carrying a tag at all.  The failure that costs is silent: the next
+	 * entry added ahead of the pair would simply stop the envelope being
+	 * found, and a REST write would fail for want of credentials with nothing
+	 * pointing at the cause.
+	 *
+	 * A false positive would need one of the JSON payloads to be exactly the
+	 * tag string, which is neither valid JSON nor an empty placeholder.
+	 */
+	for (i = 0; i + 1 < list_length(priv); i++)
+	{
+		Node   *tag = (Node *) list_nth(priv, i);
+		Node   *envelope;
+
+		if (tag == NULL || !IsA(tag, String) ||
+			strcmp(strVal(tag), ICEBERG_MODIFY_PRIV_ENVELOPE_TAG) != 0)
+			continue;
+
+		envelope = (Node *) list_nth(priv, i + 1);
+		if (envelope == NULL || !IsA(envelope, String))
+			return NULL;
+
+		return strVal(envelope);
+	}
+
+	return NULL;
+}
+
 static void
-restash_iceberg_modify_fragments_from_plan(PlannedStmt *stmt)
+restash_iceberg_modify_private_from_plan(PlannedStmt *stmt)
 {
 	ModifyTable	   *mt;
 	ListCell	   *lc_rel;
@@ -527,7 +731,8 @@ restash_iceberg_modify_fragments_from_plan(PlannedStmt *stmt)
 
 	mt = (ModifyTable *) stmt->planTree;
 	if (mt->operation != CMD_INSERT &&
-		mt->operation != CMD_UPDATE && mt->operation != CMD_DELETE)
+		mt->operation != CMD_UPDATE &&
+		mt->operation != CMD_DELETE)
 		return;
 	if (mt->fdwPrivLists == NIL)
 		return;
@@ -539,6 +744,7 @@ restash_iceberg_modify_fragments_from_plan(PlannedStmt *stmt)
 		List   *priv = (List *) lfirst(lc_priv);
 		Oid		relid;
 		Node   *carrier;
+		char   *envelope;
 		List   *fragments;
 
 		if (priv == NIL || rti == 0 || rti > list_length(stmt->rtable))
@@ -549,10 +755,12 @@ restash_iceberg_modify_fragments_from_plan(PlannedStmt *stmt)
 			continue;
 
 		/*
-		 * Slot 2, when present, is the catalog properties the segments cannot
-		 * ask the agent for themselves (issue #410).  Taken first because the
-		 * fragment handling below continues out of the loop in several cases
-		 * that say nothing about whether the properties arrived.
+		 * Slot 1 is the catalog properties the segments cannot ask the agent
+		 * for themselves (issue #410), and the tagged pair after it is the
+		 * REST storage envelope.  Both are taken before the fragments because
+		 * the fragment handling below continues out of the loop in several
+		 * cases that say nothing about whether either arrived -- an INSERT on
+		 * a REST catalog carries an envelope and no fragments at all.
 		 */
 		if (list_length(priv) >= 2)
 		{
@@ -563,7 +771,11 @@ restash_iceberg_modify_fragments_from_plan(PlannedStmt *stmt)
 														   strVal(props));
 		}
 
-		/* Unwrap the fragments carrier from the planner_hook. */
+		envelope = envelope_from_modify_priv(priv);
+		if (envelope != NULL)
+			pg_iceberg_stash_modify_envelope(relid, envelope);
+
+		/* Unwrap the fragments carrier placed by the planner_hook. */
 		carrier = (Node *) linitial(priv);
 		if (carrier == NULL)
 			continue;
@@ -609,7 +821,23 @@ restash_iceberg_modify_fragments_from_plan(PlannedStmt *stmt)
 static void
 iceberg_executor_start_hook(QueryDesc *queryDesc, int eflags)
 {
-	restash_iceberg_modify_fragments_from_plan(queryDesc->plannedstmt);
+	/*
+	 * Produce on the QD, consume everywhere else.  Both run before
+	 * standard_ExecutorStart, hence before InitPlan dispatches the plan, so a
+	 * carrier refreshed here still reaches every segment.
+	 *
+	 * EXPLAIN without ANALYZE touches no data, so it is not worth a catalog
+	 * round trip (and, on a REST catalog, not worth vending credentials that
+	 * would go unused).  The plan it prints keeps whatever the last real
+	 * execution left behind, which EXPLAIN does not display.
+	 */
+	if (Gp_role == GP_ROLE_DISPATCH)
+	{
+		if (!(eflags & EXEC_FLAG_EXPLAIN_ONLY))
+			stash_modify_private_for_iceberg_modifies(queryDesc->plannedstmt);
+	}
+	else
+		restash_iceberg_modify_private_from_plan(queryDesc->plannedstmt);
 
 	if (prev_executor_start_hook)
 		prev_executor_start_hook(queryDesc, eflags);

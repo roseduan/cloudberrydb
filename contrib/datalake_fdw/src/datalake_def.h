@@ -258,6 +258,13 @@ typedef struct storageOptions
 	char*	protocol;
 	char*	accessKey;
 	char*	secretKey;
+	/*
+	 * Session token accompanying vended temporary credentials.  NULL for
+	 * long-lived keys.  Travels with accessKey/secretKey as one atomic
+	 * group and is pushed onto the gopher connection right after connect
+	 * (gopherUpdateCredentials); gopherConfig itself has no token field.
+	 */
+	char*	sessionToken;
 	int		port;
 	char*	host;
 	bool	enableCache;

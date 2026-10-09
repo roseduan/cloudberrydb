@@ -39,6 +39,7 @@
 #include "utils/lsyscache.h"
 
 #include "../iceberg_catalog_fdw/iceberg_catalog_fdw.h"
+#include "../iceberg_catalog_fdw/iceberg_catalog_option.h"
 #include "../iceberg_volume_fdw/iceberg_volume_option.h"
 #include "src/common/iceberg_constants.h"
 #include "src/common/parser_option.h"
@@ -229,9 +230,16 @@ pg_iceberg_get_table_info(Oid relid)
 	get_catalog_name_and_server(catalog_oid,
 								&info->catalog_name,
 								&info->catalog_server_name);
-	get_volume_name_and_server(volume_oid,
-							   &info->volume_name,
-							   &info->volume_server_name);
+
+	/*
+	 * REST catalog tables have no volume (the catalog assigns storage per
+	 * table); volume_oid is InvalidOid by design, not by accident, and the
+	 * lookup would ereport on it.
+	 */
+	if (OidIsValid(volume_oid))
+		get_volume_name_and_server(volume_oid,
+								   &info->volume_name,
+								   &info->volume_server_name);
 
 	info->opts = opts;
 
@@ -260,6 +268,66 @@ pg_iceberg_free_table_info(IcebergTableInfo *info)
 }
 
 /*
+ * Does the external catalog own `table_info`'s metadata location?
+ *
+ * A table carrying a `table` OPTION names a remote identifier, so the catalog
+ * owns it.  A table created without one normally means the builtin catalog --
+ * except on a generic REST catalog, which assigns the table's storage itself
+ * and is therefore authoritative for its head no matter where the identifier
+ * came from.
+ *
+ * Exported, and used by the scan path as well as the resolver below, because
+ * those two disagreed once: the scan path kept the pre-REST `opts->table !=
+ * NULL` test after the resolver learned about REST, so a REST table created
+ * without an OPTIONS clause read the locally stored metadata_location on every
+ * scan and never re-resolved -- it could not observe a snapshot committed
+ * outside this cluster, and the metadata cache never applied to it either.
+ * One predicate, one place, so the next caller cannot drift from it.
+ */
+bool
+pg_iceberg_table_is_external(IcebergTableInfo *table_info)
+{
+	if (table_info == NULL)
+		return false;
+
+	if (table_info->opts != NULL && table_info->opts->table != NULL)
+		return true;
+
+	return checkIsGenericRestCatalog(table_info->catalog_server_name,
+									 table_info->catalog_name);
+}
+
+/*
+ * Effective metadata-cache TTL for `table_info`, in minutes; 0 = no caching.
+ *
+ * One option name, one unit, two levels: the per-table `metadata_cache`
+ * (minutes) wins when set -- 0 there is an explicit per-table opt-out the
+ * catalog must not override, and a negative value means the table said
+ * nothing.  In that case the FOREIGN CATALOG option of the same name and
+ * unit supplies the default; a catalog that does not set it means 0, i.e.
+ * every read asks the external catalog for the latest head.
+ *
+ * Callers must only ask on a read path: resolving the catalog options costs
+ * syscache lookups, and the head resolver also runs from PRE_COMMIT, which
+ * never caches.
+ */
+static int
+resolve_metadata_cache_ttl_min(IcebergTableInfo *table_info)
+{
+	IcebergCatalogOptions  *catalog_options;
+
+	if (table_info->opts != NULL && table_info->opts->metadata_cache >= 0)
+		return table_info->opts->metadata_cache;
+
+	catalog_options = getIcebergCatalogOptions(table_info->catalog_server_name,
+											   table_info->catalog_name);
+	if (catalog_options == NULL)
+		return 0;
+
+	return Max(catalog_options->foreign_catalog.metadata_cache, 0);
+}
+
+/*
  * Get latest metadata location for both internal and external iceberg tables.
  */
 char *
@@ -275,7 +343,14 @@ pg_iceberg_get_latest_metadata_location(Oid relid, IcebergTableInfo *table_info,
 	bool		is_internal;
 	int			ttl;
 
-	is_internal = (table_info->opts == NULL || table_info->opts->table == NULL);
+	/*
+	 * A generic REST catalog is authoritative for the metadata location no
+	 * matter where the table's identifier came from, so it must not be
+	 * short-circuited to the locally tracked copy just because the table was
+	 * created without an OPTIONS clause.  See the matching comment in
+	 * pg_iceberg_create_table_with_catalog.
+	 */
+	is_internal = !pg_iceberg_table_is_external(table_info);
 
 	if (is_internal)
 	{
@@ -294,18 +369,37 @@ pg_iceberg_get_latest_metadata_location(Oid relid, IcebergTableInfo *table_info,
 	 * read relnamespace would take a fresh lock at the very end of the
 	 * transaction.
 	 */
-	nameSpace = pg_iceberg_resolve_namespace(table_info->opts->namespace,
-											 table_info->catalog_server_name,
-											 table_info->catalog_name,
-											 get_rel_namespace(relid));
+	nameSpace = pg_iceberg_resolve_namespace(
+		table_info->opts ? table_info->opts->namespace : NULL,
+		table_info->catalog_server_name,
+		table_info->catalog_name,
+		get_rel_namespace(relid));
 
-	tableName = table_info->opts->table;
-	catalogName = table_info->opts->catalog;
-	ttl = table_info->opts ? table_info->opts->metadata_cache : 0;
+	if (table_info->opts == NULL || table_info->opts->table == NULL)
+	{
+		/*
+		 * A REST table created without an OPTIONS clause carries no remote
+		 * identifier, so the PG one is it.  Read through the syscache for the
+		 * same reason the namespace is, rather than opening the relation.
+		 */
+		tableName = get_rel_name(relid);
+		catalogName = NULL;
+	}
+	else
+	{
+		tableName = table_info->opts->table;
+		catalogName = table_info->opts->catalog;
+	}
+
+	/*
+	 * Only resolved on a read path: this function also runs from PRE_COMMIT,
+	 * which never caches, and resolving the catalog options is not free.
+	 */
+	ttl = allow_cache ? resolve_metadata_cache_ttl_min(table_info) : 0;
 
 	/*
 	 * issue #393 metadata cache.  On read/scan paths (allow_cache) with a
-	 * positive per-table TTL, hand the agent the head we last resolved and its
+	 * positive effective TTL, hand the agent the head we last resolved and its
 	 * timestamp; the agent reuses it while younger than the TTL, otherwise it
 	 * re-resolves the external catalog and returns a fresh head + timestamp.
 	 * A refresh is persisted so later reads within the window reuse it.  TTL 0
@@ -391,9 +485,12 @@ pg_iceberg_get_latest_metadata_and_mode(Oid relid, bool *is_internal_out)
 
 	table_info = pg_iceberg_get_table_info(relid);
 
+	/* Same qualification as pg_iceberg_get_latest_metadata_location. */
 	if (is_internal_out != NULL)
 		*is_internal_out =
-			(table_info->opts == NULL || table_info->opts->table == NULL);
+			(table_info->opts == NULL || table_info->opts->table == NULL) &&
+			!checkIsGenericRestCatalog(table_info->catalog_server_name,
+									   table_info->catalog_name);
 
 	/*
 	 * and_mode() feeds the DML tracker's base; always resolve the latest head
@@ -458,7 +555,7 @@ pg_iceberg_create_table_with_catalog(Relation rel, bool *is_internal)
 	IcebergTableInfo *table_info;
 	char	   *result;
 	char	   *location = NULL;
-	char	   *created_spec_summary = NULL;
+	IcebergLoadTableResult *created = NULL;
 	const char *nameSpace;
 	const char *tableName;
 	const char *catalogName;
@@ -506,7 +603,7 @@ pg_iceberg_create_table_with_catalog(Relation rel, bool *is_internal)
 										 table_info->volume_server_name,
 										 table_info->volume_name,
 										 location,
-										 &created_spec_summary);
+										 &created);
 
 		if (location != NULL)
 		{
@@ -523,8 +620,30 @@ pg_iceberg_create_table_with_catalog(Relation rel, bool *is_internal)
 			 * the agent returned in the create response.  The check is a no-op
 			 * when neither side is partitioned.
 			 */
-			pg_iceberg_check_partition_spec(table_info, created_spec_summary,
+			pg_iceberg_check_partition_spec(table_info,
+											created ? created->partition_spec_summary : NULL,
 											nameSpace, tableName);
+		}
+		else if (checkIsGenericRestCatalog(table_info->catalog_server_name,
+										   table_info->catalog_name) &&
+				 created != NULL &&
+				 created->location != NULL && created->location[0] != '\0')
+		{
+			/*
+			 * Generic REST: the create response is a full load-table response,
+			 * so the catalog-assigned table-location and partition-spec
+			 * summary are already in hand -- re-asking the catalog for what it
+			 * just told us was the CREATE path's extra round-trip.  Narrowed
+			 * to REST (hive/polaris keep the refresh below) for the same
+			 * reason as the is_internal narrowing further down: their create
+			 * flows are built on the refresh and widening this needs its own
+			 * testing.  An older agent whose create response lacks
+			 * table-location falls through to the refresh.
+			 */
+			pg_iceberg_check_partition_spec(table_info, created->partition_spec_summary,
+											nameSpace, tableName);
+			pg_iceberg_upsert_location_option(RelationGetRelid(rel),
+											  created->location);
 		}
 		else
 		{
@@ -567,7 +686,31 @@ pg_iceberg_create_table_with_catalog(Relation rel, bool *is_internal)
 				pg_iceberg_free_load_table_result(refresh_result);
 			}
 		}
-		*is_internal = true;
+
+		if (created != NULL)
+		{
+			pg_iceberg_free_load_table_result(created);
+			created = NULL;
+		}
+
+		/*
+		 * Taking the identifier from PG rather than from OPTIONS does not
+		 * make the table internal -- those are two different questions, and
+		 * only the catalog answers the second one.  A generic REST catalog
+		 * owns the table's storage and vends its credentials, so recording
+		 * such a table as internal makes every later scan skip the storage
+		 * envelope; the failure lands on the segment, as "neither volume nor
+		 * catalog_properties provided", nowhere near the CREATE that caused
+		 * it.  A table created WITH an OPTIONS clause took the other branch
+		 * and was unaffected, which is why this went unnoticed.
+		 *
+		 * Deliberately narrowed to the REST case: hive and polaris have
+		 * always reached here with is_internal = true and their paths are
+		 * built on that, so widening it is a separate change needing its own
+		 * testing on those catalogs.
+		 */
+		*is_internal = !checkIsGenericRestCatalog(table_info->catalog_server_name,
+												  table_info->catalog_name);
 	}
 	else
 	{
@@ -608,40 +751,65 @@ pg_iceberg_create_table_with_catalog(Relation rel, bool *is_internal)
 											 table_info->volume_server_name,
 											 table_info->volume_name,
 											 location,
-											 NULL);
+											 &created);
 
-			/*
-			 * Refresh once to capture catalog-returned table-location and persist
-			 * it in ltoptions for later DML location resolution on QEs.
-			 */
-			refresh_result = pg_iceberg_load_table(catalogName,
-												   nameSpace,
-												   tableName,
-												   table_info->catalog_server_name,
-												   table_info->catalog_name,
-												   table_info->volume_server_name,
-												   table_info->volume_name);
-			if (refresh_result == NULL)
-				ereport(ERROR,
-						(errcode(ERRCODE_UNDEFINED_OBJECT),
-						 errmsg("iceberg table \"%s.%s\" does not exist in external catalog \"%s\" after creation",
-								nameSpace,
-								tableName,
-								table_info->catalog_name)));
+			if (checkIsGenericRestCatalog(table_info->catalog_server_name,
+										  table_info->catalog_name) &&
+				created != NULL &&
+				created->location != NULL && created->location[0] != '\0')
+			{
+				/*
+				 * Generic REST: use the create response instead of re-asking
+				 * the catalog -- same rationale, and same REST-only narrowing,
+				 * as the internal-identifier branch above.
+				 */
+				pg_iceberg_check_partition_spec(table_info,
+												created->partition_spec_summary,
+												nameSpace, tableName);
+				pg_iceberg_upsert_location_option(RelationGetRelid(rel),
+												  created->location);
+			}
+			else
+			{
+				/*
+				 * Refresh once to capture catalog-returned table-location and persist
+				 * it in ltoptions for later DML location resolution on QEs.
+				 */
+				refresh_result = pg_iceberg_load_table(catalogName,
+													   nameSpace,
+													   tableName,
+													   table_info->catalog_server_name,
+													   table_info->catalog_name,
+													   table_info->volume_server_name,
+													   table_info->volume_name);
+				if (refresh_result == NULL)
+					ereport(ERROR,
+							(errcode(ERRCODE_UNDEFINED_OBJECT),
+							 errmsg("iceberg table \"%s.%s\" does not exist in external catalog \"%s\" after creation",
+									nameSpace,
+									tableName,
+									table_info->catalog_name)));
 
-			if (refresh_result->location == NULL ||
-				refresh_result->location[0] == '\0')
-				ereport(ERROR,
-						(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
-						 errmsg("external catalog \"%s\" returned empty table location for \"%s.%s\"",
-								table_info->catalog_name,
-								nameSpace,
-								tableName)));
-			pg_iceberg_check_partition_spec(table_info, refresh_result->partition_spec_summary,
-											nameSpace, tableName);
-			pg_iceberg_upsert_location_option(RelationGetRelid(rel),
-											  refresh_result->location);
-			pg_iceberg_free_load_table_result(refresh_result);
+				if (refresh_result->location == NULL ||
+					refresh_result->location[0] == '\0')
+					ereport(ERROR,
+							(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+							 errmsg("external catalog \"%s\" returned empty table location for \"%s.%s\"",
+									table_info->catalog_name,
+									nameSpace,
+									tableName)));
+				pg_iceberg_check_partition_spec(table_info, refresh_result->partition_spec_summary,
+												nameSpace, tableName);
+				pg_iceberg_upsert_location_option(RelationGetRelid(rel),
+												  refresh_result->location);
+				pg_iceberg_free_load_table_result(refresh_result);
+			}
+
+			if (created != NULL)
+			{
+				pg_iceberg_free_load_table_result(created);
+				created = NULL;
+			}
 		}
 		else
 		{
@@ -666,8 +834,6 @@ pg_iceberg_create_table_with_catalog(Relation rel, bool *is_internal)
 
 	if (location != NULL)
 		pfree(location);
-	if (created_spec_summary != NULL)
-		pfree(created_spec_summary);
 
 	/* Clean up allocated strings */
 	pg_iceberg_free_table_info(table_info);

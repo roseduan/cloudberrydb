@@ -1,0 +1,13 @@
+{
+  "combinedTasks": [],
+  "catalog-properties": {
+    "envelope-version": 1,
+    "table-location": "s3://fixture-bucket/empty-table/",
+    "metadata-location": "s3://fixture-bucket/empty-table/metadata/v1.metadata.json",
+    "local-data-access": {
+      "s3.endpoint": "https://s3.example.test",
+      "s3.region": "us-east-1",
+      "s3.path-style-access": "true"
+    }
+  }
+}

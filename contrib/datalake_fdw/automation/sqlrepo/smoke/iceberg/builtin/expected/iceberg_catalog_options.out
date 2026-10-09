@@ -51,9 +51,7 @@ CREATE FOREIGN CATALOG catopt_full_opts_cat SERVER catopt_builtin_server_2
 OPTIONS (
     catalog_name 'test_catalog',
     default_namespace 'test_ns',
-    enable_metadata_cache 'true',
-    metadata_cache_ttl '300',
-    auto_refresh_metadata 'true',
+    metadata_cache '5',
     warehouse_location_prefix 's3://warehouse/test/',
     split_size '256',
     filter_string 'col1=value1'

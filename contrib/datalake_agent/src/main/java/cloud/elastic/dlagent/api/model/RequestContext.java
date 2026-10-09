@@ -60,6 +60,9 @@ public class RequestContext {
 
     private Map<String, String> buildInCatalogProperties = new HashMap<>();
 
+    /** Phase-one REST load-table envelope, populated only for catalog type rest. */
+    private Map<String, Object> catalogProperties;
+
     private String icebergConfigVersion;
 
     private String icebergConfigUseDefaultCatalogImpl;

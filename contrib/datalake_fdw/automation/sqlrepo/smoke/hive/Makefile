@@ -33,6 +33,15 @@ HIVE_PREPARE_SQL          = $(AUTOMATION_DIR)/prepare/prepare_hive/hive_smoke.sq
 HIVE_ICEBERG_PREPARE_SQL  = $(AUTOMATION_DIR)/prepare/prepare_hive/hive_iceberg_fdw.sql
 
 # Spark + Iceberg-on-Hive catalog config for the iceberg_fdw_test fixture.
+#
+# Note for whoever edits prepare_hive/hive_smoke.sql: it is loaded by spark-sql
+# here, not by beeline, so it must satisfy Spark's ANSI store-assignment policy
+# (typed literals, e.g. DATE '1970-01-01', not bare strings).  spark-sql stops
+# at the first error and this recipe only warns, so a violation silently skips
+# every table declared below it and shows up much later as "(0 rows)" diffs.
+# Relaxing the policy to LEGACY is not an option: Iceberg's DataSource V2
+# rejects it outright ("LEGACY store assignment policy is disallowed in Spark
+# data source V2"), which would break the Iceberg-on-Hive fixture below.
 SPARK_SQL ?= spark-sql
 SPARK_CONF = \
 	--master local[*] \

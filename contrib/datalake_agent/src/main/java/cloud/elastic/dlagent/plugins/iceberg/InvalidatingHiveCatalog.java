@@ -56,6 +56,16 @@ final class InvalidatingHiveCatalog implements IcebergCatalog {
         this.context = context;
     }
 
+    /**
+     * Deliberately does NOT close the delegate: the hive catalog is owned by
+     * the wrapper's cache, which closes it on eviction and expects it to stay
+     * usable across requests. Closing it here would tear down the shared HMS
+     * client pool underneath every other request holding the same entry.
+     */
+    @Override
+    public void close() {
+    }
+
     @Override
     public Table createTable(TableIdentifier identifier,
                              Schema schema,

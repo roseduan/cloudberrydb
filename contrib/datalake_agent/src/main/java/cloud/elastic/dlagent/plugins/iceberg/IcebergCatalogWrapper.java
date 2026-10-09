@@ -49,6 +49,7 @@ import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.util.ArrayList;
+import java.util.List;
 import java.util.Map;
 import java.util.TreeMap;
 import java.util.concurrent.ExecutionException;
@@ -70,6 +71,24 @@ public class IcebergCatalogWrapper {
      * from IcebergCatalog.io(), which must never be cached/closed here.
      */
     private final Cache<String, FileIO> vendedFileIoCache;
+
+    /**
+     * The same idea as {@link #vendedFileIoCache}, for the generic REST
+     * catalog, which needs one thing more than a FileIO: the storage envelope
+     * its segments read their credentials from. They have no volume to read
+     * them from, so the envelope travels with the fragments, and a FileIO on
+     * its own is not enough to answer a scan. Caching the pair is what lets a
+     * REST scan skip the catalog entirely, the way a Polaris scan already does.
+     */
+    private final Cache<String, IcebergRestCatalog.ScanStorage> restScanStorageCache;
+
+    /**
+     * How long before the vended credentials expire we stop handing out a
+     * cached entry. Covers the flight time of the fragments to the segments
+     * and the scan they then run, so a scan that starts on a cache hit does
+     * not find its credentials rejected halfway through.
+     */
+    private static final long CREDENTIAL_EXPIRY_MARGIN_MS = 60_000L;
 
     private IcebergUtilities icebergUtilities;
     private SecureLogin secureLogin;
@@ -140,6 +159,22 @@ public class IcebergCatalogWrapper {
                             notification.getKey(), notification.getCause());
                 })
                 .build();
+
+        /*
+         * Shares the FileIO cache's TTL, and for the same reason: it holds a
+         * FileIO built on credentials that expire.  The TTL is the upper bound
+         * -- how long a revoked authorization may go unnoticed -- while the
+         * lower bound comes from the credentials themselves, which each entry
+         * carries and getRestScanStorage checks.  The eviction listener does
+         * not close either, exactly as above.
+         */
+        LOG.info("Creating iceberg restScanStorageCache with TTL {} ...", fileIoTtl);
+        restScanStorageCache = CacheBuilder.newBuilder()
+                .expireAfterWrite(fileIoTtl.toMillis(), TimeUnit.MILLISECONDS)
+                .removalListener((RemovalListener<String, IcebergRestCatalog.ScanStorage>) notification ->
+                        LOG.debug("Evicted restScanStorageCache entry key={} cause={}",
+                                notification.getKey(), notification.getCause()))
+                .build();
     }
 
     /**
@@ -179,8 +214,17 @@ public class IcebergCatalogWrapper {
          */
         String key = formCatalogCacheKey(context) + "|" + context.getDataSource();
         try {
+            /*
+             * Built untracked, on purpose.  The FileIO produced here is cached
+             * across requests, so the catalog behind it is not a per-request
+             * catalog: registering it would have releaseRequestCatalogs() close
+             * it -- and its FileIO with it -- at the end of the request that
+             * happened to miss the cache, handing every later scan a closed
+             * FileIO.  Its lifetime is the cache entry's, released the way the
+             * eviction listener above describes.
+             */
             return vendedFileIoCache.get(key,
-                    () -> getIcebergCatalog(context).loadTable(context.getDataSource()).io());
+                    () -> newIcebergCatalog(context).loadTable(context.getDataSource()).io());
         } catch (ExecutionException | UncheckedExecutionException e) {
             Throwable cause = e.getCause();
             if (cause instanceof Exception) {
@@ -189,6 +233,165 @@ public class IcebergCatalogWrapper {
             throw new DlRuntimeException(
                     "Failed to resolve FileIO for " + context.getDataSource(), e);
         }
+    }
+
+    /**
+     * Returns the storage a generic REST scan of {@code context}'s table needs
+     * -- a FileIO on the table's bucket and the envelope for the segments --
+     * resolving it from the catalog only when the cached one cannot be used.
+     *
+     * <p>This is the REST equivalent of {@link #getScanFileIO}, and exists
+     * separately because a REST scan needs the envelope too: the segments have
+     * no volume to read credentials from, so a bare FileIO leaves them unable
+     * to read anything. That is why REST could not simply use the FileIO cache.
+     *
+     * <p>The bucket the storage addresses comes from {@code metadataLocation}
+     * -- the metadata.json about to be read names its own bucket -- and is
+     * part of the cache key. That is the whole generation story: a table
+     * dropped and recreated under the same name lives in a new bucket, so its
+     * new head simply keys a new entry, and the old generation's entry ages
+     * out untouched instead of being validated against.
+     *
+     * <p>A cached entry is used only if its credentials outlast
+     * {@link #CREDENTIAL_EXPIRY_MARGIN_MS}.
+     *
+     * @param metadataLocation the metadata.json about to be read; required,
+     *                         because the bucket has no other source
+     */
+    public IcebergRestCatalog.ScanStorage getRestScanStorage(
+            RequestContext context, String metadataLocation) throws Exception {
+        if (StringUtils.isBlank(metadataLocation)) {
+            throw new DlRuntimeException(
+                    "REST scan storage needs the metadata location about to be read; none was given for "
+                            + context.getDataSource());
+        }
+        String bucket = IcebergRestCatalog.bucketFromLocation(metadataLocation);
+        String key = formRestScanCacheKey(context) + "|" + bucket;
+
+        IcebergRestCatalog.ScanStorage storage = restScanStorageCache.getIfPresent(key);
+        if (storage != null
+                && storage.usableAt(System.currentTimeMillis(), CREDENTIAL_EXPIRY_MARGIN_MS)) {
+            return storage;
+        }
+
+        /*
+         * Removing the unusable entry is what makes the reload happen at all,
+         * not merely an optimisation: get(key, Callable) runs the loader only
+         * when the key is absent, so with the stale value still in place every
+         * caller would get that value straight back and nothing would ever be
+         * refreshed.  Once the key is gone the loader does run, and Guava's
+         * per-key lock leaves exactly one caller executing it while the rest
+         * wait for its result.
+         */
+        restScanStorageCache.invalidate(key);
+        try {
+            /*
+             * Deliberately returned even when its credentials expire inside the
+             * margin: they are valid now, and this scan is about to use them
+             * immediately.  A catalog that vends credentials that short simply
+             * gets no caching -- the next request finds the entry unusable and
+             * resolves again -- which is the behaviour it had before this cache.
+             */
+            return restScanStorageCache.get(key,
+                    () -> resolveRestScanStorage(context, metadataLocation));
+        } catch (ExecutionException | UncheckedExecutionException e) {
+            Throwable cause = e.getCause();
+            if (cause instanceof Exception) {
+                throw (Exception) cause;
+            }
+            throw new DlRuntimeException(
+                    "Failed to resolve REST scan storage for " + context.getDataSource(), e);
+        }
+    }
+
+    /**
+     * Resolves a REST table's storage from the catalog (or, with credential
+     * vending off, entirely from local configuration).
+     *
+     * <p>Built untracked, like {@link #getScanFileIO}'s loader and for the same
+     * reason: what comes back is cached across requests, so registering it
+     * would have {@link #releaseRequestCatalogs()} close it at the end of
+     * whichever request missed the cache.  Nothing is leaked by skipping that
+     * -- a generic REST catalog builds no RESTCatalog until something asks it
+     * to load a table, and this path never does.
+     */
+    private IcebergRestCatalog.ScanStorage resolveRestScanStorage(
+            RequestContext context, String metadataLocation) throws Exception {
+        IcebergCatalog catalog = newIcebergCatalog(context);
+        if (!(catalog instanceof IcebergRestCatalog)) {
+            throw new DlRuntimeException("Catalog type " + context.getCatalogType()
+                    + " does not resolve REST scan storage");
+        }
+        return ((IcebergRestCatalog) catalog).resolveScanStorage(
+                icebergUtilities.getIcebergTableIdentifier(context.getDataSource()),
+                metadataLocation);
+    }
+
+    /**
+     * Everything a REST catalog reads off the FOREIGN SERVER / FOREIGN CATALOG
+     * to decide where it connects and as whom.
+     *
+     * <p>{@link #CONNECTION_CONFIG_KEYS} covers the Hive metastore connection
+     * and nothing else, so on its own it would let an {@code ALTER SERVER} that
+     * repoints the catalog or rotates its keys go unnoticed for a whole TTL --
+     * a regression against the behaviour this cache replaced, where every REST
+     * scan rebuilt its catalog from the request's configuration and therefore
+     * picked such a change up immediately.  Listing them explicitly rather than
+     * hashing the whole Configuration for the reason given on
+     * CONNECTION_CONFIG_KEYS: it also carries request-scoped properties, which
+     * would fragment the cache per request and defeat it entirely.
+     */
+    private static final String[] REST_CONNECTION_CONFIG_KEYS = {
+            "url",
+            "polaris_server_url",
+            "prefix",
+            "warehouse_location_prefix",
+            "auth_method",
+            "region",
+            "signing_name",
+            "access_key_id",
+            "secret_access_key",
+            "client_id",
+            "client_secret",
+            "scope",
+            "endpoint",
+            "path_style_access",
+            cloud.elastic.dlagent.constants.IcebergConfigConstants
+                    .ICEBERG_CATALOG_CONFIG.VENDED_CREDENTIALS,
+            cloud.elastic.dlagent.constants.IcebergConfigConstants
+                    .ICEBERG_CATALOG_CONFIG.POLARIS_SERVER_REALM,
+    };
+
+    /*
+     * Adding a REST catalog option means registering it in two fixed lists,
+     * and neither one fails loudly when you forget: omit it from
+     * IcebergRestController.setRestInline() and the option never reaches the
+     * agent at all; omit it from the array above and two catalogs that differ
+     * only by that option hash to the same key, so the second silently reuses
+     * the first one's storage -- for polaris_server_realm, credentials vended
+     * under another tenant's realm.  Both mistakes were made on this option.
+     */
+
+    /**
+     * Cache key for {@link #getRestScanStorage}: the catalog connection, the
+     * REST settings above, and the table -- one bucket per table makes the
+     * last one load-bearing rather than merely a refinement.
+     */
+    private String formRestScanCacheKey(RequestContext context) {
+        Configuration configuration = context.getConfiguration();
+        StringBuilder restInfo = new StringBuilder();
+        for (String key : REST_CONNECTION_CONFIG_KEYS) {
+            appendKeyValue(restInfo, key, configuration == null ? null : configuration.get(key));
+        }
+        return formCatalogCacheKey(context)
+                + "|" + Hashing.sha256()
+                        .hashString(restInfo, StandardCharsets.UTF_8).toString()
+                + "|" + context.getDataSource();
+    }
+
+    @VisibleForTesting
+    Cache<String, IcebergRestCatalog.ScanStorage> getRestScanStorageCache() {
+        return restScanStorageCache;
     }
 
     /**
@@ -212,9 +415,71 @@ public class IcebergCatalogWrapper {
     }
 
     /**
+     * Catalogs handed out during the request running on this thread.
+     *
+     * <p>Every branch of {@link #getIcebergCatalog} except hive builds a fresh
+     * catalog per call, and several of them (rest and polaris in particular)
+     * hold a FileIO with an open connection behind it. No caller closed them,
+     * so each request leaked one for the life of the agent process. Rather
+     * than push try-with-resources onto the fifteen-odd call sites -- and rely
+     * on every future one remembering -- the wrapper records what it hands out
+     * and {@link IcebergCatalogReleaseFilter} closes the lot when the request
+     * ends. That is the correct boundary anyway: the {@code Table} a caller
+     * gets back reads through the catalog's FileIO, so the catalog must
+     * outlive the whole call chain and nothing needs it afterwards.
+     */
+    private static final ThreadLocal<List<IcebergCatalog>> REQUEST_CATALOGS =
+            ThreadLocal.withInitial(ArrayList::new);
+
+    /**
+     * Closes and forgets every catalog handed out during the current request.
+     *
+     * <p>Called from a {@code finally}, so one catalog failing to close must
+     * not stop the others: each failure is logged and the loop continues.
+     * Idempotent -- a request that asked for no catalog closes nothing.
+     */
+    public void releaseRequestCatalogs() {
+        List<IcebergCatalog> catalogs = REQUEST_CATALOGS.get();
+
+        try {
+            for (IcebergCatalog catalog : catalogs) {
+                try {
+                    catalog.close();
+                } catch (Exception e) {
+                    LOG.warn("Failed to close per-request iceberg catalog {}",
+                            catalog.getClass().getSimpleName(), e);
+                }
+            }
+        } finally {
+            /*
+             * Remove rather than clear: Tomcat reuses worker threads, and a
+             * retained ThreadLocal keeps its (classloader-referencing) value
+             * alive for the life of the pool.
+             */
+            REQUEST_CATALOGS.remove();
+        }
+    }
+
+    private IcebergCatalog trackForRequest(IcebergCatalog catalog) {
+        REQUEST_CATALOGS.get().add(catalog);
+        return catalog;
+    }
+
+    /**
      * Returns the corresponding catalog implementation.
      */
     public IcebergCatalog getIcebergCatalog(RequestContext context) throws Exception {
+        return trackForRequest(newIcebergCatalog(context));
+    }
+
+    /**
+     * Builds a catalog without registering it for per-request release.
+     *
+     * <p>Protected rather than private so tests can substitute a catalog whose
+     * HTTP and native-storage edges are stubbed, the same seam
+     * {@link IcebergRestCatalog} offers for its own two.
+     */
+    protected IcebergCatalog newIcebergCatalog(RequestContext context) throws Exception {
         String catalogType = context.getCatalogType();
         switch (catalogType) {
             case "s3":
@@ -232,6 +497,12 @@ public class IcebergCatalogWrapper {
                 return new InvalidatingHiveCatalog(getHiveCatalog(context), this, context);
             case "polaris":
                 return new IcebergPolarisCatalog(
+                    context.getDataSource(),
+                    icebergUtilities,
+                    context.getConfiguration(),
+                    context.getGopherProperties());
+            case "rest":
+                return new IcebergRestCatalog(
                     context.getDataSource(),
                     icebergUtilities,
                     context.getConfiguration(),

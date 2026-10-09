@@ -50,7 +50,13 @@ static const OptionDef icebergTableOptionDefs[] = {
 	OPTION_STRING("compression", IcebergTableOptions, compression, "zstd"),
 	OPTION_INT("compression_level", IcebergTableOptions, compression_level, -1),
 	OPTION_STRING(DATALAKEFDW_ICEBERG_OPTION_PARTITION_BY, IcebergTableOptions, partition_by, NULL),
-	OPTION_INT("metadata_cache", IcebergTableOptions, metadata_cache, 0),
+	/*
+	 * -1, not 0: the two are different answers.  0 is "this table opts out of
+	 * caching" and must beat the catalog's metadata_cache; -1 is "this table
+	 * said nothing", which inherits it.  The option machinery has no
+	 * was-it-specified flag, so the default value carries that distinction.
+	 */
+	OPTION_INT("metadata_cache", IcebergTableOptions, metadata_cache, -1),
 	/* Add new Iceberg table options here */
 };
 

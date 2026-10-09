@@ -92,6 +92,71 @@ parseDeletes(json_t *jdeletes)
 	return deletes;
 }
 
+/*
+ * extractCatalogPropertiesEnvelope
+ *		Pull the storage envelope out of an agent response.
+ *
+ * REST catalogs return the envelope under a top-level "catalog-properties"
+ * key.  Two responses carry it, always in the same shape: get-fragments,
+ * where it is a sibling of "combinedTasks" so that fragments and storage
+ * information come from one catalog observation (the envelope convention),
+ * and load-table, which the write path uses when there are no fragments to
+ * ask for.  Responses without the key return NULL and the caller decides
+ * whether that is an error.  The subtree is re-serialized verbatim: it
+ * becomes the single trailing String of am_private that
+ * extractCatalogProperties() on the QE relies on.
+ */
+char *
+extractCatalogPropertiesEnvelope(const char *buffer, size_t buffer_size)
+{
+	json_t	   *jroot;
+	json_t	   *jenvelope;
+	json_t	   *jversion;
+	json_error_t jerror;
+	char	   *dumped;
+	char	   *result;
+
+	jroot = json_loadb(buffer, buffer_size, 0, &jerror);
+	if (jroot == NULL)
+		elog(ERROR, "failed to decode fragments message: %s line: %d",
+			 jerror.text, jerror.line);
+
+	jenvelope = json_object_get(jroot, "catalog-properties");
+	if (jenvelope == NULL || !json_is_object(jenvelope))
+	{
+		json_decref(jroot);
+		return NULL;
+	}
+
+	/*
+	 * A structural envelope change bumps envelope-version; refusing versions
+	 * we do not know beats silently misreading renamed fields.
+	 */
+	jversion = json_object_get(jenvelope, "envelope-version");
+	if (jversion == NULL || !json_is_integer(jversion))
+	{
+		json_decref(jroot);
+		elog(ERROR, "catalog-properties envelope has no envelope-version");
+	}
+	if (json_integer_value(jversion) > 1)
+	{
+		long long version = (long long) json_integer_value(jversion);
+
+		json_decref(jroot);
+		elog(ERROR, "catalog-properties envelope-version %lld is newer than "
+			 "this server understands (max 1)", version);
+	}
+
+	dumped = json_dumps(jenvelope, JSON_COMPACT);
+	json_decref(jroot);
+	if (dumped == NULL)
+		elog(ERROR, "failed to serialize catalog-properties envelope");
+
+	result = pstrdup(dumped);
+	free(dumped);
+	return result;
+}
+
 List *
 parseIcebergFragmentResponse(char *buffer, size_t buffer_size)
 {

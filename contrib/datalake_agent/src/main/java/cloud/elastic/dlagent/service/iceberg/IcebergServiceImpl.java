@@ -12,6 +12,7 @@ import cloud.elastic.dlagent.plugins.iceberg.IcebergFileFragmentMetadata;
 import cloud.elastic.dlagent.plugins.iceberg.utilities.IcebergUtilities;
 import cloud.elastic.dlagent.plugins.iceberg.IcebergCatalogWrapper;
 import cloud.elastic.dlagent.plugins.iceberg.IcebergPolarisCatalogManager;
+import cloud.elastic.dlagent.plugins.iceberg.IcebergRestCatalog;
 import cloud.elastic.dlagent.service.ServiceResult;
 import cloud.elastic.dlagent.plugins.iceberg.utilities.MetadataJsonReader;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -33,6 +34,7 @@ import org.apache.iceberg.BaseTable;
 import org.apache.iceberg.UpdateSchema;
 import org.apache.iceberg.catalog.TableIdentifier;
 import org.apache.iceberg.exceptions.NoSuchNamespaceException;
+import org.apache.iceberg.exceptions.CommitFailedException;
 import org.apache.iceberg.io.CloseableIterable;
 import org.apache.iceberg.types.TypeUtil;
 import org.apache.iceberg.types.Types;
@@ -50,6 +52,7 @@ import java.util.Set;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.stream.Collectors;
+import java.util.concurrent.Callable;
 
 import static org.apache.iceberg.FileContent.EQUALITY_DELETES;
 
@@ -89,6 +92,33 @@ public class IcebergServiceImpl implements IcebergService {
         return fetcher;
     }
 
+    private <T> T retryRestCommit(RequestContext context, Callable<T> action) throws Exception {
+        if (!"rest".equals(context.getCatalogType())) {
+            return action.call();
+        }
+        final int maxAttempts = 4;
+        long backoffMillis = 100L;
+        for (int attempt = 1; attempt <= maxAttempts; attempt++) {
+            try {
+                return action.call();
+            } catch (CommitFailedException e) {
+                if (attempt == maxAttempts) {
+                    throw e;
+                }
+                log.warn("Iceberg REST optimistic commit conflict for {}; retry {}/{}",
+                        context.getDataSource(), attempt, maxAttempts - 1);
+                try {
+                    Thread.sleep(backoffMillis);
+                } catch (InterruptedException interrupted) {
+                    Thread.currentThread().interrupt();
+                    throw interrupted;
+                }
+                backoffMillis *= 2L;
+            }
+        }
+        throw new IllegalStateException("Unreachable REST commit retry state");
+    }
+
     @Autowired
     private IcebergCatalogWrapper icebergCatalogWrapper;
 
@@ -109,12 +139,32 @@ public class IcebergServiceImpl implements IcebergService {
     @Value("${iceberg.polaris.auto-create-namespace:true}")
     private boolean polarisAutoCreateNamespace;
 
+    /**
+     * The same, for a generic REST catalog, on a switch of its own.
+     *
+     * <p>Polaris and REST reach namespace creation through one API, but they
+     * do not share one lifecycle: an S3-Tables style platform owns namespaces
+     * on its own control plane, where an operator may well want client-side
+     * creation turned off while leaving it on for Polaris.  A single switch
+     * named for Polaris could not express that, and silently decided REST's
+     * behaviour along with it.
+     *
+     * <p>Whether this path is reachable at all depends on the platform.  It
+     * hangs off {@code NoSuchNamespaceException}, so a catalog that answers a
+     * create into a missing namespace with 500 instead of the spec's 404
+     * never gets here: XSKY does exactly that, and there the namespace has to
+     * exist first no matter how this is set.  Its own createNamespace call
+     * does work, so the namespace can be made through the catalog API.
+     */
+    @Value("${iceberg.rest.auto-create-namespace:true}")
+    private boolean restAutoCreateNamespace;
+
     @Override
     public Boolean checkTableExists(String namespace, String tableName, Map<String, String> properties,
             RequestContext context) throws Exception {
         IcebergCatalog catalog = icebergCatalogWrapper.getIcebergCatalog(context);
         TableIdentifier tableId = TableIdentifier.of(namespace, tableName);
-        catalog.loadTable(tableId, context.getPath(), properties);
+        catalog.loadTableMetadataOnly(tableId, context.getPath(), properties);
         return true;
     }
 
@@ -123,7 +173,16 @@ public class IcebergServiceImpl implements IcebergService {
             throws Exception {
         IcebergCatalog catalog = icebergCatalogWrapper.getIcebergCatalog(context);
         TableIdentifier tableId = TableIdentifier.of(namespace, tableName);
-        Table table = catalog.loadTable(tableId, context.getPath(), properties);
+        /*
+         * Metadata-only on purpose: this feeds the head-resolution endpoint,
+         * whose response is built entirely from metadata.  The returned table
+         * must never be handed to anything that reads or commits.
+         */
+        Table table = catalog.loadTableMetadataOnly(tableId, context.getPath(), properties);
+        if (catalog instanceof IcebergRestCatalog) {
+            context.setCatalogProperties(
+                    ((IcebergRestCatalog) catalog).catalogPropertiesEnvelope());
+        }
         return table;
     }
 
@@ -208,11 +267,16 @@ public class IcebergServiceImpl implements IcebergService {
             tableProperties.putAll(IcebergUtilities.stripInternalProperties(properties));
         }
         try {
-            Table table = catalog.createTable(tableId, schema, spec, location, tableProperties);
+            /*
+             * Metadata-only, like loadTable above: the create endpoint's
+             * response is built from the create response's metadata and this
+             * table is never read from or committed through.
+             */
+            Table table = catalog.createTableMetadataOnly(tableId, schema, spec, location, tableProperties);
             return table;
         } catch (org.apache.iceberg.exceptions.AlreadyExistsException e) {
             log.info("Table {} already exists, loading existing table", tableId);
-            return catalog.loadTable(tableId, context.getPath(), properties);
+            return catalog.loadTableMetadataOnly(tableId, context.getPath(), properties);
         } catch (org.apache.iceberg.exceptions.ValidationException e) {
             /*
              * Hive Metastore raises InvalidObjectException(message:database <ns>)
@@ -241,23 +305,32 @@ public class IcebergServiceImpl implements IcebergService {
             throw e;
         } catch (NoSuchNamespaceException e) {
             String catalogType = context.getCatalogType();
+            boolean autoCreate;
 
-            // Only support auto-create namespace for polaris catalog
-            if (!"polaris".equals(catalogType)) {
+            /*
+             * One namespace-creation API, but a switch per catalog type: see
+             * restAutoCreateNamespace on why the two cannot share one.
+             */
+            if ("polaris".equals(catalogType)) {
+                autoCreate = polarisAutoCreateNamespace;
+            } else if ("rest".equals(catalogType)) {
+                autoCreate = restAutoCreateNamespace;
+            } else {
                 log.error("Namespace {} not found and auto-creation not supported for catalog type: {}",
                         namespace, catalogType);
                 throw e;
             }
 
-            // Check if auto-create is enabled for polaris
-            if (!polarisAutoCreateNamespace) {
-                log.error("Namespace {} not found and auto-creation is disabled for polaris catalog", namespace);
+            if (!autoCreate) {
+                log.error("Namespace {} not found and auto-creation is disabled for {} catalog",
+                        namespace, catalogType);
                 throw e;
             }
 
-            log.info("Namespace {} not found in polaris catalog, attempting to create it", namespace);
+            log.info("Namespace {} not found in {} catalog, attempting to create it",
+                    namespace, catalogType);
 
-            // Auto-create namespace for polaris catalog
+            // Auto-create namespace through the common REST catalog API.
             String[] catalogAndNamespace = extractCatalogNameAndNamespace(context);
             String catalogName = catalogAndNamespace[0];
 
@@ -265,7 +338,7 @@ public class IcebergServiceImpl implements IcebergService {
 
             log.info("Successfully auto-created namespace: {}", namespace);
             // Retry table creation
-            Table table = catalog.createTable(tableId, schema, spec, location, tableProperties);
+            Table table = catalog.createTableMetadataOnly(tableId, schema, spec, location, tableProperties);
             return table;
         }
     }
@@ -375,8 +448,13 @@ public class IcebergServiceImpl implements IcebergService {
                     throw new IllegalArgumentException("Invalid snapshot_id value: " + snapStr, e);
                 }
             }
+            /*
+             * A REST catalog's fragments carry vended credentials that expire,
+             * so they are resolved fresh rather than served from the cache.
+             */
+            boolean cacheable = !"rest".equals(context.getCatalogType());
             String cacheKey = fragmentCacheKey(uncommittedLocation, context, snapshotId);
-            String cached = fragmentCache.getIfPresent(cacheKey);
+            String cached = cacheable ? fragmentCache.getIfPresent(cacheKey) : null;
             if (cached != null) {
                 log.debug("Fragment cache hit for {} at {} snapshot {}",
                     context.getDataSource(), uncommittedLocation, snapshotId);
@@ -388,7 +466,9 @@ public class IcebergServiceImpl implements IcebergService {
             FragmentDescription fragmentDescription =
                 fetcher.getFragmentsByUncommittedMetadata(uncommittedLocation, snapshotId);
             String result = objectMapper.writeValueAsString(fragmentDescription);
-            fragmentCache.put(cacheKey, result);
+            if (cacheable) {
+                fragmentCache.put(cacheKey, result);
+            }
             return result;
         }
 
@@ -523,8 +603,8 @@ public class IcebergServiceImpl implements IcebergService {
     @Override
     public Map<String, Object> commitFileGroups(String namespace, String tableName,
             Map<String, String> properties, RequestContext context) throws Exception {
-        IcebergMetadataFetcher fetcher = newFetcher(context);
-        String metadataLocation = fetcher.commitFileGroups();
+        String metadataLocation = retryRestCommit(context,
+                () -> newFetcher(context).commitFileGroups());
         Map<String, Object> result = new HashMap<>();
         result.put("metadata-location", metadataLocation);
         return result;
@@ -533,8 +613,8 @@ public class IcebergServiceImpl implements IcebergService {
     @Override
     public Map<String, Object> commitAppend(String namespace, String tableName,
             Map<String, String> properties, RequestContext context) throws Exception {
-        IcebergMetadataFetcher fetcher = newFetcher(context);
-        String metadataLocation = fetcher.commitAppend();
+        String metadataLocation = retryRestCommit(context,
+                () -> newFetcher(context).commitAppend());
         Map<String, Object> result = new HashMap<>();
         result.put("metadata-location", metadataLocation);
         return result;
@@ -543,8 +623,8 @@ public class IcebergServiceImpl implements IcebergService {
     @Override
     public Map<String, Object> commitUpdate(String namespace, String tableName,
             Map<String, String> properties, RequestContext context) throws Exception {
-        IcebergMetadataFetcher fetcher = newFetcher(context);
-        String metadataLocation = fetcher.commitUpdate();
+        String metadataLocation = retryRestCommit(context,
+                () -> newFetcher(context).commitUpdate());
         Map<String, Object> result = new HashMap<>();
         result.put("metadata-location", metadataLocation);
         return result;
@@ -553,8 +633,8 @@ public class IcebergServiceImpl implements IcebergService {
     @Override
     public Map<String, Object> commitRewrite(String namespace, String tableName,
             Map<String, String> properties, RequestContext context) throws Exception {
-        IcebergMetadataFetcher fetcher = newFetcher(context);
-        String metadataLocation = fetcher.commitRewrite();
+        String metadataLocation = retryRestCommit(context,
+                () -> newFetcher(context).commitRewrite());
         Map<String, Object> result = new HashMap<>();
         result.put("metadata-location", metadataLocation);
         return result;
