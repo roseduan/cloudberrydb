@@ -28,6 +28,7 @@
 #include "storage/pax.h"
 
 #include <map>
+#include <numeric>
 #include <utility>
 
 #include "access/pax_visimap.h"
@@ -688,8 +689,31 @@ void TableDeleter::DeleteWithVisibilityMap(
       rel_->rd_locator, rel_->rd_backend);
 
   min_max_col_idxs = cbdb::GetMinMaxColumnIndexes(rel_);
-  stats_updater_projection->SetColumnProjection(min_max_col_idxs,
-                                                rel_->rd_att->natts);
+
+  // The statistics re-read must project EVERY column, not just the minmax ones.
+  //
+  // MicroPartitionStats::AddRow() walks all natts of the slot and derives
+  // allnull/hasnull/nonnullrows for each of them; those three are kept for every
+  // column regardless of whether minmax or bloom filters were requested.  A
+  // narrower projection leaves the remaining slot entries untouched -- they keep
+  // whatever MakeTupleTableSlot() zeroed them to, i.e. tts_isnull = false -- and
+  // AddRow() then records those columns as "no nulls at all".  The sparse filter
+  // reads that back as hasnull = false and prunes the whole micro partition for
+  // an IS NULL qual, silently losing rows.
+  //
+  // Note that passing min_max_col_idxs here was not merely narrow, it was
+  // inverted for the common case: PaxFilter::SetColumnProjection() treats a list
+  // whose size equals natts as "project everything" and anything else as an
+  // explicit allow-list, so an empty minmax list -- the default, when the table
+  // carries no minmax_columns reloption -- asked for *no* columns at all.
+  {
+    std::vector<int> all_col_idxs(rel_->rd_att->natts);
+    std::iota(all_col_idxs.begin(), all_col_idxs.end(), 0);
+    stats_updater_projection->SetColumnProjection(all_col_idxs,
+                                                  rel_->rd_att->natts);
+    // size == natts, so the filter stores an empty projection meaning "all".
+    Assert(stats_updater_projection->GetColumnProjection().empty());
+  }
   do {
     auto it = iterator->Next();
 

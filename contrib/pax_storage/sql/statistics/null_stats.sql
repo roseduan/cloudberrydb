@@ -1,0 +1,368 @@
+-- Coverage for the per-column allnull/hasnull statistics: every state the two
+-- flags can be in, and every path that can change them.
+--
+-- They gate micro partition pruning in the sparse filter:
+--
+--     IS NULL      prunes the partition when hasnull is false
+--     IS NOT NULL  prunes the partition when allnull  is true
+--
+-- so a flag that is wrong in the narrowing direction silently drops rows while
+-- every other query keeps working.  That is exactly how the DELETE path used to
+-- break: it recomputed the file-level statistics through a reader that only
+-- projected the minmax columns, so every other column came back looking like it
+-- had no NULLs at all.
+--
+-- Each case asserts two independent things:
+--
+--   * the flags as stored, via null_stats(); and
+--   * that the answer with pruning on matches the answer with pruning off.
+--     Every case runs the same two predicates twice -- once with
+--     pax.enable_sparse_filter on, once off -- and the two blocks of results
+--     must be identical.  A difference means pruning dropped rows it should
+--     have kept (or kept rows it could have skipped, which is merely slow).
+--
+-- Tables are DISTRIBUTED REPLICATED so every segment holds the same rows and
+-- the aux dump collapses to one deterministic line per micro partition.
+--
+-- Note there is deliberately no helper function around the probes: a plpgsql
+-- wrapper that SETs the GUC and then dispatches the query can hang on the
+-- interconnect, so the probes are spelled out.
+
+set default_table_access_method = pax;
+
+-- ptstatistics renders as [(allnull,hasnull),(nonnullrows),(min,max),(sum)]
+-- per column.  Only the first two groups matter here; min/max stay None unless
+-- the table carries a minmax_columns reloption.
+create or replace function null_stats(rel regclass)
+returns table(blk int, tupcount int, stats text) as $$
+  select distinct ptblockname, pttupcount, ptstatistics::text
+    from get_pax_aux_table(rel) order by 1, 2, 3;
+$$ language sql;
+
+-- ============================================================ A. write path
+-- The three states the writer itself can produce for a column.
+
+-- A1  no NULL at all  ->  (false,false)
+create table ns_a1(v int) distributed replicated;
+insert into ns_a1 select i from generate_series(1, 10) i;
+select * from null_stats('ns_a1');
+select count(*) from ns_a1 where v is null;
+select count(*) from ns_a1 where v is not null;
+set pax.enable_sparse_filter = off;
+select count(*) from ns_a1 where v is null;
+select count(*) from ns_a1 where v is not null;
+reset pax.enable_sparse_filter;
+
+-- A2  every value NULL  ->  (true,true)
+create table ns_a2(v int) distributed replicated;
+insert into ns_a2 select null::int from generate_series(1, 10) i;
+select * from null_stats('ns_a2');
+select count(*) from ns_a2 where v is null;
+select count(*) from ns_a2 where v is not null;
+set pax.enable_sparse_filter = off;
+select count(*) from ns_a2 where v is null;
+select count(*) from ns_a2 where v is not null;
+reset pax.enable_sparse_filter;
+
+-- A3  mixed  ->  (false,true)
+create table ns_a3(v int) distributed replicated;
+insert into ns_a3 select case when i % 2 = 0 then null else i end
+  from generate_series(1, 10) i;
+select * from null_stats('ns_a3');
+select count(*) from ns_a3 where v is null;
+select count(*) from ns_a3 where v is not null;
+set pax.enable_sparse_filter = off;
+select count(*) from ns_a3 where v is null;
+select count(*) from ns_a3 where v is not null;
+reset pax.enable_sparse_filter;
+
+-- ======================================================= B. DELETE rewrites
+-- DELETE is the only operation that recomputes the file-level statistics in
+-- place -- the data file is untouched, only the visimap changes -- so it is
+-- the only way a flag can move without the column being rewritten.
+
+-- B1  (false,true) -> (false,false): every NULL row deleted
+create table ns_b1(v int, k int) distributed replicated;
+insert into ns_b1 select case when i % 2 = 0 then null else i end, i
+  from generate_series(1, 10) i;
+delete from ns_b1 where v is null;
+select * from null_stats('ns_b1');
+select count(*) from ns_b1 where v is null;
+select count(*) from ns_b1 where v is not null;
+set pax.enable_sparse_filter = off;
+select count(*) from ns_b1 where v is null;
+select count(*) from ns_b1 where v is not null;
+reset pax.enable_sparse_filter;
+
+-- B2  (false,true) -> (true,true): every non-NULL row deleted
+create table ns_b2(v int, k int) distributed replicated;
+insert into ns_b2 select case when i % 2 = 0 then null else i end, i
+  from generate_series(1, 10) i;
+delete from ns_b2 where v is not null;
+select * from null_stats('ns_b2');
+select count(*) from ns_b2 where v is null;
+select count(*) from ns_b2 where v is not null;
+set pax.enable_sparse_filter = off;
+select count(*) from ns_b2 where v is null;
+select count(*) from ns_b2 where v is not null;
+reset pax.enable_sparse_filter;
+
+-- B3  (false,true) -> (false,true): some of each survives
+create table ns_b3(v int, k int) distributed replicated;
+insert into ns_b3 select case when i % 2 = 0 then null else i end, i
+  from generate_series(1, 10) i;
+delete from ns_b3 where k in (1, 2);
+select * from null_stats('ns_b3');
+select count(*) from ns_b3 where v is null;
+select count(*) from ns_b3 where v is not null;
+set pax.enable_sparse_filter = off;
+select count(*) from ns_b3 where v is null;
+select count(*) from ns_b3 where v is not null;
+reset pax.enable_sparse_filter;
+
+-- B4  (true,true) stays put: all-NULL column, an unrelated row deleted
+create table ns_b4(v int, k int) distributed replicated;
+insert into ns_b4 select null::int, i from generate_series(1, 10) i;
+delete from ns_b4 where k = 1;
+select * from null_stats('ns_b4');
+select count(*) from ns_b4 where v is null;
+select count(*) from ns_b4 where v is not null;
+set pax.enable_sparse_filter = off;
+select count(*) from ns_b4 where v is null;
+select count(*) from ns_b4 where v is not null;
+reset pax.enable_sparse_filter;
+
+-- B5  (false,false) stays put: no-NULL column, an unrelated row deleted
+create table ns_b5(v int, k int) distributed replicated;
+insert into ns_b5 select i, i from generate_series(1, 10) i;
+delete from ns_b5 where k = 1;
+select * from null_stats('ns_b5');
+select count(*) from ns_b5 where v is null;
+select count(*) from ns_b5 where v is not null;
+set pax.enable_sparse_filter = off;
+select count(*) from ns_b5 where v is null;
+select count(*) from ns_b5 where v is not null;
+reset pax.enable_sparse_filter;
+
+-- B6  everything deleted: the degenerate (true,false) state -- allnull is
+--     still set because no non-NULL value was ever seen, hasnull is not
+--     because no row was observed at all.
+create table ns_b6(v int, k int) distributed replicated;
+insert into ns_b6 select case when i % 2 = 0 then null else i end, i
+  from generate_series(1, 10) i;
+delete from ns_b6;
+select * from null_stats('ns_b6');
+select count(*) from ns_b6 where v is null;
+select count(*) from ns_b6 where v is not null;
+set pax.enable_sparse_filter = off;
+select count(*) from ns_b6 where v is null;
+select count(*) from ns_b6 where v is not null;
+reset pax.enable_sparse_filter;
+
+-- ===================================================== C. projection matrix
+-- The recompute reads the partition back to re-derive the statistics.  Which
+-- columns that read projects decides which columns end up with believable
+-- flags, so the minmax_columns reloption -- unrelated as it looks -- used to
+-- change the answer.  All four shapes must behave identically.
+
+-- C1  no minmax_columns at all
+create table ns_c1(v int, k int) distributed replicated;
+insert into ns_c1 select case when i % 2 = 0 then null else i end, i
+  from generate_series(1, 10) i;
+delete from ns_c1 where k = 1;
+select * from null_stats('ns_c1');
+select count(*) from ns_c1 where v is null;
+select count(*) from ns_c1 where v is not null;
+set pax.enable_sparse_filter = off;
+select count(*) from ns_c1 where v is null;
+select count(*) from ns_c1 where v is not null;
+reset pax.enable_sparse_filter;
+
+-- C2  minmax_columns naming a different column
+create table ns_c2(v int, k int) with (minmax_columns='k') distributed replicated;
+insert into ns_c2 select case when i % 2 = 0 then null else i end, i
+  from generate_series(1, 10) i;
+delete from ns_c2 where k = 1;
+select * from null_stats('ns_c2');
+select count(*) from ns_c2 where v is null;
+select count(*) from ns_c2 where v is not null;
+set pax.enable_sparse_filter = off;
+select count(*) from ns_c2 where v is null;
+select count(*) from ns_c2 where v is not null;
+reset pax.enable_sparse_filter;
+
+-- C3  minmax_columns naming the column under test
+create table ns_c3(v int, k int) with (minmax_columns='v') distributed replicated;
+insert into ns_c3 select case when i % 2 = 0 then null else i end, i
+  from generate_series(1, 10) i;
+delete from ns_c3 where k = 1;
+select * from null_stats('ns_c3');
+select count(*) from ns_c3 where v is null;
+select count(*) from ns_c3 where v is not null;
+set pax.enable_sparse_filter = off;
+select count(*) from ns_c3 where v is null;
+select count(*) from ns_c3 where v is not null;
+reset pax.enable_sparse_filter;
+
+-- C4  minmax_columns covering every column
+create table ns_c4(v int, k int) with (minmax_columns='v,k') distributed replicated;
+insert into ns_c4 select case when i % 2 = 0 then null else i end, i
+  from generate_series(1, 10) i;
+delete from ns_c4 where k = 1;
+select * from null_stats('ns_c4');
+select count(*) from ns_c4 where v is null;
+select count(*) from ns_c4 where v is not null;
+set pax.enable_sparse_filter = off;
+select count(*) from ns_c4 where v is null;
+select count(*) from ns_c4 where v is not null;
+reset pax.enable_sparse_filter;
+
+-- ========================================================= D. other paths
+
+-- D1  UPDATE: the old partition is recomputed (the updated rows become
+--     invisible) and a fresh one is written by the normal writer path
+create table ns_d1(v int, k int) distributed replicated;
+insert into ns_d1 select case when i % 2 = 0 then null else i end, i
+  from generate_series(1, 10) i;
+update ns_d1 set k = k + 100 where k <= 2;
+select * from null_stats('ns_d1');
+select count(*) from ns_d1 where v is null;
+select count(*) from ns_d1 where v is not null;
+set pax.enable_sparse_filter = off;
+select count(*) from ns_d1 where v is null;
+select count(*) from ns_d1 where v is not null;
+reset pax.enable_sparse_filter;
+
+-- D2  several groups inside one micro partition.  Group-level statistics live
+--     in the stripe footer and are copied verbatim for groups that lost no
+--     row; only the group holding a deleted row is recomputed.  The
+--     file-level flags are the merge of both, so both directions matter.
+set pax.max_tuples_per_group = 5;
+create table ns_d2(v int, k int) distributed replicated;
+insert into ns_d2 select case when i <= 5 then i else null end, i
+  from generate_series(1, 10) i;
+select * from null_stats('ns_d2');
+-- first delete from the group that holds no NULL: the other group is copied
+-- verbatim, so its hasnull has to survive the merge
+delete from ns_d2 where k = 1;
+select * from null_stats('ns_d2');
+select count(*) from ns_d2 where v is null;
+select count(*) from ns_d2 where v is not null;
+set pax.enable_sparse_filter = off;
+select count(*) from ns_d2 where v is null;
+select count(*) from ns_d2 where v is not null;
+reset pax.enable_sparse_filter;
+-- then delete from the group that does hold the NULLs: now the only group that
+-- knew about them is the recomputed one, and nothing else can carry hasnull
+-- through the merge -- this is the direction that used to lose it
+delete from ns_d2 where k = 6;
+select * from null_stats('ns_d2');
+select count(*) from ns_d2 where v is null;
+select count(*) from ns_d2 where v is not null;
+set pax.enable_sparse_filter = off;
+select count(*) from ns_d2 where v is null;
+select count(*) from ns_d2 where v is not null;
+reset pax.enable_sparse_filter;
+reset pax.max_tuples_per_group;
+
+-- D3  several micro partitions: one INSERT each, then delete from one of them
+create table ns_d3(v int, k int) distributed replicated;
+insert into ns_d3 select i, i from generate_series(1, 5) i;
+insert into ns_d3 select null::int, i from generate_series(6, 10) i;
+select * from null_stats('ns_d3');
+delete from ns_d3 where k = 1;
+select * from null_stats('ns_d3');
+select count(*) from ns_d3 where v is null;
+select count(*) from ns_d3 where v is not null;
+set pax.enable_sparse_filter = off;
+select count(*) from ns_d3 where v is null;
+select count(*) from ns_d3 where v is not null;
+reset pax.enable_sparse_filter;
+
+-- D4  ADD COLUMN: the new attribute has no data in the existing partition and
+--     is served by the missing-value path
+create table ns_d4(k int) distributed replicated;
+insert into ns_d4 select i from generate_series(1, 10) i;
+alter table ns_d4 add column v int;
+select count(*) from ns_d4 where v is null;
+select count(*) from ns_d4 where v is not null;
+set pax.enable_sparse_filter = off;
+select count(*) from ns_d4 where v is null;
+select count(*) from ns_d4 where v is not null;
+reset pax.enable_sparse_filter;
+delete from ns_d4 where k = 1;
+select * from null_stats('ns_d4');
+select count(*) from ns_d4 where v is null;
+select count(*) from ns_d4 where v is not null;
+set pax.enable_sparse_filter = off;
+select count(*) from ns_d4 where v is null;
+select count(*) from ns_d4 where v is not null;
+reset pax.enable_sparse_filter;
+
+-- D5  DROP COLUMN: the dropped attribute still occupies a slot position, so
+--     the column indexes the recompute walks no longer match the live ones
+create table ns_d5(v int, junk text, k int) distributed replicated;
+insert into ns_d5 select case when i % 2 = 0 then null else i end, 'x'||i, i
+  from generate_series(1, 10) i;
+alter table ns_d5 drop column junk;
+delete from ns_d5 where k = 1;
+select * from null_stats('ns_d5');
+select count(*) from ns_d5 where v is null;
+select count(*) from ns_d5 where v is not null;
+set pax.enable_sparse_filter = off;
+select count(*) from ns_d5 where v is null;
+select count(*) from ns_d5 where v is not null;
+reset pax.enable_sparse_filter;
+
+-- D6  VACUUM rewrites the partition through the writer path, so the flags must
+--     come out the same as the recompute produced
+create table ns_d6(v int, k int) distributed replicated;
+insert into ns_d6 select case when i % 2 = 0 then null else i end, i
+  from generate_series(1, 10) i;
+delete from ns_d6 where k = 1;
+select * from null_stats('ns_d6');
+vacuum ns_d6;
+select * from null_stats('ns_d6');
+select count(*) from ns_d6 where v is null;
+select count(*) from ns_d6 where v is not null;
+set pax.enable_sparse_filter = off;
+select count(*) from ns_d6 where v is null;
+select count(*) from ns_d6 where v is not null;
+reset pax.enable_sparse_filter;
+
+-- D7  repeated deletes: the recompute runs again on an already recomputed
+--     partition, and finally removes the last non-NULL value
+create table ns_d7(v int, k int) distributed replicated;
+insert into ns_d7 select case when i % 3 = 0 then null else i end, i
+  from generate_series(1, 30) i;
+delete from ns_d7 where k <= 5;
+select * from null_stats('ns_d7');
+select count(*) from ns_d7 where v is null;
+select count(*) from ns_d7 where v is not null;
+set pax.enable_sparse_filter = off;
+select count(*) from ns_d7 where v is null;
+select count(*) from ns_d7 where v is not null;
+reset pax.enable_sparse_filter;
+delete from ns_d7 where k <= 10;
+select * from null_stats('ns_d7');
+select count(*) from ns_d7 where v is null;
+select count(*) from ns_d7 where v is not null;
+set pax.enable_sparse_filter = off;
+select count(*) from ns_d7 where v is null;
+select count(*) from ns_d7 where v is not null;
+reset pax.enable_sparse_filter;
+delete from ns_d7 where v is not null;
+select * from null_stats('ns_d7');
+select count(*) from ns_d7 where v is null;
+select count(*) from ns_d7 where v is not null;
+set pax.enable_sparse_filter = off;
+select count(*) from ns_d7 where v is null;
+select count(*) from ns_d7 where v is not null;
+reset pax.enable_sparse_filter;
+
+drop table ns_a1, ns_a2, ns_a3;
+drop table ns_b1, ns_b2, ns_b3, ns_b4, ns_b5, ns_b6;
+drop table ns_c1, ns_c2, ns_c3, ns_c4;
+drop table ns_d1, ns_d2, ns_d3, ns_d4, ns_d5, ns_d6, ns_d7;
+drop function null_stats(regclass);
+reset default_table_access_method;

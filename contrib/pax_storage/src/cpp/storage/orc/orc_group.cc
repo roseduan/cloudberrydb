@@ -161,7 +161,15 @@ std::pair<bool, size_t> OrcGroup::ReadTuple(TupleTableSlot *slot) {
       }
 
       auto column = pax_columns[index].get();
-      Assert(column);
+
+      // A column can be absent from the stripe even though it is in the
+      // projection: ReadStripe() appends a null placeholder for anything it
+      // skipped, so pax_columns is always natts long.  Report it as NULL
+      // rather than dereferencing; GetTupleColumn() does the same.
+      if (!column) {
+        slot->tts_isnull[index] = true;
+        continue;
+      }
 
       std::tie(slot->tts_values[index], slot->tts_isnull[index]) =
           GetColumnDatum(column, current_row_index_, &(current_nulls_[index]));
@@ -171,7 +179,16 @@ std::pair<bool, size_t> OrcGroup::ReadTuple(TupleTableSlot *slot) {
       // Still need filter with old projection
       // If current proj_col_index_ no build or empty
       // It means current tuple only need return CTID
+      //
+      // Leaving the slot entry alone here is not an option: the caller sees a
+      // stale tts_isnull/tts_values pair from whatever used the slot last (or
+      // the zeroed state MakeTupleTableSlot() left behind, i.e. "not null"),
+      // and has no way to tell that this attribute was never filled in.  That
+      // is how the statistics re-read on DELETE used to record every skipped
+      // column as having no NULLs.  Report NULL instead, matching
+      // GetTupleColumn().
       if (!pax_columns[index]) {
+        slot->tts_isnull[index] = true;
         continue;
       }
 

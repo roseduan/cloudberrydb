@@ -517,6 +517,25 @@ MicroPartitionStats::~MicroPartitionStats() {}
   stats::ColumnDataStats *data_stats;
 
   for (auto column_index = 0; column_index < n; column_index++) {
+    // allnull is maintained as "never saw a non-NULL value", so it must agree
+    // with the non-null counter at all times -- AddNonNullColumn() clears the
+    // flag and bumps the counter together, and both merge paths
+    // (MergeRawInfo/MergeTo) keep that relationship.  A mismatch means some
+    // caller updated one without the other, which silently changes what the
+    // sparse filter is allowed to prune.
+    Assert(column_mem_stats_[column_index].null_count_stats_.all_null ==
+           (column_mem_stats_[column_index].null_count_stats_.not_null_count ==
+            0));
+    // allnull implies hasnull: a column whose every observed value was NULL
+    // obviously contains a NULL.  The converse does not hold.  The one
+    // legitimate "allnull without hasnull" state is a column for which no row
+    // was observed at all (an empty group), which still carries
+    // not_null_count == 0.
+    AssertImply(column_mem_stats_[column_index].null_count_stats_.all_null &&
+                    column_mem_stats_[column_index].null_count_stats_.has_null,
+                column_mem_stats_[column_index].null_count_stats_.not_null_count ==
+                    0);
+
     // set const stats
     stats_->SetAllNull(
         column_index,
