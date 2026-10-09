@@ -66,6 +66,12 @@ class MicroPartitionInfoIterator final
   Snapshot snapshot_ = nullptr;
   SysScanDesc desc_ = nullptr;
   HeapTuple tuple_ = nullptr;
+
+  // Same contract as in MicroPartitionInfoParallelIterator: do not call
+  // systable_getnext() again after it returned NULL.  desc_ here is a heap
+  // scan, which does stay exhausted, so this is a guard rather than a fix --
+  // it keeps the iterator correct if the scan ever grows an index.
+  bool exhausted_ = false;
 };
 
 class MicroPartitionInfoParallelIterator final
@@ -102,6 +108,22 @@ class MicroPartitionInfoParallelIterator final
 
   uint64 batch_allocated_ = 2;
   int64 allocated_block_id_ = -1;
+
+  // Terminal state for the aux-table scan.
+  //
+  // systable_getnext() must not be called again once it has returned NULL.
+  // desc_ is an *index* scan (paxc_begin passes index_oid_ with indexOK), and
+  // btgettuple() restarts a scan whose position has been invalidated:
+  //
+  //     if (!BTScanPosIsValid(so->currPos))
+  //         res = _bt_first(scan, dir);
+  //
+  // Running off the end invalidates currPos (nbtsearch.c), so the next call
+  // silently re-reads the first row of the key range instead of reporting the
+  // end.  Without this flag HasNext() then keeps handing out the same
+  // micro partition, TableReader::AdvanceReader() never sets is_empty_, and
+  // TableReader::ReadTuple() spins on that block forever.
+  bool exhausted_ = false;
 };
 
 MicroPartitionInfoIterator::MicroPartitionInfoIterator(Relation pax_rel,
@@ -120,6 +142,7 @@ void MicroPartitionInfoIterator::paxc_begin() {
   }
 
   desc_ = systable_beginscan(aux_rel_, InvalidOid, false, snapshot_, 0, NULL);
+  exhausted_ = false;
 }
 
 void MicroPartitionInfoIterator::Begin() {
@@ -153,8 +176,9 @@ void MicroPartitionInfoIterator::End(bool close_aux) {
 }
 
 bool MicroPartitionInfoIterator::HasNext() {
-  if (!tuple_ && desc_) {
+  if (!tuple_ && desc_ && !exhausted_) {
     tuple_ = cbdb::SystableGetNext(desc_);
+    if (!tuple_) exhausted_ = true;
   }
   return tuple_ != nullptr;
 }
@@ -330,6 +354,9 @@ void MicroPartitionInfoParallelIterator::Release() {
 
 bool MicroPartitionInfoParallelIterator::HasNext() {
   if (tuple_) return true;
+  // The scan is done for good; see exhausted_ for why asking desc_ again
+  // would not say so.
+  if (exhausted_) return false;
 
   bool has_more;
   CBDB_WRAP_START;
@@ -344,8 +371,13 @@ bool MicroPartitionInfoParallelIterator::HasNext() {
 
       tuple_ = systable_getnext(desc_);
       has_more = tuple_ != nullptr;
-      // has no more blocks to scan
-      if (!has_more) break;
+      // No row at or beyond allocated_block_id_.  The scan key is a lower
+      // bound only, so a later batch cannot find one either: this worker is
+      // done with the relation.
+      if (!has_more) {
+        exhausted_ = true;
+        break;
+      }
 
       auto block_id = heap_getattr(tuple_, ANUM_PG_PAX_BLOCK_TABLES_PTBLOCKNAME,
                                    RelationGetDescr(aux_rel_), &is_null);
