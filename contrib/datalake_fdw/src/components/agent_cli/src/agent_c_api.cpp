@@ -88,6 +88,29 @@ namespace {
         c_response->retry_count = cpp_response.retry_count;
     }
 
+    /*
+     * The request never produced an HTTP response (cancelled, or the client
+     * threw).  Clear whatever the previous call left in the response and
+     * carry the reason in error_message, so callers that report from the
+     * response do not print a stale or empty "HTTP Status: 0" error.
+     *
+     * The old pointers are dropped, not freed, exactly like
+     * convert_response() does: response_body may hold either malloc'd
+     * memory (convert_response) or palloc'd memory (the files/delete and
+     * cleanup-from-metadata wrappers), so free() here could corrupt the heap.
+     */
+    void set_error_response(agent_cli_response_t* c_response) {
+        if (!c_response) return;
+
+        c_response->http_status = 0;
+        c_response->curl_code = 0;
+        c_response->response_body = nullptr;
+        c_response->response_size = 0;
+        c_response->error_message = duplicate_string(last_error_message.c_str());
+        c_response->total_time = 0;
+        c_response->retry_count = 0;
+    }
+
     agent_cli_status_t validate_params(const void* param, const char* name) {
         if (!param) {
             last_error_message = std::string(name) + " is null";
@@ -208,12 +231,15 @@ static agent_cli_status_t func_name(agent_cli_handle_t handle, \
         return errorCodeToCliStatus(cpp_response.respond_last_status); \
     } catch (const CancelledException& e) { \
         last_error_message = e.what(); \
+        set_error_response(response); \
         return AGENT_CLI_ERROR_CANCELLED; \
     } catch (const std::exception& e) { \
         last_error_message = e.what(); \
+        set_error_response(response); \
         return AGENT_CLI_ERROR_NETWORK; \
     } catch (...) { \
         last_error_message = "Unknown error in " #client_method; \
+        set_error_response(response); \
         return AGENT_CLI_ERROR_NETWORK; \
     } \
 }
@@ -237,12 +263,15 @@ static agent_cli_status_t func_name(agent_cli_handle_t handle, \
         return errorCodeToCliStatus(cpp_response.respond_last_status); \
     } catch (const CancelledException& e) { \
         last_error_message = e.what(); \
+        set_error_response(response); \
         return AGENT_CLI_ERROR_CANCELLED; \
     } catch (const std::exception& e) { \
         last_error_message = e.what(); \
+        set_error_response(response); \
         return AGENT_CLI_ERROR_NETWORK; \
     } catch (...) { \
         last_error_message = "Unknown error in " #client_method; \
+        set_error_response(response); \
         return AGENT_CLI_ERROR_NETWORK; \
     } \
 }
@@ -388,6 +417,8 @@ void wrapper_name(AgentCliHandle* handle, const char* table_name, const char* js
         elog(ERROR, "Invalid agent CLI handle"); \
     handle->lastStatus = internal_name(handle->handle, table_name, json, handle->currentResponse); \
     handle->responseValid = true; \
+    if (handle->lastStatus == AGENT_CLI_ERROR_CANCELLED) \
+        CHECK_FOR_INTERRUPTS(); \
     if (handle->lastStatus != AGENT_CLI_SUCCESS) \
         handle->lastErrorMessage = pstrdup(agent_cli_failure_detail(handle->lastStatus)); \
 }
@@ -399,6 +430,8 @@ void wrapper_name(AgentCliHandle* handle, const char* json) \
         elog(ERROR, "Invalid agent CLI handle"); \
     handle->lastStatus = internal_name(handle->handle, json, handle->currentResponse); \
     handle->responseValid = true; \
+    if (handle->lastStatus == AGENT_CLI_ERROR_CANCELLED) \
+        CHECK_FOR_INTERRUPTS(); \
     if (handle->lastStatus != AGENT_CLI_SUCCESS) \
         handle->lastErrorMessage = pstrdup(agent_cli_failure_detail(handle->lastStatus)); \
 }
@@ -411,6 +444,8 @@ void agent_cli_wrapper_create_table(AgentCliHandle* handle, const char* table_na
         elog(ERROR, "Invalid agent CLI handle");
     handle->lastStatus = agent_cli_create_table_internal(handle->handle, json, handle->currentResponse);
     handle->responseValid = true;
+    if (handle->lastStatus == AGENT_CLI_ERROR_CANCELLED)
+        CHECK_FOR_INTERRUPTS();
     if (handle->lastStatus != AGENT_CLI_SUCCESS)
         handle->lastErrorMessage = pstrdup(agent_cli_get_error_string(handle->lastStatus));
 }

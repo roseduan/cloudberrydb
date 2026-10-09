@@ -42,7 +42,16 @@
 #include "src/common/iceberg_constants.h"
 #include "src/common/util.h"
 
-/* Wrapper function for CHECK_FOR_INTERRUPTS */
+/*
+ * Tell the agent HTTP client whether to abandon the in-flight request.
+ *
+ * InterruptPending alone is not a cancel request: memory-context logging,
+ * procsignal barriers, custom procsignals and several timeouts set it too,
+ * and CHECK_FOR_INTERRUPTS() simply services those and carries on.  Only
+ * abort for interrupts that ProcessInterrupts() would turn into an error,
+ * otherwise an unrelated signal fails the statement with an empty
+ * "HTTP Status: 0, CURL Code: 0" response.
+ */
 static bool
 iceberg_catalog_interrupt_callback(void)
 {
@@ -52,7 +61,10 @@ iceberg_catalog_interrupt_callback(void)
     if (InterruptHoldoffCount != 0 || CritSectionCount != 0)
         return false;
 
-    return true;
+    if (ProcDiePending)
+        return true;
+
+    return QueryCancelPending && QueryCancelHoldoffCount == 0;
 }
 /* Remove duplicate struct definitions - now in agent_cli_wrapper.h */
 
