@@ -1,0 +1,99 @@
+-- Refreshing the local metadata mirror from the external catalog: the two SQL
+-- entry points added for issue #393.
+--
+-- What this file can and cannot cover.  The interesting cases -- an external
+-- catalog whose head moved because the storage platform compacted or expired
+-- behind our back, and the scheduled task that keeps the cache warm -- need a
+-- live REST catalog, so they live in the automation smoke suite.  What is
+-- covered here is everything that must hold with no external service at all:
+-- who may call these functions, and what they refuse.
+
+-- start_ignore
+DROP DATABASE IF EXISTS iceberg_refresh_db;
+CREATE DATABASE iceberg_refresh_db;
+\c iceberg_refresh_db
+CREATE EXTENSION datalake_fdw;
+-- end_ignore
+
+-- Both functions must exist and be default-deny: they rewrite state every
+-- other session's reads depend on, and issue external-catalog calls.
+SELECT proname, provolatile, proisstrict
+  FROM pg_proc
+ WHERE proname IN ('iceberg_refresh_metadata', 'iceberg_refresh_metadata_cache')
+   AND pronamespace = 'pg_catalog'::regnamespace
+ ORDER BY proname;
+
+SELECT has_function_privilege('public', 'iceberg_refresh_metadata(regclass)', 'execute')
+       AS public_may_refresh_one,
+       has_function_privilege('public', 'iceberg_refresh_metadata_cache(int)', 'execute')
+       AS public_may_refresh_cache;
+
+-- ============================================================
+-- Relation kinds that have no metadata mirror to refresh.  Each must say so
+-- by name rather than failing later inside the metadata lookup.
+-- ============================================================
+CREATE TABLE plain_heap (id int) DISTRIBUTED BY (id);
+SELECT * FROM iceberg_refresh_metadata('plain_heap');
+
+CREATE VIEW plain_view AS SELECT 1 AS id;
+SELECT * FROM iceberg_refresh_metadata('plain_view');
+
+CREATE SEQUENCE plain_seq;
+SELECT * FROM iceberg_refresh_metadata('plain_seq');
+
+-- STRICT: a NULL argument yields NULL, not an error.
+SELECT * FROM iceberg_refresh_metadata(NULL);
+
+-- ============================================================
+-- A table that does not exist at all is a regclass cast failure, which is the
+-- right error and comes from the type system rather than from us.
+-- ============================================================
+SELECT * FROM iceberg_refresh_metadata('nosuchtbl');
+
+-- ============================================================
+-- The batch entry point rejects a non-positive budget rather than silently
+-- doing nothing.  Both checks precede any use of the agent, so they hold on a
+-- cluster with no dlagent configured.
+-- ============================================================
+SELECT iceberg_refresh_metadata_cache(0);
+SELECT iceberg_refresh_metadata_cache(-1);
+
+-- ============================================================
+-- Permission: a non-owner is refused even with full SELECT.  This is the
+-- difference from iceberg_snapshot_list(), which only reports what a read
+-- would already have seen and therefore needs SELECT alone.
+-- ============================================================
+-- There are two layers, and each is checked separately so that neither can
+-- quietly become dead code behind the other.
+CREATE ROLE iceberg_refresh_reader NOLOGIN;
+GRANT SELECT ON plain_heap TO iceberg_refresh_reader;
+
+-- Layer 1: the function is revoked from PUBLIC, so a plain reader cannot
+-- reach it at all.
+SET SESSION AUTHORIZATION iceberg_refresh_reader;
+SELECT * FROM iceberg_refresh_metadata('plain_heap');
+RESET SESSION AUTHORIZATION;
+
+-- Layer 2: granted EXECUTE, the caller reaches the function and is stopped by
+-- the ownership check inside it.  Without this case layer 2 would be
+-- untested, since layer 1 fires first.  The check also runs before the
+-- is-it-iceberg one, which is why a plain table suffices here: a non-owner is
+-- told about ownership, not about the relation kind.
+GRANT EXECUTE ON FUNCTION iceberg_refresh_metadata(regclass)
+      TO iceberg_refresh_reader;
+SET SESSION AUTHORIZATION iceberg_refresh_reader;
+SELECT * FROM iceberg_refresh_metadata('plain_heap');
+RESET SESSION AUTHORIZATION;
+
+REVOKE EXECUTE ON FUNCTION iceberg_refresh_metadata(regclass)
+       FROM iceberg_refresh_reader;
+REVOKE SELECT ON plain_heap FROM iceberg_refresh_reader;
+DROP ROLE iceberg_refresh_reader;
+
+-- start_ignore
+DROP TABLE plain_heap;
+DROP VIEW plain_view;
+DROP SEQUENCE plain_seq;
+\c contrib_regression
+DROP DATABASE iceberg_refresh_db;
+-- end_ignore

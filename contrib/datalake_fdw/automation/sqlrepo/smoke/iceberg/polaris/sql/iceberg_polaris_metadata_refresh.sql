@@ -1,0 +1,292 @@
+-- Refreshing the external-catalog metadata cache (issue #393 follow-up)
+--
+-- Two entry points over one core, both exercised here against a live Polaris
+-- catalog:
+--
+--   iceberg_refresh_metadata_cache(max_tables)  the periodic sweep -- every
+--                                               cached table whose TTL is close
+--                                               to expiring
+--   iceberg_refresh_metadata(tbl)               one named table, TTL or no TTL,
+--                                               owner only
+--
+-- and the task, which is one of the two ways to drive that sweep.  By default
+-- the sweep runs from core's AutoVacWorkerPostHook chain, whose cadence is
+-- autovacuum_naptime; the scheduler is for TTLs too short for that.  The hook
+-- is turned off below so only this file's own calls can move a stamp.
+--
+-- The stamp lifecycle itself (that a read never writes the mirror -- the gap
+-- this refresh exists to close) belongs to iceberg_polaris_metadata_cache and
+-- is not repeated here.  This case seeds a stamp with one sweep and then only
+-- asks what later refreshes do with it.
+--
+-- Expiry is forced by moving metadata_cached_at backwards rather than sleeping
+-- out the TTL, so the case costs no wall-clock time beyond the one task wait at
+-- the end.  Nothing prints a raw timestamp, a raw metadata location or a raw
+-- refresh count -- all three vary per run.
+
+-- Quiet the "already exists" notice: this file must produce identical output
+-- whether it runs alone or after a sibling test that created the extension.
+SET client_min_messages = warning;
+CREATE EXTENSION IF NOT EXISTS datalake_fdw;
+RESET client_min_messages;
+
+-- Keep the autovacuum-driven refresher from racing the explicit calls below.
+-- A worker firing between an aged stamp and its assertion would refresh that
+-- stamp out from under the test.  The GUC is PGC_SIGHUP and the worker is a
+-- separate process, so a session-level SET would not reach it.
+ALTER SYSTEM SET datalake_fdw.metadata_refresh_enabled = off;
+SELECT pg_reload_conf();
+
+-- ============================================================
+-- Setup: Polaris REST catalog + S3 (MinIO) volume
+-- ============================================================
+CREATE SERVER metaref_vol_srv
+FOREIGN DATA WRAPPER iceberg_volume_fdw
+OPTIONS (
+    type 's3',
+    endpoint 'http://minio:9000',
+    region 'us-west-2',
+    bucket_name 'warehouse',
+    path_style_access 'true'
+);
+CREATE USER MAPPING FOR current_user
+SERVER metaref_vol_srv
+OPTIONS (access_key_id 'admin', secret_access_key 'admin12345');
+CREATE FOREIGN VOLUME metaref_vol SERVER metaref_vol_srv OPTIONS (base_path '/');
+SET iceberg_default_volume = 'metaref_vol';
+
+CREATE SERVER metaref_cat_srv
+FOREIGN DATA WRAPPER iceberg_catalog_fdw
+OPTIONS (type 'polaris', url 'http://polaris:8181/api/catalog');
+CREATE USER MAPPING FOR current_user
+SERVER metaref_cat_srv
+OPTIONS (client_id 'root', client_secret 's3cr3t', scope 'PRINCIPAL_ROLE:ALL');
+CREATE FOREIGN CATALOG metaref_cat
+SERVER metaref_cat_srv
+OPTIONS (catalog_name 'polaris_default_catalog');
+SET iceberg_default_catalog = 'metaref_cat';
+
+-- ============================================================
+-- Test 1: both SQL entry points -- signature, permissions, arguments
+-- ============================================================
+SELECT proname, prorettype::regtype AS rettype, pronargs, provolatile, proisstrict
+FROM pg_proc
+WHERE proname IN ('iceberg_refresh_metadata', 'iceberg_refresh_metadata_cache')
+  AND pronamespace = 'pg_catalog'::regnamespace
+ORDER BY proname;
+
+-- Both write a shared catalog and issue external-catalog calls: default-deny.
+SELECT has_function_privilege('public',
+       'pg_catalog.iceberg_refresh_metadata(regclass)', 'EXECUTE')
+       AS public_may_refresh_one,
+       has_function_privilege('public',
+       'pg_catalog.iceberg_refresh_metadata_cache(int)', 'EXECUTE')
+       AS public_may_refresh_cache;
+
+-- A non-positive budget is rejected rather than silently doing nothing.
+SELECT iceberg_refresh_metadata_cache(0);
+SELECT iceberg_refresh_metadata_cache(-1);
+
+-- ============================================================
+-- Test 2: the GUCs exist with their documented defaults (all PGC_SIGHUP, so
+-- they cannot be SET from a session; "enabled" reads off here because of the
+-- ALTER SYSTEM above and is therefore not shown)
+-- ============================================================
+SHOW datalake_fdw.metadata_refresh_min_interval;
+SHOW datalake_fdw.metadata_refresh_max_tables_per_cycle;
+SHOW datalake_fdw.metadata_refresh_ahead_percent;
+
+-- ============================================================
+-- Fixture: an external table with a seeded cache stamp
+-- ============================================================
+CREATE ICEBERG TABLE metaref_cached (id bigint, v text)
+OPTIONS (namespace 'public', table 'metaref_cached', metadata_cache '5');
+
+INSERT INTO metaref_cached VALUES (1, 'a'), (2, 'b');
+SELECT count(*) AS rows_seen FROM metaref_cached;
+
+-- A read stamps nothing, so the stamp is still NULL here; the first sweep is
+-- what seeds it (a NULL stamp counts as infinitely stale).
+SELECT metadata_cached_at IS NULL AS stamp_null_until_first_sweep
+FROM pg_ext_aux.pg_iceberg_metadata WHERE relid = 'metaref_cached'::regclass;
+
+SELECT iceberg_refresh_metadata_cache() >= 1 AS seeded_by_first_sweep;
+
+SELECT metadata_cached_at IS NOT NULL AS stamp_seeded
+FROM pg_ext_aux.pg_iceberg_metadata WHERE relid = 'metaref_cached'::regclass;
+
+-- ============================================================
+-- Test 3: the sweep advances a stamp past its TTL
+-- ============================================================
+SET allow_system_table_mods = on;
+UPDATE pg_ext_aux.pg_iceberg_metadata
+   SET metadata_cached_at = metadata_cached_at - (6 * 60 * 1000)
+ WHERE relid = 'metaref_cached'::regclass;
+RESET allow_system_table_mods;
+
+SELECT metadata_cached_at AS aged_stamp
+FROM pg_ext_aux.pg_iceberg_metadata WHERE relid = 'metaref_cached'::regclass
+\gset
+
+SELECT iceberg_refresh_metadata_cache() >= 1 AS refreshed_at_least_one;
+
+SELECT metadata_cached_at > :aged_stamp AS stamp_advanced_by_sweep
+FROM pg_ext_aux.pg_iceberg_metadata WHERE relid = 'metaref_cached'::regclass;
+
+-- ============================================================
+-- Test 4: inside the TTL the sweep leaves the table alone
+-- ============================================================
+SELECT metadata_cached_at AS after_refresh
+FROM pg_ext_aux.pg_iceberg_metadata WHERE relid = 'metaref_cached'::regclass
+\gset
+
+-- >= 0 hides the count, which depends on other tables in this database.
+SELECT iceberg_refresh_metadata_cache() >= 0 AS ran;
+
+SELECT metadata_cached_at = :after_refresh AS stamp_unchanged_within_ttl
+FROM pg_ext_aux.pg_iceberg_metadata WHERE relid = 'metaref_cached'::regclass;
+
+-- ============================================================
+-- Test 5: what the sweep still will not touch -- a table with no TTL, and a
+--         built-in-catalog table.  Neither is a candidate, so both keep a NULL
+--         stamp however many cycles run.
+-- ============================================================
+CREATE ICEBERG TABLE metaref_nocache (id bigint)
+OPTIONS (namespace 'public', table 'metaref_nocache');
+INSERT INTO metaref_nocache VALUES (1);
+SELECT count(*) AS rows_seen FROM metaref_nocache;
+
+CREATE ICEBERG TABLE metaref_internal (id bigint);
+INSERT INTO metaref_internal VALUES (1);
+SELECT count(*) AS rows_seen FROM metaref_internal;
+
+SELECT iceberg_refresh_metadata_cache() >= 0 AS ran;
+
+-- Order by the name, not the regclass: regclass sorts by OID, which differs
+-- run to run.
+SELECT relid::regclass::text AS tbl,
+       metadata_cached_at IS NULL AS untouched_by_sweep
+FROM pg_ext_aux.pg_iceberg_metadata
+WHERE relid IN ('metaref_nocache'::regclass, 'metaref_internal'::regclass)
+ORDER BY 1;
+
+-- ============================================================
+-- Test 6: iceberg_refresh_metadata() re-points a mirror that has drifted
+--
+-- This is the state an outside maintenance pass (compaction, snapshot expiry)
+-- leaves behind: the mirror names a metadata.json that is no longer the
+-- catalog's head.  It is reproduced here by rolling the mirror back to the
+-- previous metadata this table itself wrote, which needs no maintenance API.
+-- ============================================================
+SELECT previous_metadata_location IS NOT NULL AS have_a_previous_head
+FROM pg_ext_aux.pg_iceberg_metadata WHERE relid = 'metaref_cached'::regclass;
+
+SET allow_system_table_mods = on;
+UPDATE pg_ext_aux.pg_iceberg_metadata
+   SET metadata_location = previous_metadata_location
+ WHERE relid = 'metaref_cached'::regclass;
+RESET allow_system_table_mods;
+
+SELECT metadata_location AS drifted_head
+FROM pg_ext_aux.pg_iceberg_metadata WHERE relid = 'metaref_cached'::regclass
+\gset
+
+-- The NOTICE reports both locations, which vary per run.
+SET client_min_messages = warning;
+SELECT refreshed,
+       previous_head = :'drifted_head' AS reported_the_drifted_head,
+       current_head <> :'drifted_head' AS head_moved_on
+FROM iceberg_refresh_metadata('metaref_cached');
+RESET client_min_messages;
+
+SELECT metadata_location <> :'drifted_head' AS mirror_re_pointed
+FROM pg_ext_aux.pg_iceberg_metadata WHERE relid = 'metaref_cached'::regclass;
+
+-- Already on the catalog's head: nothing to move, and it says so.  The stamp is
+-- still renewed -- that is what "refreshed" does not report.
+SELECT metadata_cached_at AS before_noop_refresh
+FROM pg_ext_aux.pg_iceberg_metadata WHERE relid = 'metaref_cached'::regclass
+\gset
+
+SELECT refreshed AS refreshed_again,
+       previous_head = current_head AS head_already_current
+FROM iceberg_refresh_metadata('metaref_cached');
+
+SELECT metadata_cached_at >= :before_noop_refresh AS stamp_renewed_anyway
+FROM pg_ext_aux.pg_iceberg_metadata WHERE relid = 'metaref_cached'::regclass;
+
+-- ============================================================
+-- Test 7: the single-table function ignores the filters the sweep applies --
+--         a table with no TTL and no stamp is refreshed on demand, and a
+--         built-in-catalog table is a defined no-op rather than an error.
+-- ============================================================
+SET client_min_messages = warning;
+SELECT current_head IS NOT NULL AS resolved_a_head
+FROM iceberg_refresh_metadata('metaref_nocache');
+RESET client_min_messages;
+
+SELECT metadata_cached_at IS NOT NULL AS stamped_on_demand
+FROM pg_ext_aux.pg_iceberg_metadata WHERE relid = 'metaref_nocache'::regclass;
+
+SELECT refreshed, previous_head = current_head AS builtin_is_a_noop
+FROM iceberg_refresh_metadata('metaref_internal');
+
+-- ============================================================
+-- Test 8: a table this transaction has already written is refused -- moving
+--         the mirror would make the pending commit race its own rebase
+-- ============================================================
+BEGIN;
+INSERT INTO metaref_cached VALUES (3, 'c');
+SELECT * FROM iceberg_refresh_metadata('metaref_cached');
+ROLLBACK;
+
+-- ============================================================
+-- Test 9: the task scheduler is what makes the sweep periodic
+-- ============================================================
+CREATE TASK metaref_sweep SCHEDULE '2 SECONDS'
+  AS $$ SELECT iceberg_refresh_metadata_cache() $$;
+
+-- Wait for the scheduler to actually run it once.  Bounded, and reported as a
+-- boolean so a slow scheduler shows up as a failed assertion rather than as a
+-- hang.
+DO $$
+DECLARE
+    waited  int := 0;
+    ran     bool := false;
+BEGIN
+    WHILE waited < 60 AND NOT ran LOOP
+        PERFORM pg_sleep(1);
+        waited := waited + 1;
+        SELECT EXISTS (SELECT 1
+                         FROM pg_catalog.pg_task t
+                         JOIN pg_catalog.pg_task_run_history h ON h.jobid = t.jobid
+                        WHERE t.jobname = 'metaref_sweep'
+                          AND h.status = 'succeeded')
+          INTO ran;
+    END LOOP;
+    RAISE NOTICE 'scheduled sweep ran: %', ran;
+END $$;
+
+DROP TASK metaref_sweep;
+
+-- ============================================================
+-- Cleanup
+-- ============================================================
+
+-- Restore the refresher before tearing anything down, not after.  This GUC is
+-- cluster-wide and outlives the session: whatever kills psql between the last
+-- assertion and this line -- a CI timeout on a hung DROP, a segment failure, a
+-- crash -- leaves the autovacuum refresher disabled for every later test and
+-- for any production use on this cluster, until some future run of THIS file
+-- happens to complete.  None of the teardown below needs the GUC off, so give
+-- those statements no chance to strand it.
+ALTER SYSTEM RESET datalake_fdw.metadata_refresh_enabled;
+SELECT pg_reload_conf();
+
+DROP TABLE metaref_internal;
+DROP TABLE metaref_nocache;
+DROP TABLE metaref_cached;
+DROP CATALOG metaref_cat;
+DROP VOLUME metaref_vol;
+DROP SERVER metaref_cat_srv CASCADE;
+DROP SERVER metaref_vol_srv CASCADE;

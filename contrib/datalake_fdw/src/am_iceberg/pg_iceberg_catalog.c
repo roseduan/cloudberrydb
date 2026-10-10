@@ -18,8 +18,6 @@
 #include "access/table.h"
 #include "access/heapam.h"
 #include "access/genam.h"
-#include "access/xact.h"		/* XactReadOnly */
-#include "access/xlog.h"		/* RecoveryInProgress */
 #include "commands/vacuum.h"
 #include "commands/dbcommands.h"
 #include "catalog/namespace.h"
@@ -437,19 +435,29 @@ pg_iceberg_get_latest_metadata_location(Oid relid, IcebergTableInfo *table_info,
 		latest_metadata_location = pstrdup(load_result->metadata_location);
 
 		/*
-		 * Persist only when the agent actually refreshed (returned a new
-		 * timestamp) and we are allowed to write: a plain SELECT that reused the
-		 * cache leaves the catalog untouched, and a read-only transaction / hot
-		 * standby skips the write (still using the freshly resolved head for
-		 * this query, just not caching it).
+		 * The refreshed head is deliberately NOT persisted here.  A read does
+		 * not write the mirror, full stop -- not even when the transaction
+		 * would allow it.
+		 *
+		 * It used to: a SELECT in a read-write transaction stamped
+		 * metadata_cached_at on its way through.  That made the cache
+		 * self-seeding, but it also meant an ordinary query mutated shared
+		 * catalog state as a side effect, with all the usual consequences --
+		 * the write rode on the reader's transaction and vanished if that
+		 * transaction rolled back, two concurrent readers raced to write the
+		 * same row, and the same statement behaved differently depending on
+		 * whether its transaction happened to be read-only.  Writing the
+		 * mirror now has exactly two entry points, both explicit:
+		 * iceberg_refresh_metadata_cache() on a task's schedule and
+		 * iceberg_refresh_metadata() by hand.
+		 *
+		 * This query still uses the head the agent just resolved, so a read is
+		 * never stale.  What it loses is the caching: with nothing advancing
+		 * metadata_cached_at, the next read hands the agent the same expired
+		 * stamp and pays the round trip again.  That is what the scheduled
+		 * refresh is for, and it is why metadata_cache is worth setting only
+		 * on a cluster that runs one -- see the guide, section 4.12.
 		 */
-		if (meta_info != NULL &&
-			load_result->timestamp_present &&
-			load_result->timestamp != cached_ts &&
-			!XactReadOnly && !RecoveryInProgress())
-			pg_iceberg_update_metadata_cache(relid,
-											 load_result->metadata_location,
-											 load_result->timestamp);
 
 		if (meta_info != NULL)
 			pg_iceberg_free_metadata_info(meta_info);

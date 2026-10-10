@@ -51,8 +51,8 @@ pg_iceberg_add_metadata(Oid relid, char *metadata_location,
 					  bool is_internal, int32 default_spec_id)
 {
 	Relation	metadata_rel;
-	Datum		values[6];
-	bool		nulls[6];
+	Datum		values[Natts_pg_iceberg_metadata];
+	bool		nulls[Natts_pg_iceberg_metadata];
 	HeapTuple	tuple;
 	Oid			metadata_relid;
 
@@ -64,25 +64,28 @@ pg_iceberg_add_metadata(Oid relid, char *metadata_location,
 	memset(values, 0, sizeof(values));
 	memset(nulls, false, sizeof(nulls));
 
-	values[0] = ObjectIdGetDatum(relid);
+	values[Anum_pg_iceberg_metadata_relid - 1] = ObjectIdGetDatum(relid);
 
 	Assert(metadata_location != NULL);
-	values[1] = CStringGetTextDatum(metadata_location);
+	values[Anum_pg_iceberg_metadata_metadata_location - 1] =
+		CStringGetTextDatum(metadata_location);
 
 	if (previous_metadata_location)
-		values[2] = CStringGetTextDatum(previous_metadata_location);
+		values[Anum_pg_iceberg_metadata_previous_metadata_location - 1] =
+			CStringGetTextDatum(previous_metadata_location);
 	else
-		nulls[2] = true;
+		nulls[Anum_pg_iceberg_metadata_previous_metadata_location - 1] = true;
 
-	values[3] = BoolGetDatum(is_internal);
-	values[4] = Int32GetDatum(default_spec_id);
+	values[Anum_pg_iceberg_metadata_is_internal - 1] = BoolGetDatum(is_internal);
+	values[Anum_pg_iceberg_metadata_default_spec_id - 1] =
+		Int32GetDatum(default_spec_id);
 
 	/*
 	 * metadata_cached_at (issue #393): unset at CREATE so the first external
 	 * read triggers a fresh catalog resolve.  Refreshes stamp it later via
 	 * pg_iceberg_update_metadata_cache().
 	 */
-	nulls[5] = true;
+	nulls[Anum_pg_iceberg_metadata_metadata_cached_at - 1] = true;
 
 	tuple = heap_form_tuple(metadata_rel->rd_att, values, nulls);
 	CatalogTupleInsert(metadata_rel, tuple);
@@ -197,9 +200,9 @@ pg_iceberg_update_metadata_cas(Oid relid,
 	HeapTuple	newtuple;
 	Oid			metadata_relid;
 	Oid			index_oid;
-	Datum		values[6];
-	bool		nulls[6];
-	bool		replaces[6];
+	Datum		values[Natts_pg_iceberg_metadata];
+	bool		nulls[Natts_pg_iceberg_metadata];
+	bool		replaces[Natts_pg_iceberg_metadata];
 	Datum		old_metadata_datum;
 	bool		old_metadata_isnull;
 
@@ -211,7 +214,7 @@ pg_iceberg_update_metadata_cas(Oid relid,
 
 	/* Search by relid using unique index */
 	ScanKeyInit(&skey[0],
-				1,
+				Anum_pg_iceberg_metadata_relid,
 				BTEqualStrategyNumber, F_OIDEQ,
 				ObjectIdGetDatum(relid));
 
@@ -225,7 +228,9 @@ pg_iceberg_update_metadata_cas(Oid relid,
 				 errmsg("iceberg metadata entry not found for relation %u", relid)));
 
 	/* Get the old metadata_location to save as previous */
-	old_metadata_datum = heap_getattr(tuple, 2, RelationGetDescr(metadata_rel),
+	old_metadata_datum = heap_getattr(tuple,
+									  Anum_pg_iceberg_metadata_metadata_location,
+									  RelationGetDescr(metadata_rel),
 									  &old_metadata_isnull);
 	Assert(!old_metadata_isnull);
 
@@ -255,12 +260,14 @@ pg_iceberg_update_metadata_cas(Oid relid,
 	memset(replaces, false, sizeof(replaces));
 
 	/* Update previous_metadata_location with old value */
-	replaces[2] = true;  /* column index 3 - previous_metadata_location */
-	values[2] = old_metadata_datum;
+	replaces[Anum_pg_iceberg_metadata_previous_metadata_location - 1] = true;
+	values[Anum_pg_iceberg_metadata_previous_metadata_location - 1] =
+		old_metadata_datum;
 
 	/* Update metadata_location with new value */
-	replaces[1] = true;  /* column index 2 - metadata_location */
-	values[1] = CStringGetTextDatum(metadata_location);
+	replaces[Anum_pg_iceberg_metadata_metadata_location - 1] = true;
+	values[Anum_pg_iceberg_metadata_metadata_location - 1] =
+		CStringGetTextDatum(metadata_location);
 
 	/* Create the updated tuple */
 	newtuple = heap_modify_tuple(tuple, RelationGetDescr(metadata_rel),
@@ -349,9 +356,9 @@ pg_iceberg_update_metadata_cache(Oid relid,
 	HeapTuple	newtuple;
 	Oid			metadata_relid;
 	Oid			index_oid;
-	Datum		values[6];
-	bool		nulls[6];
-	bool		replaces[6];
+	Datum		values[Natts_pg_iceberg_metadata];
+	bool		nulls[Natts_pg_iceberg_metadata];
+	bool		replaces[Natts_pg_iceberg_metadata];
 
 	/* Iceberg native catalog: OIDs are pinned at initdb (iceberg-cdbinit). */
 	metadata_relid = ICEBERG_METADATA_RELID;
@@ -360,7 +367,7 @@ pg_iceberg_update_metadata_cache(Oid relid,
 	metadata_rel = table_open(metadata_relid, RowExclusiveLock);
 
 	ScanKeyInit(&skey[0],
-				1,
+				Anum_pg_iceberg_metadata_relid,
 				BTEqualStrategyNumber, F_OIDEQ,
 				ObjectIdGetDatum(relid));
 
@@ -377,16 +384,16 @@ pg_iceberg_update_metadata_cache(Oid relid,
 	memset(nulls, false, sizeof(nulls));
 	memset(replaces, false, sizeof(replaces));
 
-	/* metadata_location (col 2) */
 	if (metadata_location != NULL)
 	{
-		replaces[1] = true;
-		values[1] = CStringGetTextDatum(metadata_location);
+		replaces[Anum_pg_iceberg_metadata_metadata_location - 1] = true;
+		values[Anum_pg_iceberg_metadata_metadata_location - 1] =
+			CStringGetTextDatum(metadata_location);
 	}
 
-	/* metadata_cached_at (col 6) */
-	replaces[5] = true;
-	values[5] = Int64GetDatum(cached_at_ms);
+	replaces[Anum_pg_iceberg_metadata_metadata_cached_at - 1] = true;
+	values[Anum_pg_iceberg_metadata_metadata_cached_at - 1] =
+		Int64GetDatum(cached_at_ms);
 
 	newtuple = heap_modify_tuple(tuple, RelationGetDescr(metadata_rel),
 								 values, nulls, replaces);
@@ -422,7 +429,7 @@ pg_iceberg_remove_metadata(Oid relid)
 
 	/* Search by relid using unique index */
 	ScanKeyInit(&skey[0],
-				1,
+				Anum_pg_iceberg_metadata_relid,
 				BTEqualStrategyNumber, F_OIDEQ,
 				ObjectIdGetDatum(relid));
 
@@ -465,7 +472,7 @@ pg_iceberg_get_metadata_info_internal(Oid relid, bool missing_ok)
 
 	/* Search by relid using unique index */
 	ScanKeyInit(&skey[0],
-				1,
+				Anum_pg_iceberg_metadata_relid,
 				BTEqualStrategyNumber, F_OIDEQ,
 				ObjectIdGetDatum(relid));
 
@@ -487,23 +494,24 @@ pg_iceberg_get_metadata_info_internal(Oid relid, bool missing_ok)
 				 errmsg("iceberg metadata entry not found for relation %u", relid)));
 	}
 
-	/* metadata_location */
-	datum = heap_getattr(tuple, 2, RelationGetDescr(metadata_rel), &isnull);
+	datum = heap_getattr(tuple, Anum_pg_iceberg_metadata_metadata_location,
+						 RelationGetDescr(metadata_rel), &isnull);
 	Assert(!isnull);
 	info->metadata_location = TextDatumGetCString(datum);
 
-	/* previous_metadata_location */
-	datum = heap_getattr(tuple, 3, RelationGetDescr(metadata_rel), &isnull);
+	datum = heap_getattr(tuple,
+						 Anum_pg_iceberg_metadata_previous_metadata_location,
+						 RelationGetDescr(metadata_rel), &isnull);
 	if (!isnull)
 		info->previous_metadata_location = TextDatumGetCString(datum);
 
-	/* is_internal */
-	datum = heap_getattr(tuple, 4, metadata_rel->rd_att, &isnull);
+	datum = heap_getattr(tuple, Anum_pg_iceberg_metadata_is_internal,
+						 metadata_rel->rd_att, &isnull);
 	if (!isnull)
 		info->is_internal = DatumGetBool(datum);
 
-	/* default_spec_id */
-	datum = heap_getattr(tuple, 5, metadata_rel->rd_att, &isnull);
+	datum = heap_getattr(tuple, Anum_pg_iceberg_metadata_default_spec_id,
+						 metadata_rel->rd_att, &isnull);
 	if (!isnull)
 		info->default_spec_id = DatumGetInt32(datum);
 
@@ -522,8 +530,10 @@ pg_iceberg_get_metadata_info_internal(Oid relid, bool missing_ok)
 	 * regardless, and an absent column is exactly the "never refreshed" case
 	 * the NULL branch below already handles.
 	 */
-	if (RelationGetDescr(metadata_rel)->natts >= 6)
-		datum = heap_getattr(tuple, 6, metadata_rel->rd_att, &isnull);
+	if (RelationGetDescr(metadata_rel)->natts >=
+		Anum_pg_iceberg_metadata_metadata_cached_at)
+		datum = heap_getattr(tuple, Anum_pg_iceberg_metadata_metadata_cached_at,
+							 metadata_rel->rd_att, &isnull);
 	else
 	{
 		datum = (Datum) 0;

@@ -135,6 +135,8 @@ OBJS = 	src/datalake_fdw.o \
 		src/am_iceberg/pg_iceberg_time_travel.o \
 		src/am_iceberg/pg_iceberg_pending_delete.o \
 		src/am_iceberg/pg_iceberg_av_consumer.o \
+		src/am_iceberg/pg_iceberg_metadata_refresh.o \
+		src/am_iceberg/pg_iceberg_refresh.o \
 		src/common/fileMetadata.o \
 		src/components/agent_cli/src/agent_c_api.o \
 		src/components/agent_cli/src/agent_client.o \
@@ -169,10 +171,12 @@ PG_CPPFLAGS = -DSNAPPY_CODEC_AVAILABLE -Isrc/iceberg_catalog_fdw -Isrc/component
 
 EXTENSION = datalake_fdw
 # Standard PostgreSQL extension versioning: the 1.0 base script plus the
-# 1.0->1.1 upgrade script.  CREATE EXTENSION chains them to reach the control
-# file's default_version (1.1); existing 1.0 installs upgrade in place via
-# ALTER EXTENSION datalake_fdw UPDATE without re-creating dependent objects.
-DATA = datalake_fdw--1.0.sql datalake_fdw--1.0--1.1.sql
+# upgrade scripts.  CREATE EXTENSION chains them to reach the control file's
+# default_version (1.2); an existing install upgrades in place via ALTER
+# EXTENSION datalake_fdw UPDATE without re-creating dependent objects.  A new
+# object therefore belongs in the newest upgrade script, never in --1.0.sql,
+# which an already-installed cluster never re-runs.
+DATA = datalake_fdw--1.0.sql datalake_fdw--1.0--1.1.sql datalake_fdw--1.1--1.2.sql
 
 ifdef ICEBERG_HUDI_TEST
 REGRESS = setup_hudi iceberg_read hudi_read
@@ -193,7 +197,7 @@ REGRESS = setup \
         oss_read_new_text_limit_segment oss_read_orc_limit_segment oss_read_parquet_limit_segment oss_read_text_limit_segment \
 		iceberg_test iceberg_no_extension iceberg_am_misuse iceberg_site_config \
 		text_block_boundary file_meta_cache \
-		iceberg_rest_catalog_ddl iceberg_rest_vacuum
+		iceberg_rest_catalog_ddl iceberg_rest_vacuum iceberg_refresh_metadata
 endif
 REGRESS_OPTS += --init-file=test/init_file
 

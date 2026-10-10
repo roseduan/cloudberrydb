@@ -81,6 +81,7 @@
 #include "am_iceberg/include/pg_iceberg_custom_scan.h"
 #include "am_iceberg/include/pg_iceberg_am.h"
 #include "am_iceberg/include/pg_iceberg_av_consumer.h"
+#include "am_iceberg/include/pg_iceberg_metadata_refresh.h"
 
 
 PG_MODULE_MAGIC;
@@ -627,6 +628,14 @@ _PG_init(void)
 
 	/* Register the autovacuum-driven deletion queue consumer. */
 	pg_iceberg_av_consumer_init();
+
+	/*
+	 * Register the autovacuum-driven external-catalog metadata refresh.  Must
+	 * come after the consumer so both end up in the AutoVacWorkerPostHook
+	 * chain (each link keeps the previous callback and calls it on the way
+	 * out).
+	 */
+	pg_iceberg_metadata_refresh_init();
 }
 
 /*

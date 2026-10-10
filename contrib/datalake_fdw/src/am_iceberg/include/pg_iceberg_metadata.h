@@ -25,6 +25,27 @@
  */
 
 /*
+ * Column numbers for pg_ext_aux.pg_iceberg_metadata.
+ *
+ * The catalog is created at initdb by iceberg-cdbinit--1.0.sql rather than
+ * generated from a BKI header, so there is no genbki-produced _d.h to derive
+ * these from.  This header is the single authoritative copy: every C reader
+ * of the relation (pg_iceberg_metadata.c, pg_iceberg_metadata_refresh.c,
+ * iceberg_toolkit_common.c) addresses columns through these macros, so a
+ * schema change is a one-line edit here plus the CREATE TABLE, not a hunt for
+ * magic integers.  Keep the two in sync -- attribute numbers are 1-based and
+ * follow the column order of that CREATE TABLE.
+ */
+#define Natts_pg_iceberg_metadata							6
+
+#define Anum_pg_iceberg_metadata_relid						1
+#define Anum_pg_iceberg_metadata_metadata_location			2
+#define Anum_pg_iceberg_metadata_previous_metadata_location	3
+#define Anum_pg_iceberg_metadata_is_internal				4
+#define Anum_pg_iceberg_metadata_default_spec_id			5
+#define Anum_pg_iceberg_metadata_metadata_cached_at			6
+
+/*
  * IcebergMetadataInfo - stores metadata information for an Iceberg table
  */
 typedef struct IcebergMetadataInfo

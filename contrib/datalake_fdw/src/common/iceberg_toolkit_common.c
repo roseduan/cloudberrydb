@@ -752,7 +752,7 @@ static void setup_buildin_catalog_metadata(IcebergCatalogFdwState* fdwState,
     ScanKeyData key;
     SysScanDesc scan;
     
-    ScanKeyInit(&key, 1, /* relid column is first */
+    ScanKeyInit(&key, Anum_pg_iceberg_metadata_relid,
                 BTEqualStrategyNumber, F_OIDEQ, ObjectIdGetDatum(relid));
     
     scan = systable_beginscan(metadataRel, index_oid, true, NULL, 1, &key);
@@ -760,7 +760,8 @@ static void setup_buildin_catalog_metadata(IcebergCatalogFdwState* fdwState,
     HeapTuple tuple = systable_getnext(scan);
     if (HeapTupleIsValid(tuple)) {
         bool isnull;
-        Datum metadataLocationDatum = heap_getattr(tuple, 2, /* metadata_location is 2nd column */
+        Datum metadataLocationDatum = heap_getattr(tuple,
+                                                   Anum_pg_iceberg_metadata_metadata_location,
                                                    RelationGetDescr(metadataRel), &isnull);
         
         fdwState->request.buildInCatalog.tableExists = true;

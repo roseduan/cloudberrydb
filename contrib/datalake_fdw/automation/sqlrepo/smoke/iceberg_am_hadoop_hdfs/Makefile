@@ -21,7 +21,8 @@
 PGXS := $(shell pg_config --pgxs)
 include $(PGXS)
 
-REGRESS = iceberg_am_hadoop_hdfs_basic iceberg_am_hadoop_hdfs_acid_double_update
+REGRESS = iceberg_am_hadoop_hdfs_basic iceberg_am_hadoop_hdfs_acid_double_update \
+          iceberg_am_hadoop_hdfs_metadata_cache
 
 installcheck:
 	$(pg_regress_installcheck) $(REGRESS)

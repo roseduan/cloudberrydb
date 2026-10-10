@@ -1275,9 +1275,271 @@ SELECT iceberg_toolkit.get_fragments(
 ```
 
 
-### 4.12 当前不支持的功能 / 已知限制
+### 4.12 外部 Catalog 元数据缓存与刷新
 
-#### 4.12.1 完全未实现
+外部 catalog（Polaris / Hive / Hadoop / S3）上的表，每次读之前都要先问一次 catalog：「这张表当前的 head 是哪个 metadata.json？」这一问是一次网络往返。这一节讲怎么把它省掉，一共三样东西：
+
+| | 是什么 | 谁来做 |
+|---|---|---|
+| `metadata_cache` 表选项 | 给「head 是哪个」的答案设一个有效期 | 建表的人 |
+| 后台刷新 | 在有效期到之前把答案提前续上；**它是唯一会写这份元数据的东西** | 由 autovacuum 驱动，**默认开启、无需配置** |
+| `iceberg_refresh_metadata()` | 出事时手工把某一张表拉回最新 | 运维按需 |
+
+#### 一、`metadata_cache`：给答案设一个有效期
+
+```sql
+-- 缓存 5 分钟（单位是分钟）
+CREATE ICEBERG TABLE orders (id bigint, amount numeric)
+OPTIONS (namespace 'public', table 'orders', metadata_cache '5');
+
+-- 不写这个选项，或者写 0：不缓存，每次读都问 catalog
+CREATE ICEBERG TABLE orders_live (id bigint)
+OPTIONS (namespace 'public', table 'orders_live');
+```
+
+过没过期由 dlagent 判断：读路径把「上次解析到的 head」连同「它的时间戳」一起下推，agent 发现没过 TTL 就把老答案原样还回来（**零次外部往返**），过了就去 catalog 重新解析，回一个新 head 和新时间戳。
+
+（这个选项要和下一节的定时任务一起用才有效果，原因见下。）
+
+**那新时间戳是谁存下来的？谁都不是 —— 读不写元数据。**
+
+这是一条明确的规则：不管事务能不能写、是不是备机，**任何读都不会去动 `pg_ext_aux.pg_iceberg_metadata`**。一条普通 `SELECT` 会解析出当前 head、用它返回正确的数据，然后就结束了，什么也不记。
+
+| 谁在读 | 这次读到的数据 | 时间戳 |
+|---|---|---|
+| 普通 `SELECT`（默认可读写事务） | 最新 | 不变 |
+| `BEGIN; SET TRANSACTION READ ONLY;` 里的读 | 最新 | 不变 |
+| 备机（hot standby）上的读 | 最新 | 不变 |
+
+这么定的理由是：一条普通查询不该顺带改动全局共享的目录状态 —— 那样写回会搭在读者的事务上（读事务回滚，刷新也跟着没了）、两个并发读者会去抢同一行、同一条语句还会因为事务恰好是不是只读而行为不同。**写 mirror 现在只有两个入口，且都是显式的**：定时任务调的 `iceberg_refresh_metadata_cache()`，和人工执行的 `iceberg_refresh_metadata()`。
+
+由此得到一个必须知道的结论：
+
+> **`metadata_cache` 要靠刷新器才有意义。** 时间戳只有被刷新推进过，后续的读才会命中缓存。刷新器默认是开着的（autovacuum 驱动，见第三节），所以一般情况下不用做什么；但如果它被关掉、或者 TTL 短到 autovacuum 的节奏跟不上，这个选项就等于没设 —— 读依然正确，只是一次外部往返都省不掉。
+
+`iceberg_polaris_metadata_cache` 冒烟用例把这套规则都钉住了：`stamp_still_null_after_read`、`stamp_seeded_by_refresh`、`stamp_unchanged_past_ttl`、`stamp_unchanged_by_readonly_read`。
+
+#### 二、另一层缓存：文件内容由 gopher 缓存
+
+上面那层 TTL 省掉的是「问 catalog 当前 head 是哪个」这一次 REST / HMS 往返。**文件本身还有独立的一层缓存**，两者省的不是同一笔开销：
+
+| | 省掉什么 | 谁管 |
+|---|---|---|
+| `metadata_cache` TTL | 问 catalog「head 是谁」的那次往返 | PG 侧的时间戳 + agent 的比较 |
+| gopher 文件缓存 | 把 metadata.json / manifest / 数据文件从对象存储拉下来的流量 | Go 层，按路径缓存内容 |
+
+两层是独立的，开启条件也不同：**gopher 这层开箱即用**，什么都不用配；而上面那层 `metadata_cache` 只有在建了刷新任务之后才真正生效（没有任务，时间戳永远是 NULL，每次读都要去问 catalog —— 见上一节）。
+
+Iceberg 读到的每个文件 —— metadata.json、manifest list、manifest、parquet —— 都经 `GopherFileIO` 走 gopher（agent 侧把 `CatalogProperties.FILE_IO_IMPL` 设成 `org.cbdb.iceberg.gopher.client.GopherFileIO`）。**默认就是开着缓存的**：
+
+| 位置 | 配置 | 默认 |
+|---|---|---|
+| agent | `gopher.cache-strategy`（`application.properties`） | `GOPHER_CACHE` |
+| 段上的读路径 | `datalake.disable_cache_file` | `off`（即缓存开启） |
+
+缓存落在每个实例数据目录下的 `gophermeta/`，**有容量上限，按 LRU 淘汰**：
+
+| GUC | 默认 | 改动生效 | 含义 |
+|---|---|---|---|
+| `pg_gophermeta.gopher_local_capacity_mb` | `1024000`（≈1000 GB） | SIGHUP | 本地磁盘缓存容量上限，写满后按 LRU 淘汰。GUC 自带的建议是**设成磁盘容量的 30%** |
+| `pg_gophermeta.gopher_plasma_size_mb` | `0`（**关闭**） | 需重启 | Plasma L1 共享内存读缓存，0 表示不启用；设正值才开 |
+| `pg_gophermeta.register_gophermeta` | `on` | 需重启 | 是否启动 gophermeta worker |
+
+也就是默认形态是：**L1 共享内存缓存关闭，L2 本地磁盘缓存开启、容量 1000 GB、LRU 淘汰**。默认那个容量对大多数机器都大于实际磁盘，等于「能存多少存多少」，所以生产上按上面的建议把它调到磁盘的 30% 更稳妥。
+
+（gopher 库内部有 `cached_files` / `cached_blocks` / `used_bytes` / `capacity` / `lru_size` 这些计数器，但目前没有任何 SQL 接口把它们暴露出来，只能看 `gophermeta/` 目录的实际占用。）
+
+**实测**（单表约 40 万行，polaris catalog + MinIO，量的是 MinIO 容器的实际网络流量）：
+
+```
+SELECT gp_toolkit.__gopher_free_all_cache();   -- 先清空缓存
+select sum(id) from gp_cache_t;   -- 冷读：MinIO 流出 +2MB
+select sum(id) from gp_cache_t;   -- 热读：+0
+select sum(id) from gp_cache_t;   -- 热读：+0
+```
+
+也就是说 TTL 命中的那些读，不光不问 catalog，连对象存储都不碰 —— 同一个 head 指向的是同一个 metadata.json 路径，文件内容直接从本地拿。
+
+**为什么这层缓存不会读到旧数据**：Iceberg 的文件是一次写定、名字唯一的（`00047-<uuid>.metadata.json`、`snap-<id>-1-<uuid>.avro`），同一个路径的内容永远不变，所以按路径缓存内容不存在陈旧问题。会变的只有「当前 head 是哪个」，而那个来自 catalog 服务，不经过 gopher。
+
+要清空或关闭：
+
+```sql
+SELECT gp_toolkit.__gopher_free_all_cache();   -- 清空（排查问题时用）
+SET datalake.disable_cache_file = on;          -- 关闭段上读路径的文件缓存
+```
+
+**hadoop catalog 也验过了**。它是这里唯一值得担心的形态 —— 元数据文件叫 `v1.metadata.json`、`v2.metadata.json`，当前版本来自一个每次提交都会被改写的固定路径，而其它 Iceberg 文件都是一次写定。`iceberg_am_hadoop_hdfs_metadata_cache` 冒烟用例专门盯这一点：把表推进一个版本、再把 mirror 回滚一格，然后要求刷新越过刚被写入预热过的文件缓存、落到新的那个版本文件上。结论是能（`refreshed = t`、head 确实前移）。
+
+> 顺带一个容易踩的点：这张表必须带 `OPTIONS (namespace, table)` 才算"外部表"。判定规则是**有没有指名一张已存在的外部表**，而不是用的哪种 catalog（`pg_iceberg_catalog_helper.c`）—— 不带这两个选项建出来的表 `is_internal = true`，压根不是缓存的候选。
+
+#### 三、后台刷新：默认由 autovacuum 驱动
+
+**默认就开着，什么都不用配。** 刷新挂在 autovacuum worker 上 —— QD 上的 autovacuum worker 既允许写、又不在恢复状态、还本来就会定期巡库，正好是这件事需要的执行环境，所以它和 deletion queue 的消费者共用同一个钩子。
+
+| GUC | 默认 | 含义 |
+|---|---|---|
+| `datalake_fdw.metadata_refresh_enabled` | `on` | 是否启用 autovacuum 驱动的刷新 |
+| `datalake_fdw.metadata_refresh_max_tables_per_cycle` | `100` | 单轮最多发起多少次外部请求 |
+| `datalake_fdw.metadata_refresh_ahead_percent` | `70` | TTL 烧掉这个百分比就算到期待刷 |
+| `datalake_fdw.metadata_refresh_min_interval` | `30`（秒） | 见下，实际几乎不起作用 |
+
+四个都是 `PGC_SIGHUP`，改完 `SELECT pg_reload_conf()` 生效。
+
+**它会刷哪些表**：外部 catalog 的表，且 `metadata_cache > 0`。就这两条。建表之后时间戳是 NULL，**NULL 按「无限陈旧」处理**，所以第一轮就会把它种上。
+
+反过来说：一张挂着但从来没人查的表，只要设了 `metadata_cache`，也会每个 TTL 被刷一次（一次外部往返）。不想让它占这个开销，就别给它设 `metadata_cache` —— 没有 TTL 的表根本不是候选。
+
+**正在被 DDL 占用的表会被跳过，不会去等**：刷新对表只取 `AccessShareLock`，所以普通的读写（SELECT / INSERT / UPDATE / DELETE）跟它不冲突，照刷不误；真正冲突的是 `ALTER TABLE`、`DROP`、`TRUNCATE`、`VACUUM FULL`、`REINDEX` 这类拿 `AccessExclusiveLock` 的操作。遇到它们刷新器**立刻放弃这张表**，而不是排队等 —— 等下去会把 autovacuum worker 卡住、压着本轮事务的 xmin，还让同一轮里剩下的表陪着一起等。跳过没有代价：候选按最旧优先排，下一轮它就排在最前面。（内核 autovacuum 出于同样的理由也是这么做的。）
+
+**刷不过来会怎样**：什么也不会坏。读路径自己那套 TTL 检查照旧，刷新器关了、没跑到、或者 catalog 连不上，读只是慢一点，**不会读到更旧的数据**。
+
+##### 节奏的限制：TTL 短于几分钟时它跟不上
+
+钩子在每个 autovacuum worker 的生命周期里只触发一次，所以**实际节奏就是 `autovacuum_naptime`（默认 60 秒）**，而不是 `metadata_refresh_min_interval` —— 那个 GUC 只能拦住"同一个 worker 里跑了不止一次"的情况，而 worker 每次都是新 fork 的，计时器跟着归零。于是：
+
+| `metadata_cache` | 默认 naptime 下够不够 |
+|---|---|
+| `'5'`（5 分钟）及以上 | 够 —— 3.5 分钟时到期待刷，60 秒一轮，来得及 |
+| 一两分钟 | **不够** —— 会在两轮之间就过期，由读它的查询自己解析 |
+
+##### TTL 很短时：改用任务调度器
+
+把钩子关掉，改由 task 驱动同一个函数，周期由你定（两个都开的话会对同一批表重复发外部请求）：
+
+```sql
+-- 1) 关掉 autovacuum 那条路
+ALTER SYSTEM SET datalake_fdw.metadata_refresh_enabled = off;
+SELECT pg_reload_conf();
+
+-- 2) 授权：函数默认对 PUBLIC 收回了执行权限
+GRANT EXECUTE ON FUNCTION pg_catalog.iceberg_refresh_metadata_cache(int) TO dba_role;
+
+-- 3) 建任务（在有 iceberg 外部表的那个库里建；目录是按库存的）
+CREATE TASK iceberg_metadata_refresh SCHEDULE '30 seconds'
+  AS $$ SELECT iceberg_refresh_metadata_cache() $$;
+```
+
+**`SCHEDULE` 支持哪些写法**（下表都是在本产品上实测过的）：
+
+| 写法 | 含义 | |
+|---|---|---|
+| `'30 seconds'` / `'5 seconds'` | 每 N 秒 | ✅ 秒级只支持 **1–59** |
+| `'60 seconds'`、`'90 seconds'` | — | ❌ `ERROR: invalid schedule` |
+| `'1 minute'` | — | ❌ 不认这种写法，一分钟以上一律用 cron |
+| `'*/5 * * * *'` | 每 5 分钟 | ✅ |
+| `'0 * * * *'` 或 `'@hourly'` | 每小时 | ✅ |
+| `'0 3 * * *'` | 每天 03:00 | ✅ |
+| `'@daily'` | 每天 00:00 | ✅ |
+
+**周期怎么选**：刷新在 TTL 烧掉 70% 时触发，所以周期取 TTL 的 1/10 ~ 1/5 就很宽裕：
+
+| `metadata_cache` | 建议 `SCHEDULE` |
+|---|---|
+| `'1'`（1 分钟） | `'10 seconds'` |
+| `'5'`（5 分钟） | `'30 seconds'` |
+| `'30'`（30 分钟） | `'*/5 * * * *'` |
+
+**查看、修改、停用、删除**：
+
+```sql
+-- 跑得怎么样（status 取值：succeeded / failed / running ...）
+SELECT t.jobname, h.status, h.start_time, h.return_message
+  FROM pg_task t JOIN pg_task_run_history h ON h.jobid = t.jobid
+ WHERE t.jobname = 'iceberg_metadata_refresh'
+ ORDER BY h.runid DESC LIMIT 5;
+
+ALTER TASK iceberg_metadata_refresh SCHEDULE '*/5 * * * *';   -- 改周期
+ALTER TASK iceberg_metadata_refresh NOT ACTIVE;               -- 临时停用
+ALTER TASK iceberg_metadata_refresh ACTIVE;                   -- 恢复
+DROP  TASK iceberg_metadata_refresh;                          -- 删除
+```
+
+任何时候也可以手工跑一次：`SELECT iceberg_refresh_metadata_cache();`（「我刚从 Spark 写完，让 PG 立刻看见」）。
+
+#### 四、两个函数的签名
+
+```sql
+iceberg_refresh_metadata_cache(max_tables int DEFAULT 100) RETURNS int
+
+iceberg_refresh_metadata(tbl regclass)
+    RETURNS record (refreshed bool, previous_head text, current_head text)
+```
+
+| | `iceberg_refresh_metadata_cache` | `iceberg_refresh_metadata` |
+|---|---|---|
+| 做什么 | 扫全库，把**快到期**的外部表的 head 重新解析并落盘 | 把**指定的这一张**表的 mirror 拉回 catalog 当前 head |
+| 参数 | `max_tables` — 单轮最多发起多少次外部请求 | `tbl` — 表名 |
+| 返回 | 本轮实际刷新的表数 | 三列：head 有没有移动、移动前、移动后 |
+| 看 TTL 吗 | 看，只刷到期的 | **不看**，你点名就刷 |
+| 典型用法 | 由 autovacuum 自动调用；TTL 很短时改挂在 task 上 | 出事时手工执行 |
+| 权限 | 默认无人可执行，DBA 显式 `GRANT` | 表 owner |
+| 位置 | 协调节点（QD） | 协调节点（QD） |
+
+#### 五、表很多的时候（十几二十张表可以跳过这节）
+
+默认值（每轮 100 张、autovacuum 每 60 秒一轮）对几十张表的库绰绰有余，不用调。表上千了再看这里 —— 下面的「周期」在默认形态下就是 `autovacuum_naptime`，换成 task 驱动时就是 task 的周期。
+
+- **超出额度的表不会被漏掉，也不会被饿死**。候选按缓存时间戳**最旧优先**排，刷过的表戳记变新、自动排到队尾，下一轮轮到的就是接下来最旧的一批。1000 张表、`max_tables=100`，是 10 轮轮转覆盖一遍，不是每轮都啃同样那 100 张。（实测：5 张全部到期的表，`max_tables=2` 连跑三轮，依次刷 t1+t2、t3+t4、t5，第四轮 0 张。）
+- **吞吐够不够**，一个式子就能判断：
+
+  > `max_tables ÷ 周期  ≥  表数 ÷ TTL`
+
+  1000 张表、`metadata_cache='5'`（300 秒）、`max_tables=100` → 周期要 ≤ 30 秒。默认 60 秒的 naptime 达不到，这种规模就该把 `metadata_refresh_max_tables_per_cycle` 调大到 200，或者改用 task 驱动、把周期压到 30 秒。不够也不出错，排在后面的表先过期，由读到它的那个查询自己解析。
+- **优先缩短周期，而不是一味调大 `max_tables`**。一轮是一个事务（每张表一个子事务）：轮跑得越久，QD 的 xmin 被压得越久；单轮超过 64 张表还会撑爆本事务的子事务号缓存（`PGPROC_MAX_CACHED_SUBXIDS`），让这段时间里其它 backend 的快照带上 suboverflow 标记。调度器也**不会让两轮重叠** —— 上一轮没跑完时最多排队一个，跑完立刻补一轮，然后回到正常节奏。
+
+#### 六、单表强制刷新：把被外部维护打坏的表救回来
+
+不走读缓存的那些路径 —— DML、时间旅行、`iceberg_snapshot_list()` —— 读的是 mirror 里记着的那个 metadata.json，这是事务能读到自己写入的前提。当存储平台自己做了 compaction / 快照过期 / 孤儿文件清理，mirror 可能还指着 manifest 已被删掉的那份元数据，这些路径就会报文件不存在：
+
+```
+Failed to open file: .../metadata/snap-5961517163737914279-1-....avro
+Gopher error: FileDoesNotExistException
+```
+
+还在写的表下一次写入就会自动 rebase 回来；只读的表要手工救：
+
+```sql
+SELECT * FROM iceberg_refresh_metadata('orders');
+ refreshed |               previous_head                |               current_head
+-----------+--------------------------------------------+--------------------------------------------
+ t         | .../metadata/00047-....metadata.json       | .../metadata/00050-....metadata.json
+```
+
+- 返回前后两个 head 而不是一个布尔值，是因为表被打坏之后运维第一个想知道的是「落后了多少」。
+- `refreshed` 只表示 head 有没有移动。已经在 head 上时它是 `f`，但缓存时间戳仍会续期。
+- 内建 catalog 的表是定义好的 no-op（head 由 PG 自己管），不报错。
+- 当前事务里对该表有未提交写入时会拒绝 —— 移动 mirror 会让那笔提交和自己的 rebase 打架。先提交或回滚。
+
+#### 七、升级注意
+
+**扩展本身**：这两个函数随 `datalake_fdw` 1.2 提供。新装的集群 `CREATE EXTENSION` 直接就有；已经装了旧版本的集群执行一次（需要 superuser）：
+
+```sql
+ALTER EXTENSION datalake_fdw UPDATE TO '1.2';
+```
+
+**跨版本升级集群：必须重新 initdb，不能原地换二进制。** 缓存时间戳那一列 `pg_ext_aux.pg_iceberg_metadata.metadata_cached_at` 是由 `iceberg-cdbinit--1.0.sql` 建的，而那个脚本只在 initdb 时跑一次 —— RPM 升级只会替换磁盘上的脚本文件，不会重新执行它。于是在这个特性之前创建的集群，目录里只有 5 列，而新二进制按第 6 列去读。
+
+这不是"缓存不生效"那么轻，在 release 构建里是**越界读**：`heap_getattr()` 发现 attnum 超过 natts 就走 `getmissingattr()`，去解引用属性数组末尾之后的内存，会不会崩取决于后面恰好是什么字节 —— 协调节点 SIGSEGV、整个集群进恢复，而且每次挂的查询都不一样（issue #439、#443）。
+
+所以处理办法是**在启动这一关就拦住**：`CATALOG_VERSION_NO` 已经随这一列一起提升，这样的集群会直接拒绝启动，报的是清清楚楚的
+
+```
+FATAL:  database files are incompatible with server
+DETAIL:  The database cluster was initialized with CATALOG_VERSION_NO ...,
+         but the server was compiled with CATALOG_VERSION_NO ...
+```
+
+而不是读着读着踩到没映射的页。读路径另外还加了 natts 守卫兜底，列不在就当作「从未刷新过」，走已有的 NULL 分支。
+
+一句话：**目录表的结构变更靠 initdb，不靠扩展升级脚本。** `ALTER EXTENSION ... UPDATE` 只负责函数这类扩展自己的对象。
+
+---
+
+### 4.13 当前不支持的功能 / 已知限制
+
+#### 4.13.1 完全未实现
 
 | 功能 | 备注 |
 |------|------|
@@ -1289,7 +1551,7 @@ SELECT iceberg_toolkit.get_fragments(
 | Row-level security / 列级权限传递到物理 Iceberg 数据 | 仅在 PG 入口生效，物理文件无访问控制 |
 | 生成列（GENERATED COLUMN）、表达式 DEFAULT 写入 Iceberg | PG 端语法可写但不会反映到 Iceberg schema |
 
-#### 4.12.2 静默 no-op（不会报错但实际无效）
+#### 4.13.2 静默 no-op（不会报错但实际无效）
 
 | 操作 | 实际行为 |
 |------|---------|
@@ -1298,7 +1560,7 @@ SELECT iceberg_toolkit.get_fragments(
 | `ANALYZE <iceberg_table>` | 非完全 no-op：会从 Iceberg catalog 元数据刷新 `pg_class.reltuples/relpages` 并抛 NOTICE：`ANALYZE on Iceberg tables refreshed pg_class.reltuples/relpages from Iceberg catalog metadata`；列级统计仍来自 manifest，不做采样 |
 | `PRIMARY KEY` / `UNIQUE` / `FOREIGN KEY` / `CHECK` 约束 | DDL 接受但无 Iceberg 端唯一索引承载，运行时不强制 |
 
-#### 4.12.3 显式拒绝
+#### 4.13.3 显式拒绝
 
 | 操作 | 错误 |
 |------|------|
@@ -1307,7 +1569,7 @@ SELECT iceberg_toolkit.get_fragments(
 | TID range scan（如 `WHERE ctid <@ '...'` 之类的范围 TID 谓词） | `ERRCODE_FEATURE_NOT_SUPPORTED`: `not supported`（pg_iceberg_am_handler.c） |
 | ANALYZE 内部的 `analyze_next_block` / `analyze_next_tuple` API | `ERRCODE_INTERNAL_ERROR`: `API not supported for iceberg relations`（pg_iceberg_am_handler.c） |
 
-#### 4.12.4 并发写入约束
+#### 4.13.4 并发写入约束
 
 同一张 Iceberg 表的并发提交走 **CAS + 重试**，最多重试 10 次（`TRACKER_MAX_COMMIT_RETRIES`）；超过会以 `ERRCODE_T_R_SERIALIZATION_FAILURE` 报错：
 
@@ -1393,6 +1655,7 @@ RESET datalake.disable_filter_pushdown;
 | `datalake.iceberg_autovacuum` | `on` | 启用自动 VACUUM |
 | `datalake.iceberg_autovacuum_naptime` | `600` | 自动 VACUUM 间隔（秒） |
 | `datalake.iceberg_log_autovacuum_min_duration` | `600000` | 记录超过此时长（ms）的自动 VACUUM；`-1` 全不记录、`0` 全部记录 |
+| `datalake_fdw.metadata_refresh_ahead_percent` | `70` | 外部 catalog 元数据缓存提前刷新的阈值：TTL 烧掉这个百分比即视为待刷新，见 4.12 |
 
 ---
 
