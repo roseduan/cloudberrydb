@@ -35,6 +35,7 @@ bool parquetFileWriter::createParquetWriter(ossFileStream ossFile, const std::st
     dataBufferOffset = 0;
     dataBuffer.resize(1024*1024);
     rg_writer = file_writer->AppendBufferedRowGroup();
+    columnStatsJson.clear();
     openState = true;
     return true;
 }
@@ -345,6 +346,19 @@ void parquetFileWriter::resetParquetWriter()
     rg_writer->Close();
     file_writer->Close();
     out_file->Close();
+
+    /*
+     * The footer is complete and in memory now, so read the column statistics
+     * out of it -- the dlagent then never has to reopen this file on object
+     * storage just to learn what it already knows (issue #442).  The in-memory
+     * metadata outlives out_file, so this reads the same footer either way;
+     * doing it after the close is what keeps a throw here -- bad_alloc on a
+     * very wide file, say -- from skipping the close and leaving the handle
+     * open on a file that is otherwise finished.
+     */
+    columnStatsJson =
+        Datalake::Internal::buildIcebergColumnStatsJson(file_writer->metadata().get());
+
     dataBufferOffset = 0;
     openState = false;
 }

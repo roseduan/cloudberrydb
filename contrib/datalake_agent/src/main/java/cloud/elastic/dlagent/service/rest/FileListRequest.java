@@ -53,6 +53,13 @@ public class FileListRequest {
         private String content;
         private Long fileSize;
         private Long recordCount;
+        /*
+         * Per-column statistics the segment read out of this file's own footer
+         * at write time (wire format v1, issue #442).  Held as the parsed JSON
+         * object and not interpreted here; null when the entry carried none,
+         * which leaves the agent reading the footer itself.
+         */
+        private Object columnStats;
 
         /**
          * Get the file path
@@ -132,6 +139,22 @@ public class FileListRequest {
         @JsonProperty("recordCount")
         public void setRecordCount(Long recordCount) {
             this.recordCount = recordCount;
+        }
+
+        /**
+         * Get the write-time column statistics, or null if absent
+         */
+        @JsonProperty("column_stats")
+        public Object getColumnStats() {
+            return columnStats;
+        }
+
+        /**
+         * Set the write-time column statistics
+         */
+        @JsonProperty("column_stats")
+        public void setColumnStats(Object columnStats) {
+            this.columnStats = columnStats;
         }
 
         @Override

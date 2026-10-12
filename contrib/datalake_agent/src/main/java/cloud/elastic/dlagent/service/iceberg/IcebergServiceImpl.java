@@ -603,41 +603,49 @@ public class IcebergServiceImpl implements IcebergService {
     @Override
     public Map<String, Object> commitFileGroups(String namespace, String tableName,
             Map<String, String> properties, RequestContext context) throws Exception {
-        String metadataLocation = retryRestCommit(context,
-                () -> newFetcher(context).commitFileGroups());
-        Map<String, Object> result = new HashMap<>();
-        result.put("metadata-location", metadataLocation);
-        return result;
+        return CommitIdempotency.once(context.getTxnId(), "commitFileGroups", () -> {
+            String metadataLocation = retryRestCommit(context,
+                    () -> newFetcher(context).commitFileGroups());
+            Map<String, Object> result = new HashMap<>();
+            result.put("metadata-location", metadataLocation);
+            return result;
+        });
     }
 
     @Override
     public Map<String, Object> commitAppend(String namespace, String tableName,
             Map<String, String> properties, RequestContext context) throws Exception {
-        String metadataLocation = retryRestCommit(context,
-                () -> newFetcher(context).commitAppend());
-        Map<String, Object> result = new HashMap<>();
-        result.put("metadata-location", metadataLocation);
-        return result;
+        return CommitIdempotency.once(context.getTxnId(), "commitAppend", () -> {
+            String metadataLocation = retryRestCommit(context,
+                    () -> newFetcher(context).commitAppend());
+            Map<String, Object> result = new HashMap<>();
+            result.put("metadata-location", metadataLocation);
+            return result;
+        });
     }
 
     @Override
     public Map<String, Object> commitUpdate(String namespace, String tableName,
             Map<String, String> properties, RequestContext context) throws Exception {
-        String metadataLocation = retryRestCommit(context,
-                () -> newFetcher(context).commitUpdate());
-        Map<String, Object> result = new HashMap<>();
-        result.put("metadata-location", metadataLocation);
-        return result;
+        return CommitIdempotency.once(context.getTxnId(), "commitUpdate", () -> {
+            String metadataLocation = retryRestCommit(context,
+                    () -> newFetcher(context).commitUpdate());
+            Map<String, Object> result = new HashMap<>();
+            result.put("metadata-location", metadataLocation);
+            return result;
+        });
     }
 
     @Override
     public Map<String, Object> commitRewrite(String namespace, String tableName,
             Map<String, String> properties, RequestContext context) throws Exception {
-        String metadataLocation = retryRestCommit(context,
-                () -> newFetcher(context).commitRewrite());
-        Map<String, Object> result = new HashMap<>();
-        result.put("metadata-location", metadataLocation);
-        return result;
+        return CommitIdempotency.once(context.getTxnId(), "commitRewrite", () -> {
+            String metadataLocation = retryRestCommit(context,
+                    () -> newFetcher(context).commitRewrite());
+            Map<String, Object> result = new HashMap<>();
+            result.put("metadata-location", metadataLocation);
+            return result;
+        });
     }
 
     @Override

@@ -889,6 +889,63 @@ createCreateRequestJson(IcebergCatalogFdwState* fdwState, IcebergCatalogOptions 
     return json_string;
 }
 
+/*
+ * addCommitTxnId
+ *    Stamp a final commit request with a fresh idempotency token (issue #442).
+ *
+ * A commit that takes longer than the HTTP timeout is resent whole, and the
+ * agent has no way to tell that resend from a genuine second commit -- so a
+ * slow commit could leave two snapshots holding the same data.  The token is
+ * what distinguishes them: the retry carries the identical body, hence the
+ * identical token, and the agent answers it with the first call's result.
+ *
+ * Generated per call rather than per transaction: it identifies THIS commit
+ * attempt, and a token reused across two genuinely different commits would
+ * make the agent drop the second, which is far worse than a duplicate.
+ *
+ * Only the operations that actually move the catalog pointer get one; the
+ * intermediate metadata-generating calls are not commits and stay unchanged.
+ */
+static void
+addCommitTxnId(agentcli_cJSON *request, IcebergCatalogFdwState *fdwState)
+{
+	uint8		rnd[16];
+	char		uuid[37];
+
+	switch (fdwState->catalogOperation)
+	{
+		case ICEBERG_COMMIT_APPEND:
+		case ICEBERG_COMMIT_UPDATE:
+		case ICEBERG_COMMIT_DELETE:
+		case ICEBERG_COMMIT_REWRITE:
+		case ICEBERG_COMMIT_FILE_GROUPS:
+			break;
+		default:
+			return;
+	}
+
+	/*
+	 * A weak token is worse than none: two commits colliding on one would
+	 * silently lose data.  Leave the field off rather than send something we
+	 * cannot vouch for -- the agent then behaves exactly as it did before.
+	 */
+	if (!pg_strong_random(rnd, sizeof(rnd)))
+		return;
+
+	/* RFC 4122 version 4 layout. */
+	rnd[6] = (rnd[6] & 0x0f) | 0x40;
+	rnd[8] = (rnd[8] & 0x3f) | 0x80;
+
+	snprintf(uuid, sizeof(uuid),
+			 "%02x%02x%02x%02x-%02x%02x-%02x%02x-%02x%02x-%02x%02x%02x%02x%02x%02x",
+			 rnd[0], rnd[1], rnd[2], rnd[3], rnd[4], rnd[5], rnd[6], rnd[7],
+			 rnd[8], rnd[9], rnd[10], rnd[11], rnd[12], rnd[13], rnd[14],
+			 rnd[15]);
+
+	agentcli_cJSON_AddStringToObject(request, DATALAKEFDW_ICEBERG_KEY_TXN_ID,
+									 uuid);
+}
+
 static agentcli_cJSON* createAppendFromRequest(IcebergCatalogRequest req)
 {
     if (!req.appendJson || strlen(req.appendJson) == 0) {
@@ -978,6 +1035,8 @@ createAppendRequestJson(IcebergCatalogFdwState* fdwState, IcebergCatalogOptions 
         agentcli_cJSON_AddItemToObject(request, DATALAKEFDW_ICEBERG_KEY_PROPERTIES, buildInProp);
     }
 
+    addCommitTxnId(request, fdwState);
+
     char *json_string = agentcli_cJSON_PrintUnformatted(request);
     agentcli_cJSON_Delete(request);
     return json_string;
@@ -1038,6 +1097,8 @@ createCommitFileGroupsRequestJson(IcebergCatalogFdwState* fdwState, IcebergCatal
 		agentcli_cJSON_AddItemToObject(request, DATALAKEFDW_ICEBERG_KEY_PROPERTIES, buildInProp);
 	}
 
+	addCommitTxnId(request, fdwState);
+
 	char *json_string = agentcli_cJSON_PrintUnformatted(request);
 	agentcli_cJSON_Delete(request);
 	return json_string;
@@ -1064,6 +1125,8 @@ createUpdateRequestJson(IcebergCatalogFdwState* fdwState, IcebergCatalogOptions 
         agentcli_cJSON *buildInProp = createBuildInProperties(ICEBERG_UPDATE, option, req);
         agentcli_cJSON_AddItemToObject(request, DATALAKEFDW_ICEBERG_KEY_PROPERTIES, buildInProp);
     }
+
+    addCommitTxnId(request, fdwState);
 
     char *json_string = agentcli_cJSON_PrintUnformatted(request);
     agentcli_cJSON_Delete(request);

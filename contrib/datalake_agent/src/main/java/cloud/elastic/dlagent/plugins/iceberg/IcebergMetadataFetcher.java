@@ -145,6 +145,19 @@ public class IcebergMetadataFetcher extends BasePlugin implements MetadataFetche
     private final IcebergCatalogWrapper icebergClientWrapper;
     protected final IcebergUtilities icebergUtilities;
 
+    /**
+     * Footers this commit read ahead of the loop that needs them, by path.
+     *
+     * <p>Held here rather than in IcebergUtilities because that class is a
+     * singleton @Component while this fetcher is prototype-scoped: one
+     * instance per request, so the map cannot be reached by a commit that did
+     * not fill it.  An entry is consumed by the first lookup, and it is
+     * deliberately not a cache across commits -- Metrics depend on the metrics
+     * config they were computed under, and a hit that ignored that would write
+     * bounds the table's configuration says should not exist.
+     */
+    private java.util.Map<String, org.apache.iceberg.Metrics> prefetchedMetrics = java.util.Collections.emptyMap();
+
     public IcebergMetadataFetcher() {
         this(SpringContext.getBean(IcebergUtilities.class), SpringContext.getBean(IcebergCatalogWrapper.class));
     }
@@ -157,6 +170,167 @@ public class IcebergMetadataFetcher extends BasePlugin implements MetadataFetche
     @Override
     public void afterPropertiesSet() {
         super.afterPropertiesSet();
+    }
+
+    /**
+     * Snapshot summary key holding the token of the commit that produced it
+     * (issue #442).  The in-process guard already turns a resent commit into a
+     * wait on the first one; this is what survives an agent restart, when that
+     * map is gone and the only remaining evidence that a commit landed is the
+     * table itself.
+     */
+    private static final String TXN_ID_SUMMARY_KEY = "datalake.txn-id";
+
+    /**
+     * How far back a duplicate is looked for.  A resend can only arrive within
+     * the client's retry budget -- three attempts of five minutes -- so half an
+     * hour is generous, and bounding it keeps the scan cheap on a table with a
+     * long history.
+     */
+    private static final long TXN_ID_LOOKBACK_MILLIS = 30 * 60 * 1000L;
+
+    /**
+     * Record this commit's token in the snapshot it is about to create.
+     *
+     * <p>Costs one summary entry and is what lets a later attempt recognize
+     * its own work.  A client that sends no token stamps nothing, and nothing
+     * about its commit changes.
+     */
+    private void stampTxnId(org.apache.iceberg.SnapshotUpdate<?> update) {
+        String txnId = context.getTxnId();
+
+        if (txnId != null && !txnId.isEmpty()) {
+            update.set(TXN_ID_SUMMARY_KEY, txnId);
+        }
+    }
+
+    /**
+     * True when this exact commit already produced a snapshot on this table.
+     *
+     * <p>Only an equal token counts. A false positive here would drop a commit
+     * the client believes succeeded, which is worse than the duplicate
+     * snapshot this is guarding against -- so the tokens are per-attempt UUIDs
+     * and the comparison is exact.
+     */
+    private boolean alreadyCommitted(Table table, String what) {
+        String txnId = context.getTxnId();
+
+        if (txnId == null || txnId.isEmpty() || table.currentSnapshot() == null) {
+            return false;
+        }
+
+        long cutoff = System.currentTimeMillis() - TXN_ID_LOOKBACK_MILLIS;
+        for (Snapshot snapshot : table.snapshots()) {
+            if (snapshot.timestampMillis() < cutoff) {
+                continue;
+            }
+            Map<String, String> summary = snapshot.summary();
+            if (summary != null && txnId.equals(summary.get(TXN_ID_SUMMARY_KEY))) {
+                LOG.info("{}: token {} is already recorded in snapshot {}; "
+                         + "not committing it again",
+                         what, txnId, snapshot.snapshotId());
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /**
+     * Read ahead the footers of the files that did not bring statistics with
+     * them, so the loop that follows does not fetch them one at a time.
+     *
+     * <p>Also the commit-level signal for how much of this commit fell back:
+     * when every file carries statistics there is nothing to read and nothing
+     * is logged, and when files do fall back the count says how many and why
+     * it cost what it cost.
+     */
+    private void prefetchFallbackMetrics(Table table, List<Fragment> fragments) {
+        List<String> dataFiles = new ArrayList<>();
+        List<String> deleteFiles = new ArrayList<>();
+        int parquet = 0;
+
+        for (Fragment fragment : fragments) {
+            GpdbFragmentMetadata meta = (GpdbFragmentMetadata) fragment.getMetadata();
+
+            if (meta == null || meta.getFileFormat() == null
+                    || !"PARQUET".equalsIgnoreCase(meta.getFileFormat())) {
+                continue;
+            }
+            parquet++;
+            if (meta.getColumnStats() != null) {
+                continue;
+            }
+            /*
+             * Kept apart because the two are read under different metrics
+             * configs, and a delete file read under the table's config loses
+             * the Full file_path bound that scopes it to one data file.
+             */
+            if (meta.getContentType() == GpdbFragmentMetadata.ContentType.POSITION_DELETE) {
+                deleteFiles.add(fragment.getSourceName());
+            } else {
+                dataFiles.add(fragment.getSourceName());
+            }
+        }
+
+        if (dataFiles.isEmpty() && deleteFiles.isEmpty()) {
+            return;
+        }
+        LOG.info("{} of {} parquet files in this commit carry no write-time "
+                 + "statistics and need their footers read",
+                 dataFiles.size() + deleteFiles.size(), parquet);
+        prefetchedMetrics = icebergUtilities.prefetchParquetMetrics(
+                table.io(),
+                dataFiles, org.apache.iceberg.MetricsConfig.forTable(table),
+                deleteFiles, org.apache.iceberg.MetricsConfig.forPositionDelete(table));
+    }
+
+    /**
+     * The same read-ahead for the file-list paths.
+     *
+     * <p>A separate name rather than an overload: List<Fragment> and
+     * List<FileEntry> erase to the same signature.
+     *
+     * <p>A FileEntry carries the same two facts a fragment does -- the format
+     * and whether the writer sent statistics -- so the buckets are decided the
+     * same way, and for the same reason: a delete file read under the table's
+     * metrics config loses the Full file_path bound that scopes it to one data
+     * file, which is issue #407.
+     */
+    private void prefetchFallbackMetricsForEntries(Table table,
+                                                   List<FileListRequest.FileEntry> entries) {
+        List<String> dataFiles = new ArrayList<>();
+        List<String> deleteFiles = new ArrayList<>();
+        int parquet = 0;
+
+        if (entries == null) {
+            return;
+        }
+        for (FileListRequest.FileEntry entry : entries) {
+            if (entry == null || entry.getFormat() == null
+                    || !"PARQUET".equalsIgnoreCase(entry.getFormat())) {
+                continue;
+            }
+            parquet++;
+            if (entry.getColumnStats() != null) {
+                continue;
+            }
+            if ("POSITION_DELETE".equals(entry.getContent())) {
+                deleteFiles.add(entry.getFilePath());
+            } else {
+                dataFiles.add(entry.getFilePath());
+            }
+        }
+
+        if (dataFiles.isEmpty() && deleteFiles.isEmpty()) {
+            return;
+        }
+        LOG.info("{} of {} parquet files in this commit carry no write-time "
+                 + "statistics and need their footers read",
+                 dataFiles.size() + deleteFiles.size(), parquet);
+        prefetchedMetrics = icebergUtilities.prefetchParquetMetrics(
+                table.io(),
+                dataFiles, org.apache.iceberg.MetricsConfig.forTable(table),
+                deleteFiles, org.apache.iceberg.MetricsConfig.forPositionDelete(table));
     }
 
     public FragmentDescription getFragments(String pattern) throws Exception {
@@ -273,11 +447,12 @@ public class IcebergMetadataFetcher extends BasePlugin implements MetadataFetche
                 table = catalog.loadTable(context.getDataSource());
             }
         }
+        prefetchFallbackMetricsForEntries(table, context.getFileList());
         AppendFiles batchAppend = table.newAppend();
 
         // Use file list from JSON POST request body
         for (FileListRequest.FileEntry fileEntry : context.getFileList()) {
-            DataFile dataFile = icebergUtilities.transFileFromFileEntry(fileEntry, table.io(), org.apache.iceberg.MetricsConfig.forTable(table));
+            DataFile dataFile = icebergUtilities.transFileFromFileEntry(prefetchedMetrics, fileEntry, table.io(), org.apache.iceberg.MetricsConfig.forTable(table), table.schema());
             batchAppend.appendFile(dataFile);
         }
 
@@ -289,6 +464,7 @@ public class IcebergMetadataFetcher extends BasePlugin implements MetadataFetche
         IcebergCatalog catalog = icebergClientWrapper.getIcebergCatalog(context);
         Table table = catalog.loadTable(context.getDataSource());
         healLegacyTableProperties(table);
+        prefetchFallbackMetrics(table, context.getFragments());
 
         // Transaction wrapper: commit() only writes manifest, does NOT update catalog.
         // This deferred-commit pattern is intentional and applies to ALL catalog
@@ -300,7 +476,7 @@ public class IcebergMetadataFetcher extends BasePlugin implements MetadataFetche
         Transaction txn = table.newTransaction();
         AppendFiles batchAppend = txn.newAppend();
         for (Fragment fragment : context.getFragments()) {
-            DataFile dataFile = icebergUtilities.transFileFromGpdb(fragment, table.spec(), table.io(), org.apache.iceberg.MetricsConfig.forTable(table));
+            DataFile dataFile = icebergUtilities.transFileFromGpdb(prefetchedMetrics, fragment, table.spec(), table.io(), org.apache.iceberg.MetricsConfig.forTable(table), table.schema());
             batchAppend.appendFile(dataFile);
         }
         batchAppend.commit(); // writes manifest only
@@ -386,17 +562,18 @@ public class IcebergMetadataFetcher extends BasePlugin implements MetadataFetche
         IcebergCatalog catalog = icebergClientWrapper.getIcebergCatalog(context);
         Table table = catalog.loadTable(context.getDataSource());
         healLegacyTableProperties(table);
+        prefetchFallbackMetricsForEntries(table, context.getFileList());
         RowDelta rowDelta = table.newRowDelta();
 
         // Use file list from JSON POST request body
         for (FileListRequest.FileEntry fileEntry : context.getFileList()) {
             String content = fileEntry.getContent();
             if ("POSITION_DELETE".equals(content)) {
-                DeleteFile deleteFile = icebergUtilities.transPosDeleteFromFileEntry(fileEntry);
+                DeleteFile deleteFile = icebergUtilities.transPosDeleteFromFileEntry(prefetchedMetrics, fileEntry, table.io(), org.apache.iceberg.MetricsConfig.forPositionDelete(table));
                 rowDelta.addDeletes(deleteFile);
             } else {
                 // Default to DATA_FILE
-                DataFile dataFile = icebergUtilities.transFileFromFileEntry(fileEntry, table.io(), org.apache.iceberg.MetricsConfig.forTable(table));
+                DataFile dataFile = icebergUtilities.transFileFromFileEntry(prefetchedMetrics, fileEntry, table.io(), org.apache.iceberg.MetricsConfig.forTable(table), table.schema());
                 rowDelta.addRows(dataFile);
             }
         }
@@ -409,6 +586,7 @@ public class IcebergMetadataFetcher extends BasePlugin implements MetadataFetche
         IcebergCatalog catalog = icebergClientWrapper.getIcebergCatalog(context);
         Table table = catalog.loadTable(context.getDataSource());
         healLegacyTableProperties(table);
+        prefetchFallbackMetrics(table, context.getFragments());
 
         // Transaction wrapper: commit() only writes manifest, does NOT update catalog.
         // See onlyBatchAppend() for the rationale — this method must be idempotent
@@ -418,10 +596,11 @@ public class IcebergMetadataFetcher extends BasePlugin implements MetadataFetche
         for (Fragment fragment : context.getFragments()) {
             GpdbFragmentMetadata meta = (GpdbFragmentMetadata)fragment.getMetadata();
             if (meta.getContentType() == GpdbFragmentMetadata.ContentType.DATA_FILE) {
-                DataFile dataFile = icebergUtilities.transFileFromGpdb(fragment, table.spec(), table.io(), org.apache.iceberg.MetricsConfig.forTable(table));
+                DataFile dataFile = icebergUtilities.transFileFromGpdb(prefetchedMetrics, fragment, table.spec(), table.io(), org.apache.iceberg.MetricsConfig.forTable(table), table.schema());
                 rowDelta.addRows(dataFile);
             } else if (meta.getContentType() == GpdbFragmentMetadata.ContentType.POSITION_DELETE) {
                 DeleteFile deleteFile = icebergUtilities.transPosDeleteFromGpdb(
+                        prefetchedMetrics,
                         fragment, table.spec(), table.io(),
                         org.apache.iceberg.MetricsConfig.forPositionDelete(table));
                 rowDelta.addDeletes(deleteFile);
@@ -502,6 +681,21 @@ public class IcebergMetadataFetcher extends BasePlugin implements MetadataFetche
         Table table = CommitStateGuard.wrap(catalog.loadTable(context.getDataSource()));
         healLegacyTableProperties(table);
 
+        /*
+         * Same shape as commitRewrite: the rewritten files came from the
+         * planner rather than from a writer, so none of them carries
+         * statistics, and without this the loops below read every one of
+         * those footers one at a time.
+         */
+        {
+            List<Fragment> all = new ArrayList<>(context.getFragments());
+
+            if (context.getRewrittenFragments() != null) {
+                all.addAll(context.getRewrittenFragments());
+            }
+            prefetchFallbackMetrics(table, all);
+        }
+
         // Use transaction: rewrite.commit() only writes manifests, NOT metadata.json
         Transaction txn = table.newTransaction();
 
@@ -516,13 +710,14 @@ public class IcebergMetadataFetcher extends BasePlugin implements MetadataFetche
 
         long sequenceNumber = table.snapshot(startingSnapshotId).sequenceNumber();
         rewrite.dataSequenceNumber(sequenceNumber);
+        stampTxnId(rewrite);
 
         for (Fragment fragment : context.getRewrittenFragments()) {
-            DataFile dataFile = icebergUtilities.transFileFromGpdb(fragment, table.spec(), table.io(), org.apache.iceberg.MetricsConfig.forTable(table));
+            DataFile dataFile = icebergUtilities.transFileFromGpdb(prefetchedMetrics, fragment, table.spec(), table.io(), org.apache.iceberg.MetricsConfig.forTable(table), table.schema());
             rewrite.deleteFile(dataFile);
         }
         for (Fragment fragment : context.getFragments()) {
-            DataFile dataFile = icebergUtilities.transFileFromGpdb(fragment, table.spec(), table.io(), org.apache.iceberg.MetricsConfig.forTable(table));
+            DataFile dataFile = icebergUtilities.transFileFromGpdb(prefetchedMetrics, fragment, table.spec(), table.io(), org.apache.iceberg.MetricsConfig.forTable(table), table.schema());
             rewrite.addFile(dataFile);
         }
 
@@ -650,11 +845,16 @@ public class IcebergMetadataFetcher extends BasePlugin implements MetadataFetche
         IcebergCatalog catalog = icebergClientWrapper.getIcebergCatalog(context);
         Table table = CommitStateGuard.wrap(catalog.loadTable(context.getDataSource()));
         healLegacyTableProperties(table);
+        if (alreadyCommitted(table, "commitAppend")) {
+            return ((HasTableOperations) table).operations().current().metadataFileLocation();
+        }
+        prefetchFallbackMetrics(table, context.getFragments());
         Snapshot base = table.currentSnapshot();
         Set<String> newFilePaths = new HashSet<>();
         AppendFiles batchAppend = table.newAppend();
+        stampTxnId(batchAppend);
         for (Fragment fragment : context.getFragments()) {
-            DataFile dataFile = icebergUtilities.transFileFromGpdb(fragment, table.spec(), table.io(), org.apache.iceberg.MetricsConfig.forTable(table));
+            DataFile dataFile = icebergUtilities.transFileFromGpdb(prefetchedMetrics, fragment, table.spec(), table.io(), org.apache.iceberg.MetricsConfig.forTable(table), table.schema());
             batchAppend.appendFile(dataFile);
             newFilePaths.add(dataFile.path().toString());
         }
@@ -675,17 +875,23 @@ public class IcebergMetadataFetcher extends BasePlugin implements MetadataFetche
         IcebergCatalog catalog = icebergClientWrapper.getIcebergCatalog(context);
         Table table = CommitStateGuard.wrap(catalog.loadTable(context.getDataSource()));
         healLegacyTableProperties(table);
+        if (alreadyCommitted(table, "commitUpdate")) {
+            return ((HasTableOperations) table).operations().current().metadataFileLocation();
+        }
+        prefetchFallbackMetrics(table, context.getFragments());
         Snapshot base = table.currentSnapshot();
         Set<String> newFilePaths = new HashSet<>();
         RowDelta rowDelta = table.newRowDelta();
+        stampTxnId(rowDelta);
         for (Fragment fragment : context.getFragments()) {
             GpdbFragmentMetadata meta = (GpdbFragmentMetadata)fragment.getMetadata();
             if (meta.getContentType() == GpdbFragmentMetadata.ContentType.DATA_FILE) {
-                DataFile dataFile = icebergUtilities.transFileFromGpdb(fragment, table.spec(), table.io(), org.apache.iceberg.MetricsConfig.forTable(table));
+                DataFile dataFile = icebergUtilities.transFileFromGpdb(prefetchedMetrics, fragment, table.spec(), table.io(), org.apache.iceberg.MetricsConfig.forTable(table), table.schema());
                 rowDelta.addRows(dataFile);
                 newFilePaths.add(dataFile.path().toString());
             } else if (meta.getContentType() == GpdbFragmentMetadata.ContentType.POSITION_DELETE) {
                 DeleteFile deleteFile = icebergUtilities.transPosDeleteFromGpdb(
+                        prefetchedMetrics,
                         fragment, table.spec(), table.io(),
                         org.apache.iceberg.MetricsConfig.forPositionDelete(table));
                 rowDelta.addDeletes(deleteFile);
@@ -792,6 +998,23 @@ public class IcebergMetadataFetcher extends BasePlugin implements MetadataFetche
         IcebergCatalog catalog = icebergClientWrapper.getIcebergCatalog(context);
         Table table = CommitStateGuard.wrap(catalog.loadTable(context.getDataSource()));
         healLegacyTableProperties(table);
+        if (alreadyCommitted(table, "commitRewrite")) {
+            return ((HasTableOperations) table).operations().current().metadataFileLocation();
+        }
+        /*
+         * The rewritten files are the ones being removed, and they came from
+         * the planner rather than from a writer, so none of them carries
+         * statistics -- they are read alongside the new files rather than one
+         * at a time after them.
+         */
+        {
+            List<Fragment> all = new ArrayList<>(context.getFragments());
+
+            if (context.getRewrittenFragments() != null) {
+                all.addAll(context.getRewrittenFragments());
+            }
+            prefetchFallbackMetrics(table, all);
+        }
 
         Transaction txn = table.newTransaction();
         Snapshot startingSnapshot = table.currentSnapshot();
@@ -804,14 +1027,15 @@ public class IcebergMetadataFetcher extends BasePlugin implements MetadataFetche
         RewriteFiles rewrite = txn.newRewrite().validateFromSnapshot(startingSnapshotId);
         long sequenceNumber = table.snapshot(startingSnapshotId).sequenceNumber();
         rewrite.dataSequenceNumber(sequenceNumber);
+        stampTxnId(rewrite);
 
         for (Fragment fragment : context.getRewrittenFragments()) {
-            DataFile dataFile = icebergUtilities.transFileFromGpdb(fragment, table.spec(), table.io(), org.apache.iceberg.MetricsConfig.forTable(table));
+            DataFile dataFile = icebergUtilities.transFileFromGpdb(prefetchedMetrics, fragment, table.spec(), table.io(), org.apache.iceberg.MetricsConfig.forTable(table), table.schema());
             rewrite.deleteFile(dataFile);
         }
         Set<String> newFilePaths = new HashSet<>();
         for (Fragment fragment : context.getFragments()) {
-            DataFile dataFile = icebergUtilities.transFileFromGpdb(fragment, table.spec(), table.io(), org.apache.iceberg.MetricsConfig.forTable(table));
+            DataFile dataFile = icebergUtilities.transFileFromGpdb(prefetchedMetrics, fragment, table.spec(), table.io(), org.apache.iceberg.MetricsConfig.forTable(table), table.schema());
             rewrite.addFile(dataFile);
             newFilePaths.add(dataFile.path().toString());
         }

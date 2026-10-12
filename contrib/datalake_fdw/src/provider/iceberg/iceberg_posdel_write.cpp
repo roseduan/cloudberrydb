@@ -116,6 +116,17 @@ void icebergPosDeleteWrite::appendFileMeta()
 	meta->recordCount = tuple_num;
 	meta->content = POSITION_DELETES;
 	meta->type = T_FileFragment;
+	/*
+	 * The delete file's own footer carries the file_path and pos bounds under
+	 * the Iceberg reserved field ids, which is exactly what the manifest needs
+	 * to scope the delete to one data file -- no reason for the agent to reopen
+	 * it to find that out (issue #442).
+	 */
+	{
+		const std::string &stats = file_writer->getColumnStatsJson();
+
+		meta->columnStats = stats.empty() ? NULL : pstrdup(stats.c_str());
+	}
 
 	/*
 	 * Stamp the partition tuple of the data file this delete file references so

@@ -1,0 +1,3 @@
+{"file":"counts.parquet","record_count":4,
+ "columns":[{"id":1,"name":"c_some"},{"id":2,"name":"c_none"}],
+ "column_stats":{"v":1,"cols":[{"id":1,"t":"i32","vc":4,"nc":2,"sz":76,"rg":[{"lo":"AQAAAA==","hi":"BQAAAA=="}]},{"id":2,"t":"i32","vc":4,"nc":4,"sz":42}]}}

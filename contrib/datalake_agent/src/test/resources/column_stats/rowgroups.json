@@ -1,0 +1,3 @@
+{"file":"rowgroups.parquet","record_count":4,
+ "columns":[{"id":1,"name":"c_int"},{"id":2,"name":"c_gap"}],
+ "column_stats":{"v":1,"cols":[{"id":1,"t":"i32","vc":4,"nc":0,"sz":152,"rg":[{"lo":"CgAAAA==","hi":"FAAAAA=="},{"lo":"HgAAAA==","hi":"KAAAAA=="}]},{"id":2,"t":"i32","vc":4,"nc":2,"sz":118,"rg":[{"lo":"BwAAAA==","hi":"CQAAAA=="}]}]}}

@@ -37,6 +37,13 @@ public class GpdbFragmentMetadata implements FragmentMetadata {
 	 * list means unpartitioned.
 	 */
 	private List<String> partitionValues;
+	/*
+	 * Per-column statistics the segment read out of this file's own footer at
+	 * write time (wire format v1, issue #442), as parsed from the request and
+	 * otherwise uninspected.  Null when the fragment carried none, which leaves
+	 * the agent reading the footer itself.
+	 */
+	private Object columnStats;
 
 	public GpdbFragmentMetadata(long fileSize, String fileFormat, long rowCount) {
 		this.rowCount = rowCount;
@@ -81,6 +88,14 @@ public class GpdbFragmentMetadata implements FragmentMetadata {
 
 	public void setPartitionValues(List<String> partitionValues) {
 		this.partitionValues = partitionValues;
+	}
+
+	public Object getColumnStats() {
+		return columnStats;
+	}
+
+	public void setColumnStats(Object columnStats) {
+		this.columnStats = columnStats;
 	}
 
 }

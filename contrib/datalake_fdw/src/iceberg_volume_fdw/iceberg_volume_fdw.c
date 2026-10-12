@@ -1737,7 +1737,19 @@ iceberg_volume_get_metadata(Relation relation, dataLakeFdwScanState *sstate, Lis
 					escape_json(&json_buf, strVal(pv));
 			}
 		}
-		appendStringInfo(&json_buf, "]}");
+		appendStringInfoChar(&json_buf, ']');
+
+		/*
+		 * Column statistics the writer read out of this file's own footer
+		 * (issue #442), already a JSON object -- emitted verbatim and carried
+		 * opaquely from here to the agent.  Absent when the writer collected
+		 * none, which leaves the agent reading the footer itself.
+		 */
+		if (fragment->columnStats != NULL)
+			appendStringInfo(&json_buf, ",\"column_stats\":%s",
+							 fragment->columnStats);
+
+		appendStringInfoChar(&json_buf, '}');
 
 		first = false;
 	}

@@ -1516,6 +1516,7 @@ _readFileFragment(void)
 	READ_NODE_FIELD(eqColumnNames);
 	READ_LONG_FIELD(fileSize);
 	READ_NODE_FIELD(partitionValues);
+	READ_STRING_FIELD(columnStats);
 
 	READ_DONE();
 }

@@ -53,6 +53,7 @@ OBJS = 	src/datalake_fdw.o \
 		src/provider/parquet/write/parquetWrite.o \
 		src/provider/parquet/write/parquetOutputStream.o \
 		src/provider/parquet/write/parquetFileWriter.o \
+		src/provider/parquet/write/parquetColumnStats.o \
 		src/provider/orc/read/orcInputStream.o \
 		src/provider/orc/read/orcReadDeltaFile.o \
 		src/provider/orc/read/orcReadInterface.o \

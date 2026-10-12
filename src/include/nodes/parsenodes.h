@@ -4953,6 +4953,15 @@ typedef struct FileFragment
 	List        *eqColumnNames;
 	int64		 fileSize;
 	List        *partitionValues;
+	/*
+	 * Per-column statistics the writer read out of the closed file's own
+	 * footer, as an opaque JSON object (wire format v1, issue #442).  Carried
+	 * verbatim from the QE that wrote the file to the dlagent, which builds the
+	 * manifest Metrics from it instead of reopening the file on object storage.
+	 * NULL when the writer produced none (non-parquet, older segment); the
+	 * agent then falls back to reading the footer itself.
+	 */
+	char        *columnStats;
 } FileFragment;
 
 typedef struct FileScanTask

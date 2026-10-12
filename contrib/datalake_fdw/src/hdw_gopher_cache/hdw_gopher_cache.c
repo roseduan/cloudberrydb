@@ -113,18 +113,37 @@ GopherRemoveFileMetaUnderAllUfsPath(char* prefix, int mRecursive, int mForce)
 	for (int i = 0; i < nEntries; i++)
 	{
 		int ufsId = ufsInfos[i].ufs_id;
-		if (gopherRemovePath(admin, ufsId, prefix, mRecursive, mForce))
+		int rc = gopherRemovePath(admin, ufsId, prefix, mRecursive, mForce);
+
+		if (rc)
 		{
-			DO_DB(elog(LOG, "GopherRemoveFileMetaUnderAllUfsPath: cannot remove gopherServer "
-				"metadata %s.", gopherGetLastError()));
+			/*
+			 * Not under DO_DB: the caller turns this into a bare "could not
+			 * delete gopher cache" with no detail, so without this the only
+			 * record of which ufs failed, and of what gopherRemovePath
+			 * actually returned, is discarded in every non-debug build.  This
+			 * path is reached only when the command has already failed, so it
+			 * adds no output to a working system.
+			 */
+			elog(LOG, "GopherRemoveFileMetaUnderAllUfsPath: gopherRemovePath "
+				"returned %d for ufs %d (%s), entry %d of %d, prefix %s: %s.",
+				rc, ufsId,
+				ufsInfos[i].ufs_path ? ufsInfos[i].ufs_path : "(null)",
+				i + 1, nEntries, prefix, gopherGetLastError());
+
+			for (int j = 0; j < nEntries; j++)
+				elog(LOG, "GopherRemoveFileMetaUnderAllUfsPath: ufs %d is %s.",
+					ufsInfos[j].ufs_id,
+					ufsInfos[j].ufs_path ? ufsInfos[j].ufs_path : "(null)");
+
 			return -1;
 		}
 	}
 	gopherFreeUfsInfo(ufsInfos, nEntries);
 	if (gopherDeleteAdmin(admin))
 	{
-		DO_DB(elog(LOG, "GopherRemoveFileMetaUnderAllUfsPath: cannot remove "
-			"gopherAdmin %s.", gopherGetLastError()));
+		elog(LOG, "GopherRemoveFileMetaUnderAllUfsPath: cannot remove "
+			"gopherAdmin: %s.", gopherGetLastError());
 		return -1;
 	}
 

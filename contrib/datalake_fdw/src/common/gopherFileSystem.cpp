@@ -147,9 +147,35 @@ GopherFileSystem::~GopherFileSystem()
 	}
 }
 
+/*
+ * Tell gopher whether to abandon the operation in flight.
+ *
+ * InterruptPending alone is not a cancel request: memory-context logging,
+ * procsignal barriers, custom procsignals and several timeouts set it too,
+ * and CHECK_FOR_INTERRUPTS() simply services those and carries on.
+ * Returning it made gopher give up on an unrelated signal and report
+ * failure without setting an error -- which is how __gopher_free_all_cache()
+ * came to fail with "could not delete gopher cache" while
+ * gopherGetLastError() still read "Success." (#442).  The flag doing it in
+ * CI was IdleStatsUpdateTimeoutPending, a timer that fires on the same
+ * schedule on every segment, which is why all three failed at once.
+ *
+ * Same predicate as iceberg_catalog_interrupt_callback() (#455): abort only
+ * for the interrupts ProcessInterrupts() would turn into an error, and leave
+ * the rest to the next CHECK_FOR_INTERRUPTS().
+ */
 bool GopherFileSystem::checkCanceled(void)
 {
-	return InterruptPending;
+	if (!InterruptPending)
+		return false;
+
+	if (InterruptHoldoffCount != 0 || CritSectionCount != 0)
+		return false;
+
+	if (ProcDiePending)
+		return true;
+
+	return QueryCancelPending && QueryCancelHoldoffCount == 0;
 }
 
 /* ----------------------------------------------------------------

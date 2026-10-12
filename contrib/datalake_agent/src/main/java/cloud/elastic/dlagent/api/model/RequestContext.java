@@ -150,6 +150,19 @@ public class RequestContext {
 
     private String catalogType;
 
+    /**
+     * Identifies one commit attempt (issue #442).
+     *
+     * <p>A commit that outlives the client's HTTP timeout is resent whole, and
+     * without this the agent cannot tell that resend from a second commit --
+     * so a slow commit could leave the table with two snapshots holding the
+     * same data.  The retry carries the identical body and therefore the
+     * identical token, which is what lets the second arrival be answered with
+     * the first one's result.  Null from a client that does not send one, and
+     * then nothing changes.
+     */
+    private String txnId;
+
     private String path;
 
     /**

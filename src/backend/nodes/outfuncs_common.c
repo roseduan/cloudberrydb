@@ -642,6 +642,7 @@ _outFileFragment(StringInfo str, const FileFragment *node)
 	WRITE_NODE_FIELD(eqColumnNames);
 	WRITE_LONG_FIELD(fileSize);
 	WRITE_NODE_FIELD(partitionValues);
+	WRITE_STRING_FIELD(columnStats);
 }
 
 static void

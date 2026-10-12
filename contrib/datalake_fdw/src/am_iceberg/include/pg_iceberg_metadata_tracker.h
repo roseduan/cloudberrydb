@@ -83,6 +83,19 @@ typedef struct TrackedDataFile
 	 * the agent can stamp each data file with its partition.
 	 */
 	List   *partition_values;
+
+	/*
+	 * Per-column statistics the segment read out of this file's own footer at
+	 * write time, as the raw JSON object text (wire format v1, issue #442).
+	 *
+	 * The tracker never looks inside it: it is captured as a verbatim span of
+	 * the incoming document and pasted back unchanged when the accumulated
+	 * files are reserialized for the agent.  Keeping it opaque is what lets
+	 * the format grow without this middle hop having to know the schema --
+	 * and what keeps the bound bytes byte-identical end to end.  NULL when the
+	 * fragment carried none, which leaves the agent reading the footer.
+	 */
+	char   *column_stats;
 } TrackedDataFile;
 
 /*

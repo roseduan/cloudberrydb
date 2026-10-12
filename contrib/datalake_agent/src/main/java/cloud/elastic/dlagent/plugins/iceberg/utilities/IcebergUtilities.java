@@ -596,9 +596,11 @@ public class IcebergUtilities {
      * @param fileEntry FileEntry from JSON request body
      * @return DataFile for Iceberg
      */
-    public DataFile transFileFromFileEntry(FileListRequest.FileEntry fileEntry,
+    public DataFile transFileFromFileEntry(java.util.Map<String, org.apache.iceberg.Metrics> prefetchedMetrics,
+                                           FileListRequest.FileEntry fileEntry,
                                            org.apache.iceberg.io.FileIO io,
-                                           org.apache.iceberg.MetricsConfig metricsConfig) {
+                                           org.apache.iceberg.MetricsConfig metricsConfig,
+                                           org.apache.iceberg.Schema schema) {
         // Parse format string to FileFormat enum
         org.apache.iceberg.FileFormat format;
         String formatStr = fileEntry.getFormat();
@@ -627,7 +629,9 @@ public class IcebergUtilities {
                         .withFileSizeInBytes(fileEntry.getFileSize() != null ? fileEntry.getFileSize() : 0L)
                         .withRecordCount(fileEntry.getRecordCount() != null ? fileEntry.getRecordCount() : 0L);
         org.apache.iceberg.Metrics metrics =
-                computeParquetMetrics(io, metricsConfig, fileEntry.getFilePath(), format.name());
+                resolveMetrics(prefetchedMetrics, fileEntry.getColumnStats(),
+                               fileEntry.getRecordCount() != null ? fileEntry.getRecordCount() : 0L,
+                               schema, metricsConfig, io, fileEntry.getFilePath(), format.name());
         if (metrics != null) {
             builder.withMetrics(metrics);
         }
@@ -637,10 +641,20 @@ public class IcebergUtilities {
     /**
      * Create DeleteFile from FileEntry (for POSITION_DELETE).
      *
+     * <p>Unlike the builtin path, this one used to attach no metrics at all,
+     * so its delete files carried no file_path bounds -- and without bounds
+     * DeleteFileIndex applies every delete file to every sequence-eligible
+     * data file, the fan-out that exhausted the agent's heap in issue #407.
+     * The statistics the segment now sends close that gap here too, and the
+     * footer is read as a fallback when they are absent.
+     *
      * @param fileEntry FileEntry from JSON request body
      * @return DeleteFile for Iceberg
      */
-    public DeleteFile transPosDeleteFromFileEntry(FileListRequest.FileEntry fileEntry) {
+    public DeleteFile transPosDeleteFromFileEntry(java.util.Map<String, org.apache.iceberg.Metrics> prefetchedMetrics,
+                                                  FileListRequest.FileEntry fileEntry,
+                                                  org.apache.iceberg.io.FileIO io,
+                                                  org.apache.iceberg.MetricsConfig metricsConfig) {
         // Parse format string to FileFormat enum
         org.apache.iceberg.FileFormat format;
         String formatStr = fileEntry.getFormat();
@@ -663,13 +677,22 @@ public class IcebergUtilities {
             }
         }
 
-        return FileMetadata.deleteFileBuilder(PartitionSpec.unpartitioned())
-                           .withPath(fileEntry.getFilePath())
-                           .withFormat(format)
-                           .withFileSizeInBytes(fileEntry.getFileSize() != null ? fileEntry.getFileSize() : 0L)
-                           .withRecordCount(fileEntry.getRecordCount() != null ? fileEntry.getRecordCount() : 0L)
-                           .ofPositionDeletes()
-                           .build();
+        long recordCount = fileEntry.getRecordCount() != null ? fileEntry.getRecordCount() : 0L;
+        FileMetadata.Builder builder =
+                FileMetadata.deleteFileBuilder(PartitionSpec.unpartitioned())
+                            .withPath(fileEntry.getFilePath())
+                            .withFormat(format)
+                            .withFileSizeInBytes(fileEntry.getFileSize() != null ? fileEntry.getFileSize() : 0L)
+                            .withRecordCount(recordCount)
+                            .ofPositionDeletes();
+        org.apache.iceberg.Metrics metrics =
+                resolveMetrics(prefetchedMetrics, fileEntry.getColumnStats(), recordCount,
+                               IcebergWriteMetrics.positionDeleteSchema(),
+                               metricsConfig, io, fileEntry.getFilePath(), format.name());
+        if (metrics != null) {
+            builder.withMetrics(metrics);
+        }
+        return builder.build();
     }
 
     public void setupNativeLibGopherClientLibrary() {
@@ -745,10 +768,12 @@ public class IcebergUtilities {
         }
     }
 
-    public DataFile transFileFromGpdb(Fragment gpdbFile,
+    public DataFile transFileFromGpdb(java.util.Map<String, org.apache.iceberg.Metrics> prefetchedMetrics,
+                                      Fragment gpdbFile,
                                       PartitionSpec spec,
                                       org.apache.iceberg.io.FileIO io,
-                                      org.apache.iceberg.MetricsConfig metricsConfig) {
+                                      org.apache.iceberg.MetricsConfig metricsConfig,
+                                      org.apache.iceberg.Schema schema) {
         GpdbFragmentMetadata metadata = (GpdbFragmentMetadata) gpdbFile.getMetadata();
         PartitionSpec effectiveSpec = (spec != null) ? spec : PartitionSpec.unpartitioned();
         DataFiles.Builder builder = DataFiles.builder(effectiveSpec)
@@ -781,7 +806,9 @@ public class IcebergUtilities {
         }
 
         org.apache.iceberg.Metrics metrics =
-                computeParquetMetrics(io, metricsConfig, gpdbFile.getSourceName(), metadata.getFileFormat());
+                resolveMetrics(prefetchedMetrics, metadata.getColumnStats(), metadata.getRowCount(), schema,
+                               metricsConfig, io, gpdbFile.getSourceName(),
+                               metadata.getFileFormat());
         if (metrics != null) {
             builder.withMetrics(metrics);
         }
@@ -823,6 +850,161 @@ public class IcebergUtilities {
     }
 
     /**
+     * How many footers the fallback reads at once.
+     *
+     * <p>Object-storage reads are latency, not work: a footer read is about
+     * 34 ms of waiting, so doing them one after another is what turned a
+     * 6144-file commit into minutes.  Thirty-two in flight turns the same
+     * commit into seconds while staying well inside what the agent's heap and
+     * an object store's per-client limits tolerate.
+     */
+    private static final int FALLBACK_READ_CONCURRENCY = 32;
+
+    /**
+     * Read the footers of every file that will need one, concurrently, before
+     * the loop that builds the manifest entries walks them one by one.
+     *
+     * <p>Called at the top of a commit.  Files whose statistics arrived with
+     * them are not listed here and are never read at all -- this exists for
+     * the ones that fall back: ORC tables, segments older than the statistics
+     * protocol, and anything a footer held that the collector did not expect.
+     * Without it a full-fallback commit is O(files) serial round trips, which
+     * is the failure issue #442 is about; the fallback has to stay survivable
+     * even though it is no longer the normal path.
+     */
+    public java.util.Map<String, org.apache.iceberg.Metrics> prefetchParquetMetrics(
+                                       org.apache.iceberg.io.FileIO io,
+                                       java.util.List<String> dataPaths,
+                                       org.apache.iceberg.MetricsConfig dataConfig,
+                                       java.util.List<String> deletePaths,
+                                       org.apache.iceberg.MetricsConfig deleteConfig) {
+        /*
+         * The map belongs to this commit and to nothing else.  It used to be a
+         * static field, which made the javadoc's "scoped to a single commit"
+         * false: this class is a singleton @Component, so two overlapping
+         * commits shared one map and the second one's clear() threw away the
+         * first one's prefetch before it was consumed -- putting that commit
+         * back on the serial footer reads this change exists to remove.
+         */
+        java.util.Map<String, org.apache.iceberg.Metrics> prefetched = new java.util.concurrent.ConcurrentHashMap<>();
+
+        int total = (dataPaths == null ? 0 : dataPaths.size())
+                + (deletePaths == null ? 0 : deletePaths.size());
+        if (io == null || total < 2) {
+            return prefetched;
+        }
+
+        /*
+         * Data files and delete files are read under different metrics
+         * configs and must not be mixed: a delete file's file_path bound has
+         * to be Full, and computing it under the table's config would truncate
+         * it to a prefix every delete file shares -- which is how every delete
+         * file ends up applied to every data file (issue #407).
+         */
+        int threads = Math.min(FALLBACK_READ_CONCURRENCY, total);
+        java.util.concurrent.ExecutorService pool =
+                java.util.concurrent.Executors.newFixedThreadPool(threads, runnable -> {
+                    Thread thread = new Thread(runnable, "iceberg-footer-read");
+                    thread.setDaemon(true);
+                    return thread;
+                });
+
+        long start = System.currentTimeMillis();
+        try {
+            java.util.List<java.util.concurrent.Future<?>> pending =
+                    new java.util.ArrayList<>(total);
+
+            submitFooterReads(pool, pending, prefetched, io, dataPaths, dataConfig);
+            submitFooterReads(pool, pending, prefetched, io, deletePaths, deleteConfig);
+
+            for (java.util.concurrent.Future<?> future : pending) {
+                try {
+                    future.get();
+                } catch (InterruptedException e) {
+                    /*
+                     * Someone is shutting us down.  Put the flag back -- the
+                     * broad catch below would otherwise swallow the only
+                     * record that it was ever set, and the container's
+                     * shutdown would stall on a thread that looks idle.
+                     *
+                     * Abandoning the rest is safe: a file this loop did not
+                     * wait for simply is not in the map, and a miss there is
+                     * the serial footer read that was always the fallback.
+                     */
+                    Thread.currentThread().interrupt();
+                    break;
+                } catch (Exception e) {
+                    /*
+                     * A footer that would not read is not fatal: the file's
+                     * manifest entry simply carries no metrics, exactly as it
+                     * would have if the read had failed in the loop below.
+                     */
+                    LOG.warn("prefetching a parquet footer failed: {}", e.toString());
+                }
+            }
+        } finally {
+            pool.shutdown();
+        }
+
+        LOG.info("read {} of {} parquet footers for this commit in {} ms "
+                 + "({} concurrent); these files carried no write-time statistics",
+                 prefetched.size(), total,
+                 System.currentTimeMillis() - start, threads);
+        return prefetched;
+    }
+
+    private void submitFooterReads(java.util.concurrent.ExecutorService pool,
+                                   java.util.List<java.util.concurrent.Future<?>> pending,
+                                   java.util.Map<String, org.apache.iceberg.Metrics> prefetched,
+                                   org.apache.iceberg.io.FileIO io,
+                                   java.util.List<String> paths,
+                                   org.apache.iceberg.MetricsConfig metricsConfig) {
+        if (paths == null) {
+            return;
+        }
+        for (String path : paths) {
+            pending.add(pool.submit(() -> {
+                org.apache.iceberg.Metrics metrics =
+                        readFooterMetrics(io, metricsConfig, path);
+                if (metrics != null) {
+                    prefetched.put(path, metrics);
+                }
+            }));
+        }
+    }
+
+    /**
+     * Metrics for one file: from the statistics the segment sent if it sent
+     * any, otherwise by reading the file's footer off object storage.
+     *
+     * <p>That choice is the whole of issue #442.  Reading the footer costs a
+     * remote round trip per file at commit time, and the file count is set by
+     * segments times partitions rather than by data volume -- 512 segments
+     * over 200 partitions is 102,400 files, minutes of serial reads against a
+     * five-minute timeout.  The segment had those statistics in memory when it
+     * closed the file, so when it sends them there is nothing left to read.
+     *
+     * <p>The fallback is not vestigial: ORC files, a segment older than this
+     * change, and anything the collector found unexpected in a footer all land
+     * on it, and it has to keep producing exactly what it produced before.
+     */
+    private org.apache.iceberg.Metrics resolveMetrics(java.util.Map<String, org.apache.iceberg.Metrics> prefetchedMetrics,
+                                                      Object columnStats,
+                                                      long recordCount,
+                                                      org.apache.iceberg.Schema schema,
+                                                      org.apache.iceberg.MetricsConfig metricsConfig,
+                                                      org.apache.iceberg.io.FileIO io,
+                                                      String path,
+                                                      String fileFormat) {
+        org.apache.iceberg.Metrics metrics = IcebergWriteMetrics.fromColumnStats(
+                columnStats, recordCount, schema, metricsConfig);
+        if (metrics != null) {
+            return metrics;
+        }
+        return computeParquetMetrics(prefetchedMetrics, io, metricsConfig, path, fileFormat);
+    }
+
+    /**
      * Derive column-level Metrics (record/value/null counts and lower/upper
      * bounds) by reading the just-written Parquet file footer, so the Iceberg
      * manifest carries the per-file statistics that TableScan.filter() needs to
@@ -830,11 +1012,33 @@ public class IcebergUtilities {
      * formats, a null FileIO, or any read failure return null -- pruning then
      * degrades to a full scan but results are never wrong.
      */
-    private org.apache.iceberg.Metrics computeParquetMetrics(org.apache.iceberg.io.FileIO io,
+    private org.apache.iceberg.Metrics computeParquetMetrics(java.util.Map<String, org.apache.iceberg.Metrics> prefetchedMetrics,
+                                                             org.apache.iceberg.io.FileIO io,
                                                              org.apache.iceberg.MetricsConfig metricsConfig,
                                                              String path,
                                                              String fileFormat) {
         if (io == null || fileFormat == null || !"PARQUET".equalsIgnoreCase(fileFormat)) {
+            return null;
+        }
+
+        /*
+         * Taken rather than read, so the entry does not outlive this commit and
+         * cannot be served to a later one under a different metrics config.
+         */
+        if (prefetchedMetrics != null && !prefetchedMetrics.isEmpty()) {
+            org.apache.iceberg.Metrics prefetched = prefetchedMetrics.remove(path);
+            if (prefetched != null) {
+                return prefetched;
+            }
+        }
+        return readFooterMetrics(io, metricsConfig, path);
+    }
+
+    /** The footer read itself, from either the prefetch or the loop. */
+    private org.apache.iceberg.Metrics readFooterMetrics(org.apache.iceberg.io.FileIO io,
+                                                         org.apache.iceberg.MetricsConfig metricsConfig,
+                                                         String path) {
+        if (io == null) {
             return null;
         }
         try {
@@ -871,7 +1075,8 @@ public class IcebergUtilities {
      * delete file and prune nothing.  forPositionDelete() pins file_path and pos to
      * Full.
      */
-    public DeleteFile transPosDeleteFromGpdb(Fragment gpdbFile,
+    public DeleteFile transPosDeleteFromGpdb(java.util.Map<String, org.apache.iceberg.Metrics> prefetchedMetrics,
+                                             Fragment gpdbFile,
                                              PartitionSpec spec,
                                              org.apache.iceberg.io.FileIO io,
                                              org.apache.iceberg.MetricsConfig metricsConfig) {
@@ -885,7 +1090,10 @@ public class IcebergUtilities {
                             .withRecordCount(metadata.getRowCount())
                             .ofPositionDeletes();
         org.apache.iceberg.Metrics metrics =
-                computeParquetMetrics(io, metricsConfig, gpdbFile.getSourceName(), metadata.getFileFormat());
+                resolveMetrics(prefetchedMetrics, metadata.getColumnStats(), metadata.getRowCount(),
+                               IcebergWriteMetrics.positionDeleteSchema(),
+                               metricsConfig, io, gpdbFile.getSourceName(),
+                               metadata.getFileFormat());
         if (metrics != null) {
             builder.withMetrics(metrics);
         }

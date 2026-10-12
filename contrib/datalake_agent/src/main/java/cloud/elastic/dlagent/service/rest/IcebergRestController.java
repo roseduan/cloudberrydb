@@ -148,6 +148,7 @@ public class IcebergRestController {
 
         // Create request context
         RequestContext context = createRequestContext(namespace, table, properties);
+        context.setTxnId(extractTxnId(request));
 
         // Check if the table exists and get detailed result
         icebergService.checkTableExists(namespace, table, properties, context);
@@ -217,6 +218,7 @@ public class IcebergRestController {
 
         // Create request context
         RequestContext context = createRequestContext(namespace, table, properties);
+        context.setTxnId(extractTxnId(request));
 
         // Load the table using ServiceResult
         Table icebergTable = icebergService.loadTable(namespace, table, properties, context);
@@ -341,6 +343,7 @@ public class IcebergRestController {
 
         Map<String, String> properties = extractProperties(request);
         RequestContext context = createRequestContext(namespace, table, properties);
+        context.setTxnId(extractTxnId(request));
 
         // Exactly one object storage read -- see IcebergServiceImpl.loadMetadataJson for why
         // this is not loadTable() followed by a read of the same object.
@@ -392,6 +395,7 @@ public class IcebergRestController {
 
         // convert to RequestContext and reuse the original iceberg logic
         RequestContext context = createRequestContext(namespace, table, properties);
+        context.setTxnId(extractTxnId(request));
 
         // Predicate pushdown (AM path): the serialized filter references columns
         // by 0-based index, so the filter machinery needs a ColumnDescriptor list
@@ -460,6 +464,7 @@ public class IcebergRestController {
 
         // convert to RequestContext and reuse the original iceberg logic
         RequestContext context = createRequestContext(namespace, table, properties);
+        context.setTxnId(extractTxnId(request));
 
         String schema = icebergService.getSnapshotSchema(namespace, table, properties, context);
 
@@ -515,6 +520,7 @@ public class IcebergRestController {
 
         // convert to RequestContext and reuse the original iceberg logic
         RequestContext context = createRequestContext(namespace, table, properties);
+        context.setTxnId(extractTxnId(request));
 
         String snapshots = icebergService.getSnapshots(namespace, table, properties, context);
 
@@ -562,6 +568,7 @@ public class IcebergRestController {
 
         // convert to RequestContext and reuse the original iceberg logic
         RequestContext context = createRequestContext(namespace, table, properties);
+        context.setTxnId(extractTxnId(request));
 
         // Get table statistics
         String statistics = icebergService.getTableStatistics(namespace, table, properties, context);
@@ -626,6 +633,7 @@ public class IcebergRestController {
 
         // Create request context
         RequestContext context = createRequestContext(namespace, table, properties);
+        context.setTxnId(extractTxnId(request));
 
         // Plan file groups
         String fileGroups = icebergService.planFileGroups(namespace, table, properties, context,
@@ -654,6 +662,7 @@ public class IcebergRestController {
         String namespace = (String) request.get("namespace");
         Map<String, String> properties = extractProperties(request);
         RequestContext context = createRequestContext(namespace, table, properties);
+        context.setTxnId(extractTxnId(request));
 
         @SuppressWarnings("unchecked")
         List<Map<String, Object>> rawOps = (List<Map<String, Object>>) request.get("operations");
@@ -797,6 +806,7 @@ public class IcebergRestController {
 
         Map<String, String> properties = extractProperties(request);
         RequestContext context = createRequestContext(namespace, table, properties);
+        context.setTxnId(extractTxnId(request));
 
         Map<String, Object> result = icebergService.truncateTable(namespace, table, properties, context);
 
@@ -839,9 +849,7 @@ public class IcebergRestController {
             fragmentMaps = (List<Map<String, Object>>) fragmentsObj;
         }
 
-        log.info("Received fragments: {}", fragmentMaps);
-        log.info("Fragments null check: {}, empty check: {}",
-            fragmentMaps == null, fragmentMaps != null ? fragmentMaps.isEmpty() : "N/A");
+        logReceivedFragments(fragmentMaps);
 
         if (fragmentMaps == null || fragmentMaps.isEmpty()) {
             log.warn("Empty or null fragments detected, returning error");
@@ -856,6 +864,7 @@ public class IcebergRestController {
 
         // Create request context
         RequestContext context = createRequestContext(namespace, table, properties);
+        context.setTxnId(extractTxnId(request));
 
         // Convert fragment maps to Fragment objects
         List<Fragment> fragments = new ArrayList<>();
@@ -881,6 +890,7 @@ public class IcebergRestController {
 
             GpdbFragmentMetadata metadata = new GpdbFragmentMetadata(fileSize, format, recordCount, "DATA_FILE");
             setPartitionValuesFromMap(metadata, fragmentMap);
+            setColumnStatsFromMap(metadata, fragmentMap);
 
             // Create Fragment with path and metadata
             Fragment fragment = new Fragment(path, metadata);
@@ -941,9 +951,7 @@ public class IcebergRestController {
             fragmentMaps = (List<Map<String, Object>>) fragmentsObj;
         }
 
-        log.info("Received fragments: {}", fragmentMaps);
-        log.info("Fragments null check: {}, empty check: {}",
-            fragmentMaps == null, fragmentMaps != null ? fragmentMaps.isEmpty() : "N/A");
+        logReceivedFragments(fragmentMaps);
 
         if (fragmentMaps == null || fragmentMaps.isEmpty()) {
             log.warn("Empty or null fragments detected, returning error");
@@ -958,6 +966,7 @@ public class IcebergRestController {
 
         // Create request context
         RequestContext context = createRequestContext(namespace, table, properties);
+        context.setTxnId(extractTxnId(request));
 
         // Convert fragment maps to Fragment objects
         List<Fragment> fragments = new ArrayList<>();
@@ -984,6 +993,7 @@ public class IcebergRestController {
 
             GpdbFragmentMetadata metadata = new GpdbFragmentMetadata(fileSize, format, recordCount, ContentTypeStr);
             setPartitionValuesFromMap(metadata, fragmentMap);
+            setColumnStatsFromMap(metadata, fragmentMap);
 
             // Create Fragment with path and metadata
             Fragment fragment = new Fragment(path, metadata);
@@ -1033,6 +1043,7 @@ public class IcebergRestController {
 
         // Create request context
         RequestContext context = createRequestContext(namespace, table, properties);
+        context.setTxnId(extractTxnId(request));
 
         // Extract new fragments (files to add)
         Object fragmentsObj = request.get("fragments");
@@ -1105,6 +1116,60 @@ public class IcebergRestController {
     }
 
     /**
+     * How many fragments a debug-level log line will spell out.  Enough to see
+     * the shape of a request, far short of rendering a commit.
+     */
+    private static final int FRAGMENT_LOG_SAMPLE = 5;
+
+    /**
+     * Note what arrived, without writing the request into the log.
+     *
+     * <p>This used to render the entire fragment list at INFO -- one line per
+     * request, about two megabytes of it on a 6144-file commit, and growing
+     * with the file count on exactly the commits that are already in trouble.
+     * The count is what the line was actually useful for; the contents are
+     * available at debug, and even then only the first few.
+     */
+    private void logReceivedFragments(List<Map<String, Object>> fragmentMaps) {
+        int count = fragmentMaps == null ? 0 : fragmentMaps.size();
+
+        log.info("Received {} fragments", count);
+
+        if (log.isDebugEnabled() && count > 0) {
+            log.debug("First {} of {} fragments: {}",
+                      Math.min(FRAGMENT_LOG_SAMPLE, count), count,
+                      fragmentMaps.subList(0, Math.min(FRAGMENT_LOG_SAMPLE, count)));
+        }
+    }
+
+    /**
+     * Pull the commit token out of a request body (issue #442).
+     *
+     * <p>Only commit requests carry one, and only commits act on it; reading
+     * it everywhere costs nothing and keeps the endpoints uniform. Absent
+     * means a client that predates the token, and the commit then behaves
+     * exactly as it did before.
+     */
+    private String extractTxnId(Map<String, Object> request) {
+        Object txnId = request.get("txn_id");
+        return txnId instanceof String ? (String) txnId : null;
+    }
+
+    /**
+     * Copy the write-time column statistics from a fragment map onto the
+     * metadata (issue #442).  The object is carried through as parsed and
+     * interpreted only where the manifest entry is built; absent means the
+     * fragment carried none and the file's footer gets read instead.
+     */
+    private void setColumnStatsFromMap(GpdbFragmentMetadata metadata,
+                                       Map<String, Object> fragmentMap) {
+        Object statsObj = fragmentMap.get("column_stats");
+        if (statsObj != null) {
+            metadata.setColumnStats(statsObj);
+        }
+    }
+
+    /**
      * Convert a list of fragment maps to Fragment objects.
      */
     private List<Fragment> convertToFragments(List<Map<String, Object>> fragmentMaps) {
@@ -1124,6 +1189,7 @@ public class IcebergRestController {
 
             GpdbFragmentMetadata metadata = new GpdbFragmentMetadata(fileSize, format, recordCount, "DATA_FILE");
             setPartitionValuesFromMap(metadata, fragmentMap);
+            setColumnStatsFromMap(metadata, fragmentMap);
 
             Fragment fragment = new Fragment(path, metadata);
             fragments.add(fragment);
@@ -1152,6 +1218,7 @@ public class IcebergRestController {
 
         Map<String, String> properties = extractProperties(request);
         RequestContext context = createRequestContext(namespace, table, properties);
+        context.setTxnId(extractTxnId(request));
 
         Object fragmentsObj = request.get("fragments");
         List<Map<String, Object>> fragmentMaps = parseFragmentList(fragmentsObj);
@@ -1187,6 +1254,7 @@ public class IcebergRestController {
 
         Map<String, String> properties = extractProperties(request);
         RequestContext context = createRequestContext(namespace, table, properties);
+        context.setTxnId(extractTxnId(request));
 
         Object fragmentsObj = request.get("updateFragments");
         List<Map<String, Object>> fragmentMaps = parseFragmentList(fragmentsObj);
@@ -1209,6 +1277,7 @@ public class IcebergRestController {
             String contentTypeStr = (String) fragmentMap.get("position_on_delete");
             GpdbFragmentMetadata metadata = new GpdbFragmentMetadata(fileSize, format, recordCount, contentTypeStr);
             setPartitionValuesFromMap(metadata, fragmentMap);
+            setColumnStatsFromMap(metadata, fragmentMap);
             Fragment fragment = new Fragment(path, metadata);
             fragments.add(fragment);
         }
@@ -1239,6 +1308,7 @@ public class IcebergRestController {
 
         Map<String, String> properties = extractProperties(request);
         RequestContext context = createRequestContext(namespace, table, properties);
+        context.setTxnId(extractTxnId(request));
 
         // Extract new fragments (files to add)
         Object fragmentsObj = request.get("fragments");
@@ -1378,6 +1448,7 @@ public class IcebergRestController {
 
         // Create request context
         RequestContext context = createRequestContext(namespace, table, properties);
+        context.setTxnId(extractTxnId(request));
 
         // Drop the table
         boolean dropped = icebergService.dropTable(namespace, table, purgeRequested, properties, context);

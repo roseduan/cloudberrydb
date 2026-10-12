@@ -1,1 +1,4 @@
 iceberg_site_scalar_test
+iceberg_column_stats_test
+base64_test.o
+core-*

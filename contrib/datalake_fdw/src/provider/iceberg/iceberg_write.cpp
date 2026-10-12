@@ -251,6 +251,11 @@ void icebergWrite::appendFileMeta()
 	meta->recordCount = tuple_num;
 	meta->content = DATA;
 	meta->type = T_FileFragment;
+	{
+		const std::string &stats = file_writer->getColumnStatsJson();
+
+		meta->columnStats = stats.empty() ? NULL : pstrdup(stats.c_str());
+	}
 	fileMetas = lappend(fileMetas, (void*)meta);
 	MemoryContextSwitchTo(oldContext);
 }
@@ -277,6 +282,11 @@ void icebergWrite::appendPartitionFileMeta(IcebergPartitionFile &pf)
 	meta->recordCount = pf.tupleNum;
 	meta->content = DATA;
 	meta->type = T_FileFragment;
+	{
+		const std::string &stats = pf.writer->getColumnStatsJson();
+
+		meta->columnStats = stats.empty() ? NULL : pstrdup(stats.c_str());
+	}
 
 	for (size_t i = 0; i < pf.values.size(); i++)
 	{

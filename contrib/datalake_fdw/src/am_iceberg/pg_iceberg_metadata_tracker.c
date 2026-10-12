@@ -173,6 +173,7 @@ copy_tracked_file(const TrackedDataFile *src)
 	dst->record_count = src->record_count;
 	dst->file_size = src->file_size;
 	dst->file_format = src->file_format ? pstrdup(src->file_format) : NULL;
+	dst->column_stats = src->column_stats ? pstrdup(src->column_stats) : NULL;
 
 	/* Deep-copy the partition tuple; NULL elements are SQL NULL values. */
 	dst->partition_values = NIL;
@@ -201,6 +202,8 @@ free_tracked_file(TrackedDataFile *file)
 		pfree(file->file_path);
 	if (file->file_format)
 		pfree(file->file_format);
+	if (file->column_stats)
+		pfree(file->column_stats);
 
 	/* Free the partition tuple; skip NULL (SQL NULL) list elements. */
 	foreach(lc, file->partition_values)
@@ -1475,8 +1478,21 @@ typedef struct
 {
 	DLFieldType	current_field;
 
+	/*
+	 * The lexer driving this parse, so a callback can read where in the input
+	 * the current token sits.  That is how column_stats is carried across
+	 * without being understood: its object is copied as a raw span of the
+	 * document rather than parsed and rebuilt.
+	 */
+	JsonLexContext *lex;
+
 	int			object_depth;
 	int			array_depth;
+
+	/* Inside the opaque column_stats object of the current fragment */
+	bool		in_column_stats;
+	int			column_stats_depth;
+	char	   *column_stats_start;
 
 	bool		next_array_is_fragments;
 	bool		in_fragments_array;
@@ -1497,6 +1513,7 @@ typedef struct
 	int64		cur_file_size;
 	bool		cur_is_delete;
 	List	   *cur_partition_values;	/* List of String / NULL, spec order */
+	char	   *cur_column_stats;		/* raw JSON object text, or NULL */
 
 	/* Accumulated output (List of TrackedDataFile*) */
 	List	   *data_files;
@@ -1510,6 +1527,10 @@ dl_object_start(void *semstate)
 
 	s->object_depth++;
 
+	/* Inside column_stats nothing is interpreted, only spanned. */
+	if (s->in_column_stats)
+		return JSON_SUCCESS;
+
 	if (s->in_fragments_array && !s->in_fragment_object)
 	{
 		s->in_fragment_object = true;
@@ -1520,6 +1541,7 @@ dl_object_start(void *semstate)
 		s->cur_file_size = 0;
 		s->cur_is_delete = false;
 		s->cur_partition_values = NIL;
+		s->cur_column_stats = NULL;
 	}
 
 	return JSON_SUCCESS;
@@ -1529,6 +1551,30 @@ static JsonParseErrorType
 dl_object_end(void *semstate)
 {
 	DLParseState *s = (DLParseState *) semstate;
+
+	/*
+	 * Closing brace of the opaque column_stats object: the parser has already
+	 * consumed it, so prev_token_terminator is one past it and the span from
+	 * the '{' we noted at field start is exactly the object's own text.
+	 */
+	if (s->in_column_stats)
+	{
+		if (s->object_depth == s->column_stats_depth)
+		{
+			ptrdiff_t	len = s->lex->prev_token_terminator - s->column_stats_start;
+
+			/*
+			 * The span is derived from lexer positions rather than from the
+			 * text itself, so check it points forward before trusting it as a
+			 * length: a negative one would become an enormous unsigned size.
+			 */
+			if (len > 0)
+				s->cur_column_stats = pnstrdup(s->column_stats_start, (Size) len);
+			s->in_column_stats = false;
+		}
+		s->object_depth--;
+		return JSON_SUCCESS;
+	}
 
 	if (s->in_fragment_object &&
 		s->object_depth == s->fragment_object_depth)
@@ -1540,7 +1586,9 @@ dl_object_end(void *semstate)
 		file->record_count = s->cur_record_count;
 		file->file_size = s->cur_file_size;
 		file->partition_values = s->cur_partition_values;
+		file->column_stats = s->cur_column_stats;
 		s->cur_partition_values = NIL;
+		s->cur_column_stats = NULL;
 
 		if (s->cur_is_delete)
 			s->delete_files = lappend(s->delete_files, file);
@@ -1601,6 +1649,10 @@ dl_field_start(void *semstate, char *fname, bool isnull)
 {
 	DLParseState *s = (DLParseState *) semstate;
 
+	/* Field names inside column_stats belong to the agent, not to us. */
+	if (s->in_column_stats)
+		return JSON_SUCCESS;
+
 	if (s->in_fragment_object)
 	{
 		if (strcmp(fname, "path") == 0)
@@ -1617,6 +1669,21 @@ dl_field_start(void *semstate, char *fname, bool isnull)
 		{
 			/* The value is an array; collected in dl_scalar via the flag. */
 			s->next_array_is_partvals = true;
+			s->current_field = DL_FIELD_NONE;
+		}
+		else if (strcmp(fname, "column_stats") == 0 &&
+				 s->lex->token_type == JSON_TOKEN_OBJECT_START)
+		{
+			/*
+			 * Note where the value starts and stop interpreting until its
+			 * matching brace.  The lexer has already peeked the value token,
+			 * so token_start is the '{' itself.  Requiring an object here
+			 * keeps a malformed or null column_stats from arming a state we
+			 * would never leave.
+			 */
+			s->in_column_stats = true;
+			s->column_stats_depth = s->object_depth + 1;
+			s->column_stats_start = s->lex->token_start;
 			s->current_field = DL_FIELD_NONE;
 		}
 		else
@@ -1638,6 +1705,9 @@ static JsonParseErrorType
 dl_scalar(void *semstate, char *token, JsonTokenType tokentype)
 {
 	DLParseState *s = (DLParseState *) semstate;
+
+	if (s->in_column_stats)
+		return JSON_SUCCESS;
 
 	if (!s->in_fragment_object)
 		return JSON_SUCCESS;
@@ -1720,6 +1790,8 @@ pg_iceberg_parse_data_locations(const char *json,
 									   GetDatabaseEncoding(),
 									   true);
 
+	state.lex = lex;
+
 	memset(&sem, 0, sizeof(sem));
 	sem.semstate = &state;
 	sem.object_start = dl_object_start;
@@ -1750,6 +1822,7 @@ pg_iceberg_parse_data_locations(const char *json,
 			arr[i].file_size = src->file_size;
 			arr[i].file_format = src->file_format;
 			arr[i].partition_values = src->partition_values;
+			arr[i].column_stats = src->column_stats;
 			i++;
 			pfree(src);
 		}
@@ -1775,6 +1848,7 @@ pg_iceberg_parse_data_locations(const char *json,
 			arr[i].file_size = src->file_size;
 			arr[i].file_format = src->file_format;
 			arr[i].partition_values = src->partition_values;
+			arr[i].column_stats = src->column_stats;
 			i++;
 			pfree(src);
 		}
@@ -1834,6 +1908,25 @@ append_partition_values_json(StringInfo buf, List *partition_values)
 			escape_json(buf, strVal(v));
 	}
 	appendStringInfoChar(buf, ']');
+}
+
+/*
+ * append_column_stats_json
+ *    Paste the file's statistics object back in, byte for byte (issue #442).
+ *
+ * This is the far end of the opaque carry: the text went into the tracker as
+ * a span of the incoming document and comes back out unexamined, so the bound
+ * bytes the segment read from the footer reach the agent exactly as written.
+ * Emits nothing when the file carried no statistics.
+ */
+static void
+append_column_stats_json(StringInfo buf, const char *column_stats)
+{
+	if (column_stats == NULL || column_stats[0] == '\0')
+		return;
+
+	appendStringInfoString(buf, ",\"column_stats\":");
+	appendStringInfoString(buf, column_stats);
 }
 
 static char *
@@ -1901,6 +1994,7 @@ serialize_files_to_data_locations(List *data_files,
 						 f->record_count,
 						 f->file_size);
 		append_partition_values_json(&buf, f->partition_values);
+		append_column_stats_json(&buf, f->column_stats);
 		appendStringInfoChar(&buf, '}');
 	}
 
@@ -1926,6 +2020,7 @@ serialize_files_to_data_locations(List *data_files,
 						 f->record_count,
 						 f->file_size);
 		append_partition_values_json(&buf, f->partition_values);
+		append_column_stats_json(&buf, f->column_stats);
 		appendStringInfoChar(&buf, '}');
 	}
 

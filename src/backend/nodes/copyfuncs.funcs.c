@@ -3436,6 +3436,7 @@ _copyFileFragment(const FileFragment *from)
 	COPY_SCALAR_FIELD(recordCount);
 	COPY_NODE_FIELD(eqColumnNames);
 	COPY_SCALAR_FIELD(fileSize);
+	COPY_STRING_FIELD(columnStats);
 
 	return newnode;
 }

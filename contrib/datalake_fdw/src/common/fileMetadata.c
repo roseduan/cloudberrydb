@@ -269,6 +269,8 @@ FDW_FreeMetaList(List *meta_list)
 			continue;
 		if (meta->filePath)
 			pfree(meta->filePath);
+		if (meta->columnStats)
+			pfree(meta->columnStats);
 
 		/*
 		 * Free the partition tuple built in FDW_deserializeMetaToMap: a List
@@ -320,6 +322,7 @@ FDW_deserializeMetaToMap(PGresult *res)
 	for (int i = 0; i < PQntuples(res); i++)
 	{
 		char	   *ptr = res->tuples[i][0].value;
+		char	   *msg_end = ptr + res->tuples[i][0].len;
 		Oid			relid;
 		bool		found;
 		FDW_MetaMapEntry *map_entry;
@@ -388,6 +391,29 @@ FDW_deserializeMetaToMap(PGresult *res)
 			}
 		}
 
+		/*
+		 * Column statistics (issue #442): an opaque JSON object the segment
+		 * read out of the file's own footer, or absent.  It is the last field
+		 * on the wire, and a message that stops before it simply carries none
+		 * -- the agent then reads the footer itself, exactly as it always did.
+		 */
+		meta->columnStats = NULL;
+		if (msg_end - ptr >= (ptrdiff_t) sizeof(int32))
+		{
+			int32		cslen;
+
+			memcpy(&cslen, ptr, sizeof(int32));
+			ptr += sizeof(int32);
+
+			if (cslen > 0 && msg_end - ptr >= (ptrdiff_t) cslen)
+			{
+				meta->columnStats = (char *) palloc(cslen + 1);
+				memcpy(meta->columnStats, ptr, cslen);
+				meta->columnStats[cslen] = '\0';
+				ptr += cslen;
+			}
+		}
+
 		/* store into hash table by relid */
 		map_entry = (FDW_MetaMapEntry *) hash_search(FDW_ResultMetaMap,
 													  &relid, HASH_ENTER, &found);
@@ -440,11 +466,13 @@ chain:
  *   [Oid relid][int64_t fileSize][int64_t recordCount]
  *   [FileFormat format][FileContent content][size_t slen][char filePath[slen]]
  *   [int32 npv][per partition value: uint8 isNull, int32 len, char bytes[len]]
+ *   [int32 cslen][char columnStats[cslen]]
  *
  * The partition-value trailer carries one entry per partition column (in
  * partition-spec order); isNull marks a SQL NULL value.  npv == 0 for
- * unpartitioned tables.  Encoder and FDW_deserializeMetaToMap must stay
- * byte-for-byte symmetric.
+ * unpartitioned tables.  columnStats is the opaque wire-format v1 statistics
+ * JSON (issue #442), cslen == 0 when the writer collected none.  Encoder and
+ * FDW_deserializeMetaToMap must stay byte-for-byte symmetric.
  */
 bytea *FDW_serializeMeta(void *msg, Oid relid)
 {
@@ -454,6 +482,7 @@ bytea *FDW_serializeMeta(void *msg, Oid relid)
 
 	size_t		slen = strlen(meta->filePath);
 	size_t		pv_size = sizeof(int32);	/* npv count */
+	int32		cslen = meta->columnStats ? (int32) strlen(meta->columnStats) : 0;
 
 	foreach(lc, meta->partitionValues)
 	{
@@ -466,7 +495,8 @@ bytea *FDW_serializeMeta(void *msg, Oid relid)
 
 	size_t		size = sizeof(Oid) + 2 * sizeof(int64_t) +
 					   sizeof(FileFormat) + sizeof(FileContent) +
-					   sizeof(size_t) + slen + pv_size;
+					   sizeof(size_t) + slen + pv_size +
+					   sizeof(int32) + (size_t) cslen;
 
 	result = (bytea*)palloc0(size + VARHDRSZ);
 	SET_VARSIZE(result, size + VARHDRSZ);
@@ -516,6 +546,14 @@ bytea *FDW_serializeMeta(void *msg, Oid relid)
 			memcpy(ptr, str, len);
 			ptr += len;
 		}
+	}
+
+	memcpy(ptr, &cslen, sizeof(int32));
+	ptr += sizeof(int32);
+	if (cslen > 0)
+	{
+		memcpy(ptr, meta->columnStats, cslen);
+		ptr += cslen;
 	}
 
 	return result;
@@ -602,6 +640,15 @@ FDW_serialize_file_list_to_json(List *file_list, StringInfoData *output)
 
         /* recordCount */
         appendStringInfo(output, ",\"recordCount\":%ld", (long)file->recordCount);
+
+        /*
+         * Column statistics read from the file's own footer at write time
+         * (issue #442), already a JSON object -- emitted verbatim.  Omitted
+         * when the writer collected none, which the agent reads as "reopen the
+         * file and read its footer", the behaviour before this existed.
+         */
+        if (file->columnStats != NULL)
+            appendStringInfo(output, ",\"column_stats\":%s", file->columnStats);
 
         appendStringInfoChar(output, '}');
     }

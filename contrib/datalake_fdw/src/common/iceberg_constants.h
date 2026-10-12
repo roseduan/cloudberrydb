@@ -99,6 +99,15 @@
 #define DATALAKEFDW_ICEBERG_KEY_FRAGMENTS                "fragments"
 #define DATALAKEFDW_ICEBERG_KEY_REWRITTENFRAGMENTS       "rewrittenFragments"
 
+/*
+ * Idempotency token on a final commit request (issue #442).  One fresh UUID
+ * per commit call, which the HTTP layer's retry resends verbatim because it
+ * resends the identical body -- so the agent can tell "the same commit,
+ * asked again after a timeout" from "a second commit", and answer the retry
+ * with the result of the first instead of creating another snapshot.
+ */
+#define DATALAKEFDW_ICEBERG_KEY_TXN_ID                   "txn_id"
+
 /* ========== Schema Keys ========== */
 #define DATALAKEFDW_ICEBERG_KEY_TYPE                     "type"
 #define DATALAKEFDW_ICEBERG_KEY_FIELDS                   "fields"

@@ -8,6 +8,7 @@
 #include <parquet/internal/arrow/io/interfaces.h>
 #include <parquet/file_writer.h>
 #include "parquetOutputStream.h"
+#include "parquetColumnStats.h"
 #include "src/provider/provider.h"
 #include "src/common/logicalType.h"
 #include "src/common/rewrLogical.h"
@@ -100,6 +101,13 @@ public:
     bool isOpen();
 
     int64_t getWrittenBytes();
+
+    /*
+     * Wire-format v1 column statistics of the file this writer last closed,
+     * or empty if none could be collected (issue #442).  Valid from
+     * closeParquetWriter() until the next createParquetWriter().
+     */
+    const std::string& getColumnStatsJson() const { return columnStatsJson; }
 private:
 
     void createColumnBatch();
@@ -135,6 +143,7 @@ private:
     parquet::Int96* int96Array;
     int64_t* int64Array;
     int16_t* definition_level;
+    std::string columnStatsJson;
 
     bool openState;
 };
