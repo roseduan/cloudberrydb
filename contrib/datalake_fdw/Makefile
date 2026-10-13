@@ -127,6 +127,7 @@ OBJS = 	src/datalake_fdw.o \
 		src/am_iceberg/pg_iceberg_deletion_queue.o \
 		src/am_iceberg/pg_iceberg_catalog_helper.o \
 		src/am_iceberg/pg_iceberg_metadata_reader.o \
+		src/am_iceberg/pg_iceberg_attach.o \
 		src/am_iceberg/pg_iceberg_catalog_utils.o \
 		src/am_iceberg/pg_iceberg_options.o \
 		src/am_iceberg/pg_iceberg_metadata_tracker.o \
@@ -177,7 +178,7 @@ EXTENSION = datalake_fdw
 # EXTENSION datalake_fdw UPDATE without re-creating dependent objects.  A new
 # object therefore belongs in the newest upgrade script, never in --1.0.sql,
 # which an already-installed cluster never re-runs.
-DATA = datalake_fdw--1.0.sql datalake_fdw--1.0--1.1.sql datalake_fdw--1.1--1.2.sql
+DATA = datalake_fdw--1.0.sql datalake_fdw--1.0--1.1.sql datalake_fdw--1.1--1.2.sql datalake_fdw--1.2--1.3.sql
 
 ifdef ICEBERG_HUDI_TEST
 REGRESS = setup_hudi iceberg_read hudi_read

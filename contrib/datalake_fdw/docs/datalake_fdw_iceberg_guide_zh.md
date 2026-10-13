@@ -1786,3 +1786,36 @@ DROP SERVER cat_server CASCADE;  -- 级联删除所有依赖对象
 | 凭证过期类错误（`ExpiredToken` / `InvalidAccessKeyId`） | 平台下发的临时凭证已过期（XSKY 约 1 小时） | 重跑该语句；长事务请拆短 |
 | `API not supported for iceberg relations` | 调用了 heap-only API（多见于第三方扩展直接调内部 API，或 ANALYZE 内部 block API） | 见 4.12.3；避免该扩展直接作用于 iceberg 表 |
 | `ANALYZE on Iceberg tables refreshed pg_class.reltuples/relpages from Iceberg catalog metadata` | 不是错误，只是 NOTICE | ANALYZE 仅刷新 reltuples/relpages（供 ORCA 使用）；列级统计来自 Iceberg manifest，不做采样 |
+
+## 10. 备份与恢复（gpbackup / gprestore）
+
+Iceberg 表的数据在对象存储上，gpbackup **只备元数据，不备数据**（issue #457）。
+
+### 10.1 备份的内容
+
+| 对象 | 备份内容 |
+|---|---|
+| SERVER / USER MAPPING | DDL（USER MAPPING 的凭据按 gpbackup 现有方式写入备份文件，注意备份目录的访问权限） |
+| FOREIGN CATALOG / FOREIGN VOLUME | DDL |
+| builtin Iceberg 表 | `CREATE ICEBERG TABLE` DDL，加上备份快照里读到的 metadata 指针 |
+| 外部 catalog（hive / polaris 等）的 Iceberg 表 | 只有 DDL，元数据以外部 catalog 为准 |
+| 表数据 | 不备份 |
+
+### 10.2 恢复的行为
+
+gpbackup 对每张 Iceberg 表只导出一条 `SELECT iceberg_toolkit.restore_table(...)`，恢复逻辑全部在数据库里，gprestore 不需要任何特殊处理。`restore_table` 随 datalake_fdw 1.3 提供：恢复到一个**已存在的库**之前，先在该库执行 `ALTER EXTENSION datalake_fdw UPDATE`，否则恢复会报 `function iceberg_toolkit.restore_table(...) does not exist`（用 `--create-db` 新建的库会直接装最新版本，不受影响）。
+
+- 表**已存在**：跳过，原表不做任何改动。如果已存在的是一张同名的**非 Iceberg** 表（普通表、视图等），视为冲突，报错退出。
+- 表**不存在**：执行建表 DDL（连同这张表的 COMMENT / GRANT），builtin 表再用 `iceberg_toolkit.attach_metadata()` 挂到备份时的 metadata 文件上。整个过程在一个子事务里，失败时不会留下空表。
+- 备份之后原表被 DROP / TRUNCATE 过（备份时的 metadata 文件已被清理，或者表还在删除队列里待删）：这张表**不恢复**，其余对象照常恢复，gprestore 仍然显示成功。被跳过的表**只会记在 coordinator 的服务端日志里**（gprestore 的输出里看不到），恢复后请检查：`grep "was not restored" <coordinator 数据目录>/log/*.csv`。
+- 同一个库里已有别的表指向同一份 metadata 时，挂接会被拒绝，gprestore 报错退出（例如源表还在时用 `--redirect-schema` 恢复到同一个库）。
+- 外部 catalog 的表只执行 DDL，建表时会接管 catalog 里已有的表，读到的是 catalog 里的最新数据。
+- 用 `--include-table` 指定一张**已存在**的 Iceberg 表时，gprestore 会像对待普通表一样报“Relation ... already exists”退出；不加 `--include-table` 做全量恢复时，已存在的表会被跳过。
+
+**RPO 就是备份时间点**：备份之后对 builtin 表的提交不会被恢复出来。
+
+### 10.3 使用限制
+
+- **只用于灾备**：恢复出来的表和原表共用同一批对象存储文件。源集群还活着时，**不要**把备份恢复到另一个集群或另一个库，否则任何一边 DROP 表或做清理都会删掉另一边正在用的文件，两边同时写还会让版本分叉。
+- **备份之后源表上的 VACUUM 会让备份失效**：VACUUM（包括 Iceberg autovacuum，默认开启）做 compaction 时，会把被合并掉的旧数据文件送进删除队列清理。备份时的 metadata.json 还在，但它引用的数据文件可能已被删除：恢复会成功，查询这张表时才报数据文件不存在。TRUNCATE 和 DROP 同理会清理旧文件。Iceberg autovacuum 默认开启，所以备份之后源表只要有写入，就可能触发合并。库或集群丢失后，这类表无法从备份恢复（这是已知限制）。只有备份之后源表没有发生过 VACUUM / TRUNCATE / DROP，备份才可靠。
+- `iceberg_toolkit.attach_metadata()` 只接受刚建好、还没有提交过数据的 builtin 表，它是给 gprestore 用的，一般不需要手工调用。

@@ -55,6 +55,7 @@ CATEGORY_REQUIRES=(
     [iceberg_conf_merge]="minio"
     [iceberg_am_timestamptz]="minio"
     [iceberg_am_namespace_fallback]="minio"
+    [iceberg_attach_metadata]="minio"
     [iceberg_volume_guard]="minio hdfs"
     [iceberg_conf_only]="minio polaris"
     [iceberg_conf_only_hdfs]="hdfs"
