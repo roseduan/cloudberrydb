@@ -167,8 +167,17 @@ CREATE TABLE testfk(f1 int REFERENCES testpk DEFERRABLE INITIALLY DEFERRED);
 -- NOTE: cbdb doesn't support foreign key constraint, so the violation check
 -- will not raise an error. We inject a fault to mock the error at the end
 -- of transaction when performing trigger check.
+--
+-- The fault must be scoped to this session.  Its point sits at the top of
+-- AfterTriggerFireDeferred(), which every committing transaction calls, and
+-- the occurrence counter lives in shared memory with no database filter, so
+-- occurrence 2 -- meant to be this session's commit, the one after the commit
+-- of this very statement -- is otherwise taken by whatever else commits on the
+-- coordinator first, including a backend just starting up.  The fault is then
+-- spent and the commit below raises nothing.
 
-SELECT gp_inject_fault('after_trigger_fire_deferred', 'error', '','','',2,2,0, dbid, -1) from gp_segment_configuration where role='p' and content=-1;
+SELECT gp_inject_fault('after_trigger_fire_deferred', 'error', '','','',2,2,0, dbid,
+                       current_setting('gp_session_id')::int) from gp_segment_configuration where role='p' and content=-1;
 -- end_ignore
 DO LANGUAGE plperl $$
 # this insert will fail during commit:
@@ -184,7 +193,8 @@ SELECT * FROM testpk;
 SELECT * FROM testfk;
 
 -- start_ignore
-SELECT gp_inject_fault('after_trigger_fire_deferred', 'error', '','','',2,2,0, dbid, -1) from gp_segment_configuration where role='p' and content=-1;
+SELECT gp_inject_fault('after_trigger_fire_deferred', 'error', '','','',2,2,0, dbid,
+                       current_setting('gp_session_id')::int) from gp_segment_configuration where role='p' and content=-1;
 -- end_ignore
 DO LANGUAGE plperl $$
 # this insert will fail during commit:
