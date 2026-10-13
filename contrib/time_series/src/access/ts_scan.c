@@ -579,22 +579,8 @@ ts_chunk_scan_compute_range(ChunkScanState *state)
 	}
 	else
 	{
-		int64	now_usec = GetCurrentTimestamp();
-
-		/*
-		 * No upper time bound — scan up to "now + 1 interval", then add
-		 * a 10-chunk buffer.  The buffer catches future-timestamped
-		 * INSERTs (clock skew across segments, replicas with stale
-		 * clocks, or deliberately back/forward-dated rows) that landed
-		 * in chunks numerically ahead of `now`.  Without it, those
-		 * chunks would be pruned out and the SELECT would silently miss
-		 * rows.  10 is the same buffer width used for capacity-growth
-		 * in ts_ensure_fork_capacity (ts_fork_storage.c).
-		 */
-		max_chunk = ts_calculate_chunk(now_usec + state->config.interval_usec,
-									   state->config.origin_usec,
-									   state->config.interval_usec);
-		max_chunk += 10;
+		/* No upper time bound — scan every chunk the table actually has. */
+		max_chunk = TS_MAX_CHUNK_FORKNUM;
 	}
 
 	state->min_chunk = min_chunk;
@@ -618,10 +604,8 @@ ts_chunk_scan_load_chunks(ChunkScanState *state)
 {
 	TSChunkList	list;
 
-	list = ts_chunk_catalog_get_chunks_with_status(
-		RelationGetRelid(state->rel),
-		state->min_chunk,
-		state->max_chunk);
+	list = ts_get_chunks_with_status(RelationGetRelid(state->rel),
+									 state->min_chunk, state->max_chunk);
 
 	state->chunk_list = list.chunks;
 	state->chunk_status = list.statuses;
@@ -894,7 +878,7 @@ ts_chunk_scan_begin(CustomScanState *node, EState *estate, int eflags)
 	 * SnapshotSelf semantics are the same as the first read; only
 	 * the timing changes.
 	 *
-	 * ts_chunk_catalog_get_chunks_with_status is idx-scan over
+	 * ts_get_chunks_with_status is idx-scan over
 	 * ts_chunk sorted by (table_oid, chunk_number), so both calls
 	 * return the same order when the chunk range is unchanged — a
 	 * plain memcpy over `state->chunk_status` is safe as long as
@@ -925,8 +909,7 @@ ts_chunk_scan_begin(CustomScanState *node, EState *estate, int eflags)
 		if (state->chunk_only_num >= 0)
 			refetch_min = refetch_max = state->chunk_list[0];
 
-		fresh = ts_chunk_catalog_get_chunks_with_status(
-									rel_oid, refetch_min, refetch_max);
+		fresh = ts_get_chunks_with_status(rel_oid, refetch_min, refetch_max);
 
 		if (fresh.n == state->nchunks && fresh.statuses != NULL)
 			memcpy(state->chunk_status, fresh.statuses,
@@ -1037,6 +1020,7 @@ ts_chunk_scan_advance(ChunkScanState *state)
 			pg_atomic_fetch_add_u32(&state->parallel_shared->next_chunk_idx, 1);
 	else
 		state->cur_chunk_idx++;
+
 	state->count_emitted = 0;
 	state->cur_block = 0;
 	state->cur_chunk_nblocks = InvalidBlockNumber;
@@ -1108,8 +1092,10 @@ ts_pax_iter_next(TsPaxIter *iter, Relation rel, ForkNumber chunk,
 			return false;	/* no PAX file => nothing to read */
 
 		if (iter->internal_slot == NULL)
+		{
 			iter->internal_slot = MakeSingleTupleTableSlot(
 				RelationGetDescr(rel), &TTSOpsVirtual);
+		}
 	}
 
 	ExecClearTuple(iter->internal_slot);
@@ -2402,7 +2388,6 @@ ts_scan_scan_init(void)
  *		of this planner call only.  PG_TRY restores on error.  Non-
  *		time_series queries see no behavior change.
  */
-
 static bool
 ts_planner_rte_walker(Node *node, void *context)
 {

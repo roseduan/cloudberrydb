@@ -98,7 +98,7 @@ typedef struct ChunkScanDescData
 	Relation			rel;		/* scanned relation */
 	Snapshot			snapshot;	/* visibility snapshot */
 	/*
-	 * Parallel arrays from ts_chunk_catalog_get_chunks_with_status.
+	 * Parallel arrays from ts_get_chunks_with_status.
 	 * cur_chunk_idx walks 0..n_chunks-1; the status drives whether we
 	 * read the chunk's heap fork, its PAX sidecar, or both (PARTIAL).
 	 * Without statuses, this AM path silently dropped any COMPRESSED
@@ -1328,8 +1328,9 @@ ts_heap_scan_begin(Relation rel, Snapshot snapshot, int nkeys, struct ScanKeyDat
 	 * fork is stale/empty); a simple heap-fork walk would silently drop
 	 * those rows.  See ts_compress.h for the chunk-status state machine.
 	 */
-	list = ts_chunk_catalog_get_chunks_with_status(
-		RelationGetRelid(rel), TS_FIRST_CHUNKNUM, TS_MAX_CHUNK_FORKNUM);
+	list = ts_get_chunks_with_status(RelationGetRelid(rel),
+									 TS_FIRST_CHUNKNUM,
+									 TS_MAX_CHUNK_FORKNUM);
 	scan->chunks = list.chunks;
 	scan->statuses = list.statuses;
 	scan->n_chunks = list.n;
@@ -1857,8 +1858,9 @@ ts_heap_acquire_sample_rows(Relation onerel, int elevel,
 	 * reltuples downward, breaking planner estimates on any compressed
 	 * relation.
 	 */
-	clist = ts_chunk_catalog_get_chunks_with_status(
-		RelationGetRelid(onerel), TS_FIRST_CHUNKNUM, TS_MAX_CHUNK_FORKNUM);
+	clist = ts_get_chunks_with_status(RelationGetRelid(onerel),
+									  TS_FIRST_CHUNKNUM,
+									  TS_MAX_CHUNK_FORKNUM);
 	if (clist.n == 0)
 	{
 		*totalrows = 0;
@@ -2819,9 +2821,9 @@ ts_chunk_info(PG_FUNCTION_ARGS)
 		ctx->rel = table_open(relid, AccessShareLock);
 
 		/* Unbounded range — caller wants every chunk. */
-		ctx->list = ts_chunk_catalog_get_chunks_with_status(relid,
-															TS_FIRST_CHUNKNUM,
-															TS_MAX_CHUNK_FORKNUM);
+		ctx->list = ts_get_chunks_with_status(relid,
+											  TS_FIRST_CHUNKNUM,
+											  TS_MAX_CHUNK_FORKNUM);
 		ctx->cur_idx = 0;
 
 		tupdesc = CreateTemplateTupleDesc(6);

@@ -2210,7 +2210,7 @@ ts_compress_chunk(PG_FUNCTION_ARGS)
 
 	/*
 	 * Look up the chunk in ts_chunk via SPI.  Direct heap access via
-	 * ts_chunk_catalog_get_chunks_with_status would query the local
+	 * ts_get_chunks_with_status would query the local
 	 * (master) catalog, which is empty under DISTRIBUTED RANDOMLY —
 	 * the rows live on segments.  SPI dispatches and aggregates.
 	 *

@@ -88,3 +88,51 @@ SELECT test.ts_check_consistency('sparse_t'::regclass) AS state_after_compress;
 DELETE FROM time_series.ts_compressed_chunk WHERE table_oid = 'sparse_t'::regclass;
 DELETE FROM time_series.ts_compress_config WHERE table_oid = 'sparse_t'::regclass;
 DROP TABLE sparse_t;
+
+-- ----------------------------------------------------------------------
+-- Sparse chunks spanning "now": ChunkScan must not silently drop rows
+-- whose chunk lies far beyond "now" when the query has no upper time
+-- bound.
+--
+-- ts_chunk_scan_compute_range() used to estimate the scan's upper
+-- chunk bound from wall-clock now() plus a small fixed chunk buffer
+-- whenever the query had no upper time predicate (plain SELECT,
+-- COUNT(*), or a predicate on a non-time column). A row whose chunk
+-- number landed further ahead of "now" than that buffer was silently
+-- excluded from every such scan -- not an error, just a vanished row,
+-- even though its time_series.ts_chunk catalog entry and on-disk
+-- chunk file were both intact.
+--
+-- Timestamps are now()-relative, and the future offset (3 years) is
+-- orders of magnitude past the old fixed buffer regardless of what
+-- "now" happens to be when this test runs.
+-- ----------------------------------------------------------------------
+
+CREATE TABLE sparse_future_t (ts timestamptz, k int) USING time_series
+WITH (ts_partition_column = 'ts',
+      ts_chunk_interval   = '8 hour')
+DISTRIBUTED BY (k);
+
+INSERT INTO sparse_future_t VALUES
+  (now() - interval '1 year', 1),
+  (now(), 2),
+  (now() + interval '1 year', 3),
+  (now() + interval '3 years', 4);
+
+SELECT count(DISTINCT chunk_number) AS distinct_future_chunks
+FROM time_series.ts_chunk WHERE table_oid = 'sparse_future_t'::regclass;
+
+-- No upper time bound at all: every row, including the two
+-- future-dated ones, must come back.
+SELECT count(*) AS total_rows FROM sparse_future_t;
+SELECT k FROM sparse_future_t ORDER BY k;
+
+-- No ts predicate (filter on a different column) hits the same
+-- unbounded code path.
+SELECT k FROM sparse_future_t WHERE k = 4;
+
+-- Lower-bounded but not upper-bounded: must still see the far-future
+-- row.
+SELECT k FROM sparse_future_t WHERE ts >= now() - interval '2 years' ORDER BY k;
+
+DROP TABLE sparse_future_t;

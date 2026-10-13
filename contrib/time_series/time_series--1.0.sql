@@ -308,7 +308,7 @@ IS 'Catalog of time-series chunks. Each segment tracks its own chunks.';
 --   - ts_chunk_catalog_is_compressed : per-chunk status probe
 --   - ts_chunk_catalog_update_status : per-chunk status flip
 --   - ts_chunk_catalog_lock_if_compressed
---   - ts_chunk_catalog_get_chunks_with_status (range on chunk_number)
+--   - ts_get_chunks_with_status (range on chunk_number)
 -- Prefix-only scans on (table_oid) used by:
 --   - ts_chunk_catalog_has_any
 --   - ts_chunk_catalog_get_chunks

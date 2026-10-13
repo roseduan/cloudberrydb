@@ -135,7 +135,7 @@ static TransactionId ts_chunk_cache_xid = InvalidTransactionId;
 
 /*
  * (chunk_number, status) pair carried through the List used by
- * ts_chunk_catalog_get_chunks_with_status — the pointer-list variant
+ * ts_get_chunks_with_status — the pointer-list variant
  * for the path that needs both fields.  Local to this file.
  */
 typedef struct ChunkEntry
@@ -555,7 +555,7 @@ ts_chunk_catalog_get_chunks(Oid table_oid)
 }
 
 /*
- * ts_chunk_catalog_get_chunks_with_status
+ * ts_get_chunks_with_status
  *		Return chunks of `table_oid` filtered to [min_chunk, max_chunk]
  *		inclusive, with their per-row status, as a TSChunkList struct.
  *		Pass TS_FIRST_CHUNKNUM for "no lower bound" and TS_MAX_CHUNK_FORKNUM
@@ -567,9 +567,9 @@ ts_chunk_catalog_get_chunks(Oid table_oid)
  *		when n>0; both are NULL when n==0).
  */
 TSChunkList
-ts_chunk_catalog_get_chunks_with_status(Oid table_oid,
-										ForkNumber min_chunk,
-										ForkNumber max_chunk)
+ts_get_chunks_with_status(Oid table_oid,
+						  ForkNumber min_chunk,
+						  ForkNumber max_chunk)
 {
 	TSChunkList		list = { NULL, NULL, 0 };
 	Relation		rel;

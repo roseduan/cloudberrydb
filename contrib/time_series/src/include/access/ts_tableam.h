@@ -178,9 +178,9 @@ extern void ts_chunk_catalog_insert(Oid table_oid, ForkNumber fork,
 extern bool ts_chunk_catalog_exists_cached(Oid table_oid,
 										   int32 chunk_number);
 extern List *ts_chunk_catalog_get_chunks(Oid table_oid);
-extern TSChunkList ts_chunk_catalog_get_chunks_with_status(Oid table_oid,
-														   ForkNumber min_chunk,
-														   ForkNumber max_chunk);
+extern TSChunkList ts_get_chunks_with_status(Oid table_oid,
+											 ForkNumber min_chunk,
+											 ForkNumber max_chunk);
 extern void ts_chunk_catalog_delete(Oid table_oid);
 extern bool ts_chunk_catalog_has_any(Oid table_oid);
 extern bool ts_chunk_catalog_is_compressed(Oid table_oid,
