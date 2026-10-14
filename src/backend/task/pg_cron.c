@@ -1015,6 +1015,16 @@ ManageCronTask(CronTask *task, TimestampTz currentTime)
 	ConnStatusType connectionStatus = CONNECTION_BAD;
 	TimestampTz start_time;
 
+	/*
+	 * CronJobHash is a snapshot of pg_task that RefreshTaskHash() rebuilds
+	 * from scratch, while CronTaskHash survives across iterations.  A run
+	 * can therefore outlive the job that spawned it, and cronJob is NULL
+	 * once the job is gone.  RefreshTaskHash() clears isActive for exactly
+	 * those tasks, so the two conditions below are equivalent, and every
+	 * state in this switch relies on that to avoid dereferencing NULL.
+	 */
+	Assert(cronJob != NULL || !task->isActive);
+
 	switch (checkState)
 	{
 		case CRON_TASK_WAITING:
@@ -1338,18 +1348,23 @@ ManageCronTask(CronTask *task, TimestampTz currentTime)
 
 		case CRON_TASK_SENDING:
 		{
-			char *command = cronJob->command;
+			char *command;
 			int sendResult = 0;
 
 			Assert(!task_use_background_worker);
 
-			/* check if job has been removed */
+			/*
+			 * Check if the job has been removed before reading cronJob,
+			 * which is NULL in that case.
+			 */
 			if (jobCanceled(task))
 				break;
 
 			/* check if timeout has been reached */
 			if (jobStartupTimeout(task, currentTime))
 				break;
+
+			command = cronJob->command;
 
 			/* check if socket is ready to send */
 			if (!task->isSocketReady)

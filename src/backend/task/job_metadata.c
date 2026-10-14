@@ -73,7 +73,6 @@ bool task_enable_superuser_jobs = true;
 /* global variables */
 static MemoryContext CronJobContext = NULL;
 static HTAB *CronJobHash = NULL;
-static Oid CachedCronJobRelationId = InvalidOid;
 bool CronJobCacheValid = false;
 
 /*
@@ -490,12 +489,13 @@ InvalidateJobCache(void)
 static void
 InvalidateJobCacheCallback(Datum argument, Oid relationId)
 {
-	if (relationId == CachedCronJobRelationId ||
-		CachedCronJobRelationId == InvalidOid)
-	{
+	/*
+	 * pg_task is a bootstrap catalog, so its OID is a compile-time
+	 * constant and needs no caching.  InvalidOid means the whole relcache
+	 * was reset, which we must treat as "the job list may have changed".
+	 */
+	if (relationId == TaskRelationId || relationId == InvalidOid)
 		CronJobCacheValid = false;
-		CachedCronJobRelationId = InvalidOid;
-	}
 }
 
 /*
