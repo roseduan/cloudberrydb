@@ -542,8 +542,23 @@ select fault_exec_plan(false);
 -- Same query with explain analyze (should raise
 -- 'executor_pre_tuple_processed' not 'send_exec_stats')
 select fault_exec_plan(true);
+-- Drop this session's temp tables and gangs while we are still connected.
+-- Otherwise the QD has to do both from proc_exit(), after psql has already
+-- opened the next connection, and the DROP DATABASE below races against that
+-- cleanup -- CountOtherDBBackends() gives up after 5 seconds.
+discard temp;
+select cleanupAllGangs();
 \c regression
-DROP DATABASE dispatch_test_db;
+-- start_ignore
+-- If the DROP below ever fails with "is being accessed by other users"
+-- again, this reports which backend was still attached to the database.
+select pid, backend_type, state, wait_event_type, wait_event, query
+  from pg_stat_activity where datname = 'dispatch_test_db';
+-- end_ignore
+-- FORCE so that a straggler backend from the session we just left cannot
+-- fail the drop.  Note that the DROP dispatched to the segments does not
+-- carry FORCE, see dropdb() in dbcommands.c.
+DROP DATABASE dispatch_test_db WITH (FORCE);
 
 -- issue: https://github.com/greenplum-db/gpdb/issues/13393
 -- We should avoid a double free and resultant PANIC if the
