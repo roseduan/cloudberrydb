@@ -148,3 +148,76 @@ description = description || ' Audited';
 -- start_ignore
 drop schema t_issue_557 cascade;
 -- end_ignore
+--
+-- issue #985: a duplicate inserted by the same command must be caught even when
+-- the insert needs more than one block directory minipage.
+--
+-- The placeholder block directory row written before the first insert covers
+-- every row the command is about to insert, but write_minipage() turns it into
+-- an ordinary bounded row as soon as the first minipage is written out. Without
+-- a new placeholder for each following minipage, the unique check cannot see
+-- the rows this command has already inserted and lets a duplicate through.
+--
+-- gp_blockdirectory_minipage_size is lowered and the rows are made wide so that
+-- a few thousand rows span several minipages; at the default settings this
+-- takes tens of millions of rows. The tables are replicated so that the number
+-- of rows per segment, and hence the number of minipages, does not depend on
+-- the size of the cluster.
+--
+RESET search_path;
+SET gp_blockdirectory_minipage_size = 1;
+CREATE TABLE t_issue_985_aocs (a int unique, pad text)
+  USING ao_column WITH (blocksize = 8192) DISTRIBUTED REPLICATED;
+DO $$
+BEGIN
+  INSERT INTO t_issue_985_aocs
+    SELECT CASE WHEN i = 10000 THEN 9999 ELSE i END, repeat('x', 100)
+      FROM generate_series(1, 10000) i;
+  RAISE NOTICE 'FAIL: the duplicate was not detected';
+EXCEPTION WHEN unique_violation THEN
+  RAISE NOTICE 'OK: unique_violation';
+END $$;
+NOTICE:  OK: unique_violation
+SELECT count(*) AS rows_left FROM t_issue_985_aocs;
+ rows_left 
+-----------
+         0
+(1 row)
+
+DROP TABLE t_issue_985_aocs;
+CREATE TABLE t_issue_985_ao (a int unique, pad text)
+  USING ao_row WITH (blocksize = 8192) DISTRIBUTED REPLICATED;
+DO $$
+BEGIN
+  INSERT INTO t_issue_985_ao
+    SELECT CASE WHEN i = 10000 THEN 9999 ELSE i END, repeat('x', 100)
+      FROM generate_series(1, 10000) i;
+  RAISE NOTICE 'FAIL: the duplicate was not detected';
+EXCEPTION WHEN unique_violation THEN
+  RAISE NOTICE 'OK: unique_violation';
+END $$;
+NOTICE:  OK: unique_violation
+SELECT count(*) AS rows_left FROM t_issue_985_ao;
+ rows_left 
+-----------
+         0
+(1 row)
+
+DROP TABLE t_issue_985_ao;
+-- A second INSERT into the same table loads the last minipage left by the
+-- previous one, which may already hold a full set of entries.  The placeholder
+-- row written for the new command must not be appended past the end of it.
+CREATE TABLE t_issue_985_reload (a int unique, pad text)
+  USING ao_column WITH (blocksize = 8192) DISTRIBUTED REPLICATED;
+INSERT INTO t_issue_985_reload
+  SELECT i, repeat('x', 100) FROM generate_series(1, 5000) i;
+INSERT INTO t_issue_985_reload
+  SELECT i, repeat('x', 100) FROM generate_series(5001, 10000) i;
+SELECT count(*) AS rows_loaded FROM t_issue_985_reload;
+ rows_loaded 
+-------------
+       10000
+(1 row)
+
+DROP TABLE t_issue_985_reload;
+RESET gp_blockdirectory_minipage_size;

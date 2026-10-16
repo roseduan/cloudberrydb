@@ -145,6 +145,24 @@ typedef struct AppendOnlyBlockDirectory
 	 */
 	int cached_mpentry_num;
 
+	/*
+	 * Uniqueness checks consult the block directory, so every row inserted by
+	 * the current command has to be covered by a *visible* block directory row
+	 * from the moment it is inserted until the command ends.
+	 * AppendOnlyBlockDirectory_InsertPlaceholder() establishes that for the
+	 * first in-memory minipage; these two fields let insert_new_entry() do the
+	 * same for every subsequent minipage, which would otherwise be uncovered
+	 * between the moment the previous minipage is written out (that write
+	 * replaces the covering placeholder row) and the moment it is itself
+	 * written out.
+	 *
+	 * placeholderColumnGroupNo is the column group the placeholder is written
+	 * for: the 1st non-dropped column, which is the only one a uniqueness
+	 * check looks at (see AppendOnlyBlockDirectory_CoversTuple()).
+	 */
+	bool placeholderNeeded;
+	int  placeholderColumnGroupNo;
+
 }	AppendOnlyBlockDirectory;
 
 

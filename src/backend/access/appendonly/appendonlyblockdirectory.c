@@ -51,6 +51,10 @@ static void extract_minipage(
 static void write_minipage(AppendOnlyBlockDirectory *blockDirectory,
 			   int columnGroupNo,
 			   MinipagePerColumnGroup *minipageInfo);
+static void write_placeholder_row(AppendOnlyBlockDirectory *blockDirectory,
+								 int columnGroupNo,
+								 int64 firstRowNum,
+								 int64 fileOffset);
 static bool insert_new_entry(AppendOnlyBlockDirectory *blockDirectory,
 				 int columnGroupNo,
 				 int64 firstRowNum,
@@ -107,6 +111,9 @@ init_internal(AppendOnlyBlockDirectory *blockDirectory)
 
 	Assert(blockDirectory->blkdirRel != NULL);
 	Assert(blockDirectory->blkdirIdx != NULL);
+
+	blockDirectory->placeholderNeeded = false;
+	blockDirectory->placeholderColumnGroupNo = -1;
 
 	blockDirectory->memoryContext =
 		AllocSetContextCreate(CurrentMemoryContext,
@@ -310,6 +317,8 @@ AppendOnlyBlockDirectory_Init_forInsert(
 
 	blockDirectory->aoRel = aoRel;
 	blockDirectory->appendOnlyMetaDataSnapshot = appendOnlyMetaDataSnapshot;
+	blockDirectory->placeholderNeeded = false;
+	blockDirectory->placeholderColumnGroupNo = -1;
 
 	GetAppendOnlyEntryAuxOids(aoRel, NULL, &blkdirrelid, &blkdiridxid, NULL, NULL);
 
@@ -1037,6 +1046,30 @@ insert_new_entry(
 		write_minipage(blockDirectory, columnGroupNo, minipageInfo);
 		clear_minipage(minipageInfo);
 		SIMPLE_FAULT_INJECTOR("insert_new_entry_curr_minipage_full");
+
+		/*
+		 * The write_minipage() above did not add a row: it UPDATEd the row
+		 * this column group already owns, which during an insert into a table
+		 * with a unique index is the placeholder row written by
+		 * AppendOnlyBlockDirectory_InsertPlaceholder(). That row used to cover
+		 * every row of this command; after the update it only covers the
+		 * entries just written out. The minipage we are about to start filling
+		 * is therefore not covered by any visible block directory row until it
+		 * is itself written out, and a uniqueness check performed in that
+		 * window (blkdir_entry_exists()) would not see the rows we insert and
+		 * would let a duplicate through -- within a single INSERT command.
+		 *
+		 * clear_minipage() has just invalidated tupleTid, so write_minipage()
+		 * will INSERT a new row rather than update the one we wrote above.
+		 * Write a fresh placeholder row for the new minipage; it goes through
+		 * exactly the same life cycle as the first one, and is updated into
+		 * the real row when this minipage is written out.
+		 */
+		if (blockDirectory->placeholderNeeded &&
+			!addColAction &&
+			columnGroupNo == blockDirectory->placeholderColumnGroupNo)
+			write_placeholder_row(blockDirectory, columnGroupNo,
+								  firstRowNum, fileOffset);
 	}
 
 	/* Now insert the new entry */
@@ -1481,12 +1514,70 @@ AppendOnlyBlockDirectory_InsertPlaceholder(AppendOnlyBlockDirectory *blockDirect
 		columnGroupNo < blockDirectory->aoRel->rd_att->natts);
 
 	minipagePerColumnGroup = &blockDirectory->minipages[columnGroupNo];
+	(void) minipagePerColumnGroup;
 
-	/* insert placeholder entry with a max row count */
-	insert_new_entry(blockDirectory, columnGroupNo, firstRowNum, fileOffset,
-					 AOTupleId_MaxRowNum, false);
-	/* insert placeholder row containing placeholder entry */
-	write_minipage(blockDirectory, columnGroupNo, minipagePerColumnGroup);
+	/*
+	 * Remember that this insert needs a covering placeholder row for its whole
+	 * duration, so that insert_new_entry() can write a new one every time it
+	 * starts a new in-memory minipage. Without that, only the first minipage
+	 * is covered. See the comment there and issue #985.
+	 */
+	blockDirectory->placeholderNeeded = true;
+	blockDirectory->placeholderColumnGroupNo = columnGroupNo;
+
+	write_placeholder_row(blockDirectory, columnGroupNo, firstRowNum, fileOffset);
+}
+
+/*
+ * write_placeholder_row
+ *
+ * Write one placeholder block directory row covering [firstRowNum, +inf) for
+ * columnGroupNo, and leave the in-memory minipage exactly as it was found.
+ *
+ * The entry is appended by hand rather than through insert_new_entry() on
+ * purpose: this is called from inside insert_new_entry() itself, and going
+ * through it again would re-enter the "minipage full" branch.
+ */
+static void
+write_placeholder_row(AppendOnlyBlockDirectory *blockDirectory,
+					  int columnGroupNo,
+					  int64 firstRowNum,
+					  int64 fileOffset)
+{
+	MinipagePerColumnGroup *minipageInfo =
+		&blockDirectory->minipages[columnGroupNo];
+	MinipageEntry *entry;
+
+	/*
+	 * The minipage can already be full here: AppendOnlyBlockDirectory_
+	 * Init_forInsert() loads the last minipage of every column group, and the
+	 * command that wrote it may have left it with a full set of entries.  Flush
+	 * it before appending, the way insert_new_entry() does, or the entry below
+	 * would be written one past the end of the array.
+	 */
+	if (IsMinipageFull(minipageInfo))
+	{
+		write_minipage(blockDirectory, columnGroupNo, minipageInfo);
+		clear_minipage(minipageInfo);
+	}
+	Assert(minipageInfo->numMinipageEntries < (uint32) gp_blockdirectory_minipage_size);
+
+	/* placeholder entry with a max row count */
+	entry = &(minipageInfo->minipage->entry[minipageInfo->numMinipageEntries]);
+	entry->firstRowNum = firstRowNum;
+	entry->fileOffset = fileOffset;
+	entry->rowCount = AOTupleId_MaxRowNum;
+	minipageInfo->numMinipageEntries++;
+
+	ereportif(Debug_appendonly_print_blockdirectory, LOG,
+			  (errmsg("Append-only block directory write placeholder row: "
+					  "(columnGroupNo, firstRowNum, fileOffset) = (%d, " INT64_FORMAT
+					  ", " INT64_FORMAT ")",
+					  columnGroupNo, firstRowNum, fileOffset)));
+
+	/* persist the row holding the placeholder entry */
+	write_minipage(blockDirectory, columnGroupNo, minipageInfo);
+
 	/*
 	 * Delete the placeholder entry as it has no business being in memory.
 	 * Removing it from the current minipage will make rest of the processing
@@ -1495,7 +1586,8 @@ AppendOnlyBlockDirectory_InsertPlaceholder(AppendOnlyBlockDirectory *blockDirect
 	 * is created in memory, in a subsequent call to insert_new_entry(),
 	 * followed by a write_minipage() which will make this "update" persistent.
 	 */
-	minipagePerColumnGroup->numMinipageEntries--;
+	minipageInfo->numMinipageEntries--;
+
 	/*
 	 * Increment the command counter, as we will be updating this temp row later
 	 * on in write_minipage().
