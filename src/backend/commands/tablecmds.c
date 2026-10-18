@@ -8732,7 +8732,7 @@ ATPrepAddColumn(List **wqueue, Relation rel, bool recurse, bool recursing,
 	if (!is_view && rel->rd_rel->relkind == RELKIND_FOREIGN_TABLE)
 	{
 		ForeignTable *ft = GetForeignTable(rel->rd_id);
-		CheckATForeignTableOptions(cmd, ft->options);
+		CheckATForeignTableOptions(cmd, ft->serverid, ft->options);
 	}
 
 	if (rel->rd_rel->relkind == RELKIND_COMPOSITE_TYPE)
@@ -14796,7 +14796,7 @@ ATPrepAlterColumnType(List **wqueue,
 	if (rel->rd_rel->relkind == RELKIND_FOREIGN_TABLE)
 	{
 		ForeignTable *ft = GetForeignTable(rel->rd_id);
-		CheckATForeignTableOptions(cmd, ft->options);
+		CheckATForeignTableOptions(cmd, ft->serverid, ft->options);
 	}
 
 	/*

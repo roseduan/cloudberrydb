@@ -50,6 +50,13 @@ DROP TABLE ft_source_table;
 DROP FOREIGN TABLE ft_like;
 DROP FOREIGN TABLE ft_like1;
 
+-- The numeric precision check for format orc/parquet/avro applies to
+-- datalake_fdw only; other wrappers (e.g. pxf_fdw) accept a bare numeric.
+CREATE FOREIGN TABLE ft_fmt_numeric (c1 numeric, c2 int) SERVER s0 OPTIONS (format 'parquet');
+ALTER FOREIGN TABLE ft_fmt_numeric ADD COLUMN c3 numeric;
+ALTER FOREIGN TABLE ft_fmt_numeric ALTER COLUMN c2 TYPE numeric;
+DROP FOREIGN TABLE ft_fmt_numeric;
+
 --start_ignore
 DROP FOREIGN DATA WRAPPER dummy CASCADE;
 --end_ignore

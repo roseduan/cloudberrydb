@@ -19,6 +19,8 @@
 #include "catalog/pg_foreign_server.h"
 #include "catalog/pg_foreign_table.h"
 #include "catalog/pg_foreign_table_seg.h"
+#include "catalog/pg_language.h"
+#include "catalog/pg_proc.h"
 #include "catalog/pg_foreign_catalog.h"
 #include "catalog/pg_foreign_volume.h"
 #include "catalog/pg_user_mapping.h"
@@ -39,6 +41,7 @@
 #include "parser/parse_type.h"
 #include "tcop/tcopprot.h"
 #include "utils/builtins.h"
+#include "utils/lsyscache.h"
 #include "utils/memutils.h"
 #include "utils/rel.h"
 #include "utils/syscache.h"
@@ -1220,7 +1223,53 @@ gp_foreign_server_id(PG_FUNCTION_ARGS)
 	return GetForeignServerSegByRelid(relid);
 }
 
-void CheckForeignTableOptions(Relation rel, List *options)
+/*
+ * The numeric precision check below exists for datalake_fdw, which maps
+ * numeric to the decimal types of ORC/Parquet/Avro and needs an explicit
+ * precision for that.  Other FDWs (pxf_fdw, ...) accept the same "format"
+ * option values but convert numeric on their own, so they must not be
+ * affected.
+ *
+ * Identify datalake_fdw by the C symbol of the wrapper's handler.  The
+ * wrapper itself can be created under any name, and the handler's SQL name
+ * changes with ALTER FUNCTION ... RENAME while the wrapper keeps its OID.
+ */
+static bool
+IsDatalakeFdwServer(Oid serverid)
+{
+	ForeignServer *server = GetForeignServer(serverid);
+	ForeignDataWrapper *fdw = GetForeignDataWrapper(server->fdwid);
+	HeapTuple	proctup;
+	Form_pg_proc procform;
+	bool		result = false;
+
+	if (!OidIsValid(fdw->fdwhandler))
+		return false;
+
+	proctup = SearchSysCache1(PROCOID, ObjectIdGetDatum(fdw->fdwhandler));
+	if (!HeapTupleIsValid(proctup))
+		return false;
+	procform = (Form_pg_proc) GETSTRUCT(proctup);
+	if (procform->prolang == ClanguageId)
+	{
+		Datum		prosrc;
+		bool		isnull;
+
+		prosrc = SysCacheGetAttr(PROCOID, proctup, Anum_pg_proc_prosrc, &isnull);
+		if (!isnull)
+		{
+			char	   *symbol = TextDatumGetCString(prosrc);
+
+			result = (strcmp(symbol, "datalake_fdw_handler") == 0);
+			pfree(symbol);
+		}
+	}
+	ReleaseSysCache(proctup);
+
+	return result;
+}
+
+void CheckForeignTableOptions(Relation rel, Oid serverid, List *options)
 {
 	AttrNumber i;
 	char *format = NULL;
@@ -1235,7 +1284,8 @@ void CheckForeignTableOptions(Relation rel, List *options)
 		}
 	}
 
-	if (format != NULL && (pg_strcasecmp(format, "orc") == 0 || pg_strcasecmp(format, "parquet") == 0 || pg_strcasecmp(format, "avro") == 0))
+	if (format != NULL && (pg_strcasecmp(format, "orc") == 0 || pg_strcasecmp(format, "parquet") == 0 || pg_strcasecmp(format, "avro") == 0) &&
+		IsDatalakeFdwServer(serverid))
 	{
 		TupleDesc desc = rel->rd_att;
 		AttrNumber attnum = desc->natts;
@@ -1253,7 +1303,7 @@ void CheckForeignTableOptions(Relation rel, List *options)
 	}
 }
 
-void CheckATForeignTableOptions(AlterTableCmd *cmd, List *options)
+void CheckATForeignTableOptions(AlterTableCmd *cmd, Oid serverid, List *options)
 {
 	char *format = NULL;
 	ListCell *cell;
@@ -1267,7 +1317,8 @@ void CheckATForeignTableOptions(AlterTableCmd *cmd, List *options)
 		}
 	}
 
-	if (format != NULL && (pg_strcasecmp(format, "orc") == 0 || pg_strcasecmp(format, "parquet") == 0 || pg_strcasecmp(format, "avro") == 0))
+	if (format != NULL && (pg_strcasecmp(format, "orc") == 0 || pg_strcasecmp(format, "parquet") == 0 || pg_strcasecmp(format, "avro") == 0) &&
+		IsDatalakeFdwServer(serverid))
 	{
 		// Due to the difference of storage for numeric between pg and foreign format (parquet, avro),
 		// the precision of numeric in foreign tables should be specified explicitly.

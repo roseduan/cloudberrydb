@@ -104,9 +104,9 @@ extern Oid	get_foreign_volume_oid(const char *volumename, const char *servername
 extern Oid GetForeignServerSegByRelid(Oid tableOid);
 extern List *GetForeignServerSegsByRelId(Oid relid);
 
-// Check if the data type is supported.
-extern void CheckForeignTableOptions(Relation rel, List *opions);
-extern void CheckATForeignTableOptions(AlterTableCmd *cmd, List *options);
+/* Numeric precision check for datalake_fdw foreign tables (orc/parquet/avro). */
+extern void CheckForeignTableOptions(Relation rel, Oid serverid, List *options);
+extern void CheckATForeignTableOptions(AlterTableCmd *cmd, Oid serverid, List *options);
 
 /* ----------------
  *		compiler constants for ForeignTable's exec_location

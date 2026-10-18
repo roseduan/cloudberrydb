@@ -1891,7 +1891,7 @@ CreateForeignTable(CreateForeignTableStmt *stmt, Oid relid, bool skip_permission
 										fdw->fdwvalidator);
 
 	Relation rel = RelationIdGetRelation(relid);
-	CheckForeignTableOptions(rel, untransformRelOptions(ftoptions));
+	CheckForeignTableOptions(rel, server->serverid, untransformRelOptions(ftoptions));
 	RelationClose(rel);
 
 	if (PointerIsValid(DatumGetPointer(ftoptions)))
