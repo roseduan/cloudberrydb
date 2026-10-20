@@ -18,6 +18,7 @@ test: boolean int2 int4 int8  float8  numeric
 test: name varchar text oid float4 bit money regproc rangetypes pg_lsn enum
 test: agg_stddev
 test: result_hashfilter
+test: numeric_hash
 # ----------
 # The second group of parallel tests
 # strings depends on char, varchar and text

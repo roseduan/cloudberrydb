@@ -3200,7 +3200,7 @@ FROM empsalary GROUP BY depname;
 -- the Partition Top-K rewrite.  Ask for the untouched window shape here:
 -- forcing Partition Top-K is what the vectorised TPC-DS window queries
 -- rely on and stays on by default.
-SET vector.partition_topk_require_topk_qual = on;
+SET vector.enable_partition_topk = off;
 -- Test pushdown of quals into a subquery containing window functions
 -- pushdown is safe because all PARTITION BY clauses include depname:
 EXPLAIN (COSTS OFF)
@@ -3383,7 +3383,7 @@ WHERE first_emp = 1 OR last_emp = 1;
  sales     |     4 |   4800 | 08-08-2007  |         3 |        1
 (6 rows)
 
-RESET vector.partition_topk_require_topk_qual;
+RESET vector.enable_partition_topk;
 -- cleanup
 DROP TABLE empsalary;
 -- test user-defined window function with named args and default args

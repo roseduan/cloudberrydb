@@ -18,6 +18,7 @@ test: boolean_aocs int2_aocs int4_aocs int8_aocs  float8_aocs  numeric_aocs
 test: name_aocs varchar_aocs text_aocs oid_aocs float4_aocs bit money_aocs regproc_aocs rangetypes_aocs pg_lsn_aocs enum_aocs
 test: agg_stddev_aocs
 test: result_hashfilter_aocs
+test: numeric_hash_aocs
 # ----------
 # The second group of parallel tests
 # strings depends on char, varchar and text

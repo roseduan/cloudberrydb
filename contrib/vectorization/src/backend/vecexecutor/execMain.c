@@ -15,12 +15,15 @@
 #include "arrow-glib/compute.h"
 #include "postgres.h"
 
+#include "catalog/pg_aggregate_d.h"
 #include "catalog/pg_operator_d.h"
 #include "catalog/pg_tablespace_d.h"
 #include "cdb/cdbplan.h"
 #include "cdb/cdbvars.h"
 #include "common/int.h"
 #include "nodes/nodeFuncs.h"
+#include "nodes/makefuncs.h"
+#include "utils/fmgroids.h"
 #include "parser/parsetree.h"
 #include "nodes/nodes.h"
 #include "parser/scansup.h"
@@ -148,6 +151,20 @@ typedef struct PlanBuildContext
 	 * duplicate the Diff-A / joinqual_N naming rules).
 	 */
 	List *right_key_names;
+
+	/*
+	 * Per hash key of the side build_join_project_options() is building:
+	 * how its numeric key must be rewritten before hashing, see
+	 * plan_numeric_join_keys().  NIL when no key needs it.
+	 */
+	List *numeric_key_fix;
+
+	/*
+	 * Agg group key positions whose numeric values have no fixed scale and
+	 * are grouped by their numeric_trim_scale() form, see
+	 * plan_numeric_group_keys().
+	 */
+	Bitmapset *numeric_canon_keys;
 
 	/* nestloopjoin related */
 	bool is_nestloopjoin;
@@ -282,6 +299,7 @@ static GArrowExecuteNode*build_orderby_node(PlanState *planstate, GArrowExecuteP
 static GArrowExecuteNode*build_topk_node(PlanState *planstate, GArrowExecutePlan *plan, GArrowExecuteNode *input, int64 topk_bound);
 static GArrowExecuteNode*build_partition_topk_node(PlanState *planstate, GArrowExecutePlan *plan, GArrowExecuteNode *input);
 static GArrowExpression *build_literal_expression(Datum datum, bool isnull, Oid pg_type, int32 typmod);
+static GArrowExpression *build_not_expression(GArrowExpression *expr);
 static void BuildMaterializePlan(PlanBuildContext *pcontext, VecExecuteState *estate);
 static GArrowStoreType to_arrow_storetype(StoreType type);
 static void BuildShareScanPlan(PlanBuildContext *pcontext, VecExecuteState *estate);
@@ -823,6 +841,281 @@ get_sequence_exact_result_ps(PlanState *plan)
 	return lastPS;
 }
 
+/*
+ * Numeric hash keys.
+ *
+ * A numeric128 value carries its own scale, like PostgreSQL's dscale, so
+ * 2.50 and 2.5000 are different bytes although numeric_eq() calls them
+ * equal.  The vectorized hash join and hash aggregate hash and memcmp key
+ * bytes, so such keys must first be brought to one representation:
+ *
+ *   - both sides of a join key provably have one scale each (see
+ *     numeric_expr_scale): nothing to do when the scales match, otherwise
+ *     rescale the smaller one up;
+ *   - otherwise strip trailing zeros with numeric_trim_scale().
+ *
+ * Only the hashed key column is rewritten; the original values still flow
+ * to the output, so results keep the representation PostgreSQL shows.
+ */
+#define NUMERIC_KEY_ASIS	(-1)
+#define NUMERIC_KEY_TRIM	(-2)
+#define NUMERIC_CANON_KEY_PREFIX	"_numkey_"
+
+/*
+ * The scale a numeric typmod fixes, or -1; *precision gets its precision.
+ */
+int
+vec_numeric_typmod_scale(int32 typmod, int *precision)
+{
+	int			scale;
+
+	if (typmod < (int32) VARHDRSZ)
+		return -1;
+	/* numeric typmod scale is an 11-bit signed field, see numeric.c */
+	scale = (((typmod - VARHDRSZ) & 0x7ff) ^ 1024) - 1024;
+	*precision = ((typmod - VARHDRSZ) >> 16) & 0xffff;
+	return scale >= 0 ? scale : -1;
+}
+
+static int numeric_tlist_scale(Plan *plan, AttrNumber attno, int *precision,
+							   int depth);
+
+/*
+ * The scale every value of numeric expression expr, evaluated in plan,
+ * provably has, or -1 when unknown.  *precision gets the most digits a
+ * value can have.
+ *
+ * A typmod alone is not proof: ORCA gives an Append the output typmods of
+ * its first child, so "select n52 union all select n104" claims scale 2
+ * for scale-4 values too.  So follow Vars down to where the values are
+ * made: a table column, whose typmod PostgreSQL enforced when storing it,
+ * or a numeric(p,s) cast, which rounds to scale s.
+ */
+static int
+numeric_expr_scale(Plan *plan, Node *expr, int *precision, int depth)
+{
+	int32		typmod;
+
+	while (expr && IsA(expr, RelabelType))
+		expr = (Node *) ((RelabelType *) expr)->arg;
+	if (expr == NULL || plan == NULL || depth > 64)
+		return -1;
+
+	if (IsA(expr, Var))
+	{
+		Var		   *var = (Var *) expr;
+
+		if (var->varattno <= 0)
+			return -1;
+		if (var->varno == OUTER_VAR)
+			return numeric_tlist_scale(outerPlan(plan), var->varattno,
+									   precision, depth + 1);
+		if (var->varno == INNER_VAR)
+			return numeric_tlist_scale(innerPlan(plan), var->varattno,
+									   precision, depth + 1);
+		if (IS_SPECIAL_VARNO(var->varno))
+			return -1;
+		if (IsA(plan, SubqueryScan))
+			return numeric_tlist_scale(((SubqueryScan *) plan)->subplan,
+									   var->varattno, precision, depth + 1);
+		/* stored table data; external data (foreign/custom scans) is not */
+		if (IsA(plan, SeqScan) || IsA(plan, DynamicSeqScan))
+			return vec_numeric_typmod_scale(var->vartypmod, precision);
+		return -1;
+	}
+
+	if (exprIsLengthCoercion(expr, &typmod))
+		return vec_numeric_typmod_scale(typmod, precision);
+
+	return -1;
+}
+
+static int
+numeric_tlist_scale(Plan *plan, AttrNumber attno, int *precision, int depth)
+{
+	TargetEntry *tle;
+
+	if (plan == NULL || depth > 64)
+		return -1;
+
+	if (IsA(plan, Append) || IsA(plan, MergeAppend))
+	{
+		List	   *children = IsA(plan, Append) ?
+			((Append *) plan)->appendplans : ((MergeAppend *) plan)->mergeplans;
+		ListCell   *lc;
+		int			scale = -1;
+
+		*precision = 0;
+		foreach(lc, children)
+		{
+			int			p;
+			int			s = numeric_tlist_scale((Plan *) lfirst(lc), attno,
+												&p, depth + 1);
+
+			if (s < 0 || (foreach_current_index(lc) > 0 && s != scale))
+				return -1;
+			scale = s;
+			*precision = Max(*precision, p);
+		}
+		return scale;
+	}
+
+	tle = get_tle_by_resno(plan->targetlist, attno);
+	if (tle == NULL)
+		return -1;
+	return numeric_expr_scale(plan, (Node *) tle->expr, precision, depth);
+}
+
+/*
+ * Decide, per hash key pair, how each side's numeric key is rewritten:
+ * NUMERIC_KEY_ASIS, NUMERIC_KEY_TRIM, or the scale to rescale it to.
+ * Both lists stay NIL when no key needs a rewrite.
+ */
+static void
+plan_numeric_join_keys(Plan *left_parent, List *left_keys,
+					   Plan *right_parent, List *right_keys,
+					   List **left_fix, List **right_fix)
+{
+	ListCell   *ll;
+	ListCell   *rl;
+	List	   *lfix = NIL;
+	List	   *rfix = NIL;
+	bool		any = false;
+
+	forboth(ll, left_keys, rl, right_keys)
+	{
+		Node	   *lexpr = (Node *) ((ExprState *) lfirst(ll))->expr;
+		Node	   *rexpr = (Node *) ((ExprState *) lfirst(rl))->expr;
+		int			lf = NUMERIC_KEY_ASIS;
+		int			rf = NUMERIC_KEY_ASIS;
+
+		if (exprType(lexpr) == NUMERICOID && exprType(rexpr) == NUMERICOID)
+		{
+			int			lp;
+			int			rp;
+			int			ls = numeric_expr_scale(left_parent, lexpr, &lp, 0);
+			int			rs = numeric_expr_scale(right_parent, rexpr, &rp, 0);
+
+			/*
+			 * Rescaling up adds digits, and numeric128 silently wraps past
+			 * VEC_NUMERIC_MAX_PRECISION of them, so trim when it may not fit.
+			 */
+			if (ls < 0 || rs < 0)
+				lf = rf = NUMERIC_KEY_TRIM;
+			else if (ls < rs)
+				lf = rs;
+			else if (rs < ls)
+				rf = ls;
+			if ((lf >= 0 && lp + (lf - ls) > VEC_NUMERIC_MAX_PRECISION) ||
+				(rf >= 0 && rp + (rf - rs) > VEC_NUMERIC_MAX_PRECISION))
+				lf = rf = NUMERIC_KEY_TRIM;
+			elog(DEBUG1, "numeric hash join key %d: scales %d/%d, rewrite %d/%d",
+				 foreach_current_index(ll), ls, rs, lf, rf);
+		}
+		any |= (lf != NUMERIC_KEY_ASIS || rf != NUMERIC_KEY_ASIS);
+		lfix = lappend_int(lfix, lf);
+		rfix = lappend_int(rfix, rf);
+	}
+
+	if (!any)
+	{
+		list_free(lfix);
+		list_free(rfix);
+		lfix = rfix = NIL;
+	}
+	*left_fix = lfix;
+	*right_fix = rfix;
+}
+
+/*
+ * Apply a plan_numeric_join_keys() decision to a key expression.  expr is
+ * borrowed; returns a new reference.
+ */
+static GArrowExpression *
+fix_numeric_key(GArrowExpression *expr, int fix)
+{
+	GList	   *arguments = NULL;
+	g_autoptr(GArrowRoundOptions) options = NULL;
+	GArrowExpression *arg = g_object_ref(expr);
+	GArrowExpression *result;
+
+	Assert(fix != NUMERIC_KEY_ASIS);
+	arguments = garrow_list_append_ptr(arguments, arg);
+	if (fix == NUMERIC_KEY_TRIM)
+		result = GARROW_EXPRESSION(garrow_call_expression_new(
+					"numeric_trim_scale", arguments, NULL));
+	else
+	{
+		/* scale up only: every value has at most `fix` fractional digits */
+		options = garrow_round_options_new();
+		garrow_round_options_set(options, GARROW_ROUND_HALF_UP, fix);
+		result = GARROW_EXPRESSION(garrow_call_expression_new(
+					"round", arguments, GARROW_FUNCTION_OPTIONS(options)));
+	}
+	garrow_list_free_ptr(&arguments);
+	if (!result)
+		elog(ERROR, "Failed to new arrow call expression for a numeric hash key.");
+	return result;
+}
+
+/*
+ * Group numeric keys without a fixed scale by their numeric_trim_scale()
+ * form.  The trimmed key gets a hidden name (see build_agg_project_options)
+ * and the key's own output column becomes min() of the original values: all
+ * of a group's values are equal, so min() returns one of the group's own
+ * representations, as PostgreSQL returns the group's first value.
+ *
+ * Returns agginfos with the min() aggregates appended.
+ */
+static List *
+plan_numeric_group_keys(List *agginfos, PlanBuildContext *pcontext)
+{
+	Agg		   *agg = (Agg *) pcontext->planstate->plan;
+	Plan	   *child = outerPlan(agg);
+
+	pcontext->numeric_canon_keys = NULL;
+	if (agg->groupingSets != NIL || child == NULL)
+		return agginfos;
+
+	for (int i = 0; i < agg->numCols; i++)
+	{
+		AttrNumber	attno = agg->grpColIdx[i];
+		TargetEntry *tle = get_tle_by_resno(child->targetlist, attno);
+		Aggref	   *aggref;
+		VecAggInfo *agginfo;
+		Var		   *var;
+		int			precision;
+
+		if (tle == NULL ||
+			exprType((Node *) tle->expr) != NUMERICOID ||
+			numeric_tlist_scale(child, attno, &precision, 0) >= 0)
+			continue;
+
+		var = makeVar(OUTER_VAR, attno, NUMERICOID, -1, InvalidOid, 0);
+		aggref = makeNode(Aggref);
+		aggref->aggfnoid = F_MIN_NUMERIC;
+		aggref->aggtype = NUMERICOID;
+		aggref->aggtranstype = NUMERICOID;
+		aggref->aggargtypes = list_make1_oid(NUMERICOID);
+		aggref->args = list_make1(makeTargetEntry((Expr *) var, 1, NULL, false));
+		aggref->aggkind = AGGKIND_NORMAL;
+		aggref->aggsplit = AGGSPLIT_SIMPLE;
+		/* never equal to a planner-assigned aggno */
+		aggref->aggno = -1 - i;
+		aggref->location = -1;
+
+		agginfo = new_agg_info(aggref, aggref->aggno, pcontext);
+		strlcpy(agginfo->outname,
+				GetSchemaName(pcontext->inputschema, attno, pcontext->map),
+				sizeof(agginfo->outname));
+		agginfos = lappend(agginfos, agginfo);
+		pcontext->numeric_canon_keys =
+			bms_add_member(pcontext->numeric_canon_keys, i);
+		elog(DEBUG1, "numeric group key %d has no fixed scale, grouping trimmed", i);
+	}
+	return agginfos;
+}
+
 static const char *
 get_agg_func_name(Aggref *aggref, const AggFuncTable *table, PlanBuildContext *pcontext)
 {
@@ -908,6 +1201,7 @@ build_round_expr(List *args, PlanBuildContext *pcontext, bool has_precision)
 	g_autoptr(GArrowExpression) round_expr = NULL;
 	g_autoptr(GArrowRoundOptions) options = NULL;
 	int scale = 0;
+	int precision = 0;
 	foreach (l, args)
 	{
 		g_autoptr(GArrowExpression) cur_expr = NULL;
@@ -917,7 +1211,12 @@ build_round_expr(List *args, PlanBuildContext *pcontext, bool has_precision)
 			Const* const_expr = (Const*) expr;
 			int numeric_type = const_expr->constbyval ? DatumGetInt32(const_expr->constvalue): const_expr->consttypmod;
 			if (has_precision)
-				scale = (numeric_type - VARHDRSZ) & 0xffff;
+			{
+				/* check_numeric_adjust() let only a non-negative scale through */
+				scale = vec_numeric_typmod_scale(numeric_type, &precision);
+				if (scale < 0)
+					elog(ERROR, "unexpected numeric typmod %d", numeric_type);
+			}
 			else
 				scale = numeric_type;
 			continue;
@@ -927,6 +1226,8 @@ build_round_expr(List *args, PlanBuildContext *pcontext, bool has_precision)
 	}
 	options = garrow_round_options_new();
 	garrow_round_options_set(options,GARROW_ROUND_HALF_UP, scale);
+	/* numeric(p,s) must raise overflow like numeric()'s apply_typmod() */
+	garrow_round_options_set_precision(options, precision);
 	round_expr = GARROW_EXPRESSION(garrow_call_expression_new("round", arguments, GARROW_FUNCTION_OPTIONS(options)));
 	garrow_list_free_ptr(&arguments);
 	return garrow_move_ptr(round_expr);
@@ -1051,13 +1352,15 @@ build_text_join(List *args, PlanBuildContext *pcontext, const char *name)
 }
 
 static GArrowExpression *
-build_is_in(GArrowExpression *expr, GArrowDatum *value_set, gboolean skip_nulls)
+build_is_in(GArrowExpression *expr, GArrowDatum *value_set,
+			GArrowSetLookupNullMatchingBehavior null_matching)
 {
 	g_autoptr(GArrowSetLookupOptions) options = NULL;
 	g_autoptr(GArrowExpression) is_in_expr = NULL;
 	g_autoptr(GArrowExpression) list_expr = garrow_copy_ptr(expr);
 	GList *arguments = NULL;
-	options = garrow_set_lookup_options_new(value_set, skip_nulls);
+	options = garrow_set_lookup_options_new_with_null_matching(value_set,
+															   null_matching);
 	arguments = garrow_list_append_ptr(arguments, list_expr);
 	is_in_expr = GARROW_EXPRESSION(garrow_call_expression_new("is_in", arguments, GARROW_FUNCTION_OPTIONS(options)));
 	garrow_list_free_ptr(&arguments);
@@ -1180,14 +1483,22 @@ scalararray_to_expression(ScalarArrayOpExpr *arrayexpr, PlanBuildContext *pconte
 	g_autoptr(GArrowScalar) val_scalar = NULL;
 	g_autoptr(GArrowDatum) val_datum = NULL;
 	g_autoptr(GArrowDatum) val_array_datum = NULL;
+	g_autoptr(GArrowExpression) is_in_expr = NULL;
+	bool		is_not_in;
 
 	second_expr = (Expr *) lsecond(arrayexpr->args);
 	if (nodeTag(second_expr) != T_Const)
 	{
 		elog(ERROR, "unrecognized node type: %d", (int) nodeTag(second_expr));
 	}
-	/* FIXME: Only support equal operator */
-	Assert(!strcmp(get_opname(arrayexpr->opno), "="));
+
+	/*
+	 * PG spells `x IN (...)` as `= ANY` (useOr) and `x NOT IN (...)` as
+	 * `<> ALL` (!useOr).  is_vectorable_expr() rejects every other shape, so
+	 * those are the only two that reach here.
+	 */
+	is_not_in = !arrayexpr->useOr;
+	Assert(!strcmp(get_opname(arrayexpr->opno), is_not_in ? "<>" : "="));
 	const_expr = (Const *) second_expr;
 	/* first GArrowExpression as is_in argument */
 	expr = expr_to_arrow_expression(linitial(arrayexpr->args), pcontext);
@@ -1204,9 +1515,31 @@ scalararray_to_expression(ScalarArrayOpExpr *arrayexpr, PlanBuildContext *pconte
 
 	array = garrow_base_list_scalar_get_value(GARROW_BASE_LIST_SCALAR(val_scalar));
 	array_datum = garrow_array_datum_new(array);
-	/* is_in need skip null follow pg(in null is false) */
 	val_array_datum = GARROW_DATUM(array_datum);
-	return build_is_in(expr, garrow_move_ptr(val_array_datum), true);
+
+	/*
+	 * NOT IN needs INCONCLUSIVE, SQL's three-valued set lookup: a null input
+	 * yields null, and a null anywhere in the value set makes every unmatched
+	 * input null as well.  NOT IN is then simply its inverse, because invert
+	 * propagates null -- which is exactly why `3 NOT IN (1, 2, NULL)` has to be
+	 * NULL and not true.  A two-valued is_in cannot express that at all, which
+	 * is why NOT IN used to fall back to the row engine.
+	 *
+	 * IN keeps SKIP, the behavior it has always had (it used to pass
+	 * skip_nulls=true).  SKIP is not PG's semantics either -- `3 IN (1, 2,
+	 * NULL)` is NULL, not false -- but the difference is invisible wherever the
+	 * result feeds a filter, since Arrow drops null and false alike.  It only
+	 * shows when the result is used as a value, e.g. in a target list or under
+	 * IS NULL.  Fixing that is a separate change to an already-working path.
+	 */
+	is_in_expr = build_is_in(expr, garrow_move_ptr(val_array_datum),
+							 is_not_in
+							 ? GARROW_SET_LOOKUP_NULL_MATCHING_INCONCLUSIVE
+							 : GARROW_SET_LOOKUP_NULL_MATCHING_SKIP);
+	if (!is_not_in)
+		return garrow_move_ptr(is_in_expr);
+
+	return build_not_expression(is_in_expr);
 }
 
 static GArrowExpression *
@@ -2025,7 +2358,7 @@ expr_to_arrow_expression(Expr *node, PlanBuildContext *pcontext)
 		case T_ScalarArrayOpExpr:
 			{
 				ScalarArrayOpExpr *arrayexpr = (ScalarArrayOpExpr *) node;
-				/* FIXME: todo: implement `not in` */
+
 				expr = scalararray_to_expression(arrayexpr, pcontext);
 				break;
 			}
@@ -2352,7 +2685,7 @@ BuildVecPlan(PlanState *planstate, VecExecuteState *estate)
 		bool		share_unsafe = QueryHasAnyShareInputScan(planstate);
 		int			nmotion = CountReceivingMotionsInSlice(planstate);
 
-		estate->yield_unsafe = enable_vec_yield_guard && (share_unsafe || nmotion >= 2);
+		estate->yield_unsafe = share_unsafe || nmotion >= 2;
 		if (estate->yield_unsafe)
 			elog(DEBUG1, "VEC-YIELD-GUARD pid=%d slice=%d share=%d motions=%d -> batch mode, no backpressure",
 				 MyProcPid, currentSliceId, share_unsafe ? 1 : 0, nmotion);
@@ -2384,6 +2717,8 @@ BuildVecPlan(PlanState *planstate, VecExecuteState *estate)
 	pcontext.left_hashkeys = NULL;
 	pcontext.right_hashkeys = NULL;
 	pcontext.right_key_names = NIL;
+	pcontext.numeric_key_fix = NIL;
+	pcontext.numeric_canon_keys = NULL;
 	pcontext.inputschema = NULL;
 	pcontext.is_case_when = false;
 	pcontext.is_assertop = false;
@@ -2851,8 +3186,25 @@ BuildJoinPlan(PlanBuildContext *pcontext, VecExecuteState *estate)
 	if (pcontext->is_nestloopjoin)
 	{
 		NestLoopState *nlstate = (NestLoopState *) pcontext->planstate;
-		if (nlstate->js.joinqual)
-			joinqual = (List *) nlstate->js.joinqual->expr;
+
+		/*
+		 * Take the qual list from the plan node, not from the ExprState.
+		 *
+		 * `js.joinqual->expr` is only a List when the state was built by
+		 * ExecInitQual(), which stores the implicit-AND list as-is
+		 * (execExpr.c).  JOIN_LASJ_NOTIN is initialized with ExecInitCheck()
+		 * instead -- that is how the row executor makes a NULL qual result
+		 * count as a match (nodeNestloop.c, nl_qualResultForNull) -- and
+		 * ExecInitCheck() stores make_ands_explicit()'s output, i.e. a bare
+		 * OpExpr for one clause or a BoolExpr for several.  Casting either of
+		 * those to List and walking it reads garbage.
+		 *
+		 * Join.joinqual is the same list ExecInitQual() would have stored,
+		 * already stripped of the IS NOT FALSE wrapper by createplan.c
+		 * (remove_isnotfalse), so this is equivalent for every other join
+		 * type and correct for LASJ_NOTIN as well.
+		 */
+		joinqual = ((Join *) nlstate->js.ps.plan)->joinqual;
 	}
 	else
 	{
@@ -2878,6 +3230,17 @@ BuildJoinPlan(PlanBuildContext *pcontext, VecExecuteState *estate)
 	PlanState *arrow_right_plan = innerPlanState(planstate);
 	List *arrow_left_keys  = outerHashKeys;
 	List *arrow_right_keys = innerHashKeys;
+	List *left_numeric_fix = NIL;
+	List *right_numeric_fix = NIL;
+
+	/*
+	 * Outer hash keys are evaluated on the join's outer input, inner ones
+	 * by the Hash node on its input: both reference their input as
+	 * OUTER_VAR of the node holding them.
+	 */
+	plan_numeric_join_keys(planstate->plan, arrow_left_keys,
+						   arrow_right_plan->plan, arrow_right_keys,
+						   &left_numeric_fix, &right_numeric_fix);
 
 	/* build left tree (= Arrow left input) */
 	pcontext->inputschema = GetSchemaFromSlot(arrow_left_plan->ps_ResultTupleSlot);
@@ -2885,6 +3248,7 @@ BuildJoinPlan(PlanBuildContext *pcontext, VecExecuteState *estate)
 	pcontext->left_in_schema = garrow_schema_new(left_fields);
 	pcontext->is_left_schema = true;
 	left_source_node = BuildSource(pcontext);
+	pcontext->numeric_key_fix = left_numeric_fix;
 	left_proj_node = BuildJoinProject(arrow_left_keys, left_source_node, pcontext);
 
 	/* build right tree (= Arrow right input; build side for RIGHT_SEMI/ANTI) */
@@ -2896,7 +3260,11 @@ BuildJoinPlan(PlanBuildContext *pcontext, VecExecuteState *estate)
 	 * consumed by the RIGHT_SEMI/ANTI Var resolver in BuildProject(). */
 	pcontext->right_key_names = NIL;
 	right_source_node = BuildSource(pcontext);
+	pcontext->numeric_key_fix = right_numeric_fix;
 	right_proj_node = BuildJoinProject(arrow_right_keys, right_source_node, pcontext);
+	pcontext->numeric_key_fix = NIL;
+	list_free(left_numeric_fix);
+	list_free(right_numeric_fix);
 
 	/* build hashjoin tree */
 	pcontext->inputschema = NULL;
@@ -3932,7 +4300,12 @@ BuildProject(List *targetList, List *qualList, GArrowExecuteNode *input, PlanBui
 	{
 		g_autoptr(GArrowExecuteNode) aggregation_input = NULL;
 		g_autoptr(GArrowExecuteNode) aggregation = NULL;
-		List *agginfos = pcontext->agginfos;
+		List *agginfos;
+
+		if (IsA(pcontext->planstate->plan, Agg))
+			pcontext->agginfos = plan_numeric_group_keys(pcontext->agginfos,
+														  pcontext);
+		agginfos = pcontext->agginfos;
 
 		/* build project for aggregate input */
 		aggregation_input = BuildAggProject(targetList, agginfos, current, pcontext);
@@ -3991,8 +4364,8 @@ BuildProject(List *targetList, List *qualList, GArrowExecuteNode *input, PlanBui
 		garrow_store_ptr(current, filter_node);
 	}
 
-	if (targetList && !(enable_vec_identity_project_elision &&
-						ProjectIsIdentity(current, pcontext)))
+	/* An identity projection would only copy its input; skip it. */
+	if (targetList && !ProjectIsIdentity(current, pcontext))
 	{
 		project = garrow_execute_plan_build_project_node(pcontext->plan,
 														 current,
@@ -4056,7 +4429,8 @@ build_join_project_options(List *hashkeys, GArrowExecuteNode *input, PlanBuildCo
 	schema = garrow_execute_node_get_output_schema(input);
 	fields = garrow_schema_get_fields(schema);
 
-	length = g_list_length(fields) + list_length(hashkeys);
+	/* a rewritten numeric key may also need its raw value, see below */
+	length = g_list_length(fields) + 2 * list_length(hashkeys);
 	names = palloc(length * sizeof(gchar *));
 
 	/* convert source schema column to proj fields */
@@ -4083,8 +4457,62 @@ build_join_project_options(List *hashkeys, GArrowExecuteNode *input, PlanBuildCo
 		Expr	   *kexpr = exprstate->expr;
 		int prefix_maxlen = strlen(RIGHT_PREFIX);
 		char *prefix_name;
+		int numeric_fix = pcontext->numeric_key_fix ?
+			list_nth_int(pcontext->numeric_key_fix, foreach_current_index(l)) :
+			NUMERIC_KEY_ASIS;
 
 		result_type = PGTypeToArrow(exprType((Node *) kexpr));
+
+		if (numeric_fix != NUMERIC_KEY_ASIS)
+		{
+			g_autoptr(GArrowExpression) raw_expr = NULL;
+			const char *raw_name;
+
+			/*
+			 * Hash a rewritten copy of the numeric key (see
+			 * plan_numeric_join_keys); the passthrough columns above still
+			 * carry the original values to the join output.  RIGHT_SEMI /
+			 * RIGHT_ANTI resolve a probe-side hash key Var to the build
+			 * key's column, so right_key_names must name the raw value, not
+			 * the rewritten one: the Var's passthrough column, or else an
+			 * extra column of the unrewritten expression.
+			 */
+			raw_expr = expr_to_arrow_expression(kexpr, pcontext);
+			arrow_expr = fix_numeric_key(raw_expr, numeric_fix);
+			if (IsA(kexpr, Var) && ((Var *) kexpr)->varattno > 0)
+				raw_name = GetHashJoinProjectName(pcontext,
+												  GetSchemaName(pcontext->inputschema,
+																((Var *) kexpr)->varattno,
+																pcontext->map));
+			else
+			{
+				char	   *name = palloc(prefix_maxlen + 30);
+
+				snprintf(name, prefix_maxlen + 30, "%sjoinqual_raw_%d",
+						 pcontext->is_left_schema ? LEFT_PREFIX : RIGHT_PREFIX, i);
+				expressions = garrow_list_append_ptr(expressions, raw_expr);
+				names[j++] = name;
+				raw_name = name;
+			}
+
+			expressions = garrow_list_append_ptr(expressions, arrow_expr);
+			prefix_name = palloc(prefix_maxlen + 20);
+			snprintf(prefix_name, prefix_maxlen + 20, "%sjoinqual_%d",
+					 pcontext->is_left_schema ? LEFT_PREFIX : RIGHT_PREFIX, i++);
+			field = garrow_field_new(prefix_name, result_type);
+			if (pcontext->is_left_schema)
+			{
+				pcontext->left_hashkeys = garrow_list_append_ptr(pcontext->left_hashkeys, field);
+			}
+			else
+			{
+				pcontext->right_hashkeys = garrow_list_append_ptr(pcontext->right_hashkeys, field);
+				pcontext->right_key_names = lappend(pcontext->right_key_names,
+													pstrdup(raw_name));
+			}
+			names[j++] = prefix_name;
+			continue;
+		}
 
 		/*
 		 * Diff-A (build-row slimming): when the hashkey is a plain column
@@ -4247,7 +4675,8 @@ build_agg_project_options(List *targetList, List *aggInfos, PlanBuildContext *pc
 		nkey += list_length(extra_atts);
 	}
 
-	length = list_length(aggInfos) + nkey;
+	length = list_length(aggInfos) + nkey +
+		bms_num_members(pcontext->numeric_canon_keys);
 	names = palloc(length * sizeof(gchar *));
 	/* append group keys */
 	for (i = 0; i < nkey; i++)
@@ -4273,6 +4702,41 @@ build_agg_project_options(List *targetList, List *aggInfos, PlanBuildContext *pc
 		pcontext->keys = names;
 	pcontext->nkey = nkey;
 
+	/*
+	 * Group numeric keys without a fixed scale by a hidden trimmed copy,
+	 * see plan_numeric_group_keys().  names[] keeps the original key names:
+	 * they are the min() inputs and the inputs of aggregates on a key.
+	 */
+	if (!bms_is_empty(pcontext->numeric_canon_keys))
+	{
+		const gchar **keys = palloc(nkey * sizeof(gchar *));
+
+		for (int k = 0; k < nkey; k++)
+		{
+			g_autoptr(GArrowExpression) field_expr = NULL;
+			g_autoptr(GArrowExpression) canon_expr = NULL;
+			g_autoptr(GError) error = NULL;
+			char	   *canon_name;
+
+			keys[k] = names[k];
+			if (!bms_is_member(k, pcontext->numeric_canon_keys))
+				continue;
+
+			field_expr = GARROW_EXPRESSION(
+					garrow_field_expression_new(names[k], &error));
+			if (error)
+				elog(ERROR, "New arrow expression from column: %s error: %s",
+					 names[k], error->message);
+			canon_expr = fix_numeric_key(field_expr, NUMERIC_KEY_TRIM);
+			expressions = garrow_list_append_ptr(expressions, canon_expr);
+			canon_name = psprintf(NUMERIC_CANON_KEY_PREFIX "%d", k);
+			names[i++] = canon_name;
+			keys[k] = canon_name;
+		}
+		pcontext->keys = keys;
+		need_project = true;
+	}
+
 	if ((pcontext->nkey > 0) && (!aggInfos))
 		rewrite_tl_keys(targetList, pcontext);
 
@@ -4283,6 +4747,7 @@ build_agg_project_options(List *targetList, List *aggInfos, PlanBuildContext *pc
 		VecAggInfo *agginfo = (VecAggInfo *) lfirst(l);
 		Aggref *aggref = agginfo->aggref;
 		int key;
+		int precision;
 		TargetEntry *source_tle;
 
 		Assert(IsA(aggref, Aggref));
@@ -4305,6 +4770,22 @@ build_agg_project_options(List *targetList, List *aggInfos, PlanBuildContext *pc
 		}
 
 		arrow_expr = expr_to_arrow_expression(source_tle->expr, pcontext);
+
+		/*
+		 * DISTINCT hashes its input like a group key, so numeric values
+		 * without a fixed scale are deduplicated in trimmed form (see
+		 * plan_numeric_join_keys); 2.50 and 2.5000 count once.
+		 */
+		if (aggref->aggdistinct != NIL &&
+			exprType((Node *) source_tle->expr) == NUMERICOID &&
+			numeric_expr_scale(&agg->plan, (Node *) source_tle->expr,
+							   &precision, 0) < 0)
+		{
+			GArrowExpression *trimmed = fix_numeric_key(arrow_expr, NUMERIC_KEY_TRIM);
+
+			g_object_unref(arrow_expr);
+			arrow_expr = trimmed;
+		}
 
 		/* FIXME: Add shared input expression later */
 
@@ -4593,7 +5074,7 @@ build_windowhashagg_project_options(List *targetList, List *aggInfos, PlanBuildC
 
 	/* append all input columns with windowagg */
 	int num_fields = garrow_schema_n_fields(pcontext->inputschema);
-	length = list_length(aggInfos) + num_fields;
+	length = list_length(aggInfos) + num_fields + wagg->partNumCols;
 	names = palloc(length * sizeof(gchar *));
 	int col = 0;
 	for (int i = 0; i < num_fields; i++)
@@ -4611,6 +5092,40 @@ build_windowhashagg_project_options(List *targetList, List *aggInfos, PlanBuildC
 					names[i], error->message);
 		expressions = garrow_list_append_ptr(expressions, arrow_expr);
 		++col;
+	}
+
+	/*
+	 * Partition on a hidden trimmed copy of numeric keys without a fixed
+	 * scale, as plan_numeric_group_keys() does for GROUP BY; the original
+	 * column above still carries the values the window emits.
+	 */
+	for (int i = 0; i < wagg->partNumCols; i++)
+	{
+		AttrNumber	attno = wagg->partColIdx[i];
+		TargetEntry *tle = get_tle_by_resno(outerPlan(wagg)->targetlist, attno);
+		g_autoptr(GArrowExpression) field_expr = NULL;
+		g_autoptr(GArrowExpression) canon_expr = NULL;
+		g_autoptr(GError) error = NULL;
+
+		int			precision;
+
+		if (tle == NULL ||
+			exprType((Node *) tle->expr) != NUMERICOID ||
+			numeric_tlist_scale(outerPlan(wagg), attno, &precision, 0) >= 0)
+			continue;
+
+		field_expr = GARROW_EXPRESSION(
+				garrow_field_expression_new(partcol_names[i], &error));
+		if (error)
+			elog(ERROR, "New arrow expression from column: %s error: %s",
+				 partcol_names[i], error->message);
+		canon_expr = fix_numeric_key(field_expr, NUMERIC_KEY_TRIM);
+		expressions = garrow_list_append_ptr(expressions, canon_expr);
+		names[col] = psprintf(NUMERIC_CANON_KEY_PREFIX "%d", i);
+		partcol_names[i] = names[col];
+		col++;
+		need_project = true;
+		elog(DEBUG1, "numeric partition key %d has no fixed scale, partitioning trimmed", i);
 	}
 
 	/* append window aggrefs */
@@ -5072,7 +5587,7 @@ build_topk_node(PlanState *planstate, GArrowExecutePlan *plan,
 	int sort_column_index = -1;
 	Oid collation = InvalidOid;
 
-	if (enable_topk_runtime_filter)
+	if (topk_runtime_filter)
 	{
 		VecSeqScanState *scan_state = find_seqscan_for_topk(planstate);
 		if (scan_state && scan_state->scan_node_options)
@@ -5356,8 +5871,17 @@ is_sonic_compatible(List *aggInfos, PlanBuildContext *pcontext)
 	/* Group keys: every key column type must be one sonic supports. */
 	for (int i = 0; i < pcontext->nkey; i++)
 	{
-		g_autoptr(GArrowField) field = garrow_schema_get_field_by_name(
-			pcontext->inputschema, pcontext->keys[i]);
+		g_autoptr(GArrowField) field = NULL;
+
+		/* a trimmed numeric key only exists after the agg input project */
+		if (bms_is_member(i, pcontext->numeric_canon_keys))
+		{
+			if (!sonic_supports_key_type(GARROW_TYPE_NUMERIC128))
+				return false;
+			continue;
+		}
+		field = garrow_schema_get_field_by_name(pcontext->inputschema,
+												pcontext->keys[i]);
 		if (!field)
 			return false;
 		g_autoptr(GArrowDataType) type = garrow_field_get_data_type(field);
@@ -6154,13 +6678,33 @@ to_arrow_jointype(JoinType type, List *targetlist, List *joinqual)
 		case JOIN_RIGHT_ANTI:
 			return GARROW_RIGHT_ANTI_JOIN;
 		case JOIN_RIGHT_ANTI_NOTIN:
-			/* ORCA cost model (M3) returns ∞ for this op -- planner should
-			 * never produce it. Hard-fail if it does to catch regressions. */
-			elog(ERROR, "JOIN_RIGHT_ANTI_NOTIN not implemented in vec engine "
-						"(M3 cost should have suppressed it)");
+			/*
+			 * Unreachable: nothing in the tree ever constructs this join
+			 * type.  ORCA cannot express it -- EdxlJoinType
+			 * (CDXLOperator.h) has EdxljtLeftAntiSemijoinNotIn and
+			 * EdxljtRightAntiSemijoin but no right-anti *NotIn* variant, and
+			 * CTranslatorDXLToPlStmt maps nothing to it -- and the PG planner
+			 * has no path that produces it either.  Grep confirms the enum
+			 * value is only ever compared against, never assigned.
+			 *
+			 * Keep the hard error as a tripwire for whoever adds it: the row
+			 * executor rejects it too (nodeHashjoin.c), so supporting it
+			 * means teaching both engines, and demote_right_semi_anti_to_left
+			 * in planner_vec.c is the third place that would need updating.
+			 */
+			elog(ERROR, "JOIN_RIGHT_ANTI_NOTIN is not implemented in the vec "
+						"engine (and nothing should be able to produce it)");
 			break;	/* unreachable, silence -Werror=implicit-fallthrough */
 
 		default:
+			/*
+			 * Also unreachable.  The join types that can reach a Plan node are
+			 * exactly the ten handled above -- the same set explain.c prints.
+			 * JOIN_UNIQUE_OUTER / JOIN_UNIQUE_INNER / JOIN_DEDUP_SEMI /
+			 * JOIN_DEDUP_SEMI_REVERSE exist only at path level; joinpath.c
+			 * rewrites them to JOIN_INNER before create_*_path stores the
+			 * jointype, so createplan.c never sees them.
+			 */
 			elog(ERROR, "join type not supported by arrow join %d", type);
 	}
 
@@ -6620,12 +7164,48 @@ nodeTypeToString(const void *obj)
 
 	return nodestr;
 }
+/*
+ * Build `expr IS NOT FALSE`, i.e. make a NULL result count as true.
+ *
+ * Arrow's nested loop join treats a null filter result as "no match"
+ * (nested_loop_join.cc: "We treat a null comparison result as false, like in
+ * SQL").  That is right for an ordinary join, but SQL NOT IN is null-aware:
+ * when the comparison against a build row is UNKNOWN the probe row must be
+ * suppressed, which for an anti join means the row has to count as a MATCH.
+ * The row executor achieves exactly this by compiling the qual with
+ * ExecInitCheck() rather than ExecInitQual() (nodeNestloop.c,
+ * nl_qualResultForNull).
+ *
+ * For a boolean expression, coalesce(expr, true) is precisely
+ * `expr IS NOT FALSE`, and build_filter_expression() already combines several
+ * clauses with and_kleene, so the three-valued logic underneath is correct.
+ */
+static GArrowExpression *
+build_is_not_false(GArrowExpression *expr)
+{
+	g_autoptr(GArrowExpression) result = NULL;
+	g_autoptr(GArrowExpression) arg = garrow_copy_ptr(expr);
+	g_autoptr(GArrowExpression) true_literal =
+		build_literal_expression(true, false, BOOLOID, -1);
+	GList *arguments = NULL;
+
+	arguments = garrow_list_append_ptr(arguments, arg);
+	arguments = garrow_list_append_ptr(arguments, true_literal);
+	result = GARROW_EXPRESSION(garrow_call_expression_new("coalesce", arguments, NULL));
+	garrow_list_free_ptr(&arguments);
+	if (!result)
+		elog(ERROR, "Failed to new arrow call expression coalesce.");
+	return garrow_move_ptr(result);
+}
+
 static GArrowExecuteNode *
 BuildNestLoopjoin(PlanBuildContext *pcontext, GArrowExecuteNode *left, GArrowExecuteNode *right, List *joinqual)
 {
 	GError *error = NULL;
 	NestLoopState *node;
 	GArrowJoinType type;
+	JoinType nl_jointype;
+	bool is_lasj_notin;
 	GArrowExecuteNode *nestedloopjoin_node;
 	g_autoptr(GArrowSchema) left_schema = NULL;
 	g_autoptr(GArrowSchema) right_schema = NULL;
@@ -6637,11 +7217,43 @@ BuildNestLoopjoin(PlanBuildContext *pcontext, GArrowExecuteNode *left, GArrowExe
 	right_schema = garrow_execute_node_get_output_schema(right);
 	pcontext->left_proj_schema = left_schema;
 	pcontext->right_proj_schema = right_schema;
-	type  = to_arrow_jointype(node->js.jointype, node->js.ps.plan->targetlist, joinqual);
+
+	/*
+	 * JOIN_LASJ_NOTIN (SQL "x NOT IN (subquery)") is an anti join plus one
+	 * extra rule: a comparison that evaluates to UNKNOWN must suppress the
+	 * probe row, i.e. count as a match.  A nested loop evaluates the whole
+	 * condition for every (probe, build) pair, so once NULL counts as a match
+	 * the three-valued semantics fall out of expression evaluation -- no
+	 * whole-build-side bookkeeping is needed, unlike the hash join path
+	 * (hash_join.cc, hash_table_has_null_).  That also makes multi-column
+	 * NOT IN correct for free, which matters because the planner only ever
+	 * produces a nested loop for it.
+	 *
+	 * Arrow's nested loop join has no LASJ_NOTIN join type, so map it to the
+	 * plain anti join and carry the extra rule in the filter expression
+	 * instead.  to_arrow_jointype() then picks LEFT_ANTI or FULL_ANTI
+	 * depending on whether the targetlist needs inner columns, exactly as it
+	 * does for JOIN_ANTI.  Note the hash join path keeps using
+	 * GARROW_LASJ_NOTIN_JOIN -- the two paths implement the same SQL
+	 * semantics in different places, so do not "unify" them.
+	 */
+	nl_jointype = node->js.jointype;
+	is_lasj_notin = (nl_jointype == JOIN_LASJ_NOTIN);
+	if (is_lasj_notin)
+		nl_jointype = JOIN_ANTI;
+
+	type  = to_arrow_jointype(nl_jointype, node->js.ps.plan->targetlist, joinqual);
 	if (joinqual)
 		filter_expr = build_filter_expression(joinqual, pcontext);
 	else 
 		filter_expr = build_literal_expression(true, false, BOOLOID, -1);
+
+	if (is_lasj_notin)
+	{
+		g_autoptr(GArrowExpression) bare_filter = garrow_move_ptr(filter_expr);
+
+		filter_expr = build_is_not_false(bare_filter);
+	}
 	nest_loop_options =
 		garrow_nested_loop_join_node_options_new(type, filter_expr, "", "", &error);
 	if (error)

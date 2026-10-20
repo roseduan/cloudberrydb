@@ -33,11 +33,8 @@
 #include "vecnodes/nodes.h"
 
 #include "catalog/pg_tablespace_d.h"
-#include "transform.h"
 PG_MODULE_MAGIC;
 
-exec_simple_query_hook_type exec_simple_query_hook_prev = NULL;
-static void exec_simple_query_vec(const char *query_string);
 static bool CleanupWorker(bool is_init);
 static bool rm_all_vec_path(const char *path);
 
@@ -60,7 +57,7 @@ _PG_init(void)
                             NULL,
                             &max_batch_size,
                             16384,
-                            0, 163840,
+                            1, 163840,
                             PGC_USERSET,
 							GUC_GPDB_NEED_SYNC,
                             NULL, NULL, NULL);
@@ -96,11 +93,11 @@ _PG_init(void)
 							 GUC_GPDB_NEED_SYNC,
                              NULL, NULL, NULL);
     DefineCustomBoolVariable("vector.enable_window_hash_agg",
-                             "Let ORCA consider WindowHashAgg when building a vector plan."
-                             "Off keeps the ordered WindowAgg shape in the search space only, "
-                             "independently of optimizer_force_partition_topk, so that the "
-                             "window operator and the Partition Top-K pre-filter can be varied "
-                             "as two separate factors.",
+                             "Let ORCA consider WindowHashAgg for window queries "
+                             "that are not planned with Partition Top-K: those "
+                             "with a window lacking PARTITION BY, or any window "
+                             "query while vector.enable_partition_topk is off. "
+                             "Off keeps them on Sort and an ordered WindowAgg.",
                              NULL,
                              &enable_window_hash_agg,
                              true,
@@ -108,28 +105,13 @@ _PG_init(void)
                              GUC_GPDB_NEED_SYNC,
                              NULL, NULL, NULL);
     DefineCustomBoolVariable("vector.enable_partition_topk",
-                             "Ask ORCA for the Partition Top-K world when planning "
-                             "a window query. Off lets ORCA choose, which restores "
-                             "the slower shape it prefers on its own but is needed "
-                             "to attribute a plan change to a single factor.",
+                             "Plan window queries whose windows all have "
+                             "PARTITION BY with Partition Top-K, which uses an "
+                             "ordered WindowAgg. Off leaves the choice to ORCA, "
+                             "which may pick WindowHashAgg instead.",
                              NULL,
                              &enable_partition_topk,
                              true,
-                             PGC_USERSET,
-                             GUC_GPDB_NEED_SYNC,
-                             NULL, NULL, NULL);
-    DefineCustomBoolVariable("vector.partition_topk_require_topk_qual",
-                             "Only ask ORCA for the Partition Top-K world when the "
-                             "query actually keeps a prefix of a ranking, that is, "
-                             "when some rank()/dense_rank()/row_number() output is "
-                             "constrained by <= or <. Off (the default) forces it for "
-                             "every window query whose windows all have a PARTITION BY, "
-                             "which is what the measured TPC-DS gains rely on. On is for "
-                             "isolating the hash window from the ordered one, and for "
-                             "tests that want the untouched plan shape.",
-                             NULL,
-                             &partition_topk_require_topk_qual,
-                             false,
                              PGC_USERSET,
                              GUC_GPDB_NEED_SYNC,
                              NULL, NULL, NULL);
@@ -139,15 +121,6 @@ _PG_init(void)
                             &min_concatenate_rows,
                             max_batch_size,
                             0, 65536,
-                            PGC_USERSET,
-                            GUC_GPDB_NEED_SYNC,
-                            NULL, NULL, NULL);
-    DefineCustomIntVariable("vector.min_redistribute_handle_rows",
-                            "Minimum number of rows to motion concatenate",
-                            NULL,
-                            &min_redistribute_handle_rows,
-                            0,
-                            0, 163840,
                             PGC_USERSET,
                             GUC_GPDB_NEED_SYNC,
                             NULL, NULL, NULL);
@@ -228,34 +201,6 @@ _PG_init(void)
                              PGC_USERSET,
                              GUC_GPDB_NEED_SYNC,
                              NULL, NULL, NULL);
-    DefineCustomIntVariable("vector.control_memory_resource",
-                            "minimal execution resources",
-                            NULL,
-                            &control_memory_resource,
-                            5,
-                            1, 8,
-                            PGC_USERSET,
-                            GUC_GPDB_NEED_SYNC,
-                            NULL, NULL, NULL);
-
-    DefineCustomIntVariable("vector.control_global_memory_resource",
-                            "global max execution resources",
-                            NULL,
-                            &control_global_memory_resource,
-                            5,
-                            1, 10,
-                            PGC_USERSET,
-                            GUC_GPDB_NEED_SYNC,
-                            NULL, NULL, NULL);
-
-    DefineCustomBoolVariable("vector.enable_vector_memory_resource",
-                             "enable execution resources",
-                             NULL,
-                             &enable_vector_memory_resource,
-                             false,
-                             PGC_USERSET,
-                             GUC_GPDB_NEED_SYNC,
-                             NULL, NULL, NULL);
 
     DefineCustomIntVariable("vector.pool_threads",
                             "num threads in pool",
@@ -298,27 +243,6 @@ _PG_init(void)
                             PGC_USERSET,
                             GUC_GPDB_NEED_SYNC,
                             NULL, NULL, NULL);
-
-    DefineCustomBoolVariable("vector.enable_vec_identity_project_elision",
-                             "Skip Arrow ProjectNodes whose projection emits the "
-                             "input fields unchanged, in order, under their own names.",
-                             NULL,
-                             &enable_vec_identity_project_elision,
-                             true,
-                             PGC_USERSET,
-                             GUC_GPDB_NEED_SYNC,
-                             NULL, NULL, NULL);
-
-    DefineCustomBoolVariable("vector.enable_vec_yield_guard",
-                             "Keep yield mode away from plan shapes that deadlock it: "
-                             "a ShareInputScan anywhere in the query, or a slice that "
-                             "reads from two or more Motions.",
-                             NULL,
-                             &enable_vec_yield_guard,
-                             true,
-                             PGC_USERSET,
-                             GUC_GPDB_NEED_SYNC,
-                             NULL, NULL, NULL);
 
     DefineCustomBoolVariable("vector.enable_vec_pipeline",
                              "Enable pipeline execution mode for vectorized scan nodes.",
@@ -368,7 +292,7 @@ _PG_init(void)
                              "Enable TopK runtime filter to skip PAX groups "
                              "whose min/max exceeds the TopK threshold.",
                              NULL,
-                             &enable_topk_runtime_filter,
+                             &topk_runtime_filter,
                              true,
                              PGC_USERSET,
                              GUC_GPDB_NEED_SYNC,
@@ -398,7 +322,7 @@ _PG_init(void)
                              "batches inside Sonic so Motion can send each "
                              "batch directly without re-hashing.",
                              NULL,
-                             &enable_sonic_motion_direct_send,
+                             &sonic_motion_direct_send,
                              false,
                              PGC_USERSET,
                              GUC_GPDB_NEED_SYNC,
@@ -407,9 +331,8 @@ _PG_init(void)
     DefineCustomBoolVariable("vector.enable_sonic_hashjoin",
                              "Route a vectorized hash join to the Sonic join "
                              "engine when the join type, equi-key column types "
-                             "and output column types are supported. Off forces "
-                             "the normal Arrow hash join path (for A/B "
-                             "comparison).",
+                             "and output column types are supported. Off uses "
+                             "the normal Arrow hash join path.",
                              NULL,
                              &enable_sonic_hashjoin,
                              false,
@@ -417,8 +340,6 @@ _PG_init(void)
                              GUC_GPDB_NEED_SYNC,
                              NULL, NULL, NULL);
 
-    exec_simple_query_hook_prev = exec_simple_query_hook;
-    exec_simple_query_hook = exec_simple_query_vec;
 
     planner_prev = planner_hook; 
     planner_hook = planner_hook_wrapper;
@@ -446,22 +367,6 @@ _PG_init(void)
     RegisterVectorExtensibleNode();
 
     CleanupWorker(true);
-}
-
-static void
-exec_simple_query_vec(const char *query_string)
-{
-	if (enable_vector_optimizer && enable_vectorization && Gp_role == GP_ROLE_DISPATCH)
-	{
-		const char **query_string_ref = &query_string;
-		try_transform_sql(query_string_ref);
-		exec_simple_query(*query_string_ref);
-		restore_gucs();
-	}
-	else if (exec_simple_query_hook_prev)
-		exec_simple_query_hook_prev(query_string);
-	else
-		exec_simple_query(query_string);
 }
 
 static bool

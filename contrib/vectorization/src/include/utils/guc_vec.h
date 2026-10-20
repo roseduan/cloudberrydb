@@ -25,17 +25,12 @@ extern bool enable_vector_optimizer;
 /* min concatenate rows */
 extern int min_concatenate_rows;
 /* min redistribute motion handle rows */
-extern int min_redistribute_handle_rows;
 /* partition top k */
 extern int partition_top_k;
-extern int min_redistribute_handle_rows;
-extern int control_memory_resource;
-extern int control_global_memory_resource;
 extern int take_thread_num;
 extern bool two_phase_take;
 extern bool gather_motion_take;
 /* enable execution resources */
-extern bool enable_vector_memory_resource;
 extern int pool_threads;
 extern bool print_fallback_log;
 /* hash join spill memory budget in MB, 0 = disabled */
@@ -52,7 +47,7 @@ extern char *sort_external_temp_file_base;
 /* topk bound threshold: max K value for TopKNode, larger K falls back to OrderByNode */
 extern int topk_bound_threshold;
 /* topk runtime filter: push threshold to PAX for group-level skip */
-extern bool enable_topk_runtime_filter;
+extern bool topk_runtime_filter;
 /*
  * Limit+HashAgg fusion cap.  When GROUP BY feeds directly into LIMIT,
  * Arrow's GroupByNode tracks only the first N groups (N = LIMIT + OFFSET).
@@ -67,34 +62,28 @@ extern bool enable_topk_runtime_filter;
 extern int limit_hashagg_max_total;
 /* sonic motion direct send: emit segment-tagged batches from Sonic so that a
  * downstream Redistribute Motion can route each batch without re-hashing */
-extern bool enable_sonic_motion_direct_send;
+extern bool sonic_motion_direct_send;
 /* sonic hash join: route a vectorized HashJoin to Arrow's Sonic join instead
  * of the normal Arrow hash join, when the join type / key / payload types are
- * supported. Off forces all hash joins onto the normal Arrow hash join path. */
+ * supported. Off keeps all hash joins on the normal Arrow hash join path. */
 extern bool enable_sonic_hashjoin;
-/* drop ProjectNodes that emit their input unchanged; off keeps the no-op
- * projections so the two shapes can be compared. */
-extern bool enable_vec_identity_project_elision;
 /* backpressure for vectorized execution (push_pipeline / yield / SinkNode) */
-extern bool enable_vec_yield_guard;
 extern bool enable_vec_pipeline;
 extern int backpressure_memory_mb;
 /*
- * Experimental knob: allow ORCA to consider WindowHashAgg for vector plans.
- * Historically this was hardwired to !optimizer_force_partition_topk, which
- * made the two window-plan factors impossible to vary independently.  Off
- * keeps WindowHashAgg out of the search space regardless of the Partition
- * Top-K setting, so a plain ordered WindowAgg can be measured on its own.
+ * Allow ORCA to consider WindowHashAgg for vector plans.  Only window queries
+ * that are not forced into Partition Top-K can get one: those with a window
+ * lacking PARTITION BY, or all of them while enable_partition_topk is off.
+ * The forced Partition Top-K shape always uses an ordered WindowAgg.  Off
+ * keeps WindowHashAgg out of the plan altogether.
  */
 extern bool enable_window_hash_agg;
 /*
- * Ask ORCA for the Partition Top-K world when planning a window query, instead
- * of letting it choose.  Off restores ORCA's own pick, which is needed to
- * measure the window plan factors separately -- while this is on, the setting
- * above has no effect (Partition Top-K short-circuits it in
- * planner_hook_wrapper).
+ * Force the Partition Top-K world for window queries that
+ * should_force_partition_topk() picks.  Off lets ORCA choose, which is the
+ * only way to get WindowHashAgg back for those queries short of turning
+ * the optimizer or vectorization off.
  */
 extern bool enable_partition_topk;
-extern bool partition_topk_require_topk_qual;
 
 #endif   /* GUC_VEC_H */

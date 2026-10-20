@@ -169,7 +169,8 @@ ExecVecResult(PlanState *pstate)
 			Datum hval = (Datum)0;
 			Datum hval_reduce = (Datum)0;
 			g_autoptr(GArrowRecordBatch) result_batch = garrow_copy_ptr(GetBatch(candidateOutputSlot));
-			hval = evalHashKeyVec(vnode->hash_projector, result_batch, (VecCdbHash *) node->hashFilter, GetNumRows(candidateOutputSlot));
+			g_autoptr(GArrowRecordBatch) hash_batch = garrow_record_batch_copy_with_schema(result_batch, vnode->hash_schema);
+			hval = evalHashKeyVec(vnode->hash_projector, hash_batch, (VecCdbHash *) node->hashFilter, GetNumRows(candidateOutputSlot));
 			hval_reduce =  get_segment_filter(GpIdentity.segindex, hval);
 			filter_datum = GARROW_ARRAY_DATUM(DatumGetPointer(hval_reduce));
 			filter_array = GARROW_BOOLEAN_ARRAY(garrow_datum_get_array(filter_datum));
@@ -215,7 +216,9 @@ ExecVecResultRestrPos(ResultState *node)
 static void 
 ExecInitHashFilter(ResultState *node)
 {
-	g_autoptr(GArrowSchema) out_schema = NULL;
+	/* Borrowed: GetSchemaFromSlot() returns the slot's own reference. */
+	GArrowSchema *out_schema = NULL;
+	g_autoptr(GArrowSchema) hash_schema = NULL;
 	g_autoptr(GError) error = NULL;
 	g_autoptr(GGandivaCondition) condition = NULL;
 	g_autoptr(GGandivaNode) hash_node = NULL;
@@ -227,7 +230,8 @@ ExecInitHashFilter(ResultState *node)
 	{
 		hash_keys = lappend_int(hash_keys, resultNode->hashFilterColIdx[i] - 1);
 	}
-	hash_node = make_result_cols_hash_fnode(out_schema, hash_keys);
+	hash_schema = rewrite_numeric_hash_keys_schema(out_schema, hash_keys);
+	hash_node = make_result_cols_hash_fnode(out_schema, hash_schema, hash_keys);
 	if (hash_node)
 	{
 		GError *error = NULL;
@@ -236,11 +240,12 @@ ExecInitHashFilter(ResultState *node)
 		g_autoptr(GGandivaExpression) expr = ggandiva_expression_new(hash_node, retfield);
 		/* projector */
 		GList *exprs = garrow_list_append_ptr(NULL, expr);
-		g_autoptr(GGandivaProjector) projector = ggandiva_projector_new(out_schema, exprs, &error);
+		g_autoptr(GGandivaProjector) projector = ggandiva_projector_new(hash_schema, exprs, &error);
 		if (error)
 			elog(ERROR, "Failed to initialize hash projector, cause: %s", error->message);
 		VecResultState *vnode = (VecResultState *) node;
 		garrow_store_ptr(vnode->hash_projector, projector);
+		garrow_store_ptr(vnode->hash_schema, hash_schema);
 		garrow_list_free_ptr(&exprs);
 	}
 	if (hash_keys != NIL)
@@ -348,6 +353,8 @@ ExecEndVecResult(ResultState *node)
 
 	VecResultState *vnode = (VecResultState *) node;
 	FreeVecExecuteState(&vnode->estate);
+	if (vnode->hash_schema != NULL)
+		g_clear_object((GObject **) &vnode->hash_schema);
 
 	/*
 	 * shut down subplans

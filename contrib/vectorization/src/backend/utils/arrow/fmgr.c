@@ -128,7 +128,13 @@ check_numeric_adjust(List* args) {
 		return false;
 	const_expr = (Const*) scale;
 	numeric_type = const_expr->constbyval ? DatumGetInt32(const_expr->constvalue): const_expr->consttypmod;
-	precision  = ((numeric_type  - VARHDRSZ) >> 16) & 0xffff;
+
+	/*
+	 * numeric(p,s) with s < 0 (PG 15+) rounds to the left of the decimal
+	 * point, which numeric128's scale field cannot express.
+	 */
+	if (vec_numeric_typmod_scale(numeric_type, &precision) < 0)
+		return false;
 	if (precision > VEC_NUMERIC_MAX_PRECISION)
 		return false;
 	return true;

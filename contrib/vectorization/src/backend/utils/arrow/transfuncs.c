@@ -1757,8 +1757,17 @@ AddCastType(Expr *expr, GArrowSchema *schema, GArrowDataType **rettype)
 }
 
 
+/*
+ * Hash the first distribution key.
+ *
+ * numeric: the key is a numeric128 column retyped as decimal128 (Gandiva has
+ * no numeric128 type; see rewrite_numeric_hash_keys_schema).  Hashing its
+ * bytes would put 2.50 and 2.5000 on different segments, and neither where
+ * the row executor's cdbhash puts them, so use cohash32numeric: it decodes the
+ * numeric128 bits and reproduces PostgreSQL's hash_numeric().
+ */
 GGandivaNode*
-make_hash32_fnode(GGandivaNode *node)
+make_hash32_fnode(GGandivaNode *node, bool numeric)
 {
 	GList* args = NULL;
 	g_autoptr(GGandivaNode) arg = garrow_copy_ptr(node);
@@ -1769,14 +1778,19 @@ make_hash32_fnode(GGandivaNode *node)
 	args = garrow_list_append_ptr(args, arg);
 
 	/* function node */
-	GGandivaNode *funcnode = GGANDIVA_NODE(ggandiva_function_node_new("cohash32", args, GARROW_DATA_TYPE(dt_int32)));
+	GGandivaNode *funcnode = GGANDIVA_NODE(ggandiva_function_node_new(numeric ? "cohash32numeric" : "cohash32",
+																	  args, GARROW_DATA_TYPE(dt_int32)));
 
 	garrow_list_free_ptr(&args);
 	return funcnode;
 }
 
+/*
+ * Fold one more distribution key into the running hash node_second.
+ * numeric as for make_hash32_fnode.
+ */
 GGandivaNode*
-make_cdbhash32_fnode(GGandivaNode *node_first, GGandivaNode *node_second)
+make_cdbhash32_fnode(GGandivaNode *node_first, GGandivaNode *node_second, bool numeric)
 {
 	GList* args = NULL;
 	g_autoptr(GGandivaNode) arg1 = garrow_copy_ptr(node_first);
@@ -1789,14 +1803,54 @@ make_cdbhash32_fnode(GGandivaNode *node_first, GGandivaNode *node_second)
 	args = garrow_list_append_ptr(args, arg2);
 
 	/* function node */
-	GGandivaNode *funcnode = GGANDIVA_NODE(ggandiva_function_node_new("cdbhash32", args, GARROW_DATA_TYPE(dt_int32)));
+	GGandivaNode *funcnode = GGANDIVA_NODE(ggandiva_function_node_new(numeric ? "cdbhash32numeric" : "cdbhash32",
+																	  args, GARROW_DATA_TYPE(dt_int32)));
 
 	garrow_list_free_ptr(&args);
 	return funcnode;
 }
 
+/*
+ * Return a copy of schema in which every hash key column of type numeric128
+ * is retyped as decimal128(35,0).  Gandiva has no numeric128 type; the two
+ * share a 16-byte layout, so garrow_record_batch_copy_with_schema() can view
+ * a batch through the result without copying, and the numeric hash functions
+ * decode the numeric128 bits themselves.
+ */
+GArrowSchema *
+rewrite_numeric_hash_keys_schema(GArrowSchema *schema, List *hash_keys)
+{
+	GArrowSchema *result = garrow_copy_ptr(schema);
+	ListCell   *lc;
+
+	foreach(lc, hash_keys)
+	{
+		int			key = lfirst_int(lc);
+		g_autoptr(GArrowField) field = garrow_schema_get_field(result, key);
+		g_autoptr(GArrowDataType) type = garrow_field_get_data_type(field);
+		g_autoptr(GArrowDataType) dec_type = NULL;
+		g_autoptr(GArrowField) dec_field = NULL;
+		g_autoptr(GError) error = NULL;
+
+		if (garrow_data_type_get_id(type) != GARROW_TYPE_NUMERIC128)
+			continue;
+
+		dec_type = GARROW_DATA_TYPE(garrow_decimal128_data_type_new(35, 0));
+		dec_field = garrow_field_new(garrow_field_get_name(field), dec_type);
+		garrow_store_func(result, garrow_schema_replace_field(result, key, dec_field, &error));
+		if (error)
+			elog(ERROR, "failed to retype numeric hash key column %d: %s", key, error->message);
+	}
+	return result;
+}
+
+/*
+ * Hash the result columns hash_keys.  schema is the result schema, used to
+ * spot numeric128 keys; hash_schema is the same schema passed through
+ * rewrite_numeric_hash_keys_schema, which the projector is built against.
+ */
 GGandivaNode*
-make_result_cols_hash_fnode(GArrowSchema *schema, List *hash_keys)
+make_result_cols_hash_fnode(GArrowSchema *schema, GArrowSchema *hash_schema, List *hash_keys)
 {
 	GGandivaNode *pre_node = NULL;
 	g_autoptr(GError) error = NULL;
@@ -1804,17 +1858,25 @@ make_result_cols_hash_fnode(GArrowSchema *schema, List *hash_keys)
 	foreach(lc, hash_keys)
 	{
 		g_autoptr(GArrowField) field = NULL;
+		g_autoptr(GArrowField) orig_field = NULL;
+		g_autoptr(GArrowDataType) orig_type = NULL;
 		g_autoptr(GGandivaNode) cur_node = NULL;
 		int key = lfirst_int(lc);
-		field = garrow_schema_get_field(schema, key);
+		bool numeric;
+
+		orig_field = garrow_schema_get_field(schema, key);
+		orig_type = garrow_field_get_data_type(orig_field);
+		numeric = garrow_data_type_get_id(orig_type) == GARROW_TYPE_NUMERIC128;
+
+		field = garrow_schema_get_field(hash_schema, key);
 		garrow_store_func(cur_node, ggandiva_field_node_new(field));
 		if (!pre_node)
 		{
-			garrow_store_func(pre_node, make_hash32_fnode(cur_node));
+			garrow_store_func(pre_node, make_hash32_fnode(cur_node, numeric));
 		}
 		else
 		{
-			garrow_store_func(pre_node, make_cdbhash32_fnode(cur_node, pre_node));
+			garrow_store_func(pre_node, make_cdbhash32_fnode(cur_node, pre_node, numeric));
 		}
 	}
 	return pre_node;

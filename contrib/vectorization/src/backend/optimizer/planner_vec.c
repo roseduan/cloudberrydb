@@ -56,7 +56,6 @@
 #include "utils/guc_vec.h"
 #include "utils/wrapper.h"
 #include "utils/fmgr_vec.h"
-#include "transform.h"
 
 #include <sys/stat.h>
 #include <sys/file.h>
@@ -82,11 +81,9 @@ static bool is_iceberg_am_relid(Oid relid);
 static bool iceberg_scan_types_vectorable(Oid relid, List *targetlist, List *qual);
 static bool is_sort_collation_vectorable(Sort *sort);
 static bool fallback_distinct_junk(Plan *plan);
-static bool fallback_nested_loop_jointype(Plan *plan);
 static void demote_right_semi_anti_to_left(Plan *plan);
 static bool joinclauses_type_different(Expr *node, void *context);
-static bool processFunction(int pid, int queryid);
-static bool GloablprocessFunction(int pid);
+static bool uses_nondeterministic_collation(Node *node, void *context);
 typedef struct PreNodeContext
 {
 	Node *plannedStmt;
@@ -96,7 +93,6 @@ typedef struct PreNodeContext
 
 static bool leftjoin_pull_antijoin(Node *node, PreNodeContext *context);
 static bool is_foreign_scan_vectorable(ForeignScan *foreignscan);
-static bool is_seventy_two_control(const char *query_string);
 
 static char* vector_foreign_data_wapper_whitelist[] =
 {
@@ -112,7 +108,6 @@ typedef struct
 static bool windowhashagg_check_walker(Node *node, windowhashagg_check_context *context);
 static bool windowhashagg_is_in_plan_tree(struct PlannedStmt *stmt);
 static bool should_force_partition_topk(Query *parse);
-static bool query_has_topk_qual(Query *parse);
 
 static bool
 is_type_vectorable(Oid typeOid)
@@ -402,182 +397,6 @@ window_gate_walker(Node *node, void *context)
  * today by setting optimizer_force_partition_topk by hand.)
  */
 
-/*
- * Is this a window function a Partition Top-K can pre-filter for?
- *
- * ORCA's CXformPushdownTopKThroughPartition only has something to push down
- * when the query ranks rows and then keeps the first few of each partition.
- * Anything else (sum, min, lead, ...) has no K to cut on.
- */
-static bool
-is_ranking_window_func(Oid winfnoid)
-{
-	char	   *name;
-	bool		match;
-
-	/* Restrict to built-in pg_catalog functions; a user-defined function
-	 * that happens to share the same proname (e.g. myschema.rank()) must
-	 * not be mistaken for a ranking function ORCA can optimise. */
-	if (get_func_namespace(winfnoid) != PG_CATALOG_NAMESPACE)
-		return false;
-
-	name = get_func_name(winfnoid);
-	if (name == NULL)
-		return false;
-
-	match = (strcmp(name, "rank") == 0 ||
-			 strcmp(name, "dense_rank") == 0 ||
-			 strcmp(name, "row_number") == 0);
-	pfree(name);
-	return match;
-}
-
-/*
- * If this Var reads a column of a subquery or of a CTE defined at this same
- * query level, return the expression that column computes.  NULL for anything
- * else -- a base table column has no window function behind it.
- */
-static Node *
-resolve_var_to_subquery_expr(Query *query, Var *var)
-{
-	RangeTblEntry *rte;
-	Query	   *sub = NULL;
-	ListCell   *lc;
-
-	if (var->varlevelsup != 0 ||
-		var->varno < 1 || var->varno > (Index) list_length(query->rtable))
-		return NULL;
-
-	rte = rt_fetch(var->varno, query->rtable);
-
-	if (rte->rtekind == RTE_SUBQUERY)
-		sub = rte->subquery;
-	else if (rte->rtekind == RTE_CTE)
-	{
-		/* TPC-DS Q51 ranks inside a WITH, so CTEs have to be followed too */
-		foreach(lc, query->cteList)
-		{
-			CommonTableExpr *cte = (CommonTableExpr *) lfirst(lc);
-
-			if (strcmp(cte->ctename, rte->ctename) == 0 &&
-				cte->ctequery != NULL && IsA(cte->ctequery, Query))
-			{
-				sub = (Query *) cte->ctequery;
-				break;
-			}
-		}
-	}
-
-	if (sub == NULL)
-		return NULL;
-
-	foreach(lc, sub->targetList)
-	{
-		TargetEntry *tle = (TargetEntry *) lfirst(lc);
-
-		if (!tle->resjunk && tle->resno == var->varattno)
-			return (Node *) tle->expr;
-	}
-	return NULL;
-}
-
-typedef struct
-{
-	Query	   *query;			/* level whose rtable the Vars refer to */
-	bool		found;
-} topk_qual_context;
-
-/*
- * Look for `<ranking window function> <= K` (or `< K`) in one query level's
- * quals.  `= K` is deliberately not accepted: it constrains a single rank, not
- * a prefix, and ORCA does not turn it into a Partition Top-K.
- */
-static bool
-topk_qual_walker(Node *node, topk_qual_context *ctx)
-{
-	if (node == NULL || ctx->found)
-		return ctx->found;
-
-	/* a nested Query is a separate level; the caller visits it on its own */
-	if (IsA(node, Query))
-		return false;
-
-	if (IsA(node, OpExpr))
-	{
-		OpExpr	   *op = (OpExpr *) node;
-
-		if (list_length(op->args) == 2)
-		{
-			char	   *opname = get_opname(op->opno);
-
-			if (opname != NULL &&
-				(strcmp(opname, "<=") == 0 || strcmp(opname, "<") == 0))
-			{
-				Node	   *lhs = (Node *) linitial(op->args);
-				Node	   *rhs = (Node *) lsecond(op->args);
-
-				if (IsA(lhs, Var) && (IsA(rhs, Const) || IsA(rhs, Param)))
-				{
-					Node	   *src = resolve_var_to_subquery_expr(ctx->query,
-																   (Var *) lhs);
-
-					if (src != NULL && IsA(src, WindowFunc) &&
-						is_ranking_window_func(((WindowFunc *) src)->winfnoid))
-						ctx->found = true;
-				}
-			}
-			if (opname != NULL)
-				pfree(opname);
-		}
-	}
-
-	if (ctx->found)
-		return true;
-
-	return expression_tree_walker(node, topk_qual_walker, (void *) ctx);
-}
-
-static bool
-query_topk_walker(Node *node, void *context)
-{
-	bool	   *found = (bool *) context;
-
-	if (node == NULL || *found)
-		return *found;
-
-	if (IsA(node, Query))
-	{
-		Query			   *query = (Query *) node;
-		topk_qual_context	qctx;
-
-		qctx.query = query;
-		qctx.found = false;
-
-		if (query->jointree != NULL)
-			(void) topk_qual_walker((Node *) query->jointree, &qctx);
-		if (!qctx.found)
-			(void) topk_qual_walker((Node *) query->havingQual, &qctx);
-
-		if (qctx.found)
-		{
-			*found = true;
-			return true;
-		}
-		return query_tree_walker(query, query_topk_walker, context, 0);
-	}
-
-	return expression_tree_walker(node, query_topk_walker, context);
-}
-
-static bool
-query_has_topk_qual(Query *parse)
-{
-	bool		found = false;
-
-	(void) query_topk_walker((Node *) parse, &found);
-	return found;
-}
-
 static bool
 should_force_partition_topk(Query *parse)
 {
@@ -592,12 +411,10 @@ should_force_partition_topk(Query *parse)
 		return false;
 
 	/*
-	 * An optional third condition, off by default: the query has to actually
-	 * keep a prefix of a ranking.
-	 *
-	 * Do not turn this on expecting a win.  Forcing the Partition Top-K world
-	 * does three separate things, and only the first needs a `rank() <= K`:
-	 * it lets ORCA emit a PartitionTopK, it withholds the hash window (via
+	 * There is deliberately no third condition such as "the query keeps a
+	 * prefix of a ranking".  Forcing the Partition Top-K world does three
+	 * separate things, and only the first needs a `rank() <= K`: it lets ORCA
+	 * emit a PartitionTopK, it withholds the hash window (via
 	 * create_vectorization_plan below), and -- when the resulting plan is no
 	 * longer vectorizable at all -- it drops the query back to the row engine.
 	 * Measured on TPC-DS SF1000, 32 segments, forcing on versus off:
@@ -608,14 +425,8 @@ should_force_partition_topk(Query *parse)
 	 *   q57    18s vs   21s   1.2x   ordered window, no PartitionTopK
 	 *
 	 * Three of the four gain nothing from a Top-K predicate, so gating on one
-	 * would give most of that back.  This knob exists to isolate the hash
-	 * window from the ordered one without disabling Partition Top-K as well,
-	 * which vector.enable_partition_topk cannot express, and to let a test ask
-	 * for the plan shape it had before any of this.
+	 * would give most of that back.
 	 */
-	if (partition_topk_require_topk_qual)
-		return query_has_topk_qual(parse);
-
 	return true;
 }
 
@@ -659,10 +470,9 @@ planner_hook_wrapper(Query *parse, const char *query_string, int cursorOptions, 
 	 * (Partition Top-K under an ordered WindowAgg), which the vector
 	 * executor supports as well.
 	 *
-	 * vector.enable_window_hash_agg additionally allows WindowHashAgg to be
-	 * withheld while Partition Top-K stays off, which the expression above
-	 * cannot express on its own.  That combination is only reachable through
-	 * this knob, so keep it available for plan-shape comparisons.
+	 * Queries that are not forced (see should_force_partition_topk) may still
+	 * get WindowHashAgg; vector.enable_window_hash_agg takes it out of those
+	 * plans as well.
 	 *
 	 * For a window query we ask ORCA for the Partition Top-K world outright.
 	 * Measured on TPC-DS SF1000, the shape ORCA picks on its own is the slowest
@@ -731,19 +541,6 @@ planner_hook_wrapper(Query *parse, const char *query_string, int cursorOptions, 
 		PG_END_TRY();
 	}
 
-	if (enable_vector_optimizer && enable_vector_memory_resource && is_seventy_two_control(query_string))
-	{
-		int loop = 0;
-		while(++loop < 1500)
-		{
-			bool status = processFunction(getpid(), 172);
-			if (status)
-				break;
-			else
-				sleep(0.1);
-		}
-	}
-
 	/*
 	 * Safety net for JOIN_RIGHT_ANTI_NOTIN only.  PG 14 base now executes
 	 * JOIN_RIGHT_SEMI / JOIN_RIGHT_ANTI natively (PG 16 16dc2703c54 +
@@ -757,19 +554,6 @@ planner_hook_wrapper(Query *parse, const char *query_string, int cursorOptions, 
 	return result;
 }
 
-static bool
-is_seventy_two_control(const char *query_string)
-{
-	regex_t	 regex;
-	int	     r;
-	r = regcomp(&regex, seventy_two_control_partten, 0);
-	if (r)
-		return false;
-	r = regexec(&regex, query_string, 0, NULL, 0);
-	regfree(&regex);
-	return REG_NOERROR == r;
-}
-
 /*
  * Try to generate a vectorized plan.
  */
@@ -777,7 +561,6 @@ bool
 try_vectorize_plan(PlannedStmt *result)
 {
 	bool vectorable;
-	int loop = 0;
 	Plan *plan_copy;
 	VectorExtensionContext *ext_ctx = NULL;
 	PreNodeContext context;
@@ -810,21 +593,6 @@ try_vectorize_plan(PlannedStmt *result)
 	result->extensionContext = lappend(result->extensionContext, (ExtensibleNode *)ext_ctx);
 	result->planTree = plan_copy;
 
-	if (enable_vector_optimizer && enable_vector_memory_resource)
-	{
-		if (control_global_memory_resource > 1)
-		{
-			loop = 0;
-			while(++loop < 1500)
-			{
-				bool status = GloablprocessFunction(getpid());
-				if (status)
-					break;
-				else
-					sleep(0.1);
-			}
-		}
-	}
 	/* after vectorization, should reassign plan node id */
 	assign_plannode_id(result);
 
@@ -1016,21 +784,46 @@ is_expr_vectorable(Expr* expr, void *context)
 		case T_ScalarArrayOpExpr:
 			{
 				ScalarArrayOpExpr *arrayexpr = (ScalarArrayOpExpr *) expr;
+				char *opname = get_opname(arrayexpr->opno);
+				bool supported;
 
-				/* Fixme: Fully support of ScalarArrayOpExpr, only "IN" now. */
-				if (strcmp(get_opname(arrayexpr->opno), "=")
-						|| !IsA(lsecond(arrayexpr->args), Const)
-						|| !arrayexpr->useOr)
+				/*
+				 * PG builds `x IN (...)` as `= ANY` (useOr) and
+				 * `x NOT IN (...)` as `<> ALL` (!useOr).  Accept exactly those
+				 * two shapes -- anything else (`< ANY`, a user-defined
+				 * operator, a dropped operator with no name) still falls back
+				 * to the row engine.
+				 */
+				supported = opname != NULL &&
+					((arrayexpr->useOr && strcmp(opname, "=") == 0) ||
+					 (!arrayexpr->useOr && strcmp(opname, "<>") == 0));
+				if (opname)
+					pfree(opname);
+				if (!supported || !IsA(lsecond(arrayexpr->args), Const))
 				{
-					FALLBACK_LOG("ScalarArrayOpExpr only support IN operator");
+					FALLBACK_LOG("ScalarArrayOpExpr only supports IN and NOT IN");
 					return false;
 				}
 
-				/* IN operator doesn't support null::type[] as array, so const_expr must be not null */
+				/*
+				 * A wholly NULL array constant carries no element type, so
+				 * there is no value set to build.
+				 */
 				Const *const_expr = (Const *) lsecond(arrayexpr->args);
 				if (const_expr->constisnull)
 				{
-					FALLBACK_LOG("ScalarArrayOpExpr only support IN operator");
+					FALLBACK_LOG("ScalarArrayOpExpr value set is NULL");
+					return false;
+				}
+
+				/*
+				 * is_in compares text by its bytes.  Under a nondeterministic
+				 * collation 'A' and 'a' can be equal, so `x IN ('a')` misses
+				 * 'A' and `x NOT IN ('a')` returns it, both unlike PG.
+				 */
+				if (uses_nondeterministic_collation((Node *) arrayexpr, NULL))
+				{
+					FALLBACK_LOG("IN/NOT IN under a nondeterministic collation.");
 					return false;
 				}
 			}
@@ -1317,9 +1110,36 @@ is_plan_vectorable(Plan* plan, List *rtable)
 		case T_NestLoop:	
 			{
 				NestLoop *tstlp = (NestLoop *) plan;
-				if (fallback_nested_loop_jointype(plan) || joinclauses_type_different((Expr *) tstlp->join.joinqual, NULL))
+
+				/*
+				 * JOIN_LASJ_NOTIN used to be rejected here, which sent the
+				 * *whole* query back to the row executor -- and multi-column
+				 * NOT IN is planned as a nested loop every time (the
+				 * IS NOT FALSE wrapper cdbsubselect.c puts around the whole
+				 * conjunction is not hashable, see check_hashjoinable), so a
+				 * single such predicate de-vectorized everything around it.
+				 *
+				 * It is supported now: BuildNestLoopjoin() maps it to an anti
+				 * join and makes a NULL filter result count as a match, which
+				 * is exactly the NOT IN rule.  See the comment there.
+				 */
+				if (joinclauses_type_different((Expr *) tstlp->join.joinqual, NULL))
 				{
 					FALLBACK_LOG("Unsupported nested join type.");
+					return false;
+				}
+
+				/*
+				 * The vec engine compares text by its bytes.  Under a
+				 * nondeterministic collation 'A' and 'a' can be equal, so a
+				 * byte comparison turns a NOT IN match into a mismatch and
+				 * returns rows PG suppresses.
+				 */
+				if (tstlp->join.jointype == JOIN_LASJ_NOTIN &&
+					uses_nondeterministic_collation((Node *) tstlp->join.joinqual,
+													NULL))
+				{
+					FALLBACK_LOG("NOT IN under a nondeterministic collation.");
 					return false;
 				}
 				if (!is_expr_vectorable((Expr *)tstlp->join.joinqual, NULL))
@@ -1870,15 +1690,6 @@ is_sort_collation_vectorable(Sort *sort)
 	return true;
 }
 
-static bool
-fallback_nested_loop_jointype(Plan *plan) 
-{
-	NestLoop *node = (NestLoop *) plan;
-	if (node->join.jointype == JOIN_LASJ_NOTIN)
-		return true;
-	return false;
-}
-
 static Node *
 match_replace_mutator(Node *node, void *context)
 {
@@ -2112,6 +1923,26 @@ fallback_distinct_junk(Plan *plan)
 }
 
 /*
+ * true if any comparison in the expression runs under a nondeterministic
+ * collation
+ */
+static bool
+uses_nondeterministic_collation(Node *node, void *context)
+{
+	Oid			collation;
+
+	if (node == NULL)
+		return false;
+
+	collation = exprInputCollation(node);
+	if (OidIsValid(collation) && !get_collation_isdeterministic(collation))
+		return true;
+
+	return expression_tree_walker(node, uses_nondeterministic_collation,
+								  context);
+}
+
+/*
  * true means different type
  * false means same type
  */
@@ -2286,315 +2117,6 @@ check_targetlist(Node *node, int varattno, PreNodeContext *context)
 	}
 	return false;
 }
-
-static bool isProcessExists(pid_t pid)
-{
-	char command[128] = {"\0"};
-	sprintf(command, "ps -ef | grep %d | grep -v grep", pid);
-
-	FILE* fp = popen(command, "r");
-	if (fp == NULL)
-		return false;
-
-	char buffer[128]= {"\0"};
-	bool exists = false;
-
-	while (fgets(buffer, sizeof(buffer), fp) != NULL)
-	{
-		exists = true;
-		break;
-	}
-
-	pclose(fp);
-
-	return exists;
-}
-
-static bool processFunction(int pid, int queryid)
-{
-	char dirPath[100] = "/tmp/cloudberry";
-	int max_muti_process = control_memory_resource < 8 ? control_memory_resource : 1;
-	char lockFilePath[100] = {"\0"};
-	int process_id ;
-	int lockFile;
-	char* line = NULL;
-	size_t lineLen = 0;
-	ssize_t bytesRead;
-	int existing_processes = 0;
-	int not_existing_processes = 0;
-	long currPos = 0;
-	int processBuffer[20] = {0};
-	bool status = false;
-
-	snprintf(lockFilePath, sizeof(lockFilePath), "%s/%d.lock", dirPath, queryid);
-
-	if (access(dirPath, F_OK) != 0)
-	{
-	#ifdef DEBUG
-	elog(INFO,"Create path %s",dirPath);
-	#endif
-	mkdir(dirPath, 0777);
-	}
-
-	lockFile = open(lockFilePath, O_RDWR | O_CREAT, 0666);
-	if (lockFile == -1)
-	{
-	#ifdef DEBUG
-	elog(INFO,"Open file error :%d pid:%d",lockFile,pid);
-	#endif
-		return status;
-	}
-
-	if (flock(lockFile, LOCK_EX | LOCK_NB) == -1)
-	{
-	#ifdef DEBUG
-	elog(INFO,"Open file lock  error pid %d",pid);
-	#endif
-	return status;
-	}
-	#ifdef DEBUG
-	elog(INFO,"max_muti_process is %d",max_muti_process);
-	#endif
-
-	while ((bytesRead = getline(&line, &lineLen, fdopen(lockFile, "r"))) != -1)
-	{
-		process_id = atoi(line);
-
-		char procPath[100] = {"\0"};
-		snprintf(procPath, sizeof(procPath), "/proc/%d", process_id);
-		if (access(procPath, F_OK) == 0 /*|| isProcessExists(process_id)*/)
-		{
-			if (process_id == pid)
-				status =  true;
-			else
-			{
-				processBuffer[existing_processes] =  process_id;
-				++existing_processes;
-				#ifdef DEBUG
-				elog(INFO,"existing_processes ++");
-				#endif
-			}
-		}
-		else
-		{
-			++not_existing_processes;
-			#ifdef DEBUG
-			elog(INFO,"Not exist process++");
-			#endif
-		}
-
-		currPos = lseek(lockFile, 0, SEEK_CUR);
-		free(line);
-	}
-
-	if (not_existing_processes > 0)
-	{
-		if(ftruncate(lockFile, 0) == -1)
-			elog(INFO,"Ftruncate is error");
-		lseek(lockFile, 0, SEEK_SET);
-		for (int i = 0; i < existing_processes; i++)
-		{
-			char buffer[100] = {"\0"};
-			int size = snprintf(buffer, sizeof(buffer), "%d\n",processBuffer[i]);
-			#ifdef DEBUG
-			elog(INFO,"Write process :%s",buffer);
-			#endif
-			write(lockFile, buffer, size);
-		}
-		#ifdef DEBUG
-		elog(INFO,"All exsit process in stask is %d",existing_processes);
-		#endif
-	}
-	else
-	{
-		existing_processes = 0;
-		int file = open(lockFilePath, O_RDONLY);
-		if (file == -1)
-		{
-			return -1;
-		}
-
-		char buffer[256] = {"\0"};
-
-		while (read(file, buffer, sizeof(buffer)) > 0)
-		{
-			char* token = strtok(buffer, "\n");
-			while (token != NULL)
-			{
-				int process_id = atoi(token);
-				if(0 != process_id && isProcessExists(process_id))
-				{
-					processBuffer[existing_processes] =  process_id;
-					++existing_processes;
-				}
-				#ifdef DEBUG
-				elog(INFO,"Line %d\n", existing_processes);
-				#endif
-					token = strtok(NULL, "\n");
-			}
-		}
-	}
-
-	if (existing_processes < max_muti_process)
-	{
-		status = true;
-		char buffer[100] = {"\0"};
-		int size = snprintf(buffer, sizeof(buffer), "%d\n", pid);
-		#ifdef DEBUG
-		elog(INFO,"Write self process :%s",buffer);
-		#endif
-		write(lockFile, buffer, size);
-	}
-	flock(lockFile, LOCK_UN);
-
-	close(lockFile);
-	return status;
-}
-
-static bool GloablprocessFunction(int pid)
-{
-	int queryid = 200;
-	char dirPath[100] = "/tmp/cloudberry";
-	int max_muti_process = control_global_memory_resource <= 10 ? control_global_memory_resource
-																: 4;
-	char lockFilePath[100] = {"\0"};
-	int process_id ;
-	int lockFile;
-	char* line = NULL;
-	size_t lineLen = 0;
-	ssize_t bytesRead;
-	int existing_processes = 0;
-	int not_existing_processes = 0;
-	long currPos = 0;
-	int processBuffer[20] = {0};
-	bool status = false;
-
-	snprintf(lockFilePath, sizeof(lockFilePath), "%s/%d.lock", dirPath, queryid);
-
-	if (access(dirPath, F_OK) != 0)
-	{
-#ifdef DEBUG
-	elog(INFO,"Create path %s",dirPath);
-#endif
-	mkdir(dirPath, 0777);
-	}
-
-	lockFile = open(lockFilePath, O_RDWR | O_CREAT, 0666);
-	if (lockFile == -1)
-	{
-	#ifdef DEBUG
-	elog(INFO,"Open file error :%d pid:%d",lockFile,pid);
-	#endif
-		return status;
-	}
-
-	if (flock(lockFile, LOCK_EX | LOCK_NB) == -1)
-	{
-	#ifdef DEBUG
-	elog(INFO,"Open file lock  error pid %d",pid);
-	#endif
-	return status;
-	}
-	#ifdef DEBUG
-	elog(INFO,"max_muti_process is %d",max_muti_process);
-	#endif
-
-	while ((bytesRead = getline(&line, &lineLen, fdopen(lockFile, "r"))) != -1)
-	{
-		process_id = atoi(line);
-
-		char procPath[100] = {"\0"};
-		snprintf(procPath, sizeof(procPath), "/proc/%d", process_id);
-		if (access(procPath, F_OK) == 0 /*|| isProcessExists(process_id)*/)
-		{
-			if (process_id == pid)
-				status =  true;
-			else
-			{
-				processBuffer[existing_processes] =  process_id;
-				++existing_processes;
-				#ifdef DEBUG
-				elog(INFO,"existing_processes ++");
-				#endif
-			}
-		}
-		else
-		{
-			++not_existing_processes;
-			#ifdef DEBUG
-			elog(INFO,"Not exist process++");
-			#endif
-		}
-
-		currPos = lseek(lockFile, 0, SEEK_CUR);
-		free(line);
-	}
-
-	if (not_existing_processes > 0)
-	{
-		if(ftruncate(lockFile, 0) == -1)
-			elog(INFO,"Ftruncate is error");
-		lseek(lockFile, 0, SEEK_SET);
-		for (int i = 0; i < existing_processes; i++)
-		{
-			char buffer[100] = {"\0"};
-			int size = snprintf(buffer, sizeof(buffer), "%d\n",processBuffer[i]);
-			#ifdef DEBUG
-			elog(INFO,"Write process :%s",buffer);
-			#endif
-			write(lockFile, buffer, size);
-		}
-		#ifdef DEBUG
-		elog(INFO,"All exsit process in stask is %d",existing_processes);
-		#endif
-	}
-	else
-	{
-		existing_processes = 0;
-		int file = open(lockFilePath, O_RDONLY);
-		if (file == -1)
-		{
-			return -1;
-		}
-
-		char buffer[256] = {"\0"};
-
-		while (read(file, buffer, sizeof(buffer)) > 0)
-		{
-			char* token = strtok(buffer, "\n");
-			while (token != NULL)
-			{
-				int process_id = atoi(token);
-				if(0 != process_id && isProcessExists(process_id))
-				{
-					processBuffer[existing_processes] =  process_id;
-					++existing_processes;
-				}
-				#ifdef DEBUG
-				elog(INFO,"Line %d\n", existing_processes);
-				#endif
-					token = strtok(NULL, "\n");
-			}
-		}
-	
-	}
-	
-	if (existing_processes < max_muti_process)
-	{
-		status = true;
-		char buffer[100] = {"\0"};
-		int size = snprintf(buffer, sizeof(buffer), "%d\n", pid);
-		#ifdef DEBUG
-		elog(INFO,"Write self process :%s",buffer);
-		#endif
-		write(lockFile, buffer, size);
-	}
-	flock(lockFile, LOCK_UN);
-
-	close(lockFile);
-	return status;
-}
-
 
 static bool
 traverse_is_attribute_nonnullable(Node *node, int varattno, PreNodeContext *context)

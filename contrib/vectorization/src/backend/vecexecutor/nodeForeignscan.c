@@ -100,9 +100,38 @@ ForeignRecheck(ForeignScanState *node, TupleTableSlot *slot)
 		!fdwroutine->RecheckForeignScan(node, slot))
 		return false;
 
-	/* FIXME: Vector recheck filter is not implemented now.*/
-	Assert(false);
-	return ExecQual(node->fdw_recheck_quals, econtext);
+	/*
+	 * The vector engine has no recheck filter: `slot` here is an
+	 * Arrow-backed batch slot, and ExecQual() below expects a single heap
+	 * tuple, so evaluating the quals against it would be meaningless.
+	 *
+	 * This is unreachable today.  ExecVecScanFetchInternal() only calls a
+	 * recheck method while es_epq_active is set, and nothing can set it in a
+	 * vectorized plan:
+	 *
+	 *   - EvalPlanQual is started by ModifyTable and LockRows.  Neither node
+	 *     type appears in is_plan_vectorable() (planner_vec.c), so UPDATE and
+	 *     DELETE send the whole statement back to the row executor -- and
+	 *     vectorization is decided once for the whole PlannedStmt, so the EPQ
+	 *     recheck plan is not vectorized either.
+	 *   - GPDB takes a table-level lock for SELECT ... FOR UPDATE/SHARE on a
+	 *     distributed table instead of marking rows, so no LockRows node is
+	 *     produced at all (checked for heap and AO/CO tables, ORCA on and
+	 *     off).
+	 *   - The scanrelid == 0 branch needs an FDW that pushes a join down.
+	 *     datalake_fdw is the only wrapper on the vectorization whitelist and
+	 *     it does not implement GetForeignJoinPaths.
+	 *
+	 * Raise an error rather than asserting.  An assertion only fires in a
+	 * cassert build; a release build would fall through to ExecQual() and,
+	 * because datalake_fdw leaves fdw_recheck_quals empty, quietly report
+	 * that a row it never rechecked passed -- wrong results instead of a
+	 * diagnosable failure.  Teaching the vector engine to run ModifyTable or
+	 * LockRows is what would make this reachable; implement the recheck then.
+	 */
+	elog(ERROR, "EvalPlanQual recheck is not implemented for vectorized "
+				"foreign scans");
+	return false;	/* unreachable, keep the compiler quiet */
 }
 
 /* ----------------------------------------------------------------

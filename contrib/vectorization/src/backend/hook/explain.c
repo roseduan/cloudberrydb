@@ -2344,7 +2344,7 @@ VecExplainNode(PlanState *planstate, List *ancestors,
 				 */
 				if (pMotion->motionType == MOTIONTYPE_HASH &&
 					plan_is_vectorized(planstate->state) &&
-					enable_sonic_motion_direct_send)
+					sonic_motion_direct_send)
 				{
 					Plan *child = outerPlan(plan);
 					while (child != NULL && IsA(child, Result) &&

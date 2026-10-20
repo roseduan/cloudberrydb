@@ -577,8 +577,16 @@ std::shared_ptr<PFTNode> PaxSparseFilter::ProcessVecScalarArrayOpExpr(
     goto ignore_clause;
   }
 
-  // only filter if value_set is an array and skip nulls
-  if (!lookup_options->value_set.is_array() || !lookup_options->skip_nulls ||
+  // Only filter a plain IN, which the vectorization extension builds with
+  // SKIP.  NOT IN builds its inner is_in with INCONCLUSIVE, and an InNode
+  // for it would prune with the opposite meaning.
+  //
+  // Read the behavior through GetNullMatchingBehavior(): skip_nulls is a
+  // deprecated std::optional<bool> that is unset unless a caller assigns it,
+  // so testing it directly tests has_value(), not the value.
+  if (!lookup_options->value_set.is_array() ||
+      lookup_options->GetNullMatchingBehavior() !=
+          arrow::compute::SetLookupOptions::SKIP ||
       lookup_options->value_set.length() < 1) {
     ignore_reason = "Invalid lookup_options in VecScalarArray Expression.";
     goto ignore_clause;

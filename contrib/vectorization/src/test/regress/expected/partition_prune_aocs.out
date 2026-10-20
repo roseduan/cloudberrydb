@@ -186,15 +186,15 @@ explain (costs off) select * from lp where a <> 'a' and a <> 'd';
 explain (costs off) select * from lp where a not in ('a', 'd');
                       QUERY PLAN                      
 ------------------------------------------------------
- Gather Motion 3:1  (slice1; segments: 3)
-   ->  Append
-         ->  Seq Scan on lp_bc lp_1
+ Vec Gather Motion 3:1  (slice1; segments: 3)
+   ->  Vec Append
+         ->  Vec Seq Scan on lp_bc lp_1
                Filter: (a <> ALL ('{a,d}'::bpchar[]))
-         ->  Seq Scan on lp_ef lp_2
+         ->  Vec Seq Scan on lp_ef lp_2
                Filter: (a <> ALL ('{a,d}'::bpchar[]))
-         ->  Seq Scan on lp_g lp_3
+         ->  Vec Seq Scan on lp_g lp_3
                Filter: (a <> ALL ('{a,d}'::bpchar[]))
-         ->  Seq Scan on lp_default lp_4
+         ->  Vec Seq Scan on lp_default lp_4
                Filter: (a <> ALL ('{a,d}'::bpchar[]))
  Optimizer: Postgres query optimizer
 (11 rows)

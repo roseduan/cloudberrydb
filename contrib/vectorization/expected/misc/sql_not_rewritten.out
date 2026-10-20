@@ -1,0 +1,83 @@
+--
+-- The extension used to match incoming SQL against TPC-DS query text and,
+-- on a hit, rewrite the query or change GUCs behind the user's back.  For
+-- q97 it switched optimizer and enable_mergejoin off and never switched
+-- them back, so the rest of the session silently ran without ORCA.
+--
+-- Run q97's text and check that the query is answered as written and the
+-- session's settings are left alone.
+--
+CREATE SCHEMA sql_not_rewritten;
+SET search_path = sql_not_rewritten;
+CREATE TABLE date_dim (d_date_sk int, d_month_seq int)
+	USING ao_column DISTRIBUTED BY (d_date_sk);
+CREATE TABLE store_sales (ss_sold_date_sk int, ss_customer_sk int, ss_item_sk int)
+	USING ao_column DISTRIBUTED BY (ss_item_sk);
+CREATE TABLE catalog_sales (cs_sold_date_sk int, cs_bill_customer_sk int, cs_item_sk int)
+	USING ao_column DISTRIBUTED BY (cs_item_sk);
+INSERT INTO date_dim VALUES (1, 1200), (2, 1300);
+-- (1,1) both channels, (2,2) store only, (3,3) catalog only; date 2 is
+-- outside the month range and ignored.
+INSERT INTO store_sales VALUES (1, 1, 1), (1, 2, 2), (2, 4, 4);
+INSERT INTO catalog_sales VALUES (1, 1, 1), (1, 3, 3), (2, 5, 5);
+SET vector.enable_vectorization = on;
+SET vector.enable_vector_optimizer = on;
+SET optimizer = on;
+SET enable_mergejoin = on;
+-- TPC-DS q97, laid out as dsqgen prints it.  Expect 1, 1, 1.
+with ssci as (
+select ss_customer_sk customer_sk
+      ,ss_item_sk item_sk
+from store_sales,date_dim
+where ss_sold_date_sk = d_date_sk
+  and d_month_seq between 1200 and 1200 + 11
+group by ss_customer_sk
+        ,ss_item_sk),
+csci as(
+ select cs_bill_customer_sk customer_sk
+      ,cs_item_sk item_sk
+from catalog_sales,date_dim
+where cs_sold_date_sk = d_date_sk
+  and d_month_seq between 1200 and 1200 + 11
+group by cs_bill_customer_sk
+        ,cs_item_sk)
+ select  sum(case when ssci.customer_sk is not null and csci.customer_sk is null then 1 else 0 end) store_only
+      ,sum(case when ssci.customer_sk is null and csci.customer_sk is not null then 1 else 0 end) catalog_only
+      ,sum(case when ssci.customer_sk is not null and csci.customer_sk is not null then 1 else 0 end) store_and_catalog
+from ssci full outer join csci on (ssci.customer_sk=csci.customer_sk
+                               and ssci.item_sk = csci.item_sk)
+limit 100;
+ store_only | catalog_only | store_and_catalog 
+------------+--------------+-------------------
+          1 |            1 |                 1
+(1 row)
+
+-- Still as set above.
+SHOW optimizer;
+ optimizer 
+-----------
+ on
+(1 row)
+
+SHOW enable_mergejoin;
+ enable_mergejoin 
+------------------
+ on
+(1 row)
+
+SHOW vector.enable_vectorization;
+ vector.enable_vectorization 
+-----------------------------
+ on
+(1 row)
+
+RESET enable_mergejoin;
+RESET optimizer;
+RESET vector.enable_vector_optimizer;
+RESET vector.enable_vectorization;
+RESET search_path;
+DROP SCHEMA sql_not_rewritten CASCADE;
+NOTICE:  drop cascades to 3 other objects
+DETAIL:  drop cascades to table sql_not_rewritten.date_dim
+drop cascades to table sql_not_rewritten.store_sales
+drop cascades to table sql_not_rewritten.catalog_sales

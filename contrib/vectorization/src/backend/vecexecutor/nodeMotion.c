@@ -103,23 +103,38 @@ ConvertHasExprsToGandivaNodes(List *hashExpr, GArrowSchema *schema)
 	return lst_gandiva_nodes;
 }
 
+/*
+ * Is this hash key a numeric column that motion_rewrite_numeric_type_schema
+ * retypes as decimal128?  Such a key must be hashed with the numeric-aware
+ * functions, so the two places have to agree on exactly this test.
+ */
+static bool
+is_rewritten_numeric_hash_key(Expr *expr)
+{
+	return IsA(expr, Var) && ((Var *) expr)->vartype == NUMERICOID;
+}
+
 static void
 init_hash_projector(MotionState *node, GArrowSchema *schema)
 {
 	VecMotionState *vnode = (VecMotionState *)node;
 	ListCell *lc = NULL;
+	ListCell *lc_expr = NULL;
 	g_autoptr(GGandivaNode) pre_node = NULL;
-	foreach (lc, vnode->hashExprsGandivaNodes)
+	forboth (lc, vnode->hashExprsGandivaNodes, lc_expr, node->hashExprs)
 	{
 		GGandivaNode *node_tmp = lfirst(lc);
+		ExprState  *hash_expr_state = (ExprState *) lfirst(lc_expr);
+		bool		numeric = is_rewritten_numeric_hash_key(hash_expr_state->expr);
+
 		if (!pre_node)
 		{
-			GGandivaNode *node = make_hash32_fnode(node_tmp);
+			GGandivaNode *node = make_hash32_fnode(node_tmp, numeric);
 			garrow_store_func(pre_node, node);
 		}
 		else
 		{
-			GGandivaNode *node = make_cdbhash32_fnode(node_tmp, pre_node);
+			GGandivaNode *node = make_cdbhash32_fnode(node_tmp, pre_node, numeric);
 			garrow_store_func(pre_node, node);
 		}
 	}
@@ -164,7 +179,7 @@ motion_rewrite_numeric_type_schema(MotionState *node, TupleTableSlot *outerTuple
 				g_autoptr(GArrowField) field = NULL;
 				Var *variable = (Var *) expr;
 				field = garrow_schema_get_field(schema, variable->varattno - 1);
-				if(variable->vartype == NUMERICOID) 
+				if (is_rewritten_numeric_hash_key(expr))
 				{
 					
 					g_autoptr(GError) error = NULL;
@@ -1081,7 +1096,7 @@ ExecInitVecMotion(Motion *node, EState *estate, int eflags)
 	 * lands here, the standard non-direct-send path handles it correctly
 	 * (Motion's internal cdbhash also degenerates trivially).
 	 */
-	if (enable_sonic_motion_direct_send &&
+	if (sonic_motion_direct_send &&
 		Gp_role == GP_ROLE_EXECUTE &&
 		motionstate->mstype == MOTIONSTATE_SEND &&
 		node->motionType == MOTIONTYPE_HASH &&
@@ -1591,57 +1606,6 @@ execVecMotionUnsortedReceiver(MotionState *node)
 	return slot;
 }
 
-static bool
-IsFullConcate(int rows)
-{
-	return rows >= min_redistribute_handle_rows + 1;
-}
-
-static void
-ConcatenateDistributeBatches(TupleTableSlot **slot, PlanState  *outerNode, bool *isnull)
-{
-	int totalRows = 0;
-	int recvRows = 0;
-	g_autoptr(GArrowRecordBatch) concatenateBatch = NULL;
-	GList *rbs = NULL;
-	GError *error = NULL;
-
-	TupleTableSlot * outerTupleSlot =  ExecProcNode(outerNode);
-	*slot = outerTupleSlot;
-	if (unlikely(TupIsNull(outerTupleSlot)))
-		return ;
-
-	totalRows += garrow_record_batch_get_n_rows(VECSLOT(outerTupleSlot)->tts_recordbatch);
-	if (totalRows >= min_redistribute_handle_rows + 1)
-	{
-		return;
-	}
-	if (totalRows != 0)
-		rbs = garrow_list_append_ptr(rbs, VECSLOT(outerTupleSlot)->tts_recordbatch);
-	while (true)
-	{
-		if (0 != recvRows)
-			rbs = garrow_list_append_ptr(rbs, VECSLOT(outerTupleSlot)->tts_recordbatch);
-		if (IsFullConcate(totalRows)) {
-			break;
-		}
-		outerTupleSlot =  ExecProcNode(outerNode);
-		if (TupIsNull(outerTupleSlot))
-		{
-			*isnull = true;
-			break;
-		}
-		recvRows= garrow_record_batch_get_n_rows(VECSLOT(outerTupleSlot)->tts_recordbatch);
-		totalRows += recvRows;
-	}
-
-	concatenateBatch = garrow_record_batch_concatenate(rbs, &error);
-	if (error)
-		elog(ERROR, "Failed to concatenate the motion node input batches, cause: %s", error->message);
-
-	garrow_list_free_ptr(&rbs);
-	ExecStoreBatch(*slot, concatenateBatch);
-}
 static TupleTableSlot *
 execVecMotionSender(MotionState *node)
 {
@@ -1650,7 +1614,6 @@ execVecMotionSender(MotionState *node)
 	PlanState  *outerNode;
 	Motion	   *motion = (Motion *) node->ps.plan;
 	bool		done = false;
-	bool IsNull = false;
 	int pre_max_batch_size;
 	pre_max_batch_size = max_batch_size;
 #ifdef MEASURE_MOTION_TIME
@@ -1677,15 +1640,8 @@ execVecMotionSender(MotionState *node)
 			outerTupleSlot = ExecProcNode(outerNode);
 			max_batch_size = pre_max_batch_size;
 		}
-		else if (true)
-			outerTupleSlot = ExecProcNode(outerNode);
 		else
-		{
-			if (likely(!IsNull))
-				ConcatenateDistributeBatches(&outerTupleSlot, outerNode, &IsNull);
-			else
-				outerTupleSlot = NULL;
-		}
+			outerTupleSlot = ExecProcNode(outerNode);
 #ifdef MEASURE_MOTION_TIME
 		gettimeofday(&time2, NULL);
 

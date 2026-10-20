@@ -162,6 +162,8 @@ typedef struct VecResultState
 	ResultState base;
 	VecExecuteState estate;
 	void *hash_projector;
+	/* result schema with numeric128 hash keys retyped for the projector */
+	void *hash_schema;
 } VecResultState;
 
 typedef struct VecSubqueryScanState

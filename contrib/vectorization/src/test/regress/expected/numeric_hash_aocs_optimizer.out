@@ -1,0 +1,464 @@
+--
+-- Vectorized hashing of numeric distribution keys must match the row
+-- executor's cdbhash, which uses PostgreSQL's hash_numeric(): a numeric
+-- value's hash ignores its scale, so 2.50 and 2.5000 land on one segment,
+-- the segment a table distributed on the column stores the row on.
+--
+SET default_table_access_method=ao_column;
+CREATE TABLE numhash_src (a int, n52 numeric(5,2), n124 numeric(12,4))
+	DISTRIBUTED BY (a);
+INSERT INTO numhash_src
+	SELECT g, g * 1.25, g * 1.23456 FROM generate_series(1, 20) g;
+INSERT INTO numhash_src VALUES (21, 0, 0), (22, -1.5, 0.00005), (23, NULL, NULL);
+-- Distributed on the numeric column; loaded through a row-mode INSERT, so
+-- rows sit where cdbhash put them.
+CREATE TABLE numhash_dk (k numeric(12,4), v int) DISTRIBUTED BY (k);
+INSERT INTO numhash_dk SELECT g * 1.23456, g FROM generate_series(1, 20) g;
+CREATE TABLE numhash_rep (k numeric(5,2), v int) DISTRIBUTED REPLICATED;
+INSERT INTO numhash_rep SELECT g * 1.25, g FROM generate_series(1, 20) g;
+ANALYZE numhash_src;
+ANALYZE numhash_dk;
+ANALYZE numhash_rep;
+-- Only one side is redistributed: the vectorized motion must send each row
+-- to the segment cdbhash stored its match on.  Expect 20.
+EXPLAIN (COSTS OFF)
+SELECT count(*) FROM numhash_src s JOIN numhash_dk d ON s.n124 = d.k;
+                                    QUERY PLAN                                    
+----------------------------------------------------------------------------------
+ Vec Finalize Vec Aggregate
+   ->  Vec Gather Motion 3:1  (slice1; segments: 3)
+         ->  Vec Partial Vec Aggregate
+               ->  Vec Hash Join
+                     Hash Cond: (d.k = s.n124)
+                     ->  Vec Seq Scan on numhash_dk d
+                     ->  Vec Hash
+                           ->  Vec Redistribute Motion 3:3  (slice2; segments: 3)
+                                 Hash Key: s.n124
+                                 ->  Vec Seq Scan on numhash_src s
+ Optimizer: GPORCA
+(11 rows)
+
+SELECT count(*) FROM numhash_src s JOIN numhash_dk d ON s.n124 = d.k;
+ count 
+-------
+    20
+(1 row)
+
+-- CREATE TABLE AS through a vectorized motion must store each row where a
+-- row-mode lookup on the distribution key will look for it.
+EXPLAIN (COSTS OFF)
+CREATE TABLE numhash_ctas AS SELECT n124 AS k, a FROM numhash_src DISTRIBUTED BY (k);
+                        QUERY PLAN                        
+----------------------------------------------------------
+ Vec Result
+   ->  Vec Redistribute Motion 3:3  (slice1; segments: 3)
+         Hash Key: n124
+         ->  Vec Seq Scan on numhash_src
+ Optimizer: GPORCA
+(5 rows)
+
+CREATE TABLE numhash_ctas AS SELECT n124 AS k, a FROM numhash_src DISTRIBUTED BY (k);
+SET vector.enable_vectorization = off;
+CREATE TABLE numhash_ctas_row AS SELECT n124 AS k, a FROM numhash_src DISTRIBUTED BY (k);
+-- Same segment for every row, and every key found by an equality lookup.
+SELECT count(*) AS rows, count(*) FILTER (WHERE v.gp_segment_id <> r.gp_segment_id) AS misplaced
+FROM numhash_ctas v JOIN numhash_ctas_row r ON v.a = r.a;
+ rows | misplaced 
+------+-----------
+   23 |         0
+(1 row)
+
+SELECT count(*) FROM numhash_ctas WHERE k IN (SELECT k FROM numhash_ctas_row);
+ count 
+-------
+    22
+(1 row)
+
+RESET vector.enable_vectorization;
+-- The hash filter that picks one replica of a replicated table hashes the
+-- numeric join key too.  Expect 20.
+EXPLAIN (COSTS OFF)
+SELECT count(*) FROM numhash_src s JOIN numhash_rep r ON s.n52 = r.k;
+                                    QUERY PLAN                                    
+----------------------------------------------------------------------------------
+ Vec Finalize Vec Aggregate
+   ->  Vec Gather Motion 3:1  (slice1; segments: 3)
+         ->  Vec Partial Vec Aggregate
+               ->  Vec Hash Join
+                     Hash Cond: (r.k = s.n52)
+                     ->  Vec Result
+                           ->  Vec Seq Scan on numhash_rep r
+                     ->  Vec Hash
+                           ->  Vec Redistribute Motion 3:3  (slice2; segments: 3)
+                                 Hash Key: s.n52
+                                 ->  Vec Seq Scan on numhash_src s
+ Optimizer: GPORCA
+(12 rows)
+
+SELECT count(*) FROM numhash_src s JOIN numhash_rep r ON s.n52 = r.k;
+ count 
+-------
+    20
+(1 row)
+
+DROP TABLE numhash_src, numhash_dk, numhash_rep, numhash_ctas, numhash_ctas_row;
+--
+-- A numeric128 value also carries its own scale, so 2.50 and 2.5000 are
+-- different bytes but equal numerics.  Hash joins, GROUP BY, DISTINCT and
+-- hash window partitions must treat them as one key, and still emit each
+-- value as it was stored.
+--
+CREATE TABLE numhash_s2 (a int, x numeric(5,2)) DISTRIBUTED BY (a);
+CREATE TABLE numhash_s4 (a int, x numeric(10,4)) DISTRIBUTED BY (a);
+-- 0, 1.25, 2.50, 3.75 and 5.00, four rows each, at scale 2 and at scale 4
+INSERT INTO numhash_s2 SELECT g, (g % 5) * 1.25 FROM generate_series(1, 20) g;
+INSERT INTO numhash_s4 SELECT g, (g % 5) * 1.25 FROM generate_series(1, 20) g;
+INSERT INTO numhash_s2 VALUES (21, NULL);
+INSERT INTO numhash_s4 VALUES (21, NULL);
+ANALYZE numhash_s2;
+ANALYZE numhash_s4;
+CREATE VIEW numhash_u AS
+	SELECT a, x FROM numhash_s2 UNION ALL SELECT a, x FROM numhash_s4;
+-- Join keys of different scales.  Expect 80.
+EXPLAIN (COSTS OFF)
+SELECT count(*) FROM numhash_s2 s JOIN numhash_s4 f ON s.x = f.x;
+                                    QUERY PLAN                                    
+----------------------------------------------------------------------------------
+ Vec Finalize Vec Aggregate
+   ->  Vec Gather Motion 3:1  (slice1; segments: 3)
+         ->  Vec Partial Vec Aggregate
+               ->  Vec Hash Join
+                     Hash Cond: (s.x = f.x)
+                     ->  Vec Redistribute Motion 3:3  (slice2; segments: 3)
+                           Hash Key: s.x
+                           ->  Vec Seq Scan on numhash_s2 s
+                     ->  Vec Hash
+                           ->  Vec Redistribute Motion 3:3  (slice3; segments: 3)
+                                 Hash Key: f.x
+                                 ->  Vec Seq Scan on numhash_s4 f
+ Optimizer: GPORCA
+(13 rows)
+
+SELECT count(*) FROM numhash_s2 s JOIN numhash_s4 f ON s.x = f.x;
+ count 
+-------
+    80
+(1 row)
+
+-- Each side keeps its own representation.
+SELECT s.x AS x2, f.x AS x4, count(*)
+FROM numhash_s2 s JOIN numhash_s4 f ON s.x = f.x GROUP BY 1, 2 ORDER BY 1;
+  x2  |   x4   | count 
+------+--------+-------
+ 0.00 | 0.0000 |    16
+ 1.25 | 1.2500 |    16
+ 2.50 | 2.5000 |    16
+ 3.75 | 3.7500 |    16
+ 5.00 | 5.0000 |    16
+(5 rows)
+
+SELECT s.a, s.x AS x2, f.x AS x4
+FROM numhash_s2 s LEFT JOIN numhash_s4 f ON s.x = f.x AND f.a < 5
+WHERE s.a IN (1, 4, 5, 21) ORDER BY s.a;
+ a  |  x2  |   x4   
+----+------+--------
+  1 | 1.25 | 1.2500
+  4 | 5.00 | 5.0000
+  5 | 0.00 |       
+ 21 |      |       
+(4 rows)
+
+-- Expect 20 and 8.
+SELECT count(*) FROM numhash_s2 WHERE x IN (SELECT x FROM numhash_s4);
+ count 
+-------
+    20
+(1 row)
+
+SELECT count(*) FROM numhash_s2 WHERE x NOT IN (SELECT x FROM numhash_s4 WHERE x > 2);
+ count 
+-------
+     8
+(1 row)
+
+-- Keys without a fixed scale: an expression, and a UNION ALL whose
+-- branches have different scales.  Expect 48 and 160.
+SELECT count(*) FROM numhash_s2 s JOIN numhash_s4 f ON s.x * 2 = f.x;
+ count 
+-------
+    48
+(1 row)
+
+SELECT count(*) FROM numhash_u u JOIN numhash_s4 f ON u.x = f.x;
+ count 
+-------
+   160
+(1 row)
+
+-- GROUP BY, DISTINCT and count(DISTINCT) on keys without a fixed scale:
+-- five groups of eight plus the NULL group.  Which representation a mixed
+-- group shows is not fixed, so compare them as float8.
+EXPLAIN (COSTS OFF)
+SELECT x, count(*) FROM numhash_u GROUP BY x;
+                                 QUERY PLAN                                 
+----------------------------------------------------------------------------
+ Vec Gather Motion 3:1  (slice1; segments: 3)
+   ->  Vec GroupAggregate
+         Group Key: numhash_s2.x
+         ->  Vec Sort
+               Sort Key: numhash_s2.x
+               ->  Vec Append
+                     ->  Vec Redistribute Motion 3:3  (slice2; segments: 3)
+                           Hash Key: numhash_s2.x
+                           ->  Vec Seq Scan on numhash_s2
+                     ->  Vec Redistribute Motion 3:3  (slice3; segments: 3)
+                           Hash Key: numhash_s4.x
+                           ->  Vec Seq Scan on numhash_s4
+ Optimizer: GPORCA
+(13 rows)
+
+SELECT x::float8, count(*) FROM numhash_u GROUP BY x ORDER BY 1;
+  x   | count 
+------+-------
+    0 |     8
+ 1.25 |     8
+  2.5 |     8
+ 3.75 |     8
+    5 |     8
+      |     2
+(6 rows)
+
+SELECT x::float8, count(*), sum(a) FROM numhash_u GROUP BY x HAVING count(*) > 1 ORDER BY 1;
+  x   | count | sum 
+------+-------+-----
+    0 |     8 | 100
+ 1.25 |     8 |  68
+  2.5 |     8 |  76
+ 3.75 |     8 |  84
+    5 |     8 |  92
+      |     2 |  42
+(6 rows)
+
+SELECT count(*) FROM (SELECT DISTINCT x FROM numhash_u) d;
+ count 
+-------
+     6
+(1 row)
+
+SELECT count(DISTINCT x) FROM numhash_u;
+ count 
+-------
+     5
+(1 row)
+
+-- Groups of one scale keep their representation (x * 1 has no typmod).
+SELECT x, count(*)
+FROM (SELECT x FROM numhash_s4 UNION ALL SELECT x * 1 FROM numhash_s4) u
+GROUP BY x ORDER BY 1;
+   x    | count 
+--------+-------
+ 0.0000 |     8
+ 1.2500 |     8
+ 2.5000 |     8
+ 3.7500 |     8
+ 5.0000 |     8
+        |     2
+(6 rows)
+
+-- Window partitions on keys without a fixed scale: 40 rows in partitions
+-- of eight, two NULLs.
+SELECT c, count(*) FROM (SELECT count(*) OVER (PARTITION BY x) AS c FROM numhash_u) w
+GROUP BY c ORDER BY c;
+ c | count 
+---+-------
+ 2 |     2
+ 8 |    40
+(2 rows)
+
+SELECT a, x, count(*) OVER (PARTITION BY x) FROM numhash_u WHERE a IN (1, 21)
+ORDER BY a, x::text;
+ a  |   x    | count 
+----+--------+-------
+  1 |   1.25 |     2
+  1 | 1.2500 |     2
+ 21 |        |     2
+ 21 |        |     2
+(4 rows)
+
+-- A cast to numeric(p,s) raises overflow like the row executor.
+SELECT a, (x * 10)::numeric(4,2) FROM numhash_s4 WHERE a = 3;
+ a | numeric 
+---+---------
+ 3 |   37.50
+(1 row)
+
+SELECT a, (x * 100)::numeric(4,2) FROM numhash_s4 WHERE a = 3;
+ERROR:  Read error: [record-batch-reader][read-next]: Invalid: numeric field overflow: A field with precision 4, scale 2 must round to an absolute value less than 10^2. (execMain.c:3403)  (seg0 slice1 172.18.0.2:7002 pid=2727330) (execMain.c:3403)
+SELECT a, (x / 10)::numeric(2,2) FROM numhash_s4 WHERE a = 4;
+ a | numeric 
+---+---------
+ 4 |    0.50
+(1 row)
+
+SELECT a, x::numeric(2,2) FROM numhash_s4 WHERE a = 4;
+ERROR:  Read error: [record-batch-reader][read-next]: Invalid: numeric field overflow: A field with precision 2, scale 2 must round to an absolute value less than 1. (execMain.c:3403)  (seg0 slice1 172.18.0.2:7002 pid=2727330) (execMain.c:3403)
+DROP VIEW numhash_u;
+DROP TABLE numhash_s2, numhash_s4;
+--
+-- Values the key rewrites above must not mangle: NaN and Infinity, keys too
+-- wide to upscale, and numeric columns without a typmod.
+--
+CREATE TABLE numhash_sp2 (a int, x numeric(5,2)) DISTRIBUTED BY (a);
+CREATE TABLE numhash_sp4 (a int, x numeric(10,4)) DISTRIBUTED BY (a);
+INSERT INTO numhash_sp2 VALUES (1, 1.25), (2, 'NaN'), (3, NULL), (4, 2.5);
+INSERT INTO numhash_sp4 VALUES (1, 1.25), (2, 'NaN'), (3, NULL), (4, 7);
+ANALYZE numhash_sp2;
+ANALYZE numhash_sp4;
+-- NaN equals NaN in PostgreSQL.  Joining scale 2 to scale 4 upscales the
+-- scale-2 keys, NaN included.  Expect a = 1 and a = 2.
+EXPLAIN (COSTS OFF)
+SELECT s.a, s.x, f.x FROM numhash_sp2 s JOIN numhash_sp4 f ON s.x = f.x;
+                              QUERY PLAN                              
+----------------------------------------------------------------------
+ Vec Gather Motion 3:1  (slice1; segments: 3)
+   ->  Vec Hash Join
+         Hash Cond: (s.x = f.x)
+         ->  Vec Redistribute Motion 3:3  (slice2; segments: 3)
+               Hash Key: s.x
+               ->  Vec Seq Scan on numhash_sp2 s
+         ->  Vec Hash
+               ->  Vec Redistribute Motion 3:3  (slice3; segments: 3)
+                     Hash Key: f.x
+                     ->  Vec Seq Scan on numhash_sp4 f
+ Optimizer: GPORCA
+(11 rows)
+
+SELECT s.a, s.x, f.x FROM numhash_sp2 s JOIN numhash_sp4 f ON s.x = f.x ORDER BY 1;
+ a |  x   |   x    
+---+------+--------
+ 1 | 1.25 | 1.2500
+ 2 |  NaN |    NaN
+(2 rows)
+
+-- Only the scale-2 side is redistributed; the other is distributed on a
+-- numeric(10,4) key and was loaded in row mode.  NaN must hash to the
+-- segment cdbhash stored it on.  Expect a = 1 and a = 2.
+CREATE TABLE numhash_sp_dk (x numeric(10,4)) DISTRIBUTED BY (x);
+INSERT INTO numhash_sp_dk VALUES (1.25), ('NaN'), (7);
+ANALYZE numhash_sp_dk;
+EXPLAIN (COSTS OFF)
+SELECT s.a, s.x, d.x FROM numhash_sp2 s JOIN numhash_sp_dk d ON s.x = d.x;
+                           QUERY PLAN                           
+----------------------------------------------------------------
+ Vec Gather Motion 3:1  (slice1; segments: 3)
+   ->  Vec Hash Join
+         Hash Cond: (s.x = d.x)
+         ->  Vec Redistribute Motion 3:3  (slice2; segments: 3)
+               Hash Key: s.x
+               ->  Vec Seq Scan on numhash_sp2 s
+         ->  Vec Hash
+               ->  Vec Seq Scan on numhash_sp_dk d
+ Optimizer: GPORCA
+(9 rows)
+
+SELECT s.a, s.x, d.x FROM numhash_sp2 s JOIN numhash_sp_dk d ON s.x = d.x ORDER BY 1;
+ a |  x   |   x    
+---+------+--------
+ 1 | 1.25 | 1.2500
+ 2 |  NaN |    NaN
+(2 rows)
+
+-- Upscaling 2 to 6 digits would need 37 digits, more than numeric128 holds,
+-- so these keys are trimmed instead.  Expect 2.
+CREATE TABLE numhash_w2 (a int, x numeric(33,2)) DISTRIBUTED BY (a);
+CREATE TABLE numhash_w6 (a int, x numeric(35,6)) DISTRIBUTED BY (a);
+INSERT INTO numhash_w2 VALUES (1, 12345678901234567890123456789.25), (2, 0.5);
+INSERT INTO numhash_w6 VALUES (1, 12345678901234567890123456789.250000), (2, 0.5),
+	(3, 1234567890123456789012345678.901250);
+ANALYZE numhash_w2;
+ANALYZE numhash_w6;
+EXPLAIN (COSTS OFF)
+SELECT count(*) FROM numhash_w2 s JOIN numhash_w6 f ON s.x = f.x;
+                                 QUERY PLAN                                 
+----------------------------------------------------------------------------
+ Vec Aggregate
+   ->  Vec Gather Motion 3:1  (slice1; segments: 3)
+         ->  Vec Hash Join
+               Hash Cond: (f.x = s.x)
+               ->  Vec Redistribute Motion 3:3  (slice2; segments: 3)
+                     Hash Key: f.x
+                     ->  Vec Seq Scan on numhash_w6 f
+               ->  Vec Hash
+                     ->  Vec Redistribute Motion 3:3  (slice3; segments: 3)
+                           Hash Key: s.x
+                           ->  Vec Seq Scan on numhash_w2 s
+ Optimizer: GPORCA
+(12 rows)
+
+SELECT s.a, s.x, f.x FROM numhash_w2 s JOIN numhash_w6 f ON s.x = f.x ORDER BY 1;
+ a |                x                 |                  x                   
+---+----------------------------------+--------------------------------------
+ 1 | 12345678901234567890123456789.25 | 12345678901234567890123456789.250000
+ 2 |                             0.50 |                             0.500000
+(2 rows)
+
+-- numeric without a typmod, distributed on the column, with NaN and both
+-- infinities.  The redistributed side must hash them as cdbhash does.
+-- Expect 13: nine pairs of 2.5's, and one each for NaN, the two
+-- infinities and -1.5.  A numeric column without a typmod is not
+-- vectorized yet, so today this runs in row mode; it is here so that it
+-- starts checking the vectorized hash once it is.
+CREATE TABLE numhash_bare_dk (k numeric, v int) DISTRIBUTED BY (k);
+CREATE TABLE numhash_bare_src (k numeric, v int) DISTRIBUTED BY (v);
+INSERT INTO numhash_bare_dk VALUES (2.5, 1), (2.50, 2), (2.5000, 3), ('NaN', 4),
+	('Infinity', 5), ('-Infinity', 6), (-1.5, 7), (NULL, 8);
+INSERT INTO numhash_bare_src SELECT * FROM numhash_bare_dk;
+ANALYZE numhash_bare_dk;
+ANALYZE numhash_bare_src;
+EXPLAIN (COSTS OFF)
+SELECT count(*) FROM numhash_bare_src s JOIN numhash_bare_dk d ON s.k = d.k;
+                               QUERY PLAN                               
+------------------------------------------------------------------------
+ Finalize Aggregate
+   ->  Gather Motion 3:1  (slice1; segments: 3)
+         ->  Partial Aggregate
+               ->  Hash Join
+                     Hash Cond: (s.k = d.k)
+                     ->  Redistribute Motion 3:3  (slice2; segments: 3)
+                           Hash Key: s.k
+                           ->  Seq Scan on numhash_bare_src s
+                     ->  Hash
+                           ->  Seq Scan on numhash_bare_dk d
+ Optimizer: GPORCA
+(11 rows)
+
+SELECT count(*) FROM numhash_bare_src s JOIN numhash_bare_dk d ON s.k = d.k;
+ count 
+-------
+    13
+(1 row)
+
+SELECT s.k::text, count(*) FROM numhash_bare_src s JOIN numhash_bare_dk d ON s.k = d.k
+GROUP BY 1 ORDER BY 1;
+     k     | count 
+-----------+-------
+ -1.5      |     1
+ 2.5       |     3
+ 2.50      |     3
+ 2.5000    |     3
+ Infinity  |     1
+ -Infinity |     1
+ NaN       |     1
+(7 rows)
+
+-- A cast to numeric(p,s) with s < 0 rounds to the left of the decimal
+-- point; it is left to the row executor and gives PostgreSQL's answer.
+SELECT a, (x * 1000)::numeric(6,-2) FROM numhash_sp4 WHERE a IN (1, 4) ORDER BY a;
+ a | numeric 
+---+---------
+ 1 |    1300
+ 4 |    7000
+(2 rows)
+
+DROP TABLE numhash_sp2, numhash_sp4, numhash_sp_dk, numhash_w2, numhash_w6,
+	numhash_bare_dk, numhash_bare_src;

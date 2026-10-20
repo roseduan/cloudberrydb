@@ -408,13 +408,16 @@ extern GGandivaNode*
 make_xor_fnode(GGandivaNode *node1, GGandivaNode *node2);
 
 extern GGandivaNode*
-make_hash32_fnode(GGandivaNode *node);
+make_hash32_fnode(GGandivaNode *node, bool numeric);
 
 extern GGandivaNode*
-make_cdbhash32_fnode(GGandivaNode *node_first, GGandivaNode *node_second);
+make_cdbhash32_fnode(GGandivaNode *node_first, GGandivaNode *node_second, bool numeric);
+
+extern GArrowSchema *
+rewrite_numeric_hash_keys_schema(GArrowSchema *schema, List *hash_keys);
 
 extern GGandivaNode*
-make_result_cols_hash_fnode(GArrowSchema *schema, List *hash_keys);
+make_result_cols_hash_fnode(GArrowSchema *schema, GArrowSchema *hash_schema, List *hash_keys);
 
 
 extern Oid STDDEVOID;
