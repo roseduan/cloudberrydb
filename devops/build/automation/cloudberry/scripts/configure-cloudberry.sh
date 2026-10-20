@@ -34,7 +34,6 @@
 #   - Oracle Compatibility (orafce)
 #   - ORCA Query Optimizer
 #   - PAX Access Method
-#   - PXF External Table Access
 #   - Test Automation Support (tap-tests)
 #
 # System Integration:
@@ -159,7 +158,6 @@ execute_cmd ./configure --prefix=${BUILD_DESTINATION} \
             --enable-orafce \
             --enable-orca \
             --enable-pax \
-            --disable-pxf \
             --enable-tap-tests \
             ${CONFIGURE_DEBUG_OPTS} \
             --with-diskquota \
