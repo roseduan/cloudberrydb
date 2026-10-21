@@ -66,23 +66,32 @@ ExecVecSlotToLog(TupleTableSlot *slot, const char *label)
 
 		if (slot->tts_values[i])
 		{
+			gchar	   *str;
+
 			nrows = garrow_array_get_length(
 					(GArrowArray *)slot->tts_values[i]);
+			str = garrow_array_to_string((GArrowArray *)slot->tts_values[i],
+										 &error);
 			elog(INFO, "Array[%d] of row %ld: %s\n", i, nrows,
-				garrow_array_to_string(
-						(GArrowArray *)slot->tts_values[i], &error));
+				 str ? str : error->message);
+			g_free(str);
+			g_clear_error(&error);
 		}
 		else
 			elog(INFO, "Array[%d]: NULL", i);
 	}
 	if (vslot->tts_recordbatch)
 	{
+		gchar	   *str;
+
 		elog(INFO, "Batch Schema: %s",
 			garrow_schema_to_string(garrow_record_batch_get_schema(
 					GARROW_RECORD_BATCH(vslot->tts_recordbatch))));
-		elog(INFO, "Batch: %s",
-			garrow_record_batch_to_string(
-					GARROW_RECORD_BATCH(vslot->tts_recordbatch), &error));
+		str = garrow_record_batch_to_string(
+					GARROW_RECORD_BATCH(vslot->tts_recordbatch), &error);
+		elog(INFO, "Batch: %s", str ? str : error->message);
+		g_free(str);
+		g_clear_error(&error);
 		elog(INFO, "NumRows: %d", GetNumRows(slot));
 	}
 	else

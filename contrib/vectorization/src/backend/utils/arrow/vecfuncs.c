@@ -359,9 +359,15 @@ ArrowScalarNew(GArrowType type, Datum datum, bool is_null, Oid pg_type, int32 ty
 						else
 							garrow_int8_array_builder_append_value(builder,
 																   DatumGetInt8(value), &error);
+						if (error)
+							elog(ERROR, "failed to build a constant list array: %s",
+								 error->message);
 					}
 					array = garrow_array_builder_finish(
 						GARROW_ARRAY_BUILDER(builder), &error);
+					if (error)
+						elog(ERROR, "failed to build a constant list array: %s",
+							 error->message);
 					break;
 				}
 				case GARROW_TYPE_INT16:
@@ -376,9 +382,15 @@ ArrowScalarNew(GArrowType type, Datum datum, bool is_null, Oid pg_type, int32 ty
 						else
 							garrow_int16_array_builder_append_value(builder,
 																	DatumGetInt16(value), &error);
+						if (error)
+							elog(ERROR, "failed to build a constant list array: %s",
+								 error->message);
 					}
 					array = garrow_array_builder_finish(
 						GARROW_ARRAY_BUILDER(builder), &error);
+					if (error)
+						elog(ERROR, "failed to build a constant list array: %s",
+							 error->message);
 					break;
 				}
 				case GARROW_TYPE_INT32:
@@ -393,9 +405,15 @@ ArrowScalarNew(GArrowType type, Datum datum, bool is_null, Oid pg_type, int32 ty
 						else
 							garrow_int32_array_builder_append_value(builder,
 																	DatumGetInt32(value), &error);
+						if (error)
+							elog(ERROR, "failed to build a constant list array: %s",
+								 error->message);
 					}
 					array = garrow_array_builder_finish(
 						GARROW_ARRAY_BUILDER(builder), &error);
+					if (error)
+						elog(ERROR, "failed to build a constant list array: %s",
+							 error->message);
 					break;
 				}
 				case GARROW_TYPE_INT64:
@@ -410,9 +428,15 @@ ArrowScalarNew(GArrowType type, Datum datum, bool is_null, Oid pg_type, int32 ty
 						else
 							garrow_int64_array_builder_append_value(builder,
 																	DatumGetInt64(value), &error);
+						if (error)
+							elog(ERROR, "failed to build a constant list array: %s",
+								 error->message);
 					}
 					array = garrow_array_builder_finish(
 						GARROW_ARRAY_BUILDER(builder), &error);
+					if (error)
+						elog(ERROR, "failed to build a constant list array: %s",
+							 error->message);
 					break;
 				}
 				case GARROW_TYPE_FLOAT:
@@ -427,9 +451,15 @@ ArrowScalarNew(GArrowType type, Datum datum, bool is_null, Oid pg_type, int32 ty
 						else
 							garrow_float_array_builder_append_value(builder,
 																	DatumGetFloat4(value), &error);
+						if (error)
+							elog(ERROR, "failed to build a constant list array: %s",
+								 error->message);
 					}
 					array = garrow_array_builder_finish(
 						GARROW_ARRAY_BUILDER(builder), &error);
+					if (error)
+						elog(ERROR, "failed to build a constant list array: %s",
+							 error->message);
 					break;
 				}
 				case GARROW_TYPE_DOUBLE:
@@ -444,9 +474,15 @@ ArrowScalarNew(GArrowType type, Datum datum, bool is_null, Oid pg_type, int32 ty
 						else
 							garrow_double_array_builder_append_value(builder,
 																	 DatumGetFloat8(value), &error);
+						if (error)
+							elog(ERROR, "failed to build a constant list array: %s",
+								 error->message);
 					}
 					array = garrow_array_builder_finish(
 						GARROW_ARRAY_BUILDER(builder), &error);
+					if (error)
+						elog(ERROR, "failed to build a constant list array: %s",
+							 error->message);
 					break;
 				}
 				case GARROW_TYPE_STRING:
@@ -464,9 +500,15 @@ ArrowScalarNew(GArrowType type, Datum datum, bool is_null, Oid pg_type, int32 ty
 							char *str = text_to_cstring(s);
 							garrow_string_array_builder_append_string(builder, str, &error);
 						}
+						if (error)
+							elog(ERROR, "failed to build a constant list array: %s",
+								 error->message);
 					}
 					array = garrow_array_builder_finish(
 						GARROW_ARRAY_BUILDER(builder), &error);
+					if (error)
+						elog(ERROR, "failed to build a constant list array: %s",
+							 error->message);
 					break;
 				}
 				case GARROW_TYPE_DATE32:
@@ -480,9 +522,15 @@ ArrowScalarNew(GArrowType type, Datum datum, bool is_null, Oid pg_type, int32 ty
 						else
 							garrow_date32_array_builder_append_value(builder,
 																	 DatumGetInt32(value), &error);
+						if (error)
+							elog(ERROR, "failed to build a constant list array: %s",
+								 error->message);
 					}
 					array = garrow_array_builder_finish(
 						GARROW_ARRAY_BUILDER(builder), &error);
+					if (error)
+						elog(ERROR, "failed to build a constant list array: %s",
+							 error->message);
 					break;
 				}
 				default:

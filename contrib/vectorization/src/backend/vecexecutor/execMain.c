@@ -49,8 +49,13 @@
 #define VEC_SPILL_FILE_PREFIX "vec_spill"
 #include "miscadmin.h"
 #include "pgstat.h"
+#include "libpq/libpq-be.h"
+#include "port/atomics.h"
+#include "tcop/tcopprot.h"
 
 #include <dlfcn.h>
+#include <poll.h>
+#include <time.h>
 
 /* Resolve PaxCanFastFilterC from pax.so at runtime via dlsym to avoid
  * a hard link-time dependency on the pax_storage library. */
@@ -3461,26 +3466,224 @@ FreeVecExecuteState(VecExecuteState *estate)
 static __thread bool vec_is_plan_driver_thread = false;
 
 /*
- * VecShareLockWaitTick
+ * VecHostCancelPending
  *
- * Installed into Arrow as the callback that decides whether a shared-file
- * store should keep waiting for the writer slice's lock.  The wait used to be
- * a bare F_SETLKW inside garrow_execute_plan_start(): a writer that never
- * finished left this backend parked in the kernel, deaf to statement_timeout
- * and pg_cancel_backend, with the dispatcher stuck in checkDispatchResult().
+ * True when a pending interrupt is one that will make CHECK_FOR_INTERRUPTS()
+ * fail the query: a cancel (Ctrl+C, statement_timeout, pg_cancel_backend), a
+ * termination request, or a client known to be gone.  InterruptPending alone
+ * is not enough -- sinval catchup, ProcSignalBarrier and the like set it too,
+ * and must not cost the query anything.  QueryFinishPending is deliberately
+ * left out: on a QE it means the QD has seen enough rows, which ends the
+ * slice normally.
  *
- * This runs on whichever thread is waiting -- with push_pipeline that can be
- * an Arrow thread-pool worker, not the plan driver -- so it must stay safe off
- * the main thread.  Reading InterruptPending is: it is a volatile
- * sig_atomic_t, and reporting "stop waiting" by returning false does not
- * longjmp out of C++.  Arrow turns the false into a Cancelled status,
- * ExecuteVecPlan raises it as an ordinary error on the driver thread, and
- * CHECK_FOR_INTERRUPTS() then unwinds the usual way with the real reason.
+ * Only reads volatile sig_atomic_t flags, so any thread may call it.
+ */
+static inline bool
+VecHostCancelPending(void)
+{
+	return QueryCancelPending || ProcDiePending || ClientConnectionLost;
+}
+
+/*
+ * VecClientConnectionGone
+ *
+ * The probe client_connection_check_interval asks for, done from inside Arrow.
+ *
+ * Its timer only sets CheckClientConnectionPending; the socket is looked at
+ * later, by pq_check_connection() in ProcessInterrupts().  A plan computing
+ * inside Arrow never gets there, so a client that went away stayed unnoticed
+ * until the computation ended -- possibly hours, with the whole gang waiting.
+ * Look at the socket here instead, while the probe is pending.
+ *
+ * pq_check_connection() cannot be used: it edits the shared FeBeWaitSet and
+ * may only run on the backend's main thread, while this may run on an Arrow
+ * worker.  A zero-timeout poll() for POLLRDHUP asks the kernel the same
+ * question (it is what WL_SOCKET_CLOSED maps to on Linux) and is safe from any
+ * thread.  On a lost connection, set ClientConnectionLost exactly as
+ * ProcessInterrupts() would; CHECK_FOR_INTERRUPTS() then raises the FATAL.
+ * While the connection is fine the flag is left alone, so ProcessInterrupts()
+ * still re-arms the timer the next time it runs.
+ *
+ * Until then the flag stays set, and Arrow calls this at every batch it hands
+ * on -- thousands of times a second in a busy join.  Probe at most once per
+ * client_connection_check_interval, the cadence PostgreSQL itself keeps.  The
+ * timestamp is shared by all threads without a lock; a race only costs one
+ * extra poll().
+ */
+static volatile int64 vec_last_client_probe_ms = 0;
+
+/*
+ * Whether the kernel reports that the peer closed the client socket.  Safe
+ * from any thread: a zero-timeout poll() on the socket, nothing else.
+ */
+static bool
+VecClientSocketClosed(void)
+{
+#ifdef POLLRDHUP
+	struct pollfd pfd;
+
+	if (MyProcPort == NULL || MyProcPort->sock == PGINVALID_SOCKET)
+		return false;
+
+	pfd.fd = MyProcPort->sock;
+	pfd.events = POLLRDHUP;
+	pfd.revents = 0;
+	return poll(&pfd, 1, 0) > 0 &&
+		(pfd.revents & (POLLRDHUP | POLLHUP | POLLERR | POLLNVAL)) != 0;
+#else
+	return false;
+#endif
+}
+
+static bool
+VecClientConnectionGone(void)
+{
+#ifdef POLLRDHUP
+	struct timespec ts;
+	int64		now_ms;
+
+	if (!CheckClientConnectionPending || client_connection_check_interval <= 0)
+		return false;
+
+#ifdef CLOCK_MONOTONIC_COARSE
+	clock_gettime(CLOCK_MONOTONIC_COARSE, &ts);
+#else
+	clock_gettime(CLOCK_MONOTONIC, &ts);
+#endif
+	now_ms = (int64) ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
+	if (now_ms - vec_last_client_probe_ms < client_connection_check_interval)
+		return false;
+	vec_last_client_probe_ms = now_ms;
+
+	if (VecClientSocketClosed())
+	{
+		/*
+		 * Unlike a signal handler, this may run on another thread than the
+		 * one that reads the flags, so make ClientConnectionLost visible no
+		 * later than InterruptPending: ProcessInterrupts() clears
+		 * InterruptPending before it looks at ClientConnectionLost.  The
+		 * reading side is covered by VecHostCancelCheckpoint().
+		 */
+		ClientConnectionLost = true;
+		pg_write_barrier();
+		InterruptPending = true;
+		return true;
+	}
+#endif
+	return false;
+}
+
+/*
+ * Nesting depth of VecPlanTeardownBegin() / VecPlanTeardownEnd().
+ *
+ * ExecutorRunWrapper() tears the vectorized plan tree down after an error was
+ * raised -- often by CHECK_FOR_INTERRUPTS() or a Motion receiver deep inside an
+ * Arrow callback, longjmp'ing straight over the Arrow frames.  Arrow never saw
+ * that error, so the plan's thread-pool workers carry on with the tasks
+ * already queued.  Nor can they learn it from the cancel flags: by the time
+ * the error is raised ProcessInterrupts() has already cleared
+ * QueryCancelPending.  Only the StopProducing() in the plan's destructor stops
+ * them, and work in flight -- a join probe, a hash table build task -- does not
+ * look at that; the destructor then waits for it, for at most 10 seconds.
+ *
+ * While this is non-zero, VecHostCancelTick() reports a cancel, so those
+ * workers stop at their next batch handoff, inner join loop or scheduled task,
+ * as they would on a real cancel, and the destructor's wait ends quickly.
+ *
+ * Written only by the backend's main thread, read by any thread.
+ */
+static volatile sig_atomic_t vec_plan_teardown_depth = 0;
+
+void
+VecPlanTeardownBegin(void)
+{
+	vec_plan_teardown_depth = vec_plan_teardown_depth + 1;
+}
+
+void
+VecPlanTeardownEnd(void)
+{
+	Assert(vec_plan_teardown_depth > 0);
+	vec_plan_teardown_depth = vec_plan_teardown_depth - 1;
+}
+
+/*
+ * VecHostCancelTick
+ *
+ * Installed into Arrow as its host-cancel callback (HostCancelCheck()).  Arrow
+ * asks it in its source nodes before each batch they produce, in its sink
+ * nodes on each batch they receive, inside long join loops, before each
+ * scheduled task, and while it waits for a shared-file lock or a paused scan
+ * (see ExecPlan::CheckHostCancel()).  Returning FALSE makes Arrow stop the plan
+ * with a Cancelled status through ordinary C++ returns -- nothing longjmps out
+ * of Arrow -- and ExecuteVecPlan then raises the real reason through
+ * CHECK_FOR_INTERRUPTS() (see VecHostCancelCheckpoint()).
+ *
+ * It also performs the client_connection_check_interval probe when one is
+ * due (VecClientConnectionGone()), and stops plans that are being torn down
+ * after an error (see vec_plan_teardown_depth).
+ *
+ * This runs on whichever thread is executing the plan, Arrow thread-pool
+ * workers included, so it must not do anything but read flags and poll the
+ * client socket.
  */
 static gboolean
-VecShareLockWaitTick(gpointer user_data pg_attribute_unused())
+VecHostCancelTick(gpointer user_data pg_attribute_unused())
 {
-	return InterruptPending ? FALSE : TRUE;
+	if (vec_plan_teardown_depth > 0 || VecHostCancelPending() ||
+		VecClientConnectionGone())
+		return FALSE;
+	return TRUE;
+}
+
+/*
+ * VecHostCancelCheckpoint
+ *
+ * Call on the plan driver thread whenever Arrow hands back an error or the end
+ * of a stream.  When the query is being cancelled, let CHECK_FOR_INTERRUPTS()
+ * raise the real reason ("canceling statement due to user request",
+ * "... statement timeout", "terminating connection ...") instead of Arrow's
+ * Cancelled status.  If interrupts are held off and it returns, fail anyway:
+ * whatever Arrow produced after the cancel may be cut short and must never be
+ * handed upward as a complete result.
+ */
+static inline void
+VecHostCancelCheckpoint(void)
+{
+	if (likely(!VecHostCancelPending()))
+		return;
+
+	/*
+	 * An Arrow worker that saw the client go away set ClientConnectionLost
+	 * and InterruptPending, but on a weakly ordered CPU this thread may have
+	 * observed the second before the first and already consumed it in an
+	 * earlier ProcessInterrupts() that found nothing to do.  Re-arm it from
+	 * here: this thread has now seen ClientConnectionLost, and its own store
+	 * is ordered before its own read in ProcessInterrupts().
+	 */
+	if (ClientConnectionLost)
+		InterruptPending = true;
+
+	CHECK_FOR_INTERRUPTS();
+	ereport(ERROR,
+			(errcode(ERRCODE_QUERY_CANCELED),
+			 errmsg("canceling vectorized execution")));
+}
+
+/* elog(ERROR) for a failed Arrow call, reporting a pending cancel first. */
+#define VEC_PLAN_ERROR(...) \
+	do { \
+		VecHostCancelCheckpoint(); \
+		elog(ERROR, __VA_ARGS__); \
+	} while (0)
+
+/* Hand a batch upward; at end of stream make sure it was not a cancel. */
+static inline TupleTableSlot *
+VecStorePlanBatch(TupleTableSlot *slot, GArrowRecordBatch *batch)
+{
+	if (batch == NULL)
+		VecHostCancelCheckpoint();
+	return ExecStoreBatch(slot, batch);
 }
 
 /*
@@ -3494,10 +3697,24 @@ VecShareLockWaitTick(gpointer user_data pg_attribute_unused())
  * statement_timeout outright; only pg_terminate_backend() could remove it.
  *
  * Call this right before each such blocking call.  When nothing is pending it
- * costs a single flag test.  When something is pending, stop the arrow plan
- * first so its worker threads stop touching executor state, then let
- * CHECK_FOR_INTERRUPTS() unwind.  The post-stop wait is bounded: cancelling
- * must not itself be able to hang on a plan that refuses to wind down.
+ * costs a single flag test.  When the pending interrupt will end the query,
+ * stop the arrow plan first so its worker threads stop touching executor
+ * state, then let CHECK_FOR_INTERRUPTS() unwind.  The post-stop wait is
+ * bounded: cancelling must not itself be able to hang on a plan that refuses
+ * to wind down.
+ *
+ * Only then: InterruptPending is also set by interrupts that end nothing --
+ * the client_connection_check_interval timer, sinval catchup,
+ * pg_log_backend_memory_contexts.  Stopping the plan for those made the sink
+ * close its output as if the data had run out, CHECK_FOR_INTERRUPTS()
+ * returned normally, and the query returned a truncated result -- with a
+ * thread pool and client_connection_check_interval set, every query whose plan
+ * ran past the first check.
+ *
+ * The client check is the one such interrupt that can turn fatal, and it
+ * does so inside ProcessInterrupts(), where a FATAL exits without passing an
+ * error handler that would stop the plan.  So when the check is due, look at
+ * the socket here first; a lost connection then counts as a cancel.
  */
 static inline void
 VecCheckForInterrupts(VecExecuteState *estate)
@@ -3505,7 +3722,12 @@ VecCheckForInterrupts(VecExecuteState *estate)
 	if (!INTERRUPTS_PENDING_CONDITION())
 		return;
 
-	if (estate != NULL && estate->plan != NULL && estate->started)
+	if (CheckClientConnectionPending && client_connection_check_interval > 0 &&
+		!ClientConnectionLost && VecClientSocketClosed())
+		ClientConnectionLost = true;
+
+	if (VecHostCancelPending() &&
+		estate != NULL && estate->plan != NULL && estate->started)
 	{
 		garrow_execute_plan_stop(estate->plan);
 		(void) garrow_execute_plan_wait_for(estate->plan, 5.0, NULL);
@@ -3522,10 +3744,20 @@ ExecuteVecPlan(VecExecuteState *estate)
 	vec_is_plan_driver_thread = true;	/* VEC-CANCEL-FIX */
 
 	/*
-	 * Re-arm every time: the callback is process-global in Arrow, and a plan
-	 * that finished may have cleared it.
+	 * Install the host-cancel callback once per process.  It is a single
+	 * process-global std::function in Arrow that worker threads of a running
+	 * plan may be calling at any moment; assigning it again while they do
+	 * would be a data race.  Nothing ever clears it.
 	 */
-	garrow_set_host_cancel_callback(VecShareLockWaitTick, NULL);
+	{
+		static bool host_cancel_installed = false;
+
+		if (!host_cancel_installed)
+		{
+			garrow_set_host_cancel_callback(VecHostCancelTick, NULL);
+			host_cancel_installed = true;
+		}
+	}
 
 	/*
 	 * Build deferred by PostBuildVecPlan(): exec params referenced by this
@@ -3576,17 +3808,17 @@ ExecuteVecPlan(VecExecuteState *estate)
 			bool isok;
 			isok = garrow_execute_plan_start(estate->plan, &error);
 			if (!isok || error)
-				elog(ERROR, "Start push-pipeline plan error: %s.",
-					 error ? error->message : "unknown");
+				VEC_PLAN_ERROR("Start push-pipeline plan error: %s.",
+				               error ? error->message : "unknown");
 			estate->started = true;
 		}
 
 		VecCheckForInterrupts(estate);
 		batch = garrow_record_batch_reader_read_next(estate->reader, &error);
 		if (error)
-			elog(ERROR, "Push-pipeline read error: %s.", error->message);
+			VEC_PLAN_ERROR("Push-pipeline read error: %s.", error->message);
 
-		return ExecStoreBatch(estate->slot, batch);
+		return VecStorePlanBatch(estate->slot, batch);
 	}
 	else if (enable_vec_pipeline && !estate->yield_unsafe)
 	{
@@ -3625,8 +3857,8 @@ ExecuteVecPlan(VecExecuteState *estate)
 			garrow_execute_plan_enable_source_yield(estate->plan);
 			isok = garrow_execute_plan_start(estate->plan, &error);
 			if (!isok || error)
-				elog(ERROR, "Start plan error: %s.",
-					 error ? error->message : "unknown");
+				VEC_PLAN_ERROR("Start plan error: %s.",
+				               error ? error->message : "unknown");
 			estate->started = true;
 			estate->yield_remaining =
 				garrow_execute_plan_get_yielded_batch_count(estate->plan);
@@ -3654,9 +3886,9 @@ ExecuteVecPlan(VecExecuteState *estate)
 			batch = garrow_record_batch_reader_read_next(estate->reader,
 														 &error);
 			if (error)
-				elog(ERROR, "Read error: %s.", error->message);
+				VEC_PLAN_ERROR("Read error: %s.", error->message);
 			estate->yield_remaining--;
-			return ExecStoreBatch(estate->slot, batch);
+			return VecStorePlanBatch(estate->slot, batch);
 		}
 
 		while (garrow_execute_plan_has_yielded_source(estate->plan))
@@ -3665,8 +3897,8 @@ ExecuteVecPlan(VecExecuteState *estate)
 			isok = garrow_execute_plan_continue_yielded(
 						estate->plan, &error);
 			if (!isok || error)
-				elog(ERROR, "Continue yielded error: %s.",
-					 error ? error->message : "unknown");
+				VEC_PLAN_ERROR("Continue yielded error: %s.",
+				               error ? error->message : "unknown");
 			estate->yield_remaining =
 				garrow_execute_plan_get_yielded_batch_count(estate->plan);
 			if (estate->yield_remaining > 0)
@@ -3675,9 +3907,9 @@ ExecuteVecPlan(VecExecuteState *estate)
 				batch = garrow_record_batch_reader_read_next(
 							estate->reader, &error);
 				if (error)
-					elog(ERROR, "Read error: %s.", error->message);
+					VEC_PLAN_ERROR("Read error: %s.", error->message);
 				estate->yield_remaining--;
-				return ExecStoreBatch(estate->slot, batch);
+				return VecStorePlanBatch(estate->slot, batch);
 			}
 			/*
 			 * yield_remaining == 0: blocking operator (e.g. HashJoin
@@ -3692,8 +3924,8 @@ ExecuteVecPlan(VecExecuteState *estate)
 		batch = garrow_record_batch_reader_read_next(estate->reader,
 													 &error);
 		if (error)
-			elog(ERROR, "Read error: %s.", error->message);
-		return ExecStoreBatch(estate->slot, batch);
+			VEC_PLAN_ERROR("Read error: %s.", error->message);
+		return VecStorePlanBatch(estate->slot, batch);
 	}
 	else
 	{
@@ -3712,8 +3944,8 @@ ExecuteVecPlan(VecExecuteState *estate)
 				 garrow_execute_plan_get_id(estate->plan));
 			isok = garrow_execute_plan_start(estate->plan, &error);
 			if (!isok || error)
-				elog(ERROR, "Start plan for vector plan error: %s.",
-					 error ? error->message : "unknown");
+				VEC_PLAN_ERROR("Start plan for vector plan error: %s.",
+				               error ? error->message : "unknown");
 
 			/*
 			 * VEC-CANCEL-FIX: wait in slices so the query stays cancellable.
@@ -3741,16 +3973,16 @@ ExecuteVecPlan(VecExecuteState *estate)
 				VecCheckForInterrupts(estate);
 			}
 			if (error)
-				elog(ERROR, "Execute plan for vector plan error: %s.",
-					 error->message);
+				VEC_PLAN_ERROR("Execute plan for vector plan error: %s.",
+				               error->message);
 		}
 
 		VecCheckForInterrupts(estate);
 		batch = garrow_record_batch_reader_read_next(estate->reader,
 													 &error);
 		if (error)
-			elog(ERROR, "Read error: %s.", error->message);
-		return ExecStoreBatch(estate->slot, batch);
+			VEC_PLAN_ERROR("Read error: %s.", error->message);
+		return VecStorePlanBatch(estate->slot, batch);
 	}
 	pg_unreachable();
 }

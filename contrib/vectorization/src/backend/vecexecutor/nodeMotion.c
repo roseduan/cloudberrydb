@@ -186,6 +186,9 @@ motion_rewrite_numeric_type_schema(MotionState *node, TupleTableSlot *outerTuple
 					g_autoptr(GArrowDataType) new_type = GARROW_DATA_TYPE(garrow_decimal128_data_type_new(35, 0));
 					garrow_store_func(field, garrow_field_new(garrow_field_get_name(field), new_type));
 					garrow_store_func(schema, garrow_schema_replace_field(schema, variable->varattno - 1, field, &error));
+					if (error)
+						elog(ERROR, "failed to rewrite motion schema field %d: %s",
+							 variable->varattno, error->message);
 				}
 				else if(variable->vartype == TIMESTAMPOID ||
 						variable->vartype == TIMESTAMPTZOID ||
@@ -195,6 +198,9 @@ motion_rewrite_numeric_type_schema(MotionState *node, TupleTableSlot *outerTuple
 					g_autoptr(GArrowDataType) new_type = GARROW_DATA_TYPE(garrow_int64_data_type_new());
 					garrow_store_func(field, garrow_field_new(garrow_field_get_name(field), new_type));
 					garrow_store_func(schema, garrow_schema_replace_field(schema, variable->varattno - 1, field, &error));
+					if (error)
+						elog(ERROR, "failed to rewrite motion schema field %d: %s",
+							 variable->varattno, error->message);
 				}
 				break;
 			}

@@ -996,10 +996,15 @@ PrintArrowArray(void *array, const char *label)
 	elog(INFO, "----------- %s start: %p -------------", label, array);
 	if (array)
 	{
+		gchar	   *str;
+
 		nrows = garrow_array_get_length((GArrowArray *)array);
 		type = garrow_array_get_value_type((GArrowArray *)array);
+		str = garrow_array_to_string((GArrowArray *)array, &error);
 		elog(INFO, "Array of row %ld, type %d, : %s\n", nrows, type,
-				garrow_array_to_string((GArrowArray *)array, &error));
+			 str ? str : error->message);
+		g_free(str);
+		g_clear_error(&error);
 	}
 	else
 		elog(INFO, "Array is NULL");

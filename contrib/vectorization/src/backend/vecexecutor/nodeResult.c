@@ -175,6 +175,10 @@ ExecVecResult(PlanState *pstate)
 			filter_datum = GARROW_ARRAY_DATUM(DatumGetPointer(hval_reduce));
 			filter_array = GARROW_BOOLEAN_ARRAY(garrow_datum_get_array(filter_datum));
 			filter_batch = garrow_record_batch_filter(result_batch, filter_array, NULL, &error);
+			/* A NULL batch would read as the end of the data. */
+			if (error)
+				elog(ERROR, "failed to filter the result batch by segment: %s",
+					 error->message);
 			ExecStoreBatch(candidateOutputSlot, filter_batch);
 		}
 		return candidateOutputSlot;

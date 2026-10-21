@@ -94,6 +94,8 @@ extern GArrowExpression *arrow_expression_tree_mutator(Expr *node, ArrowExprCont
 extern void BuildVecPlan(PlanState *planstate, VecExecuteState *estate);
 extern TupleTableSlot *ExecuteVecPlan(VecExecuteState *estate);
 extern void FreeVecExecuteState(VecExecuteState *estate);
+extern void VecPlanTeardownBegin(void);
+extern void VecPlanTeardownEnd(void);
 
 
 extern ExplainOneQuery_hook_type   vec_explain_prev;

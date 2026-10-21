@@ -570,6 +570,8 @@ Datum DirectCallVecFunc2ArgsAndU32ArrayRes(const char *fname, void *arg1, void *
                 uint32_cast_type = garrow_uint32_data_type_new();
                 uint32_cast_array = GARROW_UINT32_ARRAY(
                                 garrow_array_cast(array, GARROW_DATA_TYPE(uint32_cast_type), option, &error));
+                if (error)
+                        elog(ERROR, "Fail to cast hash to uint32 array, cause: %s", error->message);
                 garrow_store_func(result, garrow_array_datum_new(GARROW_ARRAY(uint32_cast_array)));
         }
 
@@ -601,6 +603,8 @@ Datum DirectCallVecFunc3ArgsAndU32ArrayRes(const char *fname,
                 uint32_cast_type = garrow_uint32_data_type_new();
                 uint32_cast_array = GARROW_UINT32_ARRAY(
                                 garrow_array_cast(array, GARROW_DATA_TYPE(uint32_cast_type), option, &error));
+                if (error)
+                        elog(ERROR, "Fail to cast hash to uint32 array, cause: %s", error->message);
                 garrow_store_func(result, garrow_array_datum_new(GARROW_ARRAY(uint32_cast_array)));
         }
 

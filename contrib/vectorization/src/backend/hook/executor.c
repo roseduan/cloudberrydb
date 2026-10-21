@@ -391,6 +391,7 @@ ExecutorRunWrapper(QueryDesc *queryDesc,
 				   bool execute_once)
 {
 	bool is_vec = queryDesc->estate->es_top_eflags & EXEC_FLAG_VECTOR;
+	MemoryContext oldcontext = CurrentMemoryContext;
 
 	if (is_vec)
 		set_printtup_wrapper(&queryDesc->dest);
@@ -412,15 +413,57 @@ ExecutorRunWrapper(QueryDesc *queryDesc,
 		 */
 		if (is_vec)
 		{
+			ErrorData  *edata;
+			int32		save_holdoff;
+
+			/*
+			 * Set the original error aside before cleaning up, and throw it
+			 * again afterwards.  The cleanup may fail too, and there is no
+			 * way to drop only that second error: FlushErrorState() empties
+			 * the whole error stack, original error included, after which
+			 * PG_RE_THROW() would reach EmitErrorReport() with
+			 * errordata_stack_depth == -1 and read errordata[-1].
+			 */
+			MemoryContextSwitchTo(oldcontext);
+			edata = CopyErrorData();
+			FlushErrorState();
+
+			/*
+			 * Let a cancel arriving now wait until the cleanup is done.  The
+			 * count is restored by hand afterwards rather than with
+			 * RESUME_INTERRUPTS(): if the cleanup fails, errfinish() has
+			 * already reset it to zero.
+			 */
+			save_holdoff = InterruptHoldoffCount;
+			HOLD_INTERRUPTS();
+
+			/*
+			 * The error may have longjmp'ed over Arrow frames, leaving the
+			 * plans' thread-pool workers running; have them stop as on a
+			 * cancel while the plans are destroyed.
+			 */
+			VecPlanTeardownBegin();
 			PG_TRY();
 			{
 				VecExecEndNode(queryDesc->planstate);
 			}
 			PG_CATCH();
 			{
+				ErrorData  *cleanup_edata;
+
+				MemoryContextSwitchTo(oldcontext);
+				cleanup_edata = CopyErrorData();
 				FlushErrorState();
+				ereport(WARNING,
+						(errmsg("could not release vectorized executor resources after an error: %s",
+								cleanup_edata->message)));
+				FreeErrorData(cleanup_edata);
 			}
 			PG_END_TRY();
+			VecPlanTeardownEnd();
+			InterruptHoldoffCount = save_holdoff;
+
+			ReThrowError(edata);
 		}
 
 		PG_RE_THROW();

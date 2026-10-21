@@ -526,19 +526,27 @@ planner_hook_wrapper(Query *parse, const char *query_string, int cursorOptions, 
 		}
 		PG_FINALLY();
 		{
+			/*
+			 * Only undo the optimizer switch here.  This block also runs
+			 * while an error from generate_plan() is propagating, and must
+			 * not plan again then: a second error would replace the original
+			 * one, and result would still hold the plan of the previous
+			 * attempt.
+			 */
 			optimizer = optimizer_origin;
-			if(!try_vectorize_plan(result))
-			{
-				optimizer_spilling_mem_threshold = 0.0;
-				result = generate_plan(parse, query_string, cursorOptions, boundParams, optimizer_options);
-				FALLBACK_LOG("current plan cannot be vectorized");
-			}
-			else
-			{
-				elog(DEBUG2, "switch to another optimizer to generate vectorized plan");
-			}
 		}
 		PG_END_TRY();
+
+		if (!try_vectorize_plan(result))
+		{
+			optimizer_spilling_mem_threshold = 0.0;
+			result = generate_plan(parse, query_string, cursorOptions, boundParams, optimizer_options);
+			FALLBACK_LOG("current plan cannot be vectorized");
+		}
+		else
+		{
+			elog(DEBUG2, "switch to another optimizer to generate vectorized plan");
+		}
 	}
 
 	/*
