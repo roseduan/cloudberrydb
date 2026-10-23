@@ -1323,6 +1323,7 @@ pg_iceberg_commit_rewrite(Relation rel, List *all_private_results)
 	const char *catalogName;
 	bool has_added_fragments = false;
 	bool has_rewritten_fragments = false;
+	bool builtin_catalog;
 
 	metadata_location = NULL;
 	table_info = NULL;
@@ -1412,6 +1413,8 @@ pg_iceberg_commit_rewrite(Relation rel, List *all_private_results)
 	table_info = pg_iceberg_get_table_info(RelationGetRelid(rel));
 	is_internal =
 		(table_info->opts == NULL || table_info->opts->table == NULL);
+	builtin_catalog =
+		pg_iceberg_is_builtin_catalog(table_info->catalog_server_name);
 	/* Commit-rewrite path: resolve the latest head, never a cached snapshot. */
 	metadata_location = pg_iceberg_get_latest_metadata_location(
 		RelationGetRelid(rel), table_info, false);
@@ -1436,19 +1439,33 @@ pg_iceberg_commit_rewrite(Relation rel, List *all_private_results)
 	/*
 	 * Keep vacuum rewrite payload in grouped JSON shape:
 	 *   {"fragments":[...], "rewrittenFragments":[...]}
-	 * and commit through the dedicated COMMIT_FILE_GROUPS operation.
+	 *
+	 * Builtin catalog: COMMIT_FILE_GROUPS only writes a new metadata.json and
+	 * the pointer swap below is the commit.
+	 *
+	 * Any other catalog (Polaris, Hive) owns the current-metadata pointer, so
+	 * the rewrite must be committed there -- COMMIT_REWRITE, the same shape
+	 * the write path takes through pg_iceberg_commit_data_with_catalog().
+	 * Swapping only the local pointer leaves the catalog on the
+	 * pre-compaction snapshot: the next write commits on top of that
+	 * snapshot, the local pointer follows it back, and the compaction is
+	 * silently dropped.  The commit is eager, as on the write path: an abort
+	 * after this point rolls back the local pointer only, and the next read
+	 * picks the catalog's head up again.
 	 */
 	data_locations = psprintf("{\"fragments\":%s,\"rewrittenFragments\":%s}",
 							  added_fragments.data,
 							  rewritten_fragments.data);
 	new_metadata_location = pg_iceberg_catalog_op(rel,
-									  ICEBERG_COMMIT_FILE_GROUPS,
+									  builtin_catalog ?
+									  ICEBERG_COMMIT_FILE_GROUPS :
+									  ICEBERG_COMMIT_REWRITE,
 									  catalogName,
 									  nameSpace,
 									  tableName,
 									  data_locations,
 									  metadata_location,
-									  is_internal,
+									  builtin_catalog && is_internal,
 									  table_info->catalog_server_name,
 									  table_info->catalog_name,
 									  table_info->volume_server_name,
@@ -1463,12 +1480,16 @@ pg_iceberg_commit_rewrite(Relation rel, List *all_private_results)
 		 * now superseded by the new compacted files in the current snapshot.
 		 * Enqueue each for async deletion (DELETION_TYPE_FILE) so the
 		 * autovacuum consumer removes them from object storage.  Only for
-		 * internal (builtin-managed) tables -- external-catalog files are owned
-		 * by that catalog.  The enqueue is transactional, so an aborted VACUUM
-		 * keeps the old files.  The exact files to delete are known from the
-		 * rewrite inputs, so no snapshot diffing is needed.
+		 * builtin-catalog tables -- on any other catalog the files are owned
+		 * by that catalog, even for a table created without OPTIONS
+		 * (is_internal): the old files stay reachable through the catalog's
+		 * earlier snapshots, and removing them is snapshot expiry's job, done
+		 * by whoever maintains that catalog.  The enqueue is transactional,
+		 * so an aborted VACUUM keeps the old files.  The exact files to
+		 * delete are known from the rewrite inputs, so no snapshot diffing is
+		 * needed.
 		 */
-		if (is_internal && has_rewritten_fragments)
+		if (builtin_catalog && is_internal && has_rewritten_fragments)
 		{
 			List	   *old_paths =
 				pg_iceberg_collect_fragment_paths(rewritten_fragments.data);

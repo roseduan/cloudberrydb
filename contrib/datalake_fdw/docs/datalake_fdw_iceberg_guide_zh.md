@@ -972,6 +972,12 @@ OPTIONS (
 - **外部 catalog（hive / polaris / hadoop / s3）**：物理路径由外部 catalog 决定，
   通常形如 `<warehouse_location_prefix>/<namespace>/<table>/`。
 
+**DROP TABLE 只删 Cloudberry 这边的定义**：只有 builtin catalog 的表在 DROP 后会
+异步删除数据文件。其他 catalog 上的表（包括建表时没写 OPTIONS 的 Polaris / Hive
+表）文件归该 catalog 所有，DROP 后表和数据都还在 catalog 里，需要时请在 catalog 侧
+删除（如 Spark 的 `DROP TABLE ... PURGE`）。因此之后再用**同名**建表，会接管这张
+已有的表及其数据，而不是建一张空表。
+
 **CREATE ICEBERG TABLE OPTIONS 全集**：
 
 | OPTION | 类型 | 说明 |

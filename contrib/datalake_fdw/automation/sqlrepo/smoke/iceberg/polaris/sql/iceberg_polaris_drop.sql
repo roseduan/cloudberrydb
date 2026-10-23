@@ -1,0 +1,67 @@
+-- DROP TABLE must leave files a non-builtin catalog owns alone.
+--
+-- A table created on a Polaris catalog without an OPTIONS clause is recorded
+-- as is_internal, and DROP used to queue its whole metadata tree for
+-- deletion on that basis alone.  Polaris still registered the table, so once
+-- the autovacuum consumer had run, every other engine found a table whose
+-- files were gone, and re-creating one under the same name failed with
+-- "Location does not exist".  Only the builtin catalog owns its files.
+
+SET client_min_messages = warning;
+CREATE EXTENSION IF NOT EXISTS datalake_fdw;
+RESET client_min_messages;
+
+CREATE SERVER drop_vol_srv
+FOREIGN DATA WRAPPER iceberg_volume_fdw
+OPTIONS (
+    type 's3',
+    endpoint 'http://minio:9000',
+    region 'us-west-2',
+    bucket_name 'warehouse',
+    path_style_access 'true'
+);
+CREATE USER MAPPING FOR current_user
+SERVER drop_vol_srv
+OPTIONS (access_key_id 'admin', secret_access_key 'admin12345');
+CREATE FOREIGN VOLUME drop_vol SERVER drop_vol_srv OPTIONS (base_path '/');
+SET iceberg_default_volume = 'drop_vol';
+
+CREATE SERVER drop_cat_srv
+FOREIGN DATA WRAPPER iceberg_catalog_fdw
+OPTIONS (
+    type 'polaris',
+    url 'http://polaris:8181/api/catalog'
+);
+CREATE USER MAPPING FOR current_user
+SERVER drop_cat_srv
+OPTIONS (
+    client_id 'root', client_secret 's3cr3t', scope 'PRINCIPAL_ROLE:ALL'
+);
+CREATE FOREIGN CATALOG drop_cat
+SERVER drop_cat_srv
+OPTIONS (
+    catalog_name 'polaris_default_catalog',
+    default_namespace 'public'
+);
+
+CREATE ICEBERG TABLE drop_plain (id int, name text) CATALOG drop_cat;
+SELECT is_internal FROM pg_ext_aux.pg_iceberg_metadata
+ WHERE relid = 'drop_plain'::regclass;
+INSERT INTO drop_plain VALUES (1, 'a'), (2, 'b'), (3, 'c');
+
+SELECT count(*) AS queued_before FROM pg_ext_aux.pg_iceberg_deletion_queue \gset
+DROP TABLE drop_plain;
+SELECT count(*) - :queued_before AS newly_queued
+  FROM pg_ext_aux.pg_iceberg_deletion_queue;
+
+-- The Polaris table is intact: mount it again and read it back.
+CREATE ICEBERG TABLE drop_mount (id int, name text) CATALOG drop_cat
+OPTIONS (namespace 'public', table 'drop_plain');
+SELECT count(*), sum(id) FROM drop_mount;
+
+DROP TABLE drop_mount;
+DROP CATALOG drop_cat;
+DROP VOLUME drop_vol;
+DROP SERVER drop_cat_srv CASCADE;
+DROP SERVER drop_vol_srv CASCADE;
+RESET iceberg_default_volume;

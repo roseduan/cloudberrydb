@@ -123,29 +123,37 @@ iceberg_object_access_hook(ObjectAccessType access, Oid classId, Oid objectId,
 				if (meta_info != NULL)
 				{
 					/*
-					 * Only builtin (internal-catalog) iceberg tables own their
-					 * files and must have them cleaned up on DROP.  External-
-					 * catalog tables (is_internal == false) are managed by an
-					 * external Iceberg catalog that owns the storage, so we never
-					 * enqueue file deletion for them -- only the local pg_iceberg
-					 * bookkeeping is dropped below.
+					 * Resolve the storage context while pg_lake_table is still
+					 * intact.  pg_iceberg_get_table_info goes pg_lake_table ->
+					 * pg_foreign_volume -> pg_foreign_server to fill in the
+					 * volume_name / volume_server_name we need to reconstruct
+					 * fileIOConfig on the consumer side.
 					 */
-					if (meta_info->is_internal)
+					IcebergTableInfo *table_info =
+						pg_iceberg_get_table_info(objectId);
+
+					/*
+					 * Only builtin-catalog iceberg tables own their files and
+					 * must have them cleaned up on DROP.  Tables on any other
+					 * catalog are managed by a catalog that owns the storage, so
+					 * we never enqueue file deletion for them -- only the local
+					 * pg_iceberg bookkeeping is dropped below.
+					 *
+					 * is_internal alone does not say that: it means "created
+					 * without an OPTIONS clause", which a Polaris or Hive table
+					 * created on the default catalog also is.  Deleting such a
+					 * table's files left the catalog registering a table whose
+					 * data was gone -- unreadable by every other engine, and in
+					 * the way of re-creating one under the same name.  Removing
+					 * it from that catalog is its maintainer's call.
+					 */
+					if (meta_info->is_internal &&
+						pg_iceberg_is_builtin_catalog(table_info->catalog_server_name))
 					{
-						IcebergTableInfo   *table_info;
 						char               *owner_username;
 						char               *table_qname;
 						char               *nspname;
 						const char         *relname;
-
-						/*
-						 * Resolve the storage context while pg_lake_table is still
-						 * intact.  pg_iceberg_get_table_info goes pg_lake_table ->
-						 * pg_foreign_volume -> pg_foreign_server to fill in the
-						 * volume_name / volume_server_name we need to reconstruct
-						 * fileIOConfig on the consumer side.
-						 */
-						table_info = pg_iceberg_get_table_info(objectId);
 
 						owner_username = GetUserNameFromId(GetUserId(), false);
 
@@ -171,13 +179,12 @@ iceberg_object_access_hook(ObjectAccessType access, Oid classId, Oid objectId,
 							GetCurrentTimestamp(),
 							DELETION_TYPE_METADATA);
 
-						pg_iceberg_free_table_info(table_info);
-
 						if (nspname)
 							pfree(nspname);
 						pfree(table_qname);
 					}
 
+					pg_iceberg_free_table_info(table_info);
 					pg_iceberg_free_metadata_info(meta_info);
 					pg_iceberg_remove_metadata(objectId);
 				}

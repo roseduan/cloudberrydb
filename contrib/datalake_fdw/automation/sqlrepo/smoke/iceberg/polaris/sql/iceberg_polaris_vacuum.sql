@@ -1,0 +1,120 @@
+-- VACUUM compaction on a Polaris catalog must be committed TO Polaris.
+--
+-- Polaris owns the current-metadata pointer.  VACUUM used to write the
+-- compacted metadata.json and swap only the local pointer, so Polaris stayed
+-- on the pre-compaction snapshot: the next INSERT committed on top of that
+-- snapshot, the local pointer followed it back, and the compaction was gone.
+-- For a table created without OPTIONS the rewritten files were also queued
+-- for deletion, while Polaris still referenced them -- data loss.
+--
+-- The INSERT after each VACUUM is what makes this observable from SQL: it is
+-- committed by Polaris, so afterwards the local pointer is Polaris's head and
+-- the snapshot history below is Polaris's history.
+
+SET client_min_messages = warning;
+CREATE EXTENSION IF NOT EXISTS datalake_fdw;
+RESET client_min_messages;
+
+CREATE SERVER vac_vol_srv
+FOREIGN DATA WRAPPER iceberg_volume_fdw
+OPTIONS (
+    type 's3',
+    endpoint 'http://minio:9000',
+    region 'us-west-2',
+    bucket_name 'warehouse',
+    path_style_access 'true'
+);
+CREATE USER MAPPING FOR current_user
+SERVER vac_vol_srv
+OPTIONS (
+    access_key_id 'admin',
+    secret_access_key 'admin12345');
+CREATE FOREIGN VOLUME vac_vol SERVER vac_vol_srv OPTIONS (base_path '/');
+-- The catalog FDW derives Polaris's storageConfig from this volume when it
+-- has to create the catalog.
+SET iceberg_default_volume = 'vac_vol';
+
+CREATE SERVER vac_cat_srv
+FOREIGN DATA WRAPPER iceberg_catalog_fdw
+OPTIONS (
+    type 'polaris',
+    url 'http://polaris:8181/api/catalog'
+);
+CREATE USER MAPPING FOR current_user
+SERVER vac_cat_srv
+OPTIONS (
+    client_id 'root', client_secret 's3cr3t', scope 'PRINCIPAL_ROLE:ALL'
+);
+CREATE FOREIGN CATALOG vac_cat
+SERVER vac_cat_srv
+OPTIONS (
+    catalog_name 'polaris_default_catalog',
+    default_namespace 'public'
+);
+
+-- One file per INSERT: six files, above the default threshold of five.
+CREATE FUNCTION vac_seed(tbl regclass) RETURNS void AS $$
+BEGIN
+    FOR i IN 1..6 LOOP
+        EXECUTE format('INSERT INTO %s VALUES (%s, %L)', tbl, i, 'v' || i);
+    END LOOP;
+END $$ LANGUAGE plpgsql;
+
+CREATE FUNCTION vac_state(tbl regclass)
+RETURNS TABLE (operation text, data_files int, records int) AS $$
+    SELECT operation,
+           (summary->>'total-data-files')::int,
+           (summary->>'total-records')::int
+      FROM iceberg_snapshot_list(tbl)
+     WHERE is_current;
+$$ LANGUAGE SQL;
+
+-- ============================================================
+-- Case 1: table created without OPTIONS (default catalog)
+-- ============================================================
+CREATE ICEBERG TABLE vac_plain (id int, name text) CATALOG vac_cat VOLUME vac_vol;
+SELECT vac_seed('vac_plain');
+SELECT * FROM vac_state('vac_plain');
+
+VACUUM vac_plain;
+SELECT operation, data_files < 6 AS compacted, records FROM vac_state('vac_plain');
+
+-- Polaris owns these files: nothing may be queued for deletion.
+SELECT count(*) AS queued_for_deletion
+  FROM pg_ext_aux.pg_iceberg_deletion_queue
+ WHERE table_name = 'vac_plain'::regclass;
+
+INSERT INTO vac_plain VALUES (7, 'v7');
+-- The compaction survives a write that Polaris committed.
+SELECT count(*) FILTER (WHERE operation = 'replace') AS replace_snapshots
+  FROM iceberg_snapshot_list('vac_plain');
+SELECT operation, data_files < 7 AS still_compacted, records FROM vac_state('vac_plain');
+SELECT count(*), sum(id) FROM vac_plain;
+
+-- ============================================================
+-- Case 2: table created with explicit OPTIONS
+-- ============================================================
+CREATE ICEBERG TABLE vac_opts (id int, name text) CATALOG vac_cat VOLUME vac_vol
+OPTIONS (namespace 'public', table 'vac_opts');
+SELECT vac_seed('vac_opts');
+
+VACUUM vac_opts;
+SELECT operation, data_files < 6 AS compacted, records FROM vac_state('vac_opts');
+
+INSERT INTO vac_opts VALUES (7, 'v7');
+SELECT count(*) FILTER (WHERE operation = 'replace') AS replace_snapshots
+  FROM iceberg_snapshot_list('vac_opts');
+SELECT operation, data_files < 7 AS still_compacted, records FROM vac_state('vac_opts');
+SELECT count(*), sum(id) FROM vac_opts;
+
+-- ============================================================
+-- Cleanup
+-- ============================================================
+DROP TABLE vac_plain;
+DROP TABLE vac_opts;
+DROP FUNCTION vac_seed(regclass);
+DROP FUNCTION vac_state(regclass);
+DROP CATALOG vac_cat;
+DROP VOLUME vac_vol;
+DROP SERVER vac_cat_srv CASCADE;
+DROP SERVER vac_vol_srv CASCADE;
