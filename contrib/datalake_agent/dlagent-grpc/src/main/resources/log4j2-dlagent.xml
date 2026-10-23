@@ -1,0 +1,51 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  The gRPC agent's copy of dlagent-rest's log4j2-dlagent.xml: same file, same
+  pattern, same loggers, the same bytes in dlagent-*.log. Three lines differ,
+  all because there is no Spring here:
+  - the level comes from ${sys:dlagent.log.level}, which Main sets from the
+    dlagent.log.level property, instead of from the Spring environment;
+  - %xwEx is spring-boot's converter (a line break, the extended stack trace,
+    a line break, only when there is a throwable); %notEmpty{%n%xEx%n} is the
+    same output from log4j alone;
+  - log4j does not see a throwable converter inside %notEmpty, so without
+    alwaysWriteExceptions="false" it would print the stack a second time.
+  Main sets LOG_PATH, FILE_LOG_CHARSET and PID as spring-boot does.
+  ConfigParityTest holds the two files to exactly these lines.
+-->
+<Configuration status="WARN">
+<Properties>
+    <Property name="LOG_EXCEPTION_CONVERSION_WORD">%notEmpty{%n%xEx%n}</Property>
+    <Property name="LOG_LEVEL_PATTERN">%5p [%X{sessionId}]</Property>
+    <Property name="LOG_DATEFORMAT_PATTERN">yyyy-MM-dd HH:mm:ss.SSS zzz</Property>
+    <Property name="FILE_LOG_PATTERN">%d{${LOG_DATEFORMAT_PATTERN}} ${LOG_LEVEL_PATTERN} %pid --- [%-9.10t] %-40.40c{1.} : %m%n${sys:LOG_EXCEPTION_CONVERSION_WORD}</Property>
+</Properties>
+<Appenders>
+    <RollingFile name="RollingFile" filePattern="${sys:LOG_PATH}/dlagent-%d{yyyy-MM-dd}.log">
+        <PatternLayout pattern="${sys:FILE_LOG_PATTERN}" charset="${sys:FILE_LOG_CHARSET}" alwaysWriteExceptions="false"/>
+        <Policies>
+            <TimeBasedTriggeringPolicy interval="1" modulate="true"/>
+        </Policies>
+    </RollingFile>
+</Appenders>
+<Loggers>
+    <Root level="info">
+        <AppenderRef ref="RollingFile"/>
+    </Root>
+
+    <Logger name="cloud.elastic.dlagent" level="${sys:dlagent.log.level:-info}"/>
+
+    <!-- The levels below are tuned to provide minimal output, change to INFO or DEBUG to troubleshoot -->
+    <Logger name="org.apache.hadoop" level="warn"/>
+    <Logger name="hive.metastore" level="warn"/>
+    <Logger name="org.apache.catalina.startup.DigesterFactory" level="error"/>
+    <Logger name="org.apache.catalina.util.LifecycleBase" level="error"/>
+    <Logger name="org.apache.coyote.http11.Http11NioProtocol" level="warn"/>
+    <Logger name="org.apache.sshd.common.util.SecurityUtils" level="warn"/>
+    <Logger name="org.apache.tomcat.util.net.NioSelectorPool" level="warn"/>
+    <Logger name="org.eclipse.jetty.util.component.AbstractLifeCycle" level="error"/>
+    <Logger name="org.springframework.boot.actuate.endpoint.jmx" level="warn"/>
+    <Logger name="org.apache.catalina.loader.WebappClassLoaderBase" level="error"/>
+    <Logger name="org.cbdb.iceberg.gopher" level="info"/>
+</Loggers>
+</Configuration>

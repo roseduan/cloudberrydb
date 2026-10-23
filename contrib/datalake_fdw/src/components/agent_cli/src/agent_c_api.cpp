@@ -23,6 +23,19 @@ extern "C" {
 #include "utils/memutils.h"
 #include "agent_cjson_builder.hpp"
 #include "src/am_iceberg/include/pg_iceberg_guc.h"
+
+/*
+ * The transport accessor, defined in datalake_fdw.c.  Declared here rather
+ * than by including datalake_def.h, which pulls in the whole FDW surface and
+ * its PG macros into a translation unit that has to undef half of them again.
+ */
+extern int	datalake_agent_transport_get(void);
+/* "host:port" for the gRPC agent; datalake_fdw.c owns the two GUCs behind it. */
+extern const char *datalake_agent_grpc_target(void);
+/* datalake.rpc_max_message_size in bytes; same ownership, same reason. */
+extern int	datalake_agent_rpc_max_message_bytes_get(void);
+#define DATALAKE_AGENT_TRANSPORT_REST	0
+#define DATALAKE_AGENT_TRANSPORT_GRPC	1
 }
 
 /* Save PG log-level macros and undef so they don't break C++ enum definitions */
@@ -35,6 +48,35 @@ extern "C" {
 #pragma push_macro("DEBUG3")
 #pragma push_macro("DEBUG4")
 #pragma push_macro("DEBUG5")
+
+/*
+ * c.h also defines Max, Min and the gettext family as macros, and real
+ * functions by those names are declared in headers grpcpp.h drags in.  A
+ * two-argument macro meeting a one-argument declaration is a hard error:
+ *
+ *   absl/container/internal/layout.h:287:30: error: macro "Max" requires 2
+ *                                            arguments, but only 1 given
+ *   libintl.h:61:14: error: expected ')' before 'unsigned'   [ngettext]
+ *
+ * The reach is what makes this version-dependent.  grpc 1.59.5 has
+ * credentials.h -> tls_crl_provider.h -> grpc/grpc_crl_provider.h ->
+ * absl/status/statusor.h -> cord.h -> cord_rep_ring.h -> layout.h; 1.59.2
+ * has no crl_provider header at all and never reaches abseil's containers.
+ * So this file compiles on an image carrying 1.59.2 and fails on one
+ * carrying 1.59.5, which is exactly how it reached CI: the image the build
+ * job actually compiles in (centos-7:devel-cbdb-20260903) is ahead of the
+ * development ones, and every image to hand locally still had 1.59.2.
+ *
+ * contrib/pax_storage/src/cpp/comm/cbdb_api.h undefs the same set for the
+ * same reason -- it just does it permanently, where this file has to put
+ * them back for the wrapper section below.
+ */
+#pragma push_macro("Max")
+#pragma push_macro("Min")
+#pragma push_macro("gettext")
+#pragma push_macro("dgettext")
+#pragma push_macro("ngettext")
+#pragma push_macro("dngettext")
 #undef LOG
 #undef INFO
 #undef WARNING
@@ -44,13 +86,22 @@ extern "C" {
 #undef DEBUG3
 #undef DEBUG4
 #undef DEBUG5
+#undef Max
+#undef Min
+#undef gettext
+#undef dgettext
+#undef ngettext
+#undef dngettext
 
 #include <agent_c_api.h>
 #include <agent_client.hpp>
+#ifdef HAVE_GRPCXX
+#include "grpc_agent_client.hpp"
+#endif
 #include <agent_types.hpp>
 
-/* libcurl + libc for agent_cli_wrapper_cleanup_metadata (defined below) */
-#include <curl/curl.h>
+/* libc for the wrapper layer below; libcurl is no longer needed here, the
+ * cleanup endpoints go through AgentClient like every other operation. */
 #include <string.h>
 #include <logger.hpp>
 #include <memory>
@@ -76,9 +127,28 @@ namespace {
         return copy;
     }
 
+    /*
+     * Free the strings the previous call left in a response.  A handle reuses
+     * one response for every call it makes, so overwriting the pointers
+     * leaked two malloc'd strings per agent call for the life of the handle.
+     *
+     * Safe because every string in a response is malloc'd here:
+     * convert_response() and set_error_response() are its only writers (the
+     * cleanup-from-metadata and delete wrappers that used to pstrdup into it
+     * now go through the client), and callers copy what they keep -- they
+     * pstrdup the body or parse it before the next call on the handle.
+     */
+    void release_response_strings(agent_cli_response_t* c_response) {
+        free(c_response->response_body);
+        c_response->response_body = nullptr;
+        free(c_response->error_message);
+        c_response->error_message = nullptr;
+    }
+
     void convert_response(const Response& cpp_response, agent_cli_response_t* c_response) {
         if (!c_response) return;
 
+        release_response_strings(c_response);
         c_response->http_status = cpp_response.http_status;
         c_response->curl_code = cpp_response.curl_code;
         c_response->response_body = duplicate_string(cpp_response.response_body.c_str());
@@ -93,18 +163,13 @@ namespace {
      * threw).  Clear whatever the previous call left in the response and
      * carry the reason in error_message, so callers that report from the
      * response do not print a stale or empty "HTTP Status: 0" error.
-     *
-     * The old pointers are dropped, not freed, exactly like
-     * convert_response() does: response_body may hold either malloc'd
-     * memory (convert_response) or palloc'd memory (the files/delete and
-     * cleanup-from-metadata wrappers), so free() here could corrupt the heap.
      */
     void set_error_response(agent_cli_response_t* c_response) {
         if (!c_response) return;
 
+        release_response_strings(c_response);
         c_response->http_status = 0;
         c_response->curl_code = 0;
-        c_response->response_body = nullptr;
         c_response->response_size = 0;
         c_response->error_message = duplicate_string(last_error_message.c_str());
         c_response->total_time = 0;
@@ -166,6 +231,7 @@ static agent_cli_status_t agent_cli_init_internal(const agent_cli_config_t* conf
 
         Config cpp_config;
         cpp_config.server_url = config->server_url;
+        cpp_config.grpc_target = config->grpc_target ? config->grpc_target : "";
         cpp_config.auth_token = config->auth_token ? config->auth_token : "";
         cpp_config.request_timeout_seconds = config->request_timeout_seconds > 0 ? config->request_timeout_seconds : 30;
         cpp_config.connect_timeout_seconds = config->connect_timeout_seconds > 0 ? config->connect_timeout_seconds : 10;
@@ -173,7 +239,40 @@ static agent_cli_status_t agent_cli_init_internal(const agent_cli_config_t* conf
         cpp_config.retry_delay_ms = config->retry_delay_ms > 0 ? config->retry_delay_ms : 1000;
 
         AgentContext* context = new AgentContext();
+        /*
+         * THE TRANSPORT DISPATCH FOR THE CONTROL PLANE.
+         *
+         * Chosen once, here, where the handle is built.  Because AgentClient
+         * is polymorphic, the operation macros below and every
+         * agent_cli_wrapper_* signature -- and the 101 call sites above them
+         * -- are untouched by the addition of gRPC.
+         *
+         * datalake.agent_transport is PGC_POSTMASTER, so it cannot change
+         * under a live handle.
+         */
+#ifdef HAVE_GRPCXX
+        if (datalake_agent_transport_get() == DATALAKE_AGENT_TRANSPORT_GRPC) {
+            /*
+             * Before the first channel exists, because channels are cached by
+             * target and carry the args they were built with.  The agent gets
+             * the same number on its command line from datalake_proxy, so the
+             * sender's ceiling and the receiver's are one setting; see
+             * dlagent_transport.h.
+             */
+            agent_cli::grpcx::set_max_message_size(
+                datalake_agent_rpc_max_message_bytes_get());
+            context->client.reset(new GrpcAgentClient(cpp_config));
+            LOG_INFO("Agent CLI using the gRPC transport, target " + cpp_config.grpc_target);
+        } else {
+            context->client.reset(new AgentClient(cpp_config));
+        }
+#else
+        /*
+         * Without gRPC support a "grpc" setting has already been rejected,
+         * by datalake_proxy's check hook or by agent_cli_wrapper_create.
+         */
         context->client.reset(new AgentClient(cpp_config));
+#endif
 
         *handle = context;
         LOG_INFO("Agent CLI initialized successfully");
@@ -313,6 +412,12 @@ AGENT_CLI_OP_NO_TABLE(agent_cli_list_namespaces_internal, list_namespaces)
 #pragma pop_macro("DEBUG3")
 #pragma pop_macro("DEBUG4")
 #pragma pop_macro("DEBUG5")
+#pragma pop_macro("Max")
+#pragma pop_macro("Min")
+#pragma pop_macro("gettext")
+#pragma pop_macro("dgettext")
+#pragma pop_macro("ngettext")
+#pragma pop_macro("dngettext")
 
 /* ----------------------------------------------------------------
  * Public PostgreSQL-integrated API (formerly agent_cli_wrapper.c)
@@ -348,14 +453,58 @@ agent_cli_wrapper_init_config(const char* server_url, const char* prefix,
         config->log_level = AGENT_CLI_LOG_OFF;
 }
 
+/*
+ * The interrupt check every handle gets by default: pending, and safe to act
+ * on right now.  Mirrors what CHECK_FOR_INTERRUPTS would do, without raising
+ * from inside the C++ client.
+ */
+static bool
+agent_cli_default_interrupt_check(void)
+{
+    if (!InterruptPending)
+        return false;
+    if (InterruptHoldoffCount != 0 || CritSectionCount != 0)
+        return false;
+    /*
+     * Only interrupts that ProcessInterrupts() turns into an error, the same
+     * rule as iceberg_catalog_interrupt_callback: memory-context logging,
+     * procsignal barriers and several timeouts also set InterruptPending, and
+     * abandoning the request for those fails a statement nothing cancelled.
+     */
+    if (ProcDiePending)
+        return true;
+    return QueryCancelPending && QueryCancelHoldoffCount == 0;
+}
+
 AgentCliHandle*
 agent_cli_wrapper_create(const char* server_url, const char* prefix, const char* namespace_name)
 {
+#ifndef HAVE_GRPCXX
+    /*
+     * Rejects datalake.agent_transport=grpc on a build without gRPC, which
+     * datalake_proxy's check hook covers only where it is preloaded.  Here,
+     * before any C++ object exists, because it raises an ERROR.
+     */
+    (void) datalake_agent_transport_get();
+#endif
     AgentCliHandle *handle = (AgentCliHandle *)palloc0(sizeof(AgentCliHandle));
     handle->agentConfig = (agent_cli_config_t *)palloc0(sizeof(agent_cli_config_t));
     handle->currentResponse = (agent_cli_response_t *)palloc0(sizeof(agent_cli_response_t));
 
     agent_cli_wrapper_init_config(server_url, prefix, namespace_name, handle->agentConfig);
+
+    /*
+     * The gRPC target, resolved here so the C++ side never has to reinterpret
+     * a REST URL.  Always set: the transport is chosen inside
+     * agent_cli_init_internal, and computing this unconditionally keeps that
+     * decision in one place.
+     *
+     * Leaving it null is not harmless: GrpcAgentClient falls back to
+     * target_from_url(server_url), and that URL is the REST endpoint, so every
+     * catalog operation under agent_transport=grpc dials the REST agent's port
+     * and fails with "Connection refused" against a perfectly healthy agent.
+     */
+    handle->agentConfig->grpc_target = pstrdup(datalake_agent_grpc_target());
 
     agent_cli_status_t status = agent_cli_init_internal(handle->agentConfig, &handle->handle);
     if (status != AGENT_CLI_SUCCESS)
@@ -366,7 +515,35 @@ agent_cli_wrapper_create(const char* server_url, const char* prefix, const char*
         elog(ERROR, "Failed to initialize agent CLI: status %d %s", status, agent_cli_get_error_string(status));
     }
 
+    /*
+     * Every handle is cancellable, not just the one the catalog FDW remembered
+     * to arm.
+     *
+     * agent_cli_wrapper_set_interrupt_callback had exactly ONE call site
+     * (initAgentCliHandle in iceberg_catalog_fdw.c) against six agent_cli_wrapper_create() call
+     * sites, so the other five produced handles that could not be interrupted
+     * at all: a Ctrl-C during one of those operations waited out the full
+     * retry schedule.  Registering the default here fixes all of them at once,
+     * and the callback is generic -- it only asks whether an interrupt is
+     * pending and safe to service.  A caller that wants different behaviour
+     * still overrides it.
+     *
+     * isValid MUST be set first.  agent_cli_wrapper_set_interrupt_callback
+     * starts with `if (!handle || !handle->isValid) return;`, so arming the
+     * callback on a handle that is not yet marked valid is a silent no-op,
+     * leaving every handle except the one iceberg_catalog_fdw.c arms by hand
+     * exactly as uninterruptible as before.  Measured on a live cluster: with
+     * CREATE FOREIGN CATALOG stuck on an unresponsive catalog server,
+     * InterruptPending=1, QueryCancelPending=1, InterruptHoldoffCount=0 and
+     * the backend sitting in select() in http_client.cpp -- inside the
+     * loop whose first statement is check_for_interrupts() -- because
+     * HttpClient::interrupt_callback_ was still an empty std::function.
+     * statement_timeout=300ms and pg_cancel_backend were both ignored for the
+     * full 17 s the retry schedule takes.
+     */
     handle->isValid = true;
+    agent_cli_wrapper_set_interrupt_callback(handle, agent_cli_default_interrupt_check);
+
     handle->responseValid = false;
     return handle;
 }
@@ -378,6 +555,9 @@ agent_cli_wrapper_destroy(AgentCliHandle* handle)
         return;
     if (handle->handle)
         agent_cli_cleanup_internal(handle->handle);
+    /* The response's strings are malloc'd; the response itself is palloc'd. */
+    if (handle->currentResponse)
+        agent_cli_free_response(handle->currentResponse);
     pfree(handle);
 }
 
@@ -509,6 +689,21 @@ agent_cli_wrapper_check_exec_error(AgentCliHandle* handle, const char *error_pre
     if (!handle)
         elog(ERROR, "%s: Invalid agent CLI handle", error_prefix);
 
+    /*
+     * A cancelled operation is not an agent failure, and reporting it as one
+     * loses what actually happened.  The interrupt that stopped the call is
+     * still pending, so hand it to PostgreSQL and let it raise its own
+     * "canceling statement due to statement timeout" / "due to user request"
+     * -- the same message every other cancelled statement in the system
+     * produces, with the right SQLSTATE (57014) for a client to recognise.
+     *
+     * Without this the user sees "Failed to create catalog: HTTP Status: 0,
+     * CURL Code: 0, Error: Operation cancelled", which reads like the catalog
+     * server did something, and carries XX000.
+     */
+    if (handle->lastStatus == AGENT_CLI_ERROR_CANCELLED)
+        CHECK_FOR_INTERRUPTS();
+
     if (handle->lastStatus != AGENT_CLI_SUCCESS)
     {
         initStringInfo(&errorBuf);
@@ -539,6 +734,21 @@ agent_cli_wrapper_check_exec_error_json(AgentCliHandle* handle, const char *erro
 
     if (!handle)
         elog(ERROR, "%s: Invalid agent CLI handle", error_prefix);
+
+    /*
+     * A cancelled operation is not an agent failure, and reporting it as one
+     * loses what actually happened.  The interrupt that stopped the call is
+     * still pending, so hand it to PostgreSQL and let it raise its own
+     * "canceling statement due to statement timeout" / "due to user request"
+     * -- the same message every other cancelled statement in the system
+     * produces, with the right SQLSTATE (57014) for a client to recognise.
+     *
+     * Without this the user sees "Failed to create catalog: HTTP Status: 0,
+     * CURL Code: 0, Error: Operation cancelled", which reads like the catalog
+     * server did something, and carries XX000.
+     */
+    if (handle->lastStatus == AGENT_CLI_ERROR_CANCELLED)
+        CHECK_FOR_INTERRUPTS();
 
     if (handle->lastStatus != AGENT_CLI_SUCCESS)
     {
@@ -642,21 +852,67 @@ const char* agent_cli_get_error_string(agent_cli_status_t status) {
 }
 
 /* ----------------------------------------------------------------
- * agent_cli_wrapper_cleanup_metadata
+ * File-level cleanup: agent_cli_wrapper_cleanup_metadata and
+ * agent_cli_wrapper_delete_file.
  *
- * libcurl-based POST to /api/v1/files/cleanup-from-metadata.  Bypasses the
- * agent_cli_* C++ method routing because the cleanup endpoint is not part of
- * the prefix-based method registry.  Called by the deletion-queue consumer.
+ * These two are ordinary operations: the same JSON bodies, dispatched
+ * through the same AgentClient the other 24 use, so the transport decides --
+ * even though the cleanup endpoints are not part of the prefix-based method
+ * registry.  As raw libcurl POSTs to /api/v1/files/... they would ignore
+ * datalake.agent_transport: under grpc the REST agent is not running, so
+ * every cleanup would fail "Connection refused" and leave the files it was
+ * meant to remove for the orphan backstop.  In the subtransaction-abort path
+ * that failure is worse than a leak -- see the abort-path PANIC guard in
+ * pg_iceberg_metadata_tracker.c.
  * ----------------------------------------------------------------
  */
-static size_t
-cleanup_metadata_write_cb(char *ptr, size_t size, size_t nmemb, void *userdata)
-{
-    StringInfo body = (StringInfo) userdata;
-    size_t total = size * nmemb;
 
-    appendBinaryStringInfo(body, ptr, (int) total);
-    return total;
+AGENT_CLI_OP_NO_TABLE(agent_cli_cleanup_metadata_internal, cleanup_metadata)
+AGENT_CLI_OP_NO_TABLE(agent_cli_delete_file_internal, delete_file)
+
+/*
+ * Append a JSON string body, escaping exactly what the curl versions escaped:
+ * a backslash and a double quote.  Kept identical rather than widened to full
+ * JSON escaping, because these bodies have to stay byte-for-byte what dlagent
+ * already accepts: the REST path's observable behaviour must not change.
+ */
+static void
+append_json_escaped(StringInfo out, const char *value)
+{
+    for (const char *p = value; *p; p++)
+    {
+        if (*p == '\\' || *p == '"')
+            appendStringInfoChar(out, '\\');
+        appendStringInfoChar(out, *p);
+    }
+}
+
+/*
+ * The failure detail the cleanup callers log: the agent's status and body for
+ * an HTTP-level failure, otherwise the transport's own reason.
+ */
+static char *
+cleanup_failure_detail(AgentCliHandle* handle)
+{
+    agent_cli_response_t *r = handle->currentResponse;
+
+    if (handle->lastStatus == AGENT_CLI_ERROR_HTTP && r != NULL && r->http_status != 0)
+        return psprintf("dlagent returned HTTP %d: %s", r->http_status,
+                        (r->response_body && r->response_size > 0)
+                        ? r->response_body : "(empty)");
+    if (r != NULL && r->error_message != NULL && r->error_message[0] != '\0')
+        return psprintf("%s: %s", agent_cli_get_error_string(handle->lastStatus),
+                        r->error_message);
+    return pstrdup(agent_cli_get_error_string(handle->lastStatus));
+}
+
+static void
+append_fileio_config(StringInfo out, const char *fileio_config_json)
+{
+    if (fileio_config_json && fileio_config_json[0] != '\0')
+        appendStringInfoString(out, fileio_config_json);
+    else
+        appendStringInfoString(out, "{}");
 }
 
 void
@@ -664,28 +920,10 @@ agent_cli_wrapper_cleanup_metadata(AgentCliHandle* handle,
                                    const char* metadata_path,
                                    const char* fileio_config_json)
 {
-    CURL              *curl;
-    CURLcode           res;
-    long               http_code = 0;
-    struct curl_slist *headers = NULL;
-    StringInfoData     url;
-    StringInfoData     body;
-    StringInfoData     response;
-    const char        *base_url;
+    StringInfoData body;
 
     if (!handle || !handle->isValid)
         elog(ERROR, "Invalid agent CLI handle");
-
-    if (handle->agentConfig == NULL ||
-        handle->agentConfig->server_url == NULL ||
-        handle->agentConfig->server_url[0] == '\0')
-    {
-        handle->lastStatus       = AGENT_CLI_ERROR_INVALID_PARAM;
-        handle->lastErrorMessage = pstrdup("agent server_url is empty");
-        handle->responseValid    = false;
-        return;
-    }
-    base_url = handle->agentConfig->server_url;
 
     if (metadata_path == NULL || metadata_path[0] == '\0')
     {
@@ -695,148 +933,32 @@ agent_cli_wrapper_cleanup_metadata(AgentCliHandle* handle,
         return;
     }
 
-    /* Build URL: <base>/api/v1/files/cleanup-from-metadata (trim trailing /). */
-    initStringInfo(&url);
-    {
-        size_t base_len = strlen(base_url);
-        if (base_len > 0 && base_url[base_len - 1] == '/')
-            appendBinaryStringInfo(&url, base_url, (int)(base_len - 1));
-        else
-            appendStringInfoString(&url, base_url);
-        appendStringInfoString(&url, "/api/v1/files/cleanup-from-metadata");
-    }
-
-    /* Build JSON body.  metadata_path is hand-escaped; fileio_config_json is
-     * assumed to be a valid JSON object and inlined verbatim. */
+    /* {"metadataPath":"<path>","fileIOConfig":<cfg>} */
     initStringInfo(&body);
     appendStringInfoString(&body, "{\"metadataPath\":\"");
-    for (const char *p = metadata_path; *p; p++)
-    {
-        if (*p == '\\' || *p == '"')
-            appendStringInfoChar(&body, '\\');
-        appendStringInfoChar(&body, *p);
-    }
+    append_json_escaped(&body, metadata_path);
     appendStringInfoString(&body, "\",\"fileIOConfig\":");
-    if (fileio_config_json && fileio_config_json[0] != '\0')
-        appendStringInfoString(&body, fileio_config_json);
-    else
-        appendStringInfoString(&body, "{}");
+    append_fileio_config(&body, fileio_config_json);
     appendStringInfoChar(&body, '}');
 
-    initStringInfo(&response);
+    handle->lastStatus = agent_cli_cleanup_metadata_internal(handle->handle, body.data,
+                                                             handle->currentResponse);
+    handle->responseValid = true;
+    if (handle->lastStatus != AGENT_CLI_SUCCESS)
+        handle->lastErrorMessage = cleanup_failure_detail(handle);
 
-    curl = curl_easy_init();
-    if (!curl)
-    {
-        handle->lastStatus       = AGENT_CLI_ERROR_CURL;
-        handle->lastErrorMessage = pstrdup("curl_easy_init() failed");
-        handle->responseValid    = false;
-
-        pfree(url.data);
-        pfree(body.data);
-        pfree(response.data);
-        return;
-    }
-
-    headers = curl_slist_append(headers, "Content-Type: application/json");
-    headers = curl_slist_append(headers, "Accept: application/json");
-
-    curl_easy_setopt(curl, CURLOPT_URL,          url.data);
-    curl_easy_setopt(curl, CURLOPT_POST,         1L);
-    curl_easy_setopt(curl, CURLOPT_POSTFIELDS,   body.data);
-    curl_easy_setopt(curl, CURLOPT_POSTFIELDSIZE, (long) body.len);
-    curl_easy_setopt(curl, CURLOPT_HTTPHEADER,   headers);
-    curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, cleanup_metadata_write_cb);
-    curl_easy_setopt(curl, CURLOPT_WRITEDATA,    (void *) &response);
-    curl_easy_setopt(curl, CURLOPT_NOSIGNAL,     1L);   /* avoid SIGPIPE in PG backends */
-
-    if (handle->agentConfig->request_timeout_seconds > 0)
-        curl_easy_setopt(curl, CURLOPT_TIMEOUT,
-                         (long) handle->agentConfig->request_timeout_seconds);
-    if (handle->agentConfig->connect_timeout_seconds > 0)
-        curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT,
-                         (long) handle->agentConfig->connect_timeout_seconds);
-
-    res = curl_easy_perform(curl);
-    curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &http_code);
-
-    /* Populate handle->currentResponse so callers can read the body. */
-    if (handle->currentResponse->response_body)
-    {
-        pfree(handle->currentResponse->response_body);
-        handle->currentResponse->response_body = NULL;
-    }
-    handle->currentResponse->response_body = pstrdup(response.data);
-    handle->currentResponse->response_size = response.len;
-    handle->currentResponse->http_status   = (int) http_code;
-    handle->currentResponse->curl_code     = (long) res;
-    handle->responseValid                  = true;
-
-    if (res != CURLE_OK)
-    {
-        handle->lastStatus       = AGENT_CLI_ERROR_NETWORK;
-        handle->lastErrorMessage = psprintf("curl_easy_perform failed: %s",
-                                            curl_easy_strerror(res));
-    }
-    else if (http_code < 200 || http_code >= 300)
-    {
-        handle->lastStatus       = AGENT_CLI_ERROR_HTTP;
-        handle->lastErrorMessage = psprintf("dlagent returned HTTP %ld: %s",
-                                            http_code,
-                                            response.len > 0 ? response.data : "(empty)");
-    }
-    else
-    {
-        handle->lastStatus       = AGENT_CLI_SUCCESS;
-        handle->lastErrorMessage = NULL;
-    }
-
-    curl_slist_free_all(headers);
-    curl_easy_cleanup(curl);
-
-    pfree(url.data);
     pfree(body.data);
-    pfree(response.data);
 }
 
-/*
- * ----------------------------------------------------------------
- * agent_cli_wrapper_delete_file
- *
- * libcurl-based POST to /api/v1/files/delete, deleting a single object by
- * path (DELETION_TYPE_FILE entries, e.g. VACUUM's rewritten old files).
- * Mirrors agent_cli_wrapper_cleanup_metadata but sends
- * {"paths":["<path>"],"fileIOConfig":...} and does NOT parse the path as a
- * metadata tree.
- * ----------------------------------------------------------------
- */
 void
 agent_cli_wrapper_delete_file(AgentCliHandle* handle,
                               const char* path,
                               const char* fileio_config_json)
 {
-    CURL              *curl;
-    CURLcode           res;
-    long               http_code = 0;
-    struct curl_slist *headers = NULL;
-    StringInfoData     url;
-    StringInfoData     body;
-    StringInfoData     response;
-    const char        *base_url;
+    StringInfoData body;
 
     if (!handle || !handle->isValid)
         elog(ERROR, "Invalid agent CLI handle");
-
-    if (handle->agentConfig == NULL ||
-        handle->agentConfig->server_url == NULL ||
-        handle->agentConfig->server_url[0] == '\0')
-    {
-        handle->lastStatus       = AGENT_CLI_ERROR_INVALID_PARAM;
-        handle->lastErrorMessage = pstrdup("agent server_url is empty");
-        handle->responseValid    = false;
-        return;
-    }
-    base_url = handle->agentConfig->server_url;
 
     if (path == NULL || path[0] == '\0')
     {
@@ -846,106 +968,21 @@ agent_cli_wrapper_delete_file(AgentCliHandle* handle,
         return;
     }
 
-    /* Build URL: <base>/api/v1/files/delete (trim trailing /). */
-    initStringInfo(&url);
-    {
-        size_t base_len = strlen(base_url);
-        if (base_len > 0 && base_url[base_len - 1] == '/')
-            appendBinaryStringInfo(&url, base_url, (int)(base_len - 1));
-        else
-            appendStringInfoString(&url, base_url);
-        appendStringInfoString(&url, "/api/v1/files/delete");
-    }
-
-    /* Build JSON body: {"paths":["<path>"],"fileIOConfig":<cfg>} */
+    /* {"paths":["<path>"],"fileIOConfig":<cfg>} */
     initStringInfo(&body);
     appendStringInfoString(&body, "{\"paths\":[\"");
-    for (const char *p = path; *p; p++)
-    {
-        if (*p == '\\' || *p == '"')
-            appendStringInfoChar(&body, '\\');
-        appendStringInfoChar(&body, *p);
-    }
+    append_json_escaped(&body, path);
     appendStringInfoString(&body, "\"],\"fileIOConfig\":");
-    if (fileio_config_json && fileio_config_json[0] != '\0')
-        appendStringInfoString(&body, fileio_config_json);
-    else
-        appendStringInfoString(&body, "{}");
+    append_fileio_config(&body, fileio_config_json);
     appendStringInfoChar(&body, '}');
 
-    initStringInfo(&response);
+    handle->lastStatus = agent_cli_delete_file_internal(handle->handle, body.data,
+                                                        handle->currentResponse);
+    handle->responseValid = true;
+    if (handle->lastStatus != AGENT_CLI_SUCCESS)
+        handle->lastErrorMessage = cleanup_failure_detail(handle);
 
-    curl = curl_easy_init();
-    if (!curl)
-    {
-        handle->lastStatus       = AGENT_CLI_ERROR_CURL;
-        handle->lastErrorMessage = pstrdup("curl_easy_init() failed");
-        handle->responseValid    = false;
-
-        pfree(url.data);
-        pfree(body.data);
-        pfree(response.data);
-        return;
-    }
-
-    headers = curl_slist_append(headers, "Content-Type: application/json");
-    headers = curl_slist_append(headers, "Accept: application/json");
-
-    curl_easy_setopt(curl, CURLOPT_URL,          url.data);
-    curl_easy_setopt(curl, CURLOPT_POST,         1L);
-    curl_easy_setopt(curl, CURLOPT_POSTFIELDS,   body.data);
-    curl_easy_setopt(curl, CURLOPT_POSTFIELDSIZE, (long) body.len);
-    curl_easy_setopt(curl, CURLOPT_HTTPHEADER,   headers);
-    curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, cleanup_metadata_write_cb);
-    curl_easy_setopt(curl, CURLOPT_WRITEDATA,    (void *) &response);
-    curl_easy_setopt(curl, CURLOPT_NOSIGNAL,     1L);
-
-    if (handle->agentConfig->request_timeout_seconds > 0)
-        curl_easy_setopt(curl, CURLOPT_TIMEOUT,
-                         (long) handle->agentConfig->request_timeout_seconds);
-    if (handle->agentConfig->connect_timeout_seconds > 0)
-        curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT,
-                         (long) handle->agentConfig->connect_timeout_seconds);
-
-    res = curl_easy_perform(curl);
-    curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &http_code);
-
-    if (handle->currentResponse->response_body)
-    {
-        pfree(handle->currentResponse->response_body);
-        handle->currentResponse->response_body = NULL;
-    }
-    handle->currentResponse->response_body = pstrdup(response.data);
-    handle->currentResponse->response_size = response.len;
-    handle->currentResponse->http_status   = (int) http_code;
-    handle->currentResponse->curl_code     = (long) res;
-    handle->responseValid                  = true;
-
-    if (res != CURLE_OK)
-    {
-        handle->lastStatus       = AGENT_CLI_ERROR_NETWORK;
-        handle->lastErrorMessage = psprintf("curl_easy_perform failed: %s",
-                                            curl_easy_strerror(res));
-    }
-    else if (http_code < 200 || http_code >= 300)
-    {
-        handle->lastStatus       = AGENT_CLI_ERROR_HTTP;
-        handle->lastErrorMessage = psprintf("dlagent returned HTTP %ld: %s",
-                                            http_code,
-                                            response.len > 0 ? response.data : "(empty)");
-    }
-    else
-    {
-        handle->lastStatus       = AGENT_CLI_SUCCESS;
-        handle->lastErrorMessage = NULL;
-    }
-
-    curl_slist_free_all(headers);
-    curl_easy_cleanup(curl);
-
-    pfree(url.data);
     pfree(body.data);
-    pfree(response.data);
 }
 
 } // extern "C"

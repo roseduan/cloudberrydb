@@ -27,6 +27,12 @@ struct HttpRequest {
      * i.e. the server provably never saw them.
      */
     bool idempotent = true;
+    /*
+     * Never retried, whatever the failure.  For best-effort calls made on
+     * error-cleanup paths, where interrupts are held off: waiting out the
+     * agent-restart window there would stall a ROLLBACK uncancellably.
+     */
+    bool single_attempt = false;
 };
 
 struct HttpResponse {

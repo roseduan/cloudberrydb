@@ -49,6 +49,15 @@ HttpClient::~HttpClient() {
 }
 
 void HttpClient::setup_curl_options() {
+    /*
+     * Never route agent traffic through an HTTP proxy.  libchurl.c has
+     * done this on the data plane since forever; the control plane did not,
+     * so with http_proxy set in the backend's environment every catalog
+     * operation was silently sent to an external proxy instead of to the
+     * loopback agent.  The gRPC client sets GRPC_ARG_ENABLE_HTTP_PROXY=0 for
+     * the same reason.
+     */
+    curl_easy_setopt(curl_handle_, CURLOPT_PROXY, "");
     curl_easy_setopt(curl_handle_, CURLOPT_FOLLOWLOCATION, 1L);
     curl_easy_setopt(curl_handle_, CURLOPT_MAXREDIRS, 5L);
     curl_easy_setopt(curl_handle_, CURLOPT_NOSIGNAL, 1L);
@@ -179,7 +188,8 @@ HttpResponse HttpClient::perform_request_with_retry(const HttpRequest& request) 
     while (attempts < max_attempts) {
         response = perform_single_request(attempt_request);
 
-        if (response.curl_code == CURLE_OK && response.status_code < 500) {
+        if (request.single_attempt ||
+            (response.curl_code == CURLE_OK && response.status_code < 500)) {
             break;
         }
 

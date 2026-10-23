@@ -1,0 +1,415 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+
+    <parent>
+        <groupId>cloud.elastic</groupId>
+        <artifactId>dlagent-parent</artifactId>
+        <version>1.0.0</version>
+    </parent>
+
+    <artifactId>dlagent-core</artifactId>
+
+    <!--
+      Everything that is neither REST nor gRPC: api/, plugins/, the
+      transport-neutral service layer, and the three classes that deliberately
+      live under org.apache.* to reach package-private Hadoop/Iceberg internals.
+
+      No spring-*, no tomcat-embed-*, no javax.servlet here, by rule and by
+      test (ModuleBoundaryTest). Dependency order below is unchanged from the
+      single-module pom on purpose - the parquet-before-hive/iceberg comment is
+      load-bearing.
+    -->
+
+    <dependencies>
+        <dependency>
+            <groupId>org.apache.hadoop</groupId>
+            <artifactId>hadoop-annotations</artifactId>
+            <version>${hadoop.version}</version>
+        </dependency>
+        <dependency>
+            <groupId>org.apache.hadoop</groupId>
+            <artifactId>hadoop-auth</artifactId>
+            <version>${hadoop.version}</version>
+            <exclusions>
+                <exclusion>
+                    <groupId>org.slf4j</groupId>
+                    <artifactId>slf4j-reload4j</artifactId>
+                </exclusion>
+            </exclusions>
+        </dependency>
+        <dependency>
+            <groupId>org.apache.hadoop</groupId>
+            <artifactId>hadoop-common</artifactId>
+            <version>${hadoop.version}</version>
+            <exclusions>
+                <exclusion>
+                    <groupId>javax.servlet</groupId>
+                    <artifactId>servlet-api</artifactId>
+                </exclusion>
+                <exclusion>
+                    <groupId>org.slf4j</groupId>
+                    <artifactId>slf4j-reload4j</artifactId>
+                </exclusion>
+                <exclusion>
+                    <groupId>org.apache.avro</groupId>
+                    <artifactId>avro</artifactId>
+                </exclusion>
+            </exclusions>
+        </dependency>
+        <dependency>
+            <groupId>org.apache.hadoop</groupId>
+            <artifactId>hadoop-hdfs</artifactId>
+            <version>${hadoop.version}</version>
+            <exclusions>
+                <exclusion>
+                    <groupId>javax.servlet</groupId>
+                    <artifactId>servlet-api</artifactId>
+                </exclusion>
+            </exclusions>
+        </dependency>
+        <dependency>
+            <groupId>org.apache.hadoop</groupId>
+            <artifactId>hadoop-hdfs-client</artifactId>
+            <version>${hadoop.version}</version>
+        </dependency>
+        <dependency>
+            <groupId>org.apache.hadoop</groupId>
+            <artifactId>hadoop-mapreduce-client-core</artifactId>
+            <version>${hadoop.version}</version>
+            <exclusions>
+                <exclusion>
+                    <groupId>javax.servlet</groupId>
+                    <artifactId>servlet-api</artifactId>
+                </exclusion>
+                <exclusion>
+                    <groupId>org.slf4j</groupId>
+                    <artifactId>slf4j-reload4j</artifactId>
+                </exclusion>
+                <exclusion>
+                    <groupId>org.apache.avro</groupId>
+                    <artifactId>avro</artifactId>
+                </exclusion>
+            </exclusions>
+        </dependency>
+        <dependency>
+            <groupId>org.apache.hadoop</groupId>
+            <artifactId>hadoop-yarn-api</artifactId>
+            <version>${hadoop.version}</version>
+        </dependency>
+        <dependency>
+            <groupId>org.apache.hadoop</groupId>
+            <artifactId>hadoop-yarn-client</artifactId>
+            <version>${hadoop.version}</version>
+        </dependency>
+        <dependency>
+            <groupId>org.apache.hadoop</groupId>
+            <artifactId>hadoop-aws</artifactId>
+            <version>${hadoop.version}</version>
+        </dependency>
+        <!-- Since hadoop 3.4.3, commons-collections (3.x) is only a transitive runtime dep,
+             but HttpHeaderDecoder uses org.apache.commons.collections.CollectionUtils at
+             compile time; add it back explicitly (also fixes CVE-2015-7501) -->
+        <dependency>
+            <groupId>commons-collections</groupId>
+            <artifactId>commons-collections</artifactId>
+            <version>3.2.2</version>
+        </dependency>
+        <!-- JSR-330: the DI annotations core is written against. Used to come in
+             as a fourth-level transitive of hadoop -> guice. -->
+        <dependency>
+            <groupId>javax.inject</groupId>
+            <artifactId>javax.inject</artifactId>
+        </dependency>
+        <!-- MetricsReporter's meters. Used to come only via
+             spring-boot-starter-actuator, which core no longer has. -->
+        <dependency>
+            <groupId>io.micrometer</groupId>
+            <artifactId>micrometer-core</artifactId>
+        </dependency>
+        <!-- The three Jackson modules Spring Boot's auto-configured ObjectMapper
+             registers and that are NOT Boot-specific. DlObjectMapperFactory has
+             to register the same set for the single serialization exit to emit
+             the same bytes as today's REST path (the two transports must produce
+             byte-identical response bodies); they used to reach the code only
+             via dlagent-rest's spring-boot-starter-web, so core could not see
+             them at all.
+             Versions come from the parent's jackson-bom import. -->
+        <dependency>
+            <groupId>com.fasterxml.jackson.datatype</groupId>
+            <artifactId>jackson-datatype-jdk8</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>com.fasterxml.jackson.datatype</groupId>
+            <artifactId>jackson-datatype-jsr310</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>com.fasterxml.jackson.module</groupId>
+            <artifactId>jackson-module-parameter-names</artifactId>
+        </dependency>
+        <!-- Used directly all over core (Preconditions, CacheBuilder, Lists,
+             Sets, CountingOutputStream) but never declared; version pinned in
+             the parent, see the guava flavour note there. -->
+        <dependency>
+            <groupId>com.google.guava</groupId>
+            <artifactId>guava</artifactId>
+        </dependency>
+        <!-- SiteConfigLoader / BaseConfigurationFactory parse the gphive.conf /
+             s3.conf / gphdfs.conf YAML with it. It used to arrive via
+             spring-boot-starter; version (2.2, CVE-2022-1471) from the parent. -->
+        <dependency>
+            <groupId>org.yaml</groupId>
+            <artifactId>snakeyaml</artifactId>
+        </dependency>
+        <!-- log4j2, previously supplied by spring-boot-starter-log4j2. Declared
+             explicitly so a non-Spring transport still has an slf4j
+             binding; versions come from the log4j-bom the parent imports
+             (log4j2.version). -->
+        <dependency>
+            <groupId>org.apache.logging.log4j</groupId>
+            <artifactId>log4j-api</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>org.apache.logging.log4j</groupId>
+            <artifactId>log4j-core</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>org.apache.logging.log4j</groupId>
+            <artifactId>log4j-slf4j-impl</artifactId>
+        </dependency>
+        <!-- Parquet 1.15.2 MUST be declared before the Hive/Iceberg dependencies.
+             hive-exec-3.1.0 and iceberg-hive-runtime are shaded uber jars that embed an
+             old parquet 1.10 org.apache.parquet.schema.Type (lacking getLogicalTypeAnnotation())
+             at the original package name with no relocation, so a Maven <exclusion> cannot
+             remove them. Spring Boot's LaunchedURLClassLoader loads BOOT-INF/lib jars in
+             BOOT-INF/classpath.idx order, which mirrors dependency declaration order;
+             declaring parquet-* first lets parquet-column-1.15.2 win over the embedded
+             copies and fixes NoSuchMethodError: Type.getLogicalTypeAnnotation() on Hudi reads.
+             Still true after the module split: these are all inside this module's subtree,
+             so their relative order is what it was. -->
+        <dependency>
+            <groupId>org.apache.parquet</groupId>
+            <artifactId>parquet-column</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>org.apache.parquet</groupId>
+            <artifactId>parquet-hadoop</artifactId>
+        </dependency>
+        <dependency>
+            <!-- hudi-common calls AvroSchemaConverter at runtime; parquet-avro is
+                 provided-scope in the Hudi parent BOM (not transitive), and dropping
+                 hudi-presto-bundle removed the shaded copy that used to satisfy it, so
+                 declare it explicitly to keep it in the agent fat jar. -->
+            <groupId>org.apache.parquet</groupId>
+            <artifactId>parquet-avro</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>org.apache.hive</groupId>
+            <artifactId>hive-metastore</artifactId>
+            <version>${hive.version}</version>
+            <exclusions>
+                <exclusion>
+                    <groupId>org.slf4j</groupId>
+                    <artifactId>slf4j-reload4j</artifactId>
+                </exclusion>
+                <exclusion>
+                    <groupId>org.apache.parquet</groupId>
+                    <artifactId>parquet-hadoop-bundle</artifactId>
+                </exclusion>
+                <exclusion>
+                    <groupId>org.apache.avro</groupId>
+                    <artifactId>avro</artifactId>
+                </exclusion>
+                <!-- #580: legacy Log4j 1.x (pulled via hbase-common); org.apache.log4j.* is provided by reload4j + log4j-1.2-api -->
+                <exclusion>
+                    <groupId>log4j</groupId>
+                    <artifactId>log4j</artifactId>
+                </exclusion>
+                <!-- CVE-2019-10172: Jackson 1.x (org.codehaus.jackson, pulled via hive-shims-0.23, unpatchable) -->
+                <exclusion>
+                    <groupId>org.codehaus.jackson</groupId>
+                    <artifactId>jackson-core-asl</artifactId>
+                </exclusion>
+                <exclusion>
+                    <groupId>org.codehaus.jackson</groupId>
+                    <artifactId>jackson-mapper-asl</artifactId>
+                </exclusion>
+                <exclusion>
+                    <groupId>org.codehaus.jackson</groupId>
+                    <artifactId>jackson-jaxrs</artifactId>
+                </exclusion>
+                <exclusion>
+                    <groupId>org.codehaus.jackson</groupId>
+                    <artifactId>jackson-xc</artifactId>
+                </exclusion>
+                <!-- CVE-2022-46337 (CVSS 9.8): derby 10.14.2.0 LDAP injection. The fixed
+                     10.14.2.1 / 10.15.2.1 / 10.16.1.2 were never published to Maven Central
+                     and 10.17.x needs Java 21, so the coordinate is a dead end. It is only
+                     the embedded HMS database, which the agent never runs - it talks to a
+                     remote metastore. -->
+                <exclusion>
+                    <groupId>org.apache.derby</groupId>
+                    <artifactId>derby</artifactId>
+                </exclusion>
+            </exclusions>
+        </dependency>
+        <dependency>
+            <groupId>org.apache.hive</groupId>
+            <artifactId>hive-common</artifactId>
+            <version>${hive.version}</version>
+            <exclusions>
+                <exclusion>
+                    <groupId>org.eclipse.jetty.aggregate</groupId>
+                    <artifactId>jetty-all</artifactId>
+                </exclusion>
+                <exclusion>
+                    <groupId>org.apache.derby</groupId>
+                    <artifactId>derby</artifactId>
+                </exclusion>
+            </exclusions>
+        </dependency>
+
+        <dependency>
+            <groupId>org.apache.hive</groupId>
+            <artifactId>hive-exec</artifactId>
+            <version>${hive.version}</version>
+            <exclusions>
+                <exclusion>
+                    <groupId>org.apache.derby</groupId>
+                    <artifactId>derby</artifactId>
+                </exclusion>
+                <!-- CVE-2020-13936: velocity 1.5 template sandbox escape, fixed only on the
+                     velocity-engine-core 2.x line, so 1.x is a dead end. The fat jar already
+                     ships velocity-engine-core 2.3, which owns the same org.apache.velocity.*
+                     packages - dropping 1.5 also removes that classpath-order ambiguity. -->
+                <exclusion>
+                    <groupId>org.apache.velocity</groupId>
+                    <artifactId>velocity</artifactId>
+                </exclusion>
+            </exclusions>
+        </dependency>
+
+        <dependency>
+            <groupId>org.apache.iceberg</groupId>
+            <artifactId>iceberg-api</artifactId>
+            <version>${iceberg.version}</version>
+        </dependency>
+
+        <dependency>
+            <groupId>org.apache.iceberg</groupId>
+            <artifactId>iceberg-hive-runtime</artifactId>
+            <version>${iceberg.version}</version>
+        </dependency>
+
+        <dependency>
+            <groupId>org.apache.iceberg</groupId>
+            <artifactId>iceberg-core</artifactId>
+            <version>${iceberg.version}</version>
+        </dependency>
+
+        <dependency>
+            <groupId>org.apache.iceberg</groupId>
+            <artifactId>iceberg-aws</artifactId>
+            <version>${iceberg.version}</version>
+        </dependency>
+
+        <!-- Custom FileIO implementation for Gopher storage -->
+        <dependency>
+            <groupId>org.cbdb.iceberg</groupId>
+            <artifactId>iceberg-gopher</artifactId>
+            <version>4.0.7</version>
+        </dependency>
+
+        <dependency>
+            <groupId>com.github.ben-manes.caffeine</groupId>
+            <artifactId>caffeine</artifactId>
+            <version>2.9.3</version>
+            <scope>provided</scope>
+        </dependency>
+
+        <!-- Slim Hudi modules instead of hudi-presto-bundle: the agent only uses
+             org.apache.hudi.common/avro/metadata/internal.schema classes (all in
+             hudi-common) plus the Hadoop input formats (hudi-hadoop-mr) for the read
+             path. The presto bundle is a shaded uber jar that embeds ancient
+             jackson-databind 2.4.0 + netty-all 4.1.65 + hbase-shaded-netty, none of
+             which are needed; dropping it removes those bundled CVEs and lets Avro/
+             Parquet resolve to the patched versions managed above. -->
+        <dependency>
+            <groupId>org.apache.hudi</groupId>
+            <artifactId>hudi-common</artifactId>
+            <version>${hudi.version}</version>
+        </dependency>
+        <dependency>
+            <groupId>org.apache.hudi</groupId>
+            <artifactId>hudi-hadoop-mr</artifactId>
+            <version>${hudi.version}</version>
+            <exclusions>
+                <!-- hudi-hadoop-mr transitively re-pulls the hadoop-* modules;
+                     exclude the slf4j-reload4j binding on this path too, matching
+                     the direct hadoop-* dependency declarations above (keeps log4j2
+                     as the only slf4j binding). -->
+                <exclusion>
+                    <groupId>org.slf4j</groupId>
+                    <artifactId>slf4j-reload4j</artifactId>
+                </exclusion>
+            </exclusions>
+        </dependency>
+        <dependency>
+            <groupId>org.apache.avro</groupId>
+            <artifactId>avro-mapred</artifactId>
+            <version>${avro.version}</version>
+        </dependency>
+        <!-- Kryo: hudi-common 0.13.0 compiles against Kryo 4's nested
+             com.esotericsoftware.kryo.Kryo$DefaultInstantiatorStrategy, which Kryo 5.x
+             removed (moved to the top-level com.esotericsoftware.kryo.util package).
+             Dropping hudi-presto-bundle removed the shaded kryo-shaded 4.0.2 it embedded,
+             and declaring plain kryo:5.3.0 here caused NoClassDefFoundError on Hudi reads.
+             Use kryo-shaded 4.0.2 — the exact artifact/version Hudi 0.13's parent BOM
+             manages (<kryo.shaded.version>4.0.2</kryo.shaded.version>). -->
+        <dependency>
+            <groupId>com.esotericsoftware</groupId>
+            <artifactId>kryo-shaded</artifactId>
+            <version>4.0.2</version>
+        </dependency>
+        <!-- HBase relocated third-party (shaded Guava/Protobuf): Hudi 0.13's
+             metadata-table reader parses the MDT log blocks as HBase HFiles
+             (HoodieBackedTableMetadata -> HoodieMergedLogRecordScanner ->
+             HoodieAvroHFileReader -> org.apache.hadoop.hbase.io.hfile.ReaderContextBuilder),
+             which calls org.apache.hbase.thirdparty.com.google.common.base.Preconditions
+             and reads the protobuf-encoded HFile trailer/fileinfo.
+             hbase-server (which carries the HFile classes) is pulled transitively via
+             hudi-common, but the org.apache.hbase.thirdparty:* artifacts are declared
+             on hbase-server WITHOUT a version (managed only by HBase's own parent BOM),
+             so at depth-3 (hudi-common -> hbase-server -> hbase-thirdparty) Maven cannot
+             resolve their version in this pom and drops them from the agent fat jar.
+             hudi-presto-bundle used to embed the shaded copies; declare them explicitly
+             at HBase 2.4.9's managed hbase-thirdparty.version=3.5.1 to fix:
+             NoClassDefFoundError: org/apache/hbase/thirdparty/com/google/common/base/Preconditions
+             on Hudi reads. (netty/gson thirdparty are RPC-path only; the local HFile
+             read path does not need them.) -->
+        <dependency>
+            <groupId>org.apache.hbase.thirdparty</groupId>
+            <artifactId>hbase-shaded-miscellaneous</artifactId>
+            <version>3.5.1</version>
+        </dependency>
+        <dependency>
+            <groupId>org.apache.hbase.thirdparty</groupId>
+            <artifactId>hbase-shaded-protobuf</artifactId>
+            <version>3.5.1</version>
+        </dependency>
+        <dependency>
+            <groupId>software.amazon.awssdk</groupId>
+            <artifactId>s3</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>software.amazon.awssdk</groupId>
+            <artifactId>sts</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>software.amazon.awssdk</groupId>
+            <artifactId>url-connection-client</artifactId>
+        </dependency>
+    </dependencies>
+</project>

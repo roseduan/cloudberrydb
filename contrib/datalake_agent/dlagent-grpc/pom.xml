@@ -1,0 +1,108 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+
+    <parent>
+        <groupId>cloud.elastic</groupId>
+        <artifactId>dlagent-parent</artifactId>
+        <version>1.0.0</version>
+    </parent>
+
+    <artifactId>dlagent-grpc</artifactId>
+
+    <!--
+      The Guice composition root: DiModule, which assembles dlagent-core under
+      Guice with the right scopes, plus the gRPC services, the hand-built
+      method descriptors for proto/dlagent.proto, the configuration parser,
+      Main and the two-phase startup.
+
+      It uses io.grpc:grpc-netty (NOT grpc-netty-shaded) plus
+      io.netty:netty-transport-native-epoll, with the grpc version pinned in
+      the parent like everything else.
+    -->
+
+    <dependencies>
+        <!--
+          THE gRPC STACK, AND WHAT IS DELIBERATELY ABSENT.
+
+          grpc-api / grpc-core / grpc-stub / grpc-netty only. There is no
+          grpc-protobuf and no protobuf-java, because the payload
+          contract makes both unnecessary: every request and response is a
+          single `bytes payload` field, so the marshalling is 30 lines of
+          well-defined framing pinned by protoc-generated golden bytes (see
+          PayloadMarshaller) rather than generated code.
+
+          That is not merely tidier, it removes a risk this module cannot
+          otherwise close. grpc-protobuf 1.81.0 requires
+          com.google.protobuf:protobuf-java 3.25.8, while
+          hive-standalone-metastore 3.1.0, hbase-client 2.4.9 and orc-core
+          1.5.1 all still resolve 2.5.0 on dlagent-core's classpath, and under
+          the thin-jar install layout core and grpc share one classpath.
+          Hadoop and HBase themselves are safe either way (they ship their
+          protobuf relocated, as hadoop-shaded-protobuf_3_25 and
+          hbase-shaded-protobuf), but Hive metastore and ORC use the
+          non-shaded 2.5.0, and nothing in this repository's test suite
+          exercises their protobuf paths, so a 3.x upgrade could only be
+          declared safe by assertion.
+        -->
+        <dependency>
+            <groupId>io.grpc</groupId>
+            <artifactId>grpc-api</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>io.grpc</groupId>
+            <artifactId>grpc-core</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>io.grpc</groupId>
+            <artifactId>grpc-stub</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>io.grpc</groupId>
+            <artifactId>grpc-netty</artifactId>
+        </dependency>
+        <!--
+          grpc-netty-shaded bundles its own epoll native; the non-shaded
+          grpc-netty does not, and without this it silently falls back to NIO.
+          Version comes from the netty-bom pin in the parent.
+        -->
+        <dependency>
+            <groupId>io.netty</groupId>
+            <artifactId>netty-transport-native-epoll</artifactId>
+            <classifier>linux-x86_64</classifier>
+        </dependency>
+        <!-- In-process transport: lets the service tests exercise real gRPC
+             plumbing (marshalling, status mapping, cancellation) with no
+             sockets and no ports. -->
+        <dependency>
+            <groupId>io.grpc</groupId>
+            <artifactId>grpc-inprocess</artifactId>
+            <scope>test</scope>
+        </dependency>
+
+        <dependency>
+            <groupId>cloud.elastic</groupId>
+            <artifactId>dlagent-core</artifactId>
+        </dependency>
+        <!--
+          grpc-java logs through java.util.logging; Main installs log4j-jul's
+          bridge handler so those records reach dlagent.log instead of stderr.
+          Same artifact and version spring-boot-starter-log4j2 puts on the
+          REST classpath.
+        -->
+        <dependency>
+            <groupId>org.apache.logging.log4j</groupId>
+            <artifactId>log4j-jul</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>com.google.inject</groupId>
+            <artifactId>guice</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>javax.inject</groupId>
+            <artifactId>javax.inject</artifactId>
+        </dependency>
+    </dependencies>
+</project>

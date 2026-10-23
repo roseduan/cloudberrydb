@@ -1,0 +1,141 @@
+// Portions Copyright (c) 2023-2026, HashData Technology Limited.
+//
+// The dlagent gRPC contract.
+//
+// PAYLOAD CONTRACT. Every request and response carries one field: `bytes
+// payload`, holding the very same JSON document the REST transport puts in an
+// HTTP body. proto does three jobs here and no more -- name the method, carry
+// the bytes, carry the status. There is deliberately no per-operation message
+// schema:
+//
+//   * The consumers of these bytes are the ~215 JSON parse sites above
+//     agent_c_api.h in datalake_fdw. Typing the payload in proto would protect
+//     it only as far as the C++ transport layer and then hand those parsers a
+//     JSON string again, so the typing buys nothing where it would matter --
+//     while costing compromises of its own.
+//   * Keeping the payload as bytes makes the two transports byte-identical by
+//     construction, which turns "the transports are equivalent" into a memcmp
+//     instead of a semantic comparison.
+//
+// Two rules for anyone extending this file:
+//
+//   1. NEVER use google.protobuf.Struct. Its Value.number_value is a double,
+//      and Iceberg metadata is full of random int64 snapshot ids, so a Struct
+//      round-trip corrupts them silently. The old branch's
+//      LoadTableResponse.table_metadata was a Struct; that is one of the
+//      reasons this design changed.
+//   2. On the CONTROL plane, one streamed message is one COMPLETE JSON
+//      document; do not split a document across messages, or the C side has to
+//      buffer the whole stream before it can parse anything, which cancels the
+//      streaming cancellation behaviour depends on. (As it stands
+//      the control plane has no streaming methods at all: every catalog
+//      operation returns one document.) The DATA plane is the exception and
+//      the reason streaming exists here: DataProxy.Read/Write carry the raw
+//      octet stream libchurl carries today, so a message there is a chunk of
+//      bytes with no structure of its own, and the client concatenates them.
+//
+// Java note: dlagent-grpc does NOT generate code from this file. The payload is
+// a single `bytes` field, so the Java side hand-builds its MethodDescriptors
+// with a byte[] marshaller and depends on neither protobuf-java nor
+// grpc-protobuf -- which keeps com.google.protobuf:protobuf-java off the agent
+// classpath, where hive-standalone-metastore, hbase-client and orc-core 1.5.1
+// still require the ancient 2.5.0. See PayloadMarshaller for the wire format
+// and the protoc-generated golden bytes that pin it.
+
+syntax = "proto3";
+
+package dlagent.v1;
+
+option java_package = "cloud.elastic.dlagent.grpc.proto";
+option java_multiple_files = true;
+
+// ---------------------------------------------------------------------------
+// The only two messages in the contract.
+// ---------------------------------------------------------------------------
+
+// A request. `payload` is the JSON object the REST transport would have POSTed
+// as the HTTP body, byte for byte.
+message Request {
+  bytes payload = 1;
+}
+
+// A response. `payload` is the JSON the REST transport would have returned as
+// the HTTP body, byte for byte -- including error bodies, which keep the
+// {"error":{"message":..,"type":..,"code":..}} shape the C side already parses
+// with agent_cli_wrapper_check_exec_error_json(). Transport-level failure is
+// reported by the gRPC status code, mapped from the same HTTP-shaped status the
+// REST path uses.
+//
+// A zero-length payload means "no body", which is what
+// ResponseEntity.ok().build() sends today; it is NOT the four bytes `null`.
+message Response {
+  bytes payload = 1;
+}
+
+// ---------------------------------------------------------------------------
+// Control plane. One method per agent_cli_wrapper_* operation, so that gRPC's
+// per-method metrics, deadlines and error rates line up with the operations
+// the FDW actually issues. The set here must equal the operation set in
+// agent_c_api.h; ProtoContractTest asserts that.
+// ---------------------------------------------------------------------------
+
+service IcebergCatalog {
+  // Table lifecycle.
+  rpc CreateTable       (Request) returns (Response);
+  rpc LoadTable         (Request) returns (Response);
+  rpc LoadMetadataJson  (Request) returns (Response);
+  rpc TableExists       (Request) returns (Response);
+  rpc DropTable         (Request) returns (Response);
+  // Submission only: the storage platform runs the job on its own schedule.
+  rpc SubmitMaintenance (Request) returns (Response);
+  rpc TruncateTable     (Request) returns (Response);
+  rpc UpdateSchema      (Request) returns (Response);
+
+  // Reads and statistics.
+  rpc GetStatistics     (Request) returns (Response);
+  rpc GetSnapshotSchema (Request) returns (Response);
+  rpc GetSnapshots      (Request) returns (Response);
+
+  // Writes and commits.
+  rpc AppendTable       (Request) returns (Response);
+  rpc UpdateTable       (Request) returns (Response);
+  rpc CommitAppend      (Request) returns (Response);
+  rpc CommitUpdate      (Request) returns (Response);
+  rpc CommitRewrite     (Request) returns (Response);
+
+  // Planning and commit of file groups.
+  //
+  // UNARY, despite the old branch's proto making them server-streaming: all
+  // three return ONE document today (a fragment, a file-group list, a commit
+  // result), so streaming them would buy nothing and would force the client to
+  // reassemble an array whose byte-for-byte agreement with the REST body it
+  // could then only approximate. Streaming belongs to the data plane below,
+  // where a scan really does produce an unbounded sequence.
+  rpc GetFragment       (Request) returns (Response);
+  rpc PlanFileGroups    (Request) returns (Response);
+  rpc CommitFileGroups  (Request) returns (Response);
+
+  // File-level cleanup, the two operations outside the prefix-based method
+  // registry (agent_cli_wrapper_cleanup_metadata / _delete_file).
+  rpc CleanupMetadata   (Request) returns (Response);
+  rpc DeleteFile        (Request) returns (Response);
+}
+
+service CatalogManagement {
+  rpc CreateCatalog     (Request) returns (Response);
+  rpc ListCatalogs      (Request) returns (Response);
+  rpc CreateNamespace   (Request) returns (Response);
+  rpc ListNamespaces    (Request) returns (Response);
+}
+
+// ---------------------------------------------------------------------------
+// Data plane, replacing the libchurl.h byte-stream boundary. Streaming is on
+// the RESPONSE side only: both upload paths in datalakeDoRPC_once (protocol.c)
+// POST a bounded JSON body and then stream the reply back, so the request
+// needs no client-streaming.
+// ---------------------------------------------------------------------------
+
+service DataProxy {
+  rpc Read  (Request) returns (stream Response);
+  rpc Write (Request) returns (stream Response);
+}

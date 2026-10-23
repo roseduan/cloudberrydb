@@ -30,6 +30,10 @@ if ! bash "${AUTOMATION_DIR}/scripts/setup/check_services.sh"; then
     exit 1
 fi
 
+if [ -n "${DATALAKE_AGENT_TRANSPORT:-}" ]; then
+    set_agent_transport "${DATALAKE_AGENT_TRANSPORT}"
+fi
+
 # Create report directory
 FEATURE_REPORT_DIR="${REPORTS_DIR}/feature/${REPORT_TIMESTAMP}"
 ensure_dir "${FEATURE_REPORT_DIR}"
@@ -106,7 +110,10 @@ else
     # (feature/negative points at an unreachable host on purpose) slows down
     # whichever suite happens to follow it.  A failure that depends on the
     # order is one nobody can reproduce.
-    FEATURE_CATEGORIES=$(find "${SQLREPO_DIR}/feature" -mindepth 1 -maxdepth 1 -type d -exec basename {} \; | sort)
+    # FEATURE_CATEGORIES, when set, picks a subset and keeps its order.
+    if [ -z "${FEATURE_CATEGORIES:-}" ]; then
+        FEATURE_CATEGORIES=$(find "${SQLREPO_DIR}/feature" -mindepth 1 -maxdepth 1 -type d -exec basename {} \; | sort)
+    fi
 
     if [ -z "${FEATURE_CATEGORIES}" ]; then
         log_error "No feature test categories found in ${SQLREPO_DIR}/feature"

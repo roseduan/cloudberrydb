@@ -9,20 +9,33 @@ echo "Starting application with mocked parent process and debug mode..."
 echo "Debug port: 5005"
 echo ""
 
-JAR_FILE="target/dlagent-1.0.0.jar"
+# The REST agent is no longer one fat jar: it is the dlagent-rest module jar
+# plus its dependencies, the same classpath datalake_proxy launches it with
+# (see install-layout.sh).  classpath-src.txt is maven's own list of those
+# dependencies, as paths that exist, with dlagent-core first.
+JAR_FILE="dlagent-rest/target/dlagent-rest-1.0.0.jar"
+DEPS_FILE="dlagent-rest/target/classpath-src.txt"
+MAIN_CLASS="cloud.elastic.dlagent.service.ServiceApplication"
 
-if [ ! -f "$JAR_FILE" ]; then
-    echo "JAR file not found: $JAR_FILE"
+# The pids of what this script starts, so cleanup.sh stops exactly these and
+# nothing else on the machine.
+PID_FILE="test/.agent.pids"
+
+if [ ! -f "$JAR_FILE" ] || [ ! -f "$DEPS_FILE" ]; then
+    echo "Agent not built: $JAR_FILE / $DEPS_FILE"
     echo "Building the project..."
     mvn clean package -DskipTests
 fi
 
 # Create a background process that simulates the parent
 create_mock_parent() {
-    # Start a background process that will act as the parent
+    # The agent's watchdog exits unless its parent's command line contains
+    # "datalake proxy".  exec -a renames bash itself, which is a real binary
+    # everywhere; renaming sleep does not work where sleep is a wrapper
+    # script (coreutils on Rocky 9), whose interpreter then shows instead.
+    # The trailing ':' keeps bash from exec'ing sleep in its place.
     (
-        # Create a process with "datalake proxy" in cmdline
-        exec -a "datalake proxy test" sleep 3600
+        exec -a "datalake proxy test" bash -c 'sleep 3600; :'
     ) &
     
     MOCK_PARENT_PID=$!
@@ -52,13 +65,17 @@ create_mock_parent() {
              -Dlogging.pattern.console="%d{HH:mm:ss.SSS} [%thread] %-5level %logger{36} - %msg%n" \
              -Dspring.jmx.enabled=false \
              -Dspring.profiles.active=test \
-             -jar "$JAR_FILE" \
+             -cp "$JAR_FILE:$(cat "$DEPS_FILE")" "$MAIN_CLASS" \
              --parent.pid=$MOCK_PARENT_PID \
              --logging.config= \
-             --server.port=8080
+             --server.port=8080 &
+        AGENT_PID=$!
+        echo "$MOCK_PARENT_PID $AGENT_PID" > "$PID_FILE"
+        wait $AGENT_PID
         
         # Clean up mock parent when application exits
         kill $MOCK_PARENT_PID 2>/dev/null
+        rm -f "$PID_FILE"
     else
         echo "Failed to create mock parent process"
         exit 1

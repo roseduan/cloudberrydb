@@ -242,6 +242,37 @@ uninstall-data:
 install: install-data
 uninstall: uninstall-data
 
+#
+# The gRPC transport, compiled only where grpc++ >= 1.50 is found.  This
+# module finds it itself (grpcxx.mk); the server core does not use gRPC.
+#
+# Conditional rather than always-on because the transport is optional by
+# design: a build without grpc++ produces a datalake_fdw that
+# speaks REST only, and datalake.agent_transport refuses the value 'grpc'.
+#
+# This MUST sit after the PGXS include: the include path goes into CPPFLAGS
+# and not PG_CPPFLAGS because PGXS folds PG_CPPFLAGS into CPPFLAGS at include
+# time, so appending to it here would be ignored.  The storage-backend
+# selection below has the same shape for the same reason.
+#
+include ../datalake_agent/grpcxx.mk
+
+ifeq ($(have_grpcxx),yes)
+GRPC_OBJS = src/components/agent_cli/grpc/grpc_transport.o \
+            src/components/agent_cli/grpc/grpc_agent_client.o \
+            src/components/agent_cli/grpc/grpc_stream.o \
+            src/components/agent_cli/grpc/grpc_health.o
+OBJS += $(GRPC_OBJS)
+override CPPFLAGS += -Isrc/components/agent_cli/grpc $(GRPCXX_CFLAGS)
+SHLIB_LINK += $(GRPCXX_LIBS)
+
+# Same reason as the storage backend objects below: OBJS additions made after
+# the PGXS include are not in the .so's prerequisite list, so under parallel
+# make the link can start before these compile.
+datalake_fdw.so: $(GRPC_OBJS)
+all: $(GRPC_OBJS)
+endif
+
 # ---- Storage backend selection (after PGXS include for variable access) ----
 # Default-commercial: build the open-source backend (S3 SDK + libhdfs3) ONLY
 # when with_gopher is explicitly "no" (configure --without-gopher). Anything

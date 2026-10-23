@@ -1,1 +1,4 @@
 /target/
+# Build output of the three reactor modules (dlagent-core / -rest / -grpc).
+target/
+.agent.pids

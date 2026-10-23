@@ -38,6 +38,58 @@ CREATE EXTENSION IF NOT EXISTS hive_connector;   -- Hive 集成（可选）
 | `iceberg_catalog_fdw` | Iceberg Catalog 管理 |
 | `iceberg_volume_fdw` | Iceberg Volume（存储层）管理 |
 
+### 2.1 datalake agent 的传输方式：默认 gRPC，可切回 REST
+
+元数据面（建表 / 加载 / 提交 / fragments）和部分数据面请求由 coordinator 上的
+datalake agent（一个 JVM 进程，由预加载的 `datalake_proxy` 启动并看护）处理。
+FDW 与 agent 之间有两种传输方式，由 `datalake.agent_transport` 选择：
+
+| 取值 | 说明 |
+|------|------|
+| `grpc`（默认） | gRPC agent，监听 `datalake.agent_grpc_port`（默认 3889），启动约 1 秒 |
+| `rest` | 原 Spring Boot REST agent，监听 3888，启动 15–30 秒；作为回退方式保留 |
+
+两种方式收发的是同一套 JSON 载荷，行为一致；切换**不需要任何 DDL**，不需要重建
+SERVER / CATALOG / VOLUME / 外部表，只需重启集群（该参数为 postmaster 级，agent
+在集群启动时选定）。
+
+> 编译时没有找到 grpc++ >= 1.50 的版本不含 gRPC 支持：这种版本默认就是 `rest`，
+> 配置 `grpc` 会让集群启动失败，并报 `datalake.agent_transport cannot be set to "grpc"`。
+
+**切换到 REST**（coordinator 上以 gpadmin 执行）：
+
+```bash
+gpconfig -c datalake.agent_transport -v rest
+gpstop -ar
+psql -Atc 'SHOW datalake.agent_transport'    # 输出 rest
+```
+
+**切回默认的 gRPC**：
+
+```bash
+gpconfig -r datalake.agent_transport
+gpstop -ar
+psql -Atc 'SHOW datalake.agent_transport'    # 输出 grpc
+```
+
+确认实际运行的是哪个 agent（主类在约 28KB 的 classpath 之后，CentOS 7 的
+`pgrep -f` 只看命令行前 4KB，匹配不到，所以直接查 `/proc`）：
+
+```bash
+grep -ls 'dlagent\.grpc\.Main' /proc/[0-9]*/cmdline                    # gRPC agent
+grep -ls 'dlagent\.service\.ServiceApplication' /proc/[0-9]*/cmdline   # REST agent
+```
+
+相关参数（见第 6 节）：
+
+- `datalake.agent_server_url`：FDW 连接 agent 的地址。`rest` 下用完整地址；`grpc`
+  下只取其中的主机名，端口取 `datalake.agent_grpc_port`。
+- `datalake.rpc_max_message_size`：需重启生效，仅 `grpc` 使用，单条 gRPC 消息上限（默认 64MB）。
+  一次请求把整个文件列表放在一条消息里，每个文件约 200 字节；文件极多的提交 / VACUUM
+  报 `RESOURCE_EXHAUSTED` 时调大它。
+- `datalake_proxy.restart_time`：需重启生效，agent 退出后多久重启，默认随传输方式而定
+  （`grpc` 5 秒，`rest` 30 秒）。
+
 ---
 
 ## 3. FDW 外部表（非 Iceberg）
@@ -1657,6 +1709,15 @@ RESET datalake.disable_filter_pushdown;
 | `datalake.iceberg_log_autovacuum_min_duration` | `600000` | 记录超过此时长（ms）的自动 VACUUM；`-1` 全不记录、`0` 全部记录 |
 | `datalake_fdw.metadata_refresh_ahead_percent` | `70` | 外部 catalog 元数据缓存提前刷新的阈值：TTL 烧掉这个百分比即视为待刷新，见 4.12 |
 
+### 需重启集群生效（POSTMASTER，由 `datalake_proxy` 定义）
+
+| GUC | 默认值 | 说明 |
+|-----|--------|------|
+| `datalake.agent_transport` | `grpc` | FDW 与 datalake agent 的传输方式：`grpc` / `rest`，见 2.1。无 gRPC 支持的版本默认为 `rest` |
+| `datalake.agent_grpc_port` | `3889` | gRPC agent 的监听端口，仅 `grpc` 使用 |
+| `datalake.rpc_max_message_size` | `64MB` | 单条 gRPC 消息上限（1 – 2047MB），agent 与 FDW 同时生效，仅 `grpc` 使用 |
+| `datalake_proxy.restart_time` | `grpc` 时 `5`，`rest` 时 `30` | agent 退出后重启前等待的秒数 |
+
 ---
 
 ## 7. 端到端示例
@@ -1762,6 +1823,8 @@ DROP SERVER cat_server CASCADE;  -- 级联删除所有依赖对象
 | 下推不生效 | GUC 被关闭 | `RESET datalake.disable_filter_pushdown` |
 | Polaris 401 错误 | OAuth 认证失败 | 检查 `client_id` / `client_secret` / `scope` |
 | 外部表文件找不到 | `filePath` 路径错误 | 确认包含 bucket 前缀或绝对路径 |
+| 怀疑是 gRPC 传输引起的问题 | — | 按 2.1 切到 `rest` 并重启集群对比；两种方式行为应一致，不一致请报 bug |
+| 集群启动失败：`datalake.agent_transport cannot be set to "grpc"` | 该版本编译时没有 gRPC 支持 | 改为 `rest`，或换用带 gRPC 的版本 |
 
 ### 9.2 Iceberg 表运行时错误对照
 

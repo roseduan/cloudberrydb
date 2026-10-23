@@ -942,6 +942,7 @@ tracker_agent_delete_paths(const char *fileio_config, List *paths)
 {
 	AgentCliHandle *h = NULL;
 	ListCell   *lc;
+	MemoryContext oldcontext;
 
 	if (fileio_config == NULL || paths == NIL)
 		return;
@@ -958,6 +959,8 @@ tracker_agent_delete_paths(const char *fileio_config, List *paths)
 	 * leftover files fall to the orphan-file backstop.  (destroy() never
 	 * throws -- it only frees -- so it is safe at the tail of the TRY.)
 	 */
+	oldcontext = CurrentMemoryContext;
+
 	PG_TRY();
 	{
 		h = agent_cli_wrapper_create(datalake_agent_server_url,
@@ -977,6 +980,20 @@ tracker_agent_delete_paths(const char *fileio_config, List *paths)
 			}
 			PG_CATCH();
 			{
+				/*
+				 * Back to the caller's context BEFORE FlushErrorState.
+				 *
+				 * Error handling leaves CurrentMemoryContext as ErrorContext,
+				 * and FlushErrorState resets that context.  Without this the
+				 * NEXT iteration allocates its work in ErrorContext, the
+				 * iteration after that frees it out from under itself, and the
+				 * one after that reads a dangling chunk header -- which is a
+				 * SIGSEGV in pfree() inside a subtransaction-abort callback,
+				 * so it escalates straight to a coordinator PANIC.  Observed
+				 * exactly that way on ROLLBACK TO SAVEPOINT once every delete
+				 * in the loop started failing.
+				 */
+				MemoryContextSwitchTo(oldcontext);
 				FlushErrorState();
 				elog(WARNING,
 					 "iceberg: could not delete orphaned metadata file \"%s\"; "
@@ -989,6 +1006,7 @@ tracker_agent_delete_paths(const char *fileio_config, List *paths)
 	}
 	PG_CATCH();
 	{
+		MemoryContextSwitchTo(oldcontext);
 		FlushErrorState();
 		elog(WARNING,
 			 "iceberg: could not run metadata orphan cleanup "

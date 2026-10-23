@@ -1943,6 +1943,22 @@ copyResponseToFdwState(IcebergCatalogFdwState *fdwState, AgentCliHandle *handle)
         case AGENT_CLI_ERROR_TIMEOUT:
             fdwState->lastStatus = ICEBERG_ERROR_TIMEOUT;
             break;
+        case AGENT_CLI_ERROR_CANCELLED:
+            /*
+             * The user cancelled, or a statement timeout fired.  Before this
+             * case existed the switch fell through to default and reported
+             * "invalid parameter" -- so a Ctrl-C during a catalog operation
+             * surfaced as a parameter error, which sends whoever reads the log
+             * looking for a bad request that never existed.
+             *
+             * CHECK_FOR_INTERRUPTS() then raises the real cancellation at the
+             * first safe point, which is what the user expects to see; the
+             * status below is only reached if the interrupt has already been
+             * serviced.
+             */
+            CHECK_FOR_INTERRUPTS();
+            fdwState->lastStatus = ICEBERG_ERROR_TRANSPORT;
+            break;
         default:
             fdwState->lastStatus = ICEBERG_ERROR_INVALID_PARAM;
             break;

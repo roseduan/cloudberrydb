@@ -1,0 +1,148 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+
+    <parent>
+        <groupId>cloud.elastic</groupId>
+        <artifactId>dlagent-parent</artifactId>
+        <version>1.0.0</version>
+    </parent>
+
+    <artifactId>dlagent-rest</artifactId>
+
+    <!--
+      The Spring Boot transport and, for this release, the default one. It is
+      also the rollback path, so it is frozen: no new features, and the module
+      split must not change a single observable behaviour of it.
+
+      dlagent-core is declared first so that its subtree keeps coming before
+      everything else on the packaged classpath - see the parquet ordering note
+      in dlagent-core/pom.xml.
+
+      Packaging is a thin jar: install-layout.sh puts it under pkglib/java/rest/
+      beside the shared dependencies in core/, and datalake_proxy launches it
+      with the ordered classpath it reads from pkglib/java/rest.cp.
+    -->
+
+    <dependencies>
+        <dependency>
+            <groupId>cloud.elastic</groupId>
+            <artifactId>dlagent-core</artifactId>
+        </dependency>
+
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-web</artifactId>
+            <exclusions>
+                <exclusion>
+                    <groupId>org.springframework.boot</groupId>
+                    <artifactId>spring-boot-starter-logging</artifactId>
+                </exclusion>
+                <exclusion>
+                    <groupId>ch.qos.logback</groupId>
+                    <artifactId>logback-classic</artifactId>
+                </exclusion>
+                <exclusion>
+                    <groupId>ch.qos.logback</groupId>
+                    <artifactId>logback-core</artifactId>
+                </exclusion>
+            </exclusions>
+        </dependency>
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-log4j2</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>org.apache.logging.log4j</groupId>
+            <artifactId>log4j-spring-boot</artifactId>
+        </dependency>
+        <!-- log4j 2.25's parent pom excludes spring-jcl from spring-core, and
+             log4j-spring-boot is the nearest path to spring-core here, so
+             without this spring-jcl drops off the classpath and Spring's
+             logging falls through to plain commons-logging. Declared to keep
+             the REST agent's logging wiring what it was on log4j 2.17.2. -->
+        <dependency>
+            <groupId>org.springframework</groupId>
+            <artifactId>spring-jcl</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-actuator</artifactId>
+            <exclusions>
+                <exclusion>
+                    <groupId>org.springframework.boot</groupId>
+                    <artifactId>spring-boot-starter-logging</artifactId>
+                </exclusion>
+                <exclusion>
+                    <groupId>ch.qos.logback</groupId>
+                    <artifactId>logback-classic</artifactId>
+                </exclusion>
+                <exclusion>
+                    <groupId>ch.qos.logback</groupId>
+                    <artifactId>logback-core</artifactId>
+                </exclusion>
+            </exclusions>
+        </dependency>
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-devtools</artifactId>
+            <optional>true</optional>
+        </dependency>
+
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-test</artifactId>
+            <scope>test</scope>
+            <exclusions>
+                <exclusion>
+                    <groupId>org.springframework.boot</groupId>
+                    <artifactId>spring-boot-starter-logging</artifactId>
+                </exclusion>
+                <exclusion>
+                    <groupId>ch.qos.logback</groupId>
+                    <artifactId>logback-classic</artifactId>
+                </exclusion>
+                <exclusion>
+                    <groupId>ch.qos.logback</groupId>
+                    <artifactId>logback-core</artifactId>
+                </exclusion>
+            </exclusions>
+        </dependency>
+    </dependencies>
+
+    <build>
+        <plugins>
+            <plugin>
+                <groupId>org.springframework.boot</groupId>
+                <artifactId>spring-boot-maven-plugin</artifactId>
+                <configuration>
+                    <mainClass>cloud.elastic.dlagent.service.ServiceApplication</mainClass>
+                </configuration>
+                <executions>
+                    <execution>
+                        <goals>
+                            <!--
+                              build-info only. No `repackage` goal, because of
+                              the thin-jar install layout: it produced a 996 MB
+                              fat jar carrying every dependency, so installing
+                              it beside the gRPC jar would have stored the
+                              shared 1 GB of core dependencies twice and blown
+                              the bound of keeping the installed size near
+                              the old single fat jar.
+
+                              A Spring Boot application does not need the fat
+                              jar; it needs its dependencies on the classpath,
+                              which datalake_proxy now supplies from the
+                              generated rest.cp. What is lost is `java -jar`
+                              convenience, and the launcher was never a person.
+                            -->
+                            <goal>build-info</goal>
+                        </goals>
+                    </execution>
+                </executions>
+            </plugin>
+        </plugins>
+    </build>
+</project>

@@ -14,6 +14,7 @@ AgentClient::AgentClient(const Config& config)
 AgentClient::~AgentClient() = default;
 
 void AgentClient::set_interrupt_callback(InterruptCheckCallback callback) {
+    interrupt_check_ = callback;
     if (http_client_) {
         http_client_->set_interrupt_callback(callback);
     }
@@ -196,7 +197,8 @@ Response AgentClient::execute_request(const std::string& method,
                                      const std::string& url,
                                      const std::string& json_data,
                                      const RequestConfig* request_config,
-                                     bool idempotent) {
+                                     bool idempotent,
+                                     bool single_attempt) {
     total_requests_++;
 
     LOG_INFO("HTTP " + method + " " + url);
@@ -206,6 +208,7 @@ Response AgentClient::execute_request(const std::string& method,
     request.url = url;
     request.body = json_data;
     request.idempotent = idempotent;
+    request.single_attempt = single_attempt;
     request.timeout = config_.request_timeout_seconds;
     request.connect_timeout = config_.connect_timeout_seconds;
     if (request_config) {
@@ -289,6 +292,24 @@ Response AgentClient::create_catalog(const std::string& request_json,
                                     const RequestConfig* request_config) {
     std::string url = build_url("api/v1/catalogs/create");
     return execute_request("POST", url, request_json, request_config);
+}
+
+Response AgentClient::cleanup_metadata(const std::string& request_json,
+                                    const RequestConfig* request_config) {
+    std::string url = build_url("api/v1/files/cleanup-from-metadata");
+    // Best effort, on cleanup paths: one attempt, as before it went through
+    // this client.
+    return execute_request("POST", url, request_json, request_config,
+                           /* idempotent */ true, /* single_attempt */ true);
+}
+
+Response AgentClient::delete_file(const std::string& request_json,
+                                    const RequestConfig* request_config) {
+    std::string url = build_url("api/v1/files/delete");
+    // Best effort, on cleanup paths: one attempt, as before it went through
+    // this client.
+    return execute_request("POST", url, request_json, request_config,
+                           /* idempotent */ true, /* single_attempt */ true);
 }
 
 Response AgentClient::list_catalogs(const std::string& request_json,

@@ -32,6 +32,150 @@
  */
 #define CURL_DISABLE_TYPECHECK
 #include <curl/curl.h>
+
+/*
+ * TRANSPORT DISPATCH FOR THE DATA PLANE.
+ *
+ * Each public datalake_churl_* entry point below delegates to the gRPC stream
+ * when datalake.agent_transport = grpc.  Putting the branch here rather than
+ * at protocol.c's 52 call sites is what keeps that file, and the byte
+ * semantics it encodes, unchanged.
+ *
+ * The GUC is PGC_POSTMASTER, so the answer cannot change under a live handle
+ * and there is no need to tag handles with their transport.
+ */
+static void report_agent_http_error(long response_code, char *response_text,
+									char *curl_error_buffer);
+
+#ifdef HAVE_GRPCXX
+#include "src/components/agent_cli/grpc/grpc_stream.hpp"
+#include "src/datalake_def.h"
+
+static bool
+churl_use_grpc(void)
+{
+	return datalake_agent_transport_get() == DATALAKE_AGENT_TRANSPORT_GRPC;
+}
+
+/*
+ * Where the gRPC data plane connects: the host the REST data plane uses
+ * (DLPROXY_HOST, see datalake_get_authority) on the agent's gRPC port, so the
+ * two transports reach the same machine.
+ */
+static const char *
+churl_grpc_data_target(void)
+{
+	static char target[NAMEDATALEN * 2];
+	const char *host = get_dlproxy_host();
+
+	dlagent_format_grpc_target(target, sizeof(target), host, strlen(host),
+							   datalake_agent_grpc_port_get());
+	return target;
+}
+
+/*
+ * The interrupt check handed to the gRPC stream.  It must NOT raise: it runs
+ * inside the transport's poll loop, which still has an RPC in flight and has
+ * to unwind it before PostgreSQL's error handling takes over.
+ *
+ * Only interrupts that ProcessInterrupts() turns into an error abandon the
+ * call (the same rule as iceberg_catalog_interrupt_callback).  InterruptPending
+ * alone is not one: memory-context logging, procsignal barriers and several
+ * timeouts set it too, and abandoning the stream for those would fail a
+ * statement that nothing asked to stop.
+ */
+static bool
+churl_grpc_interrupted(void)
+{
+	if (!InterruptPending)
+		return false;
+	if (InterruptHoldoffCount != 0 || CritSectionCount != 0)
+		return false;
+	if (ProcDiePending)
+		return true;
+	return QueryCancelPending && QueryCancelHoldoffCount == 0;
+}
+
+/*
+ * The value to send for a header under gRPC.  The REST path URL-escapes every
+ * X-GP-* value (build_header_str) and the agent decodes the ones it expects
+ * escaped, so the gRPC path has to send the same bytes or the agent sees a
+ * different value -- a '%' or '+' in a path would be decoded into something
+ * else.  Escaping also keeps the value printable ASCII, which is all gRPC
+ * metadata may carry.  Returns a palloc'd string.
+ */
+static char *
+churl_grpc_header_value(const char *key, const char *value)
+{
+	char	   *escaped;
+	char	   *result;
+
+	if (value == NULL || pg_strncasecmp("X-GP-", key, 5) != 0)
+		return pstrdup(value ? value : "");
+
+	escaped = curl_easy_escape(NULL, value, strlen(value));
+	if (!escaped)
+		elog(ERROR, "internal error: curl_easy_escape failed for value %s", value);
+	result = pstrdup(escaped);
+	curl_free(escaped);
+	return result;
+}
+
+/*
+ * Raise the error a failed data-plane stream carries, as REST would for the
+ * same failure: the agent's own error document when it answered with one,
+ * otherwise a transfer error carrying gRPC's reason (which is what
+ * datalakeDoRPC inspects to retry a refused connection).  A real cancel is
+ * reported as one: CHECK_FOR_INTERRUPTS raises "canceling statement".
+ *
+ * The stream is NOT released before raising.  The caller still holds it,
+ * and its error path (datalake_destroy_context or datalakeDoRPC's retry)
+ * releases it with after_error = true; releasing it here as well would free
+ * it twice.  On success it is released when release is true.
+ */
+static void
+churl_grpc_raise_if_failed(DL_GRPC_STREAM stream, bool release)
+{
+	const char *msg = NULL;
+	long		status;
+	const char *doc;
+	size_t		doc_len;
+
+	if (!dl_grpc_stream_failed(stream, &msg))
+	{
+		if (release)
+			dl_grpc_stream_cleanup(stream, false);
+		return;
+	}
+
+	CHECK_FOR_INTERRUPTS();
+
+	if (dl_grpc_stream_error_document(stream, &status, &doc, &doc_len))
+	{
+		char		no_curl_error[1] = "";
+
+		report_agent_http_error(status, pnstrdup(doc, doc_len), no_curl_error);
+	}
+
+	ereport(ERROR,
+			(errcode(ERRCODE_CONNECTION_EXCEPTION),
+			 errmsg("transfer error: %s", msg ? msg : "unknown"),
+			 errdetail("datalake agent gRPC data plane, %s", churl_grpc_data_target())));
+}
+#else
+#include "src/datalake_def.h"
+
+/*
+ * Still asks: datalake_agent_transport_get() is what rejects a grpc setting
+ * on a build without gRPC, and it is cached, so this costs one lookup.
+ */
+static inline bool
+churl_use_grpc(void)
+{
+	(void) datalake_agent_transport_get();
+	return false;
+}
+#endif
 #undef CURL_DISABLE_TYPECHECK
 
 /*
@@ -129,6 +273,10 @@ static bool	IsValidJson(text *json);
 CHURL_HEADERS
 datalake_churl_headers_init(void)
 {
+#ifdef HAVE_GRPCXX
+	if (churl_use_grpc())
+		return (CHURL_HEADERS) dl_grpc_headers_init();
+#endif
 	churl_settings *settings = (churl_settings *) palloc0(sizeof(churl_settings));
 
 	return (CHURL_HEADERS) settings;
@@ -176,6 +324,16 @@ build_header_str(const char *format, const char *key, const char *value)
 void
 datalake_churl_headers_append(CHURL_HEADERS headers, const char *key, const char *value)
 {
+#ifdef HAVE_GRPCXX
+	if (churl_use_grpc())
+	{
+		char	   *v = churl_grpc_header_value(key, value);
+
+		dl_grpc_headers_append((DL_GRPC_HEADERS) headers, key, v);
+		pfree(v);
+		return;
+	}
+#endif
 	churl_settings *settings = (churl_settings *) headers;
 	char	   *header_option = NULL;
 
@@ -189,6 +347,16 @@ datalake_churl_headers_append(CHURL_HEADERS headers, const char *key, const char
 void
 datalake_churl_headers_override(CHURL_HEADERS headers, const char *key, const char *value)
 {
+#ifdef HAVE_GRPCXX
+	if (churl_use_grpc())
+	{
+		char	   *v = churl_grpc_header_value(key, value);
+
+		dl_grpc_headers_override((DL_GRPC_HEADERS) headers, key, v);
+		pfree(v);
+		return;
+	}
+#endif
 	churl_settings *settings = (churl_settings *) headers;
 	struct curl_slist *header_cell = settings->headers;
 	char	   *key_option = NULL;
@@ -235,6 +403,13 @@ datalake_churl_headers_override(CHURL_HEADERS headers, const char *key, const ch
 void
 datalake_churl_headers_remove(CHURL_HEADERS headers, const char *key, bool has_value)
 {
+#ifdef HAVE_GRPCXX
+	if (churl_use_grpc())
+	{
+		dl_grpc_headers_remove((DL_GRPC_HEADERS) headers, key);
+		return;
+	}
+#endif
 
 	churl_settings *settings = (churl_settings *) headers;
 	struct curl_slist *to_del_cell = settings->headers;
@@ -295,6 +470,13 @@ datalake_churl_headers_remove(CHURL_HEADERS headers, const char *key, bool has_v
 void
 datalake_churl_headers_cleanup(CHURL_HEADERS headers)
 {
+#ifdef HAVE_GRPCXX
+	if (churl_use_grpc())
+	{
+		dl_grpc_headers_cleanup((DL_GRPC_HEADERS) headers);
+		return;
+	}
+#endif
 	churl_settings *settings = (churl_settings *) headers;
 
 	if (!settings)
@@ -384,9 +566,32 @@ churl_init(const char *url, CHURL_HEADERS headers)
 	return (CHURL_HANDLE) context;
 }
 
+#ifdef HAVE_GRPCXX
+/*
+ * Start a data-plane call.  The message-size limit is set first, here and not
+ * only when a catalog handle is built: channels are cached per target with
+ * the limit they were created with, so a backend whose first agent call is a
+ * scan would otherwise keep the default whatever datalake.rpc_max_message_size
+ * says, and the agent, which datalake_proxy started with that setting, would
+ * disagree with it.
+ */
+static CHURL_HANDLE
+churl_grpc_start(bool is_write, CHURL_HEADERS headers)
+{
+	dl_grpc_set_max_message_size(datalake_agent_rpc_max_message_bytes_get());
+	return (CHURL_HANDLE) dl_grpc_stream_start(churl_grpc_data_target(), is_write,
+											   (DL_GRPC_HEADERS) headers,
+											   churl_grpc_interrupted);
+}
+#endif
+
 CHURL_HANDLE
 datalake_churl_init_upload(const char *url, CHURL_HEADERS headers)
 {
+#ifdef HAVE_GRPCXX
+	if (churl_use_grpc())
+		return churl_grpc_start(true, headers);
+#endif
 	churl_context *context = churl_init(url, headers);
 
 	context->upload = true;
@@ -405,6 +610,10 @@ datalake_churl_init_upload(const char *url, CHURL_HEADERS headers)
 CHURL_HANDLE
 datalake_churl_init_download(const char *url, CHURL_HEADERS headers)
 {
+#ifdef HAVE_GRPCXX
+	if (churl_use_grpc())
+		return churl_grpc_start(false, headers);
+#endif
 	churl_context *context = churl_init(url, headers);
 
 	context->upload = false;
@@ -440,6 +649,10 @@ datalake_churl_download_restart(CHURL_HANDLE handle, const char *url, CHURL_HEAD
 size_t
 datalake_churl_write(CHURL_HANDLE handle, const char *buf, size_t bufsize)
 {
+#ifdef HAVE_GRPCXX
+	if (churl_use_grpc())
+		return dl_grpc_stream_write((DL_GRPC_STREAM) handle, buf, bufsize);
+#endif
 	churl_context *context = (churl_context *) handle;
 	churl_buffer *context_buffer = context->upload_buffer;
 
@@ -464,6 +677,14 @@ datalake_churl_write(CHURL_HANDLE handle, const char *buf, size_t bufsize)
 void
 datalake_churl_read_check_connectivity(CHURL_HANDLE handle)
 {
+#ifdef HAVE_GRPCXX
+	if (churl_use_grpc())
+	{
+		/* dl_grpc_stream_failed runs the call first if it has not run yet. */
+		churl_grpc_raise_if_failed((DL_GRPC_STREAM) handle, false);
+		return;
+	}
+#endif
 	churl_context *context = (churl_context *) handle;
 
 	Assert(!context->upload);
@@ -478,6 +699,10 @@ datalake_churl_read_check_connectivity(CHURL_HANDLE handle)
 size_t
 datalake_churl_read(CHURL_HANDLE handle, char *buf, size_t max_size)
 {
+#ifdef HAVE_GRPCXX
+	if (churl_use_grpc())
+		return dl_grpc_stream_read((DL_GRPC_STREAM) handle, buf, max_size);
+#endif
 	int			n = 0;
 	churl_context *context = (churl_context *) handle;
 	churl_buffer *context_buffer = context->download_buffer;
@@ -526,6 +751,19 @@ datalake_churl_read(CHURL_HANDLE handle, char *buf, size_t max_size)
 size_t
 datalake_churl_finish_upload_and_read(CHURL_HANDLE handle, char *buf, size_t max_size)
 {
+#ifdef HAVE_GRPCXX
+	if (churl_use_grpc())
+	{
+		/*
+		 * Under gRPC there is nothing to "finish": the request was buffered by
+		 * datalake_churl_write and is sent when the first read runs.  Reading
+		 * is therefore the whole operation -- and notably it does NOT spin,
+		 * unlike the REST implementation below, whose busy-wait was measured at
+		 * 1.84M iterations burning a core while ignoring pending cancels.
+		 */
+		return dl_grpc_stream_read((DL_GRPC_STREAM) handle, buf, max_size);
+	}
+#endif
 	churl_context *context = (churl_context *) handle;
 	churl_buffer *context_buffer;
 	int			n = 0;
@@ -581,6 +819,29 @@ datalake_churl_finish_upload_and_read(CHURL_HANDLE handle, char *buf, size_t max
 void
 datalake_churl_cleanup(CHURL_HANDLE handle, bool after_error)
 {
+#ifdef HAVE_GRPCXX
+	if (churl_use_grpc())
+	{
+		/*
+		 * Nothing to clean up, as for REST below: datalake_destroy_context
+		 * runs after datalakeDoRPC has already released the handle.
+		 */
+		if (handle == NULL)
+			return;
+
+		/*
+		 * Like the REST path below, a cleanup that is not itself part of
+		 * error handling reports how the call ended: the POST paths in
+		 * protocol.c read until no more data comes and rely on this to turn
+		 * a failed call into an error rather than a short result.
+		 */
+		if (after_error)
+			dl_grpc_stream_cleanup((DL_GRPC_STREAM) handle, true);
+		else
+			churl_grpc_raise_if_failed((DL_GRPC_STREAM) handle, true);
+		return;
+	}
+#endif
 	churl_context *context = (churl_context *) handle;
 
 	if (!context)
@@ -943,6 +1204,71 @@ churl_headers_set(churl_context *context, CHURL_HEADERS headers)
  * Checks that the response finished successfully
  * with a valid response status and code.
  */
+/*
+ * Raise the ERROR for an agent that answered with an HTTP-level failure:
+ * its status and the JSON error document it returned.  Shared by both
+ * transports, so the same agent error reads the same either way.
+ */
+static void
+report_agent_http_error(long response_code, char *response_text,
+						char *curl_error_buffer)
+{
+	StringInfoData err;
+	char	   *hint_msg = NULL,
+			   *http_error_msg,
+			   *trace_msg = NULL;
+
+	initStringInfo(&err);
+
+	appendStringInfo(&err, "dlproxy server error");
+	if ((LOG >= log_min_messages) || (LOG >= client_min_messages))
+	{
+		/* add remote http error code */
+		appendStringInfo(&err, "(%ld)", response_code);
+	}
+
+	if (!handle_special_error(response_code, &err))
+	{
+		/*
+		 * add detailed error message from the http response.
+		 * response_text could be NULL in some cases. get_http_error_msg
+		 * checks for that.
+		 */
+		http_error_msg = get_http_error_msg(response_code, response_text, curl_error_buffer, &hint_msg, &trace_msg);
+
+		appendStringInfo(&err, " : %s", http_error_msg);
+	}
+
+	if (trace_msg != NULL && hint_msg != NULL)
+	{
+		ereport(ERROR,
+			(errcode(ERRCODE_CONNECTION_EXCEPTION),
+			errmsg("%s", err.data),
+			errdetail("%s", trace_msg),
+			errhint("%s", hint_msg)));
+	}
+	else if (trace_msg != NULL)
+	{
+		ereport(ERROR,
+			(errcode(ERRCODE_CONNECTION_EXCEPTION),
+			errmsg("%s", err.data),
+			errdetail("%s", trace_msg)));
+	}
+	else if (hint_msg != NULL)
+	{
+		ereport(ERROR,
+			(errcode(ERRCODE_CONNECTION_EXCEPTION),
+			errmsg("%s", err.data),
+			errhint("%s", hint_msg)));
+	}
+	else
+	{
+		ereport(ERROR,
+			(errcode(ERRCODE_CONNECTION_EXCEPTION),
+			errmsg("%s", err.data)));
+	}
+}
+
 static void
 check_response(churl_context *context)
 {
@@ -1032,13 +1358,6 @@ check_response_code(churl_context *context)
 	}
 	else if (response_code != 200 && response_code != 100)
 	{
-		StringInfoData err;
-		char	   *hint_msg = NULL,
-				   *http_error_msg,
-				   *trace_msg = NULL;
-
-		initStringInfo(&err);
-
 		/* prepare response text if any */
 		if (context->download_buffer->ptr)
 		{
@@ -1046,53 +1365,8 @@ check_response_code(churl_context *context)
 			response_text = context->download_buffer->ptr + context->download_buffer->bot;
 		}
 
-		appendStringInfo(&err, "dlproxy server error");
-		if ((LOG >= log_min_messages) || (LOG >= client_min_messages))
-		{
-			/* add remote http error code */
-			appendStringInfo(&err, "(%ld)", response_code);
-		}
-
-		if (!handle_special_error(response_code, &err))
-		{
-			/*
-			 * add detailed error message from the http response.
-			 * response_text could be NULL in some cases. get_http_error_msg
-			 * checks for that.
-			 */
-			http_error_msg = get_http_error_msg(response_code, response_text, context->curl_error_buffer, &hint_msg, &trace_msg);
-
-			appendStringInfo(&err, " : %s", http_error_msg);
-		}
-
-		if (trace_msg != NULL && hint_msg != NULL)
-		{
-			ereport(ERROR,
-				(errcode(ERRCODE_CONNECTION_EXCEPTION),
-				errmsg("%s", err.data),
-				errdetail("%s", trace_msg),
-				errhint("%s", hint_msg)));
-		}
-		else if (trace_msg != NULL)
-		{
-			ereport(ERROR,
-				(errcode(ERRCODE_CONNECTION_EXCEPTION),
-				errmsg("%s", err.data),
-				errdetail("%s", trace_msg)));
-		}
-		else if (hint_msg != NULL)
-		{
-			ereport(ERROR,
-				(errcode(ERRCODE_CONNECTION_EXCEPTION),
-				errmsg("%s", err.data),
-				errhint("%s", hint_msg)));
-		}
-		else
-		{
-			ereport(ERROR,
-				(errcode(ERRCODE_CONNECTION_EXCEPTION),
-				errmsg("%s", err.data)));
-		}
+		report_agent_http_error(response_code, response_text,
+								context->curl_error_buffer);
 	}
 
 	free_http_response(context);

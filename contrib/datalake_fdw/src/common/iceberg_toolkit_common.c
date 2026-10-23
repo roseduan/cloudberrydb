@@ -4,6 +4,7 @@
  */
 
 #include "iceberg_toolkit_common.h"
+#include "../datalake_def.h"		/* datalake_agent_endpoint() */
 #include "catalog/pg_foreign_data_wrapper.h"
 #include "foreign/foreign.h"
 #include "utils/syscache.h"
@@ -785,7 +786,8 @@ void iceberg_setup_catalog_fdw_state(IcebergCatalogFdwState* fdwState,
     fdwState->catalogOperation = operation;
     fdwState->request.tableName = tableName ? pstrdup(tableName) : NULL;
     fdwState->request.nameSpace = nameSpace ? pstrdup(nameSpace) : NULL;
-    fdwState->request.agentServerUrl = pstrdup("http://localhost:3888");
+    /* Endpoint consolidation: honour datalake.agent_server_url. */
+    fdwState->request.agentServerUrl = pstrdup(datalake_agent_endpoint());
     fdwState->lastStatus = ICEBERG_SUCCESS;
     fdwState->catalogInfo.catalog_name = catalogTable ? pstrdup(catalogTable) : NULL;
     fdwState->catalogInfo.catalog_server_name = catalogServer ? pstrdup(catalogServer) : NULL;

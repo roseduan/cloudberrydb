@@ -1,0 +1,125 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+
+    <parent>
+        <groupId>cloud.elastic</groupId>
+        <artifactId>dlagent-parent</artifactId>
+        <version>1.0.0</version>
+    </parent>
+
+    <artifactId>dlagent-parity</artifactId>
+
+    <!--
+      TESTS ONLY. This module ships nothing.
+
+      It exists because the question "do the two transports answer the same
+      request with the same bytes?" cannot be asked from either transport's
+      own module: dlagent-rest and dlagent-grpc are siblings that do not
+      depend on each other, so neither can see the other's handler. Something
+      has to depend on both, and this is it.
+
+      WHY NOT JUST ADD dlagent-rest TO dlagent-grpc's TEST SCOPE. The install
+      layout is built from dependency:build-classpath output, which does not
+      filter by scope, so a test-scoped spring would be copied into the
+      installed grpc/ directory, and that directory must contain no spring
+      and no tomcat at all.
+      InstalledClasspathTest would fail, and rightly.
+
+      NOT INSTALLED, NOT DEPLOYED: install-layout.sh lays out core/, rest/ and
+      grpc/ by name and ignores anything else, and the two plugin
+      configurations below make sure a stray `mvn install` cannot put this
+      into anyone's local repository either.
+    -->
+
+    <dependencies>
+        <dependency>
+            <groupId>cloud.elastic</groupId>
+            <artifactId>dlagent-core</artifactId>
+        </dependency>
+        <!--
+          Both transports, so one JVM can run both handlers over the same
+          input. They are test-scoped: nothing in this module has a main
+          source tree.
+        -->
+        <dependency>
+            <groupId>cloud.elastic</groupId>
+            <artifactId>dlagent-rest</artifactId>
+            <!-- The parent manages dlagent-core's version but not these two,
+                 because nothing depended on them until this module did. -->
+            <version>${project.version}</version>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>cloud.elastic</groupId>
+            <artifactId>dlagent-grpc</artifactId>
+            <version>${project.version}</version>
+            <scope>test</scope>
+        </dependency>
+
+        <!--
+          MockMvc, to drive the real controller through the real Spring MVC
+          message converters. Declared here rather than inherited because test
+          scope is not transitive.
+        -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-test</artifactId>
+            <scope>test</scope>
+            <exclusions>
+                <!-- Same three exclusions dlagent-rest applies: the agent logs
+                     through log4j2, and logback on the classpath would fight
+                     it for the slf4j binding. -->
+                <exclusion>
+                    <groupId>org.springframework.boot</groupId>
+                    <artifactId>spring-boot-starter-logging</artifactId>
+                </exclusion>
+                <exclusion>
+                    <groupId>ch.qos.logback</groupId>
+                    <artifactId>logback-classic</artifactId>
+                </exclusion>
+                <exclusion>
+                    <groupId>ch.qos.logback</groupId>
+                    <artifactId>logback-core</artifactId>
+                </exclusion>
+            </exclusions>
+        </dependency>
+        <!-- The in-process server the gRPC half of each comparison runs on. -->
+        <dependency>
+            <groupId>io.grpc</groupId>
+            <artifactId>grpc-inprocess</artifactId>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>io.grpc</groupId>
+            <artifactId>grpc-stub</artifactId>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>org.junit.jupiter</groupId>
+            <artifactId>junit-jupiter</artifactId>
+            <scope>test</scope>
+        </dependency>
+    </dependencies>
+
+    <build>
+        <plugins>
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-install-plugin</artifactId>
+                <configuration>
+                    <skip>true</skip>
+                </configuration>
+            </plugin>
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-deploy-plugin</artifactId>
+                <configuration>
+                    <skip>true</skip>
+                </configuration>
+            </plugin>
+        </plugins>
+    </build>
+</project>

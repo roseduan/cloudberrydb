@@ -1,18 +1,19 @@
 #!/bin/bash
 
+cd "$(dirname "$0")"
+
 echo "🧹 Cleaning up test processes..."
 
-# Kill processes by port
-lsof -ti:8080 | xargs kill -9 2>/dev/null || true
-lsof -ti:5005 | xargs kill -9 2>/dev/null || true
-
-# Kill by process patterns
-pkill -f 'dlagent-1.0.0.jar' || true
-pkill -f 'spring.profiles.active=test' || true
-pkill -f 'agentlib:jdwp.*address=5005' || true
-pkill -f 'datalake proxy mock' || true
-
-# Kill any remaining Java processes with test profile
-ps aux | grep 'java.*test' | grep -v grep | awk '{print $2}' | xargs kill -9 2>/dev/null || true
+# Stop exactly what start-with-mock-parent.sh started: the agent and its mock
+# parent, by the pids it recorded.  Killing by port or by a command-line
+# pattern, as this used to, also took down whatever else matched -- on a
+# developer machine that includes the cluster's own dlagent, whose classpath
+# contains "test".
+if [ -f .agent.pids ]; then
+    for pid in $(cat .agent.pids); do
+        kill "$pid" 2>/dev/null || true
+    done
+    rm -f .agent.pids
+fi
 
 echo "✅ Cleanup completed!"

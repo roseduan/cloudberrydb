@@ -12,3 +12,4 @@ reports/
 # Tools downloaded by install_tools.sh
 tools/bin/
 tools/lib/
+config/local.env

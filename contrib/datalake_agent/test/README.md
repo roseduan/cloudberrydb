@@ -45,8 +45,8 @@ cd test && ./cleanup.sh
 
 **Application won't start:**
 ```bash
-# Check JAR file
-ls -la ../target/dlagent-1.0.0.jar
+# Check the agent jar and its dependency list
+ls -la ../dlagent-rest/target/dlagent-rest-1.0.0.jar ../dlagent-rest/target/classpath-src.txt
 
 # Rebuild
 cd .. && mvn clean package -DskipTests

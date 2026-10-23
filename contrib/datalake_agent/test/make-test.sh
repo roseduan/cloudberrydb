@@ -20,7 +20,9 @@ echo ""
 echo "📋 Step 3: Waiting for application to be ready..."
 cd ..
 for i in {1..60}; do
-    if curl -s http://localhost:8080/actuator/health > /dev/null 2>&1; then
+    # --noproxy: the agent is local, and with http_proxy set curl would ask
+    # the proxy instead, which never reports it ready.
+    if curl --noproxy '*' -sf http://localhost:8080/actuator/health > /dev/null 2>&1; then
         echo "✅ Application is ready!"
         break
     fi

@@ -37,6 +37,51 @@ log_debug() {
 }
 
 # ============================================================================
+# Cluster Settings
+# ============================================================================
+
+# Switch the cluster to the given datalake.agent_transport (rest or grpc)
+# and wait until the matching agent is running, so a run that meant to test
+# one transport cannot silently test the other.
+set_agent_transport() {
+    local transport=$1
+    local main_class
+    local deadline
+
+    case "${transport}" in
+        rest) main_class='dlagent\.service\.ServiceApplication' ;;
+        grpc) main_class='dlagent\.grpc\.Main' ;;
+        *)
+            log_error "Unknown datalake.agent_transport: ${transport}"
+            return 1
+            ;;
+    esac
+
+    log_info "Switching datalake.agent_transport to ${transport}"
+    gpconfig -c datalake.agent_transport -v "${transport}" --skipvalidation || return 1
+    gpstop -ar || return 1
+
+    if [ "$(psql -X -d postgres -Atc 'SHOW datalake.agent_transport')" != "${transport}" ]; then
+        log_error "datalake.agent_transport did not change to ${transport}"
+        return 1
+    fi
+
+    # Match /proc/*/cmdline rather than `pgrep -f`: the main class follows a
+    # classpath of about 28 KB, and CentOS 7's pgrep looks at only the first
+    # 4 KB of a command line.  The backslashes in the pattern keep this grep
+    # from matching its own command line.
+    deadline=$(( $(date +%s) + 60 ))
+    until grep -qs -- "${main_class}" /proc/[0-9]*/cmdline; do
+        if [ "$(date +%s)" -ge "${deadline}" ]; then
+            log_error "No ${transport} agent running 60s after the restart"
+            return 1
+        fi
+        sleep 1
+    done
+    log_success "datalake.agent_transport=${transport}, agent running"
+}
+
+# ============================================================================
 # Service Check Functions
 # ============================================================================
 
@@ -64,6 +109,9 @@ check_service() {
     return 1
 }
 
+# Returns 1 when the service never comes up.  Only the caller knows
+# whether that is fatal (load_hive_data.sh) or just skips some tests
+# (check_services.sh), so the caller logs the outcome at its own level.
 wait_for_service() {
     local service_name=$1
     local host=$2
@@ -85,7 +133,7 @@ wait_for_service() {
         attempt=$((attempt + 1))
     done
 
-    log_error "${service_name} failed to become ready after ${max_attempts} attempts"
+    log_info "${service_name} not reachable after ${max_attempts} attempts"
     return 1
 }
 

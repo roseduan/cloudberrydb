@@ -263,6 +263,145 @@ int iceberg_analyze_statistics_target = 1000;
 bool iceberg_analyze_snap_unique_ndv = true;
 bool enable_list_in_master;
 char *datalake_agent_server_url = NULL;
+
+/*
+ * datalake.agent_transport -- which wire protocol talks to the datalake agent.
+ *
+ * READ HERE, OWNED BY datalake_proxy.  The postmaster has to know which agent
+ * jar to launch before any backend has loaded this library, so the GUC is
+ * defined by the module that is in shared_preload_libraries and this one asks
+ * for it by name.  dlagent_transport.h has the full reason, including the
+ * FATAL that the previous arrangement -- an extern from datalake_proxy into
+ * this file -- produced at postmaster startup.
+ *
+ * Cached on first use because the setting is PGC_POSTMASTER: it cannot change
+ * for the life of this process, and the dispatch sites in libchurl.c sit on
+ * the per-request path.
+ */
+int
+datalake_agent_transport_get(void)
+{
+	static int	cached = -1;
+
+	if (cached < 0)
+	{
+		int			transport = dlagent_transport_from_string(
+						GetConfigOption(DLAGENT_GUC_TRANSPORT, true, false));
+
+#ifndef HAVE_GRPCXX
+		/*
+		 * datalake_proxy's check hook already refuses grpc on a build without
+		 * gRPC, but only where datalake_proxy is preloaded.  Without it the
+		 * setting is an unvalidated placeholder, and silently answering "rest"
+		 * to someone who asked for grpc would hide the misconfiguration behind
+		 * traffic that merely goes somewhere else.
+		 */
+		if (transport == DATALAKE_AGENT_TRANSPORT_GRPC)
+			ereport(ERROR,
+					(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+					 errmsg("datalake.agent_transport cannot be set to \"grpc\""),
+					 errdetail("This build of datalake_fdw has no gRPC support "
+							   "because grpc++ >= 1.50 was not found when it was built."),
+					 errhint("Rebuild with grpc++ available, or use datalake.agent_transport=rest.")));
+#endif
+		/* Only now: an error above must be raised on every call, not once. */
+		cached = transport;
+	}
+
+	return cached;
+}
+
+/*
+ * The gRPC agent's port, likewise owned by datalake_proxy and read by name.
+ */
+int
+datalake_agent_grpc_port_get(void)
+{
+	static int	cached = -1;
+
+	if (cached < 0)
+	{
+		const char *value = GetConfigOption(DLAGENT_GUC_GRPC_PORT, true, false);
+		int			port = value ? atoi(value) : 0;
+
+		cached = (port > 0 && port <= 65535)
+			? port : DATALAKE_AGENT_DEFAULT_GRPC_PORT;
+	}
+
+	return cached;
+}
+
+/*
+ * datalake.rpc_max_message_size, in BYTES -- the client half of the one
+ * ceiling both sides take.  Owned by datalake_proxy, read here by name, like
+ * the two settings above.
+ *
+ * parse_int() rather than atoi() because this GUC carries GUC_UNIT_MB, so
+ * GetConfigOption() hands back a value WITH its unit and PostgreSQL picks the
+ * unit it prints: a configured 1024 MB comes back as "1GB", which atoi() reads
+ * as 1.  That is not a rounding error, it is a 1024x under-estimate, and it
+ * would cap the client a thousand times lower than the agent -- the exact
+ * asymmetry this setting exists to remove.  parse_int() with the same flag
+ * understands every spelling the GUC machinery can produce, including the raw
+ * postgresql.conf text that comes back when datalake_proxy is not preloaded
+ * and the setting is an unclaimed placeholder.
+ */
+int
+datalake_agent_rpc_max_message_bytes_get(void)
+{
+	static int	cached = -1;
+
+	if (cached < 0)
+	{
+		const char *value = GetConfigOption(DLAGENT_GUC_RPC_MAX_MESSAGE_SIZE,
+											true, false);
+		int			mb = 0;
+
+		if (value == NULL || !parse_int(value, &mb, GUC_UNIT_MB, NULL) ||
+			mb < 1 || mb > DATALAKE_AGENT_MAX_RPC_MAX_MESSAGE_SIZE_MB)
+			mb = DATALAKE_AGENT_DEFAULT_RPC_MAX_MESSAGE_SIZE_MB;
+
+		cached = mb * 1024 * 1024;
+	}
+
+	return cached;
+}
+
+/*
+ * The agent endpoint.
+ *
+ * One accessor so the GUC is actually in charge.  Before this, three call
+ * sites wrote "http://localhost:3888" directly
+ * (pg_iceberg_catalog_helper.c, iceberg_toolkit_common.c and the GUC's own
+ * default), so setting datalake.agent_server_url moved some traffic and
+ * silently left the rest pointing at the default port -- and under
+ * agent_transport=grpc those sites would have gone on talking to the REST
+ * agent's port, failing in a way that looks like a network fault.
+ */
+const char *
+datalake_agent_endpoint(void)
+{
+	if (datalake_agent_server_url == NULL || datalake_agent_server_url[0] == '\0')
+		return DATALAKE_AGENT_DEFAULT_URL;
+	return datalake_agent_server_url;
+}
+
+/*
+ * The gRPC target, as "host:port".
+ *
+ * The host/port split itself lives in dlagent_transport.h so datalake_proxy's
+ * health probe and this client cannot end up aiming at different places.
+ */
+const char *
+datalake_agent_grpc_target(void)
+{
+	static char target[NAMEDATALEN * 2];
+
+	dlagent_build_grpc_target(target, sizeof(target),
+							  datalake_agent_endpoint(),
+							  datalake_agent_grpc_port_get());
+	return target;
+}
 bool skip_create_polaris_catalog;
 bool enable_get_block_location;
 bool enable_iceberg_fragment_cache;
@@ -582,11 +721,17 @@ _PG_init(void)
 							NULL,
 							NULL);
 
+	/*
+	 * datalake.agent_transport and datalake.agent_grpc_port are deliberately
+	 * NOT defined here: datalake_proxy defines them, because the postmaster
+	 * needs them before this library is loaded.  See dlagent_transport.h.
+	 */
+
 	DefineCustomStringVariable("datalake.agent_server_url",
 							"Agent server URL for catalog operations",
 							NULL,
 							&datalake_agent_server_url,
-							"http://localhost:3888",
+							DATALAKE_AGENT_DEFAULT_URL,
 							PGC_USERSET,
 							0,
 							NULL,

@@ -1,0 +1,116 @@
+/*
+ * Licensed to the Apache Software Foundation (ASF) under one
+ * or more contributor license agreements.  See the NOTICE file
+ * distributed with this work for additional information
+ * regarding copyright ownership.  The ASF licenses this file
+ * to you under the Apache License, Version 2.0 (the
+ * "License"); you may not use this file except in compliance
+ * with the License.  You may obtain a copy of the License at
+ * 
+ *   http://www.apache.org/licenses/LICENSE-2.0
+ * 
+ * Unless required by applicable law or agreed to in writing,
+ * software distributed under the License is distributed on an
+ * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+ * KIND, either express or implied.  See the License for the
+ * specific language governing permissions and limitations
+ * under the License.
+ */
+
+package cloud.elastic.dlagent.api.configuration;
+
+import lombok.Getter;
+import lombok.Setter;
+
+import java.time.Duration;
+
+/**
+ * Configuration properties for dlagent.
+ * <p>
+ * Plain POJO: the binding lives in each composition root, because
+ * {@code @ConfigurationProperties} is a spring-boot type that dlagent-core may
+ * not reference. dlagent-rest declares
+ * {@code @Bean @ConfigurationProperties(prefix = "dlagent")}, which binds this
+ * exact class with the same prefix and therefore the same values as before;
+ * dlagent-grpc binds an instance filled in by its own configuration parser.
+ */
+public class DlServerProperties {
+    /**
+     * The property prefix for all properties in this group.
+     */
+    public static final String PROPERTY_PREFIX = "dlagent";
+
+    /**
+     * Customizable settings for tomcat through dlagent
+     */
+    @Getter
+    @Setter
+    private Tomcat tomcat = new Tomcat();
+
+    /**
+     * Configurable task execution properties for async tasks (i.e Bridge Read)
+     */
+    @Getter
+    @Setter
+    private TaskProperties task = new TaskProperties();
+
+    /**
+     * Customizable settings for iceberg plugins through dlagent
+     */
+    @Getter
+    @Setter
+    private Iceberg iceberg = new Iceberg();
+
+    @Getter
+    @Setter
+    public static class Tomcat {
+
+        /**
+         * Maximum number of headers allowed in the request
+         */
+        private int maxHeaderCount = 30000;
+
+        /**
+         * Whether upload requests will use the same read timeout as connectionTimeout
+         */
+        private boolean disableUploadTimeout = true; // default Tomcat setting
+
+        /**
+         * Timeout for reading data from upload requests, if disableUploadTimeout is set to false.
+         */
+        private Duration connectionUploadTimeout = Duration.ofMinutes(5); // 5 min is default Tomcat setting
+
+    }
+
+    @Getter
+    @Setter
+    public static class Iceberg {
+
+        /**
+         * Idle expiration (expireAfterAccess) for the cached hive catalogs in
+         * IcebergCatalogWrapper.  An entry that has not been read for this
+         * long is evicted and its underlying HMS connections are closed.
+         */
+        private Duration hiveCatalogCacheTtl = Duration.ofMinutes(5);
+
+        /**
+         * Expiration (expireAfterWrite) for the per-table FileIO cache and the
+         * REST scan-storage cache used by credential-vending catalogs
+         * (Polaris/REST) in IcebergCatalogWrapper (issue #393).  A scan reuses
+         * the cached vended credentials until the entry expires, then resolves
+         * fresh ones from the catalog.
+         *
+         * <p>This is the upper bound only -- how long a revoked authorization
+         * may go unnoticed.  The lower bound is enforced from the credentials
+         * themselves: an entry carries the expiry the catalog advertised
+         * (s3.session-token-expires-at-ms) and is dropped before reaching it,
+         * so setting this above the credential lifetime cannot hand out an
+         * expired key.
+         *
+         * <p>Config-based catalogs (Hive) bypass both caches entirely -- they
+         * hand out their shared config FileIO directly.
+         */
+        private Duration fileIoCacheTtl = Duration.ofMinutes(5);
+
+    }
+}

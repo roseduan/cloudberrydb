@@ -39,6 +39,13 @@ typedef void* agent_cli_handle_t;
 
 typedef struct {
     const char* server_url;
+    /*
+     * "host:port" for the gRPC transport; NULL under REST.  An additive field
+     * on an internal struct: the surface that must stay frozen is the
+     * agent_cli_wrapper_* function signatures, which the 101 FDW call sites
+     * use and which are unchanged.
+     */
+    const char* grpc_target;
     const char* namespace_name;
     const char* auth_token;
     int request_timeout_seconds;

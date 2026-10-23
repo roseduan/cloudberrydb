@@ -13,6 +13,7 @@
  */
 
 #include "postgres.h"
+#include "../datalake_def.h"		/* datalake_agent_endpoint() */
 
 #include "access/relation.h"
 #include "catalog/namespace.h"
@@ -167,7 +168,8 @@ create_catalog_fdw_state(IcebergCatalogOperation operation,
 	//fdwState->request.catalogName = catalogName;
 	fdwState->request.tableName = tableName;
 	fdwState->request.nameSpace = nameSpace;
-	fdwState->request.agentServerUrl = "http://localhost:3888";
+	/* Endpoint consolidation: honour datalake.agent_server_url. */
+	fdwState->request.agentServerUrl = datalake_agent_endpoint();
 	fdwState->catalogInfo.catalog_name = foreignCatalogName;
 	fdwState->catalogInfo.catalog_server_name = catalogServer;
 	fdwState->catalogInfo.volumn_server_name = volumeServer;

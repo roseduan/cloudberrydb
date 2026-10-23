@@ -846,6 +846,47 @@ test_datalake_feature:
   artifacts:
     <<: *artifacts
 
+# The datalake feature categories that need only MinIO, run with
+# datalake.agent_transport=rest.  The other datalake jobs cover the default
+# gRPC transport; this keeps the REST agent, the fallback, tested on every
+# pipeline in about ten minutes, without the Hive/Spark/Hudi preparation.
+test_datalake_feature_rest:
+  stage: test
+  extends: .common
+  parallel:
+    matrix:
+      - ARCH:
+          - x86_64
+  <<: *cache-only-pull
+  script: |
+    trap 'test -e /tmp/.debugging && tmux new-session -d -s debug && tmux wait-for done' EXIT
+
+    set -euxo pipefail
+    pushd ${CI_PROJECT_DIR}
+      docker network create share-enterprise-ci || true
+      docker compose -f services/datalake-test-env.yml up -d minio minio-init
+    popd
+
+    # The test container is started by `make test-datalake-feature`, which
+    # forwards only a fixed set of variables; config/local.env reaches it
+    # through the mounted tree.
+    cat > database/contrib/datalake_fdw/automation/config/local.env <<'EOF_ENV'
+    export DATALAKE_AGENT_TRANSPORT=rest
+    export FEATURE_CATEGORIES="fdw_read fdw_write fdw_pushdown iceberg_catalog iceberg_dml iceberg_pushdown iceberg_vacuum transactions negative"
+    EOF_ENV
+
+    export ENV=release
+    bash database/contrib/datalake_fdw/automation/docker/singlecluster/download_cache/download.sh
+    export INSTALL_TOOLS=1
+    make test-datalake-feature
+
+  after_script: |
+    cd ${CI_PROJECT_DIR} && docker compose -f services/datalake-test-env.yml down -v || true
+  rules:
+    - !reference [ .common-rules ]
+  artifacts:
+    <<: *artifacts
+
 analyze_pipeline:
   stage: .post
   allow_failure: true

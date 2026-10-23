@@ -497,6 +497,18 @@ is_dlagent_connect_error(ErrorData *edata)
 		 strstr(edata->message, "Connection refused")))
 		return true;
 
+	/*
+	 * The gRPC agent refuses calls with this text between binding its port
+	 * and being ready (DlAgentServer.NOT_READY_DESCRIPTION); such a call
+	 * never ran, so it is as safe to retry as a refused connection.
+	 */
+	if (edata->message && strstr(edata->message, "dlagent is not ready"))
+		return true;
+
+	/* gRPC's wording for a call that could not connect, hence never sent. */
+	if (edata->message && strstr(edata->message, "failed to connect to all addresses"))
+		return true;
+
 	return false;
 }
 
@@ -511,11 +523,19 @@ datalakeDoRPC(datalake_gphadoop_context *context)
 		CHECK_FOR_INTERRUPTS();
 		MemoryContext oldcontext = CurrentMemoryContext;
 		bool should_retry = false;
+		bool succeeded = false;
 
+		/*
+		 * No return inside PG_TRY: it would skip PG_END_TRY, leaving
+		 * PG_exception_stack pointing into this frame after it is gone, and
+		 * the next ERROR before an enclosing PG_END_TRY -- a malformed reply
+		 * in the caller's parser, say -- would longjmp into a dead stack and
+		 * crash the backend instead of reporting the error.
+		 */
 		PG_TRY();
 		{
 			datalakeDoRPC_once(context);
-			return; /* success */
+			succeeded = true;
 		}
 		PG_CATCH();
 		{
@@ -553,7 +573,7 @@ datalakeDoRPC(datalake_gphadoop_context *context)
 		}
 		PG_END_TRY();
 
-		if (!should_retry)
+		if (succeeded || !should_retry)
 			break;
 	}
 }

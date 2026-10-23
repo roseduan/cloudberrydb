@@ -477,6 +477,42 @@ extern IcebergFileIndexMap *datalake_iceberg_file_index_map;
 extern char *datalake_agent_server_url;
 
 /*
+ * Which transport talks to the datalake agent.  The GUC itself belongs to
+ * datalake_proxy (it has to be readable in the postmaster, which has not
+ * loaded this library); the enum, the defaults and the setting names are
+ * shared through dlagent_transport.h so the two modules cannot drift apart.
+ */
+#include "../../datalake_agent/dlagent_transport.h"
+
+/*
+ * datalake.agent_transport, as this process sees it.  A function rather than a
+ * variable: the value is fetched by GUC name on first use, because an extern
+ * across the two .so files is what made the postmaster fail to start.
+ */
+extern int	datalake_agent_transport_get(void);
+
+/*
+ * datalake.rpc_max_message_size in BYTES, for the gRPC client's channel args.
+ * Same ownership as above; dlagent_transport.h says why one setting drives
+ * both the client and the agent.
+ */
+extern int	datalake_agent_rpc_max_message_bytes_get(void);
+
+/*
+ * The agent endpoint, from datalake.agent_server_url.
+ *
+ * Call this instead of writing "http://localhost:3888": three call sites used
+ * to hardcode it, so setting the GUC moved some traffic and not the rest, and
+ * under agent_transport=grpc those sites would have kept talking to the REST
+ * port.
+ */
+extern const char *datalake_agent_endpoint(void);
+
+/* "host:port" for the gRPC transport, derived from the URL and the port GUC. */
+extern const char *datalake_agent_grpc_target(void);
+extern int	datalake_agent_grpc_port_get(void);
+
+/*
  * Global reference to the full fragment list from BeginForeignScan.
  * Used by BeginForeignModify to eagerly populate the file index map with
  * ALL files across all segments, ensuring globally consistent file IDs.

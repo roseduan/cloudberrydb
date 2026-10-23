@@ -5,8 +5,37 @@
     <modelVersion>4.0.0</modelVersion>
 
     <groupId>cloud.elastic</groupId>
-    <artifactId>dlagent</artifactId>
+    <artifactId>dlagent-parent</artifactId>
     <version>1.0.0</version>
+    <packaging>pom</packaging>
+
+    <!--
+      Three modules, two transports, one copy of the business logic:
+
+        dlagent-core   api + plugins + transport-neutral services. No Spring,
+                       no servlet, no Tomcat - see the boundary assertion in
+                       dlagent-core's ModuleBoundaryTest.
+        dlagent-rest   Spring Boot composition root (service/rest +
+                       service/spring). The fallback transport.
+        dlagent-grpc   Guice composition root, proto contract + gRPC services.
+
+      Version pinning lives here and only here: child modules name a
+      groupId/artifactId and never a <version> for anything this
+      dependencyManagement block manages, so the "child pom pins jackson to an
+      older patch level than the parent" failure mode has nowhere to happen.
+      PomHygieneTest enforces that mechanically.
+    -->
+    <modules>
+        <module>dlagent-core</module>
+        <module>dlagent-rest</module>
+        <module>dlagent-grpc</module>
+        <!--
+          Tests only, ships nothing: it is the one place that can depend on
+          both transports at once and ask whether they answer identically.
+          See dlagent-parity/pom.xml.
+        -->
+        <module>dlagent-parity</module>
+    </modules>
 
     <properties>
         <maven.compiler.source>8</maven.compiler.source>
@@ -26,7 +55,10 @@
         <tomcat.version>9.0.121</tomcat.version>
         <!-- snakeyaml 2.2: CVE-2022-1471 RCE (overrides spring-boot bom default 1.30) -->
         <snakeyaml.version>2.2</snakeyaml.version>
-        <!-- jetty 9.4.57: CVE-2024-22201/13009/8184/6763 (enforced via jetty-bom below) -->
+        <!-- jetty 9.4.57: CVE-2024-22201/13009/8184/6763 (enforced via jetty-bom below).
+             9.4.58 is the last 9.4 release on Maven Central and fixes nothing open
+             here, so CVE-2026-2332 (fixed 9.4.60) / CVE-2026-10050 (fixed 9.4.63),
+             CVE-2024-6763, CVE-2025-11143 and CVE-2026-6790 stay open on this line. -->
         <jetty.version>9.4.57.v20241219</jetty.version>
         <!-- parquet 1.15.2: CVE-2025-30065 RCE / CVE-2024-46762 / CVE-2021-41561 -->
         <parquet.version>1.15.2</parquet.version>
@@ -37,7 +69,10 @@
              4.1.136 adds CVE-2026-56745 / CVE-2026-55831 / CVE-2026-55833 (netty-codec-http),
              CVE-2026-56817 (netty-codec-xml) and the matching codec / codec-haproxy /
              codec-http2 / codec-stomp / handler-ssl-ocsp advisories still open in 4.1.135.
-             4.1.137 adds CVE-2026-59902 (netty-transport-sctp). -->
+             4.1.137 adds CVE-2026-59902 (netty-transport-sctp).
+             dlagent-grpc uses the non-shaded io.grpc:grpc-netty. grpc-netty-shaded
+             relocates netty 4.1.132 into its own jar, where this bom cannot reach it
+             and where an SBOM keyed on maven coordinates cannot see it. -->
         <netty.version>4.1.137.Final</netty.version>
         <!-- jackson 2.21.4: newer PolymorphicTypeValidator bypass via generic type
              parameters + array-subtype allowlist bypass (CVE-2026-54512 / CVE-2026-54513),
@@ -46,8 +81,21 @@
              2.15.2; enforced via jackson-bom below. Does NOT affect the jackson 2.9.5
              shaded inside hive-exec. 2.21.5 rather than 2.21.4 because 2.21.0-2.21.4 are
              themselves affected by GHSA-5gvw-p9qm-jgwh / GHSA-5jmj-h7xm-6q6v /
-             GHSA-mhm7-754m-9p8w. -->
-        <jackson.version>2.21.5</jackson.version>
+             GHSA-mhm7-754m-9p8w. 2.21.7 for CVE-2026-19032 / CVE-2026-68497 /
+             CVE-2026-83557 (fixed 2.21.6) and CVE-2026-89407 / CVE-2026-89425 /
+             CVE-2026-91776 / CVE-2026-91777 (fixed 2.21.7). -->
+        <jackson.version>2.21.7</jackson.version>
+        <!-- grpc-java 1.81.0: verified to still target Java 8 (every class in all
+             11 artifacts reads major version 52, and the full RPC shape ran on
+             OpenJDK 1.8.0_452).
+             NOTE: dlagent-grpc uses grpc-api/core/stub/netty only. It does NOT
+             use grpc-protobuf, because that would put
+             com.google.protobuf:protobuf-java on the agent classpath, where
+             hive-standalone-metastore / hbase-client / orc-core 1.5.1 still
+             require 2.5.0. The payload is a single `bytes` field, so the
+             marshalling is hand-written and pinned by protoc-generated golden
+             bytes instead (see PayloadMarshaller). -->
+        <grpc.version>1.81.0</grpc.version>
         <!-- zookeeper 3.9.5: CVE-2026-24308 (sensitive info in client logfile) /
              CVE-2026-24281 (ZKTrustManager PTR-fallback hostname verification), plus the
              earlier resource-consumption / auth fixes (overrides transitive 3.8.4) -->
@@ -56,7 +104,9 @@
         <aircompressor.version>0.27</aircompressor.version>
         <!-- ant 1.10.15: CVE-2020-11979 (overrides hive-common's transitive 1.9.1) -->
         <ant.version>1.10.15</ant.version>
-        <!-- bcprov-jdk18on 1.85: bump to latest (overrides hadoop-common's transitive 1.82) -->
+        <!-- bcprov-jdk18on / bcpkix-jdk18on 1.85: overrides hadoop-common's transitive
+             1.82. bcpkix moves with bcprov - left alone it stayed on 1.82 next to a
+             1.85 provider, and 1.82 carries CVE-2026-5588 (fixed 1.84). -->
         <bcprov.version>1.85</bcprov.version>
         <!-- ivy 2.5.3: CVE-2022-37865 / CVE-2022-37866 path traversal (overrides the
              transitive 2.4.0 pulled via hive-common's `ADD JAR` support) -->
@@ -65,9 +115,11 @@
              org.lz4 coordinate is dead - its last release, 1.8.1, is only a relocation POM
              pointing at at.yawk.lz4, and is itself still flagged (last_affected 1.8.1). Pin
              org.lz4 to that relocation stub so every requester follows it onto the live
-             coordinate, then pin at.yawk.lz4 to 1.11.1, which carries both fixes. -->
+             coordinate, then pin at.yawk.lz4 to 1.11.4, which carries both fixes plus
+             CVE-2026-106452 / CVE-2026-106453 (fixed 1.11.2) and CVE-2026-106449 /
+             CVE-2026-106450 / CVE-2026-106451 (fixed 1.11.4). -->
         <lz4-java-relocation.version>1.8.1</lz4-java-relocation.version>
-        <lz4-java.version>1.11.1</lz4-java.version>
+        <lz4-java.version>1.11.4</lz4-java.version>
         <!-- mssql-jdbc 13.4.0.jre8: CVE-2025-59250 (hive-metastore 3.1.0 brings 10.2.3.jre8).
              Microsoft only published the fix on the .jre11 classifier for the older lines, so
              move to the current .jre8 build. The agent talks to HMS over thrift and never
@@ -77,441 +129,112 @@
              0.13.0 is the ceiling that keeps hive 3.1.0's generated metastore stubs working;
              CVE-2020-13949 (needs 0.14.0) and CVE-2026-43869 (needs 0.23.0) stay open. -->
         <libthrift.version>0.13.0</libthrift.version>
-        <!-- httpcore5 5.4.3: CVE-2026-54399 (header parsing DoS) / CVE-2026-54428
-             (HPack unbounded header list); overrides the transitive 5.1.5. Java 8 ok. -->
-        <httpcore5.version>5.4.3</httpcore5.version>
-        <!-- httpclient5 5.4.4: moves with httpcore5 above, otherwise the spring-boot
-             BOM leaves a 5.1.4 client on 5.4.3 core. Do not go to 5.6.x - it wants
-             httpcore5 5.5+, which has no stable release. -->
-        <httpclient5.version>5.4.4</httpclient5.version>
+        <!-- httpcore5 5.4.4: CVE-2026-54399 (header parsing DoS) / CVE-2026-54428
+             (HPack unbounded header list, both fixed 5.4.3); overrides the transitive
+             5.1.5. 5.4.4 is the core httpclient5 5.6.5 is built against. Java 8 ok. -->
+        <httpcore5.version>5.4.4</httpcore5.version>
+        <!-- httpclient5 5.6.5: CVE-2026-64607 (connection leak on Content-Encoding
+             decode error, fixed 5.6.3). Moves with httpcore5 above, otherwise the
+             spring-boot BOM leaves a 5.1.4 client on a 5.4 core. The 5.6.x line
+             still builds on httpcore5 5.4.x and targets Java 8. -->
+        <httpclient5.version>5.6.5</httpclient5.version>
+        <!-- log4j2 2.25.5: CVE-2025-68161 (Socket Appender skips TLS hostname
+             verification), CVE-2026-34477 / CVE-2026-34479 / CVE-2026-34480 and
+             CVE-2026-49844; overrides spring-boot 2.7.18's 2.17.2. The 2.x line
+             still targets Java 8. Enforced via log4j-bom below. -->
+        <log4j2.version>2.25.5</log4j2.version>
+        <!-- commons-lang3 3.18.0: CVE-2025-48924 (uncontrolled recursion in
+             ClassUtils.getClass); overrides spring-boot's 3.12.0. -->
+        <commons-lang3.version>3.18.0</commons-lang3.version>
+        <!-- commons-configuration2 2.15.0: CVE-2026-45205 (StackOverflowError on
+             cyclic YAML); overrides hadoop-common's transitive 2.10.1. -->
+        <commons-configuration2.version>2.15.0</commons-configuration2.version>
+        <!-- commons-io 2.22.0: what commons-configuration2 2.15.0 is built
+             against. Its FileLocatorUtils calls IOSupplier.getUnchecked(), added
+             in commons-io 2.17.0; hadoop-common's transitive 2.16.1 lacks it, so
+             the first S3AFileSystem in a JVM fails with NoSuchMethodError while
+             Hadoop metrics load their config. -->
+        <commons-io.version>2.22.0</commons-io.version>
+        <!-- groovy-all 2.4.21: CVE-2020-17521 (information disclosure through the
+             shared temp directory); overrides hive-exec's transitive 2.4.11. Stays on
+             2.4.x, the line hive 3.1.0 is built against. -->
+        <groovy-all.version>2.4.21</groovy-all.version>
+
+        <!-- ===== Four coordinates the single-module pom never named at all =====
+             All four used to arrive only by transitivity, which was survivable
+             while one fat jar held everything and unacceptable once the same
+             core code is assembled by two different transports: the version
+             core is compiled and unit-tested against would not be the version
+             it runs against. -->
+
+        <!-- guava: was resolving to 32.0.1-jre purely via hadoop, while grpc-java
+             1.81.0 declares 33.5.0-android; without a pin, core would face a
+             different flavour under each transport.
+
+             Flavour choice: -jre, decided on measured API deltas rather than on
+             matching grpc's declared coordinate. Dumping every public member of
+             all three jars with javap and diffing at Class#method granularity:
+               32.0.1-jre -> 33.5.0-jre     0 public methods removed (115 added)
+               32.0.1-jre -> 33.5.0-android 67 public methods removed
+             The android removals are not exotic: Predicate#test,
+             ImmutableList#forEach/sort/spliterator, ImmutableMap#merge/
+             putIfAbsent/replaceAll, Multiset#forEach, FluentIterable#stream.
+             hadoop 3.4.3 / hive 3.1.0 / iceberg 1.3.0 / parquet 1.15.2 are all
+             compiled against the JRE flavour and are free to call any of them,
+             so -android buys a NoSuchMethodError risk we cannot bound, while
+             -jre is a strict superset of what resolves today and therefore the
+             option that leaves the REST path (the rollback path, whose
+             behaviour must not change) alone.
+             grpc uses no guava API that -jre lacks; -jre is the flavour Guava
+             documents for non-Android JVMs. -->
+        <guava.version>33.5.0-jre</guava.version>
+        <!-- guice 5.1.0: the Guice composition root of dlagent-grpc.
+             The tree already carries three inconsistent guice coordinates via
+             hadoop/hive (guice 4.2.3, guice-servlet 4.2.3,
+             guice-assistedinject 3.0), so leaving it unmanaged would put a
+             different guice in core than in grpc. Because core resolves this
+             same pinned guice transitively, install-layout.sh stores the jar
+             once under core/ - the naive "single-transport dependency goes in
+             that transport's directory" rule would put two different guice
+             versions on one classpath. -->
+        <guice.version>5.1.0</guice.version>
+        <!-- javax.inject 1: the JSR-330 annotations dlagent-core is now written
+             against. It used to be a fourth-level
+             transitive of hadoop -> guice; a hadoop bump could have made core
+             stop compiling. -->
+        <javax-inject.version>1</javax-inject.version>
+        <!-- micrometer-core 1.9.17: MetricsReporter's meters. Its only supplier
+             was spring-boot-starter-actuator, i.e. exactly the dependency core
+             sheds. Version is the one the tree resolves today. -->
+        <micrometer.version>1.9.17</micrometer.version>
     </properties>
 
     <dependencies>
-        <!-- test dependencies -->
+        <!-- Shared by every module: the test harness and lombok. -->
         <dependency>
             <groupId>org.junit.jupiter</groupId>
             <artifactId>junit-jupiter-api</artifactId>
-            <version>5.8.2</version>
             <scope>test</scope>
         </dependency>
         <dependency>
             <groupId>org.junit.jupiter</groupId>
             <artifactId>junit-jupiter-engine</artifactId>
-            <version>5.8.2</version>
             <scope>test</scope>
         </dependency>
         <dependency>
             <groupId>org.mockito</groupId>
             <artifactId>mockito-core</artifactId>
-            <version>4.5.1</version>
             <scope>test</scope>
         </dependency>
         <dependency>
             <groupId>org.mockito</groupId>
             <artifactId>mockito-junit-jupiter</artifactId>
-            <version>4.5.1</version>
             <scope>test</scope>
-        </dependency>
-        <dependency>
-            <groupId>org.springframework.boot</groupId>
-            <artifactId>spring-boot-starter-test</artifactId>
-            <scope>test</scope>
-            <exclusions>
-                <exclusion>
-                    <groupId>org.springframework.boot</groupId>
-                    <artifactId>spring-boot-starter-logging</artifactId>
-                </exclusion>
-                <exclusion>
-                    <groupId>ch.qos.logback</groupId>
-                    <artifactId>logback-classic</artifactId>
-                </exclusion>
-                <exclusion>
-                    <groupId>ch.qos.logback</groupId>
-                    <artifactId>logback-core</artifactId>
-                </exclusion>
-            </exclusions>
-        </dependency>
-
-        <dependency>
-            <groupId>org.apache.hadoop</groupId>
-            <artifactId>hadoop-annotations</artifactId>
-            <version>${hadoop.version}</version>
-        </dependency>
-        <dependency>
-            <groupId>org.apache.hadoop</groupId>
-            <artifactId>hadoop-auth</artifactId>
-            <version>${hadoop.version}</version>
-            <exclusions>
-                <exclusion>
-                    <groupId>org.slf4j</groupId>
-                    <artifactId>slf4j-reload4j</artifactId>
-                </exclusion>
-            </exclusions>
-        </dependency>
-        <dependency>
-            <groupId>org.apache.hadoop</groupId>
-            <artifactId>hadoop-common</artifactId>
-            <version>${hadoop.version}</version>
-            <exclusions>
-                <exclusion>
-                    <groupId>javax.servlet</groupId>
-                    <artifactId>servlet-api</artifactId>
-                </exclusion>
-                <exclusion>
-                    <groupId>org.slf4j</groupId>
-                    <artifactId>slf4j-reload4j</artifactId>
-                </exclusion>
-                <exclusion>
-                    <groupId>org.apache.avro</groupId>
-                    <artifactId>avro</artifactId>
-                </exclusion>
-            </exclusions>
-        </dependency>
-        <dependency>
-            <groupId>org.apache.hadoop</groupId>
-            <artifactId>hadoop-hdfs</artifactId>
-            <version>${hadoop.version}</version>
-            <exclusions>
-                <exclusion>
-                    <groupId>javax.servlet</groupId>
-                    <artifactId>servlet-api</artifactId>
-                </exclusion>
-            </exclusions>
-        </dependency>
-        <dependency>
-            <groupId>org.apache.hadoop</groupId>
-            <artifactId>hadoop-hdfs-client</artifactId>
-            <version>${hadoop.version}</version>
-        </dependency>
-        <dependency>
-            <groupId>org.apache.hadoop</groupId>
-            <artifactId>hadoop-mapreduce-client-core</artifactId>
-            <version>${hadoop.version}</version>
-            <exclusions>
-                <exclusion>
-                    <groupId>javax.servlet</groupId>
-                    <artifactId>servlet-api</artifactId>
-                </exclusion>
-                <exclusion>
-                    <groupId>org.slf4j</groupId>
-                    <artifactId>slf4j-reload4j</artifactId>
-                </exclusion>
-                <exclusion>
-                    <groupId>org.apache.avro</groupId>
-                    <artifactId>avro</artifactId>
-                </exclusion>
-            </exclusions>
-        </dependency>
-        <dependency>
-            <groupId>org.apache.hadoop</groupId>
-            <artifactId>hadoop-yarn-api</artifactId>
-            <version>${hadoop.version}</version>
-        </dependency>
-        <dependency>
-            <groupId>org.apache.hadoop</groupId>
-            <artifactId>hadoop-yarn-client</artifactId>
-            <version>${hadoop.version}</version>
-        </dependency>
-        <dependency>
-            <groupId>org.apache.hadoop</groupId>
-            <artifactId>hadoop-aws</artifactId>
-            <version>${hadoop.version}</version>
-        </dependency>
-        <!-- Since hadoop 3.4.3, commons-collections (3.x) is only a transitive runtime dep,
-             but HttpHeaderDecoder uses org.apache.commons.collections.CollectionUtils at
-             compile time; add it back explicitly (also fixes CVE-2015-7501) -->
-        <dependency>
-            <groupId>commons-collections</groupId>
-            <artifactId>commons-collections</artifactId>
-            <version>3.2.2</version>
-        </dependency>
-        <dependency>
-            <groupId>org.springframework.boot</groupId>
-            <artifactId>spring-boot-starter-web</artifactId>
-            <exclusions>
-                <exclusion>
-                    <groupId>org.springframework.boot</groupId>
-                    <artifactId>spring-boot-starter-logging</artifactId>
-                </exclusion>
-                <exclusion>
-                    <groupId>ch.qos.logback</groupId>
-                    <artifactId>logback-classic</artifactId>
-                </exclusion>
-                <exclusion>
-                    <groupId>ch.qos.logback</groupId>
-                    <artifactId>logback-core</artifactId>
-                </exclusion>
-            </exclusions>
-        </dependency>
-        <dependency>
-            <groupId>org.springframework.boot</groupId>
-            <artifactId>spring-boot-starter-log4j2</artifactId>
-        </dependency>
-        <dependency>
-            <groupId>org.apache.logging.log4j</groupId>
-            <artifactId>log4j-spring-boot</artifactId>
-        </dependency>
-        <dependency>
-            <groupId>org.springframework.boot</groupId>
-            <artifactId>spring-boot-starter-actuator</artifactId>
-            <exclusions>
-                <exclusion>
-                    <groupId>org.springframework.boot</groupId>
-                    <artifactId>spring-boot-starter-logging</artifactId>
-                </exclusion>
-                <exclusion>
-                    <groupId>ch.qos.logback</groupId>
-                    <artifactId>logback-classic</artifactId>
-                </exclusion>
-                <exclusion>
-                    <groupId>ch.qos.logback</groupId>
-                    <artifactId>logback-core</artifactId>
-                </exclusion>
-            </exclusions>
-        </dependency>
-        <dependency>
-            <groupId>org.springframework.boot</groupId>
-            <artifactId>spring-boot-devtools</artifactId>
-            <optional>true</optional>
         </dependency>
         <dependency>
             <groupId>org.projectlombok</groupId>
             <artifactId>lombok</artifactId>
-            <version>1.18.12</version>
             <scope>provided</scope>
-        </dependency>
-        <!-- Parquet 1.15.2 MUST be declared before the Hive/Iceberg dependencies.
-             hive-exec-3.1.0 and iceberg-hive-runtime are shaded uber jars that embed an
-             old parquet 1.10 org.apache.parquet.schema.Type (lacking getLogicalTypeAnnotation())
-             at the original package name with no relocation, so a Maven <exclusion> cannot
-             remove them. Spring Boot's LaunchedURLClassLoader loads BOOT-INF/lib jars in
-             BOOT-INF/classpath.idx order, which mirrors dependency declaration order;
-             declaring parquet-* first lets parquet-column-1.15.2 win over the embedded
-             copies and fixes NoSuchMethodError: Type.getLogicalTypeAnnotation() on Hudi reads. -->
-        <dependency>
-            <groupId>org.apache.parquet</groupId>
-            <artifactId>parquet-column</artifactId>
-            <version>${parquet.version}</version>
-        </dependency>
-        <dependency>
-            <groupId>org.apache.parquet</groupId>
-            <artifactId>parquet-hadoop</artifactId>
-            <version>${parquet.version}</version>
-        </dependency>
-        <dependency>
-            <!-- hudi-common calls AvroSchemaConverter at runtime; parquet-avro is
-                 provided-scope in the Hudi parent BOM (not transitive), and dropping
-                 hudi-presto-bundle removed the shaded copy that used to satisfy it, so
-                 declare it explicitly to keep it in the agent fat jar. -->
-            <groupId>org.apache.parquet</groupId>
-            <artifactId>parquet-avro</artifactId>
-            <version>${parquet.version}</version>
-        </dependency>
-        <dependency>
-            <groupId>org.apache.hive</groupId>
-            <artifactId>hive-metastore</artifactId>
-            <version>${hive.version}</version>
-            <exclusions>
-                <exclusion>
-                    <groupId>org.slf4j</groupId>
-                    <artifactId>slf4j-reload4j</artifactId>
-                </exclusion>
-                <exclusion>
-                    <groupId>org.apache.parquet</groupId>
-                    <artifactId>parquet-hadoop-bundle</artifactId>
-                </exclusion>
-                <exclusion>
-                    <groupId>org.apache.avro</groupId>
-                    <artifactId>avro</artifactId>
-                </exclusion>
-                <!-- #580: legacy Log4j 1.x (pulled via hbase-common); org.apache.log4j.* is provided by reload4j + log4j-1.2-api 2.17.2 -->
-                <exclusion>
-                    <groupId>log4j</groupId>
-                    <artifactId>log4j</artifactId>
-                </exclusion>
-                <!-- CVE-2019-10172: Jackson 1.x (org.codehaus.jackson, pulled via hive-shims-0.23, unpatchable) -->
-                <exclusion>
-                    <groupId>org.codehaus.jackson</groupId>
-                    <artifactId>jackson-core-asl</artifactId>
-                </exclusion>
-                <exclusion>
-                    <groupId>org.codehaus.jackson</groupId>
-                    <artifactId>jackson-mapper-asl</artifactId>
-                </exclusion>
-                <exclusion>
-                    <groupId>org.codehaus.jackson</groupId>
-                    <artifactId>jackson-jaxrs</artifactId>
-                </exclusion>
-                <exclusion>
-                    <groupId>org.codehaus.jackson</groupId>
-                    <artifactId>jackson-xc</artifactId>
-                </exclusion>
-                <!-- CVE-2022-46337 (CVSS 9.8): derby 10.14.2.0 LDAP injection. The fixed
-                     10.14.2.1 / 10.15.2.1 / 10.16.1.2 were never published to Maven Central
-                     and 10.17.x needs Java 21, so the coordinate is a dead end. It is only
-                     the embedded HMS database, which the agent never runs - it talks to a
-                     remote metastore. -->
-                <exclusion>
-                    <groupId>org.apache.derby</groupId>
-                    <artifactId>derby</artifactId>
-                </exclusion>
-            </exclusions>
-        </dependency>
-        <dependency>
-            <groupId>org.apache.hive</groupId>
-            <artifactId>hive-common</artifactId>
-            <version>${hive.version}</version>
-            <exclusions>
-                <exclusion>
-                    <groupId>org.eclipse.jetty.aggregate</groupId>
-                    <artifactId>jetty-all</artifactId>
-                </exclusion>
-                <exclusion>
-                    <groupId>org.apache.derby</groupId>
-                    <artifactId>derby</artifactId>
-                </exclusion>
-            </exclusions>
-        </dependency>
-
-        <dependency>
-            <groupId>org.apache.hive</groupId>
-            <artifactId>hive-exec</artifactId>
-            <version>${hive.version}</version>
-            <exclusions>
-                <exclusion>
-                    <groupId>org.apache.derby</groupId>
-                    <artifactId>derby</artifactId>
-                </exclusion>
-                <!-- CVE-2020-13936: velocity 1.5 template sandbox escape, fixed only on the
-                     velocity-engine-core 2.x line, so 1.x is a dead end. The fat jar already
-                     ships velocity-engine-core 2.3, which owns the same org.apache.velocity.*
-                     packages - dropping 1.5 also removes that classpath-order ambiguity. -->
-                <exclusion>
-                    <groupId>org.apache.velocity</groupId>
-                    <artifactId>velocity</artifactId>
-                </exclusion>
-            </exclusions>
-        </dependency>
-
-        <dependency>
-            <groupId>org.apache.iceberg</groupId>
-            <artifactId>iceberg-api</artifactId>
-            <version>${iceberg.version}</version>
-        </dependency>
-
-        <dependency>
-            <groupId>org.apache.iceberg</groupId>
-            <artifactId>iceberg-hive-runtime</artifactId>
-            <version>${iceberg.version}</version>
-        </dependency>
-
-        <dependency>
-            <groupId>org.apache.iceberg</groupId>
-            <artifactId>iceberg-core</artifactId>
-            <version>${iceberg.version}</version>
-        </dependency>
-
-        <dependency>
-            <groupId>org.apache.iceberg</groupId>
-            <artifactId>iceberg-aws</artifactId>
-            <version>${iceberg.version}</version>
-        </dependency>
-
-        <!-- Custom FileIO implementation for Gopher storage -->
-        <dependency>
-            <groupId>org.cbdb.iceberg</groupId>
-            <artifactId>iceberg-gopher</artifactId>
-            <version>4.0.7</version>
-        </dependency>
-
-        <dependency>
-            <groupId>com.github.ben-manes.caffeine</groupId>
-            <artifactId>caffeine</artifactId>
-            <version>2.9.3</version>
-            <scope>provided</scope>
-        </dependency>
-
-        <!-- Slim Hudi modules instead of hudi-presto-bundle: the agent only uses
-             org.apache.hudi.common/avro/metadata/internal.schema classes (all in
-             hudi-common) plus the Hadoop input formats (hudi-hadoop-mr) for the read
-             path. The presto bundle is a shaded uber jar that embeds ancient
-             jackson-databind 2.4.0 + netty-all 4.1.65 + hbase-shaded-netty, none of
-             which are needed; dropping it removes those bundled CVEs and lets Avro/
-             Parquet resolve to the patched versions managed above. -->
-        <dependency>
-            <groupId>org.apache.hudi</groupId>
-            <artifactId>hudi-common</artifactId>
-            <version>${hudi.version}</version>
-        </dependency>
-        <dependency>
-            <groupId>org.apache.hudi</groupId>
-            <artifactId>hudi-hadoop-mr</artifactId>
-            <version>${hudi.version}</version>
-            <exclusions>
-                <!-- hudi-hadoop-mr transitively re-pulls the hadoop-* modules;
-                     exclude the slf4j-reload4j binding on this path too, matching
-                     the direct hadoop-* dependency declarations above (keeps log4j2
-                     as the only slf4j binding). -->
-                <exclusion>
-                    <groupId>org.slf4j</groupId>
-                    <artifactId>slf4j-reload4j</artifactId>
-                </exclusion>
-            </exclusions>
-        </dependency>
-        <dependency>
-            <groupId>org.apache.avro</groupId>
-            <artifactId>avro-mapred</artifactId>
-            <version>${avro.version}</version>
-        </dependency>
-        <!-- Kryo: hudi-common 0.13.0 compiles against Kryo 4's nested
-             com.esotericsoftware.kryo.Kryo$DefaultInstantiatorStrategy, which Kryo 5.x
-             removed (moved to the top-level com.esotericsoftware.kryo.util package).
-             Dropping hudi-presto-bundle removed the shaded kryo-shaded 4.0.2 it embedded,
-             and declaring plain kryo:5.3.0 here caused NoClassDefFoundError on Hudi reads.
-             Use kryo-shaded 4.0.2 — the exact artifact/version Hudi 0.13's parent BOM
-             manages (<kryo.shaded.version>4.0.2</kryo.shaded.version>). -->
-        <dependency>
-            <groupId>com.esotericsoftware</groupId>
-            <artifactId>kryo-shaded</artifactId>
-            <version>4.0.2</version>
-        </dependency>
-        <!-- HBase relocated third-party (shaded Guava/Protobuf): Hudi 0.13's
-             metadata-table reader parses the MDT log blocks as HBase HFiles
-             (HoodieBackedTableMetadata -> HoodieMergedLogRecordScanner ->
-             HoodieAvroHFileReader -> org.apache.hadoop.hbase.io.hfile.ReaderContextBuilder),
-             which calls org.apache.hbase.thirdparty.com.google.common.base.Preconditions
-             and reads the protobuf-encoded HFile trailer/fileinfo.
-             hbase-server (which carries the HFile classes) is pulled transitively via
-             hudi-common, but the org.apache.hbase.thirdparty:* artifacts are declared
-             on hbase-server WITHOUT a version (managed only by HBase's own parent BOM),
-             so at depth-3 (hudi-common -> hbase-server -> hbase-thirdparty) Maven cannot
-             resolve their version in this pom and drops them from the agent fat jar.
-             hudi-presto-bundle used to embed the shaded copies; declare them explicitly
-             at HBase 2.4.9's managed hbase-thirdparty.version=3.5.1 to fix:
-             NoClassDefFoundError: org/apache/hbase/thirdparty/com/google/common/base/Preconditions
-             on Hudi reads. (netty/gson thirdparty are RPC-path only; the local HFile
-             read path does not need them.) -->
-        <dependency>
-            <groupId>org.apache.hbase.thirdparty</groupId>
-            <artifactId>hbase-shaded-miscellaneous</artifactId>
-            <version>3.5.1</version>
-        </dependency>
-        <dependency>
-            <groupId>org.apache.hbase.thirdparty</groupId>
-            <artifactId>hbase-shaded-protobuf</artifactId>
-            <version>3.5.1</version>
-        </dependency>
-        <dependency>
-            <groupId>software.amazon.awssdk</groupId>
-            <artifactId>s3</artifactId>
-        </dependency>
-        <dependency>
-            <groupId>software.amazon.awssdk</groupId>
-            <artifactId>sts</artifactId>
-        </dependency>
-        <dependency>
-            <groupId>software.amazon.awssdk</groupId>
-            <artifactId>url-connection-client</artifactId>
         </dependency>
     </dependencies>
 
@@ -653,6 +376,11 @@
                 <artifactId>bcprov-jdk18on</artifactId>
                 <version>${bcprov.version}</version>
             </dependency>
+            <dependency>
+                <groupId>org.bouncycastle</groupId>
+                <artifactId>bcpkix-jdk18on</artifactId>
+                <version>${bcprov.version}</version>
+            </dependency>
             <!-- ivy 2.5.3: CVE-2022-37865 / CVE-2022-37866 (transitive via hive-common) -->
             <dependency>
                 <groupId>org.apache.ivy</groupId>
@@ -682,6 +410,39 @@
                 <groupId>org.apache.thrift</groupId>
                 <artifactId>libthrift</artifactId>
                 <version>${libthrift.version}</version>
+            </dependency>
+            <!-- log4j2 2.25.5: CVE-2025-68161 etc.; see the properties. Imported ahead
+                 of spring-boot-dependencies, which would otherwise pin 2.17.2. -->
+            <dependency>
+                <groupId>org.apache.logging.log4j</groupId>
+                <artifactId>log4j-bom</artifactId>
+                <version>${log4j2.version}</version>
+                <type>pom</type>
+                <scope>import</scope>
+            </dependency>
+            <!-- commons-lang3 3.18.0: CVE-2025-48924 (via spring-boot / hadoop) -->
+            <dependency>
+                <groupId>org.apache.commons</groupId>
+                <artifactId>commons-lang3</artifactId>
+                <version>${commons-lang3.version}</version>
+            </dependency>
+            <!-- commons-configuration2 2.15.0: CVE-2026-45205 (via hadoop-common) -->
+            <dependency>
+                <groupId>org.apache.commons</groupId>
+                <artifactId>commons-configuration2</artifactId>
+                <version>${commons-configuration2.version}</version>
+            </dependency>
+            <!-- commons-io 2.22.0: required by commons-configuration2 2.15.0; see the properties. -->
+            <dependency>
+                <groupId>commons-io</groupId>
+                <artifactId>commons-io</artifactId>
+                <version>${commons-io.version}</version>
+            </dependency>
+            <!-- groovy-all 2.4.21: CVE-2020-17521 (via hive-exec) -->
+            <dependency>
+                <groupId>org.codehaus.groovy</groupId>
+                <artifactId>groovy-all</artifactId>
+                <version>${groovy-all.version}</version>
             </dependency>
             <!-- httpcomponents-5 set moves as one unit; see the properties. -->
             <dependency>
@@ -773,6 +534,41 @@
                 <artifactId>hbase-hadoop-compat</artifactId>
                 <version>2.4.9</version>
             </dependency>
+            <!-- ===== The four coordinates that had no pin at all; see the properties ===== -->
+            <dependency>
+                <groupId>com.google.guava</groupId>
+                <artifactId>guava</artifactId>
+                <version>${guava.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>com.google.inject</groupId>
+                <artifactId>guice</artifactId>
+                <version>${guice.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>javax.inject</groupId>
+                <artifactId>javax.inject</artifactId>
+                <version>${javax-inject.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>io.micrometer</groupId>
+                <artifactId>micrometer-core</artifactId>
+                <version>${micrometer.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>io.grpc</groupId>
+                <artifactId>grpc-bom</artifactId>
+                <version>${grpc.version}</version>
+                <type>pom</type>
+                <scope>import</scope>
+            </dependency>
+            <!-- grpc-netty pulls netty; the netty-bom above already pins 4.1.136
+                 for the HTTP/2 Rapid Reset CVEs, and declaring grpc-bom after it
+                 keeps that pin winning (first declaration wins under import
+                 scope). This is also why the non-shaded grpc-netty is used
+                 rather than grpc-netty-shaded, which embeds netty 4.1.132 under
+                 a relocated package where no version pin or SBOM scan can reach
+                 it. -->
             <dependency>
                 <groupId>org.springframework.boot</groupId>
                 <artifactId>spring-boot-dependencies</artifactId>
@@ -787,40 +583,85 @@
                 <type>pom</type>
                 <scope>import</scope>
             </dependency>
+            <!-- Test harness and lombok, declared here so the modules do not
+                 have to name versions. -->
+            <dependency>
+                <groupId>org.junit.jupiter</groupId>
+                <artifactId>junit-jupiter-api</artifactId>
+                <version>5.8.2</version>
+            </dependency>
+            <dependency>
+                <groupId>org.junit.jupiter</groupId>
+                <artifactId>junit-jupiter-engine</artifactId>
+                <version>5.8.2</version>
+            </dependency>
+            <dependency>
+                <groupId>org.mockito</groupId>
+                <artifactId>mockito-core</artifactId>
+                <version>4.5.1</version>
+            </dependency>
+            <dependency>
+                <groupId>org.mockito</groupId>
+                <artifactId>mockito-junit-jupiter</artifactId>
+                <version>4.5.1</version>
+            </dependency>
+            <dependency>
+                <groupId>org.projectlombok</groupId>
+                <artifactId>lombok</artifactId>
+                <version>1.18.12</version>
+            </dependency>
+            <!-- The modules themselves, so dlagent-rest / dlagent-grpc name no version. -->
+            <dependency>
+                <groupId>cloud.elastic</groupId>
+                <artifactId>dlagent-core</artifactId>
+                <version>${project.version}</version>
+            </dependency>
         </dependencies>
     </dependencyManagement>
+
     <repositories>
-            <repository>
-                <id>nexus-releases</id>
-                <name>HashData Releases</name>
-                <url>https://nexus.hashdata.dev/repository/maven-hosted/</url>
-                <releases>
-                    <enabled>true</enabled>
-                </releases>
-                <snapshots>
-                    <enabled>false</enabled>
-                </snapshots>
-            </repository>
-            <repository>
-                <id>nexus-snapshots</id>
-                <name>HashData Snapshots</name>
-                <url>https://nexus.hashdata.dev/repository/maven-snapshot-hosted/</url>
-                <releases>
-                    <enabled>false</enabled>
-                </releases>
-                <snapshots>
-                    <enabled>true</enabled>
-                    <updatePolicy>daily</updatePolicy>
-                </snapshots>
-            </repository>
-        </repositories>
+        <repository>
+            <id>nexus-releases</id>
+            <name>HashData Releases</name>
+            <url>https://nexus.hashdata.dev/repository/maven-hosted/</url>
+            <releases>
+                <enabled>true</enabled>
+            </releases>
+            <snapshots>
+                <enabled>false</enabled>
+            </snapshots>
+        </repository>
+        <repository>
+            <id>nexus-snapshots</id>
+            <name>HashData Snapshots</name>
+            <url>https://nexus.hashdata.dev/repository/maven-snapshot-hosted/</url>
+            <releases>
+                <enabled>false</enabled>
+            </releases>
+            <snapshots>
+                <enabled>true</enabled>
+                <updatePolicy>daily</updatePolicy>
+            </snapshots>
+        </repository>
+    </repositories>
 
     <build>
+        <pluginManagement>
+            <plugins>
+                <plugin>
+                    <groupId>org.springframework.boot</groupId>
+                    <artifactId>spring-boot-maven-plugin</artifactId>
+                    <version>${spring-boot.version}</version>
+                </plugin>
+            </plugins>
+        </pluginManagement>
         <plugins>
             <plugin>
                 <groupId>org.cyclonedx</groupId>
                 <artifactId>cyclonedx-maven-plugin</artifactId>
                 <version>2.9.1</version>
+                <!-- Aggregate BOM: run once, on the aggregator, not once per module. -->
+                <inherited>false</inherited>
                 <executions>
                     <execution>
                     <phase>package</phase>
@@ -853,9 +694,128 @@
                 </configuration>
             </plugin>
             <plugin>
+                <!--
+                  THE THIN-JAR LAYOUT.
+
+                  Each module emits an ORDERED classpath file listing its
+                  dependencies; the install rule turns those into
+                  core.cp / rest.cp / grpc.cp under pkglib/java.
+
+                  Ordered, and explicitly so, rather than a "lib/*" wildcard:
+                  the JVM leaves the expansion order of a wildcard classpath
+                  entry unspecified, while `bundle` 2.35.4 and `s3` 2.20.26
+                  share 98.5% of their class names. Under a
+                  fat jar the winner was fixed by the packaging; under a
+                  wildcard it would be whatever the filesystem returned that
+                  day; the kind of difference that surfaces as one segment
+                  reading a file wrong. The REST path is the rollback path and
+                  must go on behaving as it does, so the order is pinned here.
+                -->
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-dependency-plugin</artifactId>
+                <executions>
+                    <execution>
+                        <id>emit-ordered-classpath</id>
+                        <!--
+                          BEFORE test, not at package. InstalledClasspathTest
+                          asserts on these two outputs, so binding them to the
+                          package phase makes "mvn clean package" (the
+                          canonical command) fail on a clean tree while
+                          passing on a warm one: a test that depends on what
+                          the previous build left behind.
+                        -->
+                        <phase>process-classes</phase>
+                        <goals>
+                            <goal>build-classpath</goal>
+                        </goals>
+                        <configuration>
+                            <outputFile>${project.build.directory}/classpath.txt</outputFile>
+                            <!--
+                              Runtime classpath only.  build-classpath lists
+                              every scope by default, which put junit, mockito,
+                              spring-test, the build JDK's tools.jar (system
+                              scope) and a .pom on the installed classpath, and
+                              spring-boot-devtools (optional; the fat jar's
+                              repackage used to drop it), which once present
+                              renames the main thread, turns on extra exception
+                              logging and opens a LiveReload server on
+                              *:35729.
+                            -->
+                            <includeScope>runtime</includeScope>
+                            <excludeTypes>pom</excludeTypes>
+                            <excludeArtifactIds>spring-boot-devtools</excludeArtifactIds>
+                            <prefix>__DLAGENT_LIB__</prefix>
+                            <fileSeparator>/</fileSeparator>
+                            <pathSeparator>:</pathSeparator>
+                        </configuration>
+                    </execution>
+                    <execution>
+                        <!--
+                          THE SAME LIST AGAIN, AS PATHS THAT EXIST.
+
+                          classpath.txt above is the CONTRACT: placeholder
+                          prefix, installed order, read by the C side.  This
+                          one is the SOURCE: where each of those jars can be
+                          copied from right now, so install-layout.sh and
+                          InstalledClasspathTest can open the files without
+                          anything having to duplicate them first.
+
+                          It is deliberately not a copy-dependencies
+                          execution materialising every module's whole
+                          dependency tree under target/deps.  Inherited by all
+                          four modules, that writes the same jars four times,
+                          4.1 GB of contrib/datalake_agent, of which
+                          bundle-2.35.4.jar alone is 686 MB stored four times,
+                          and pushes the pipeline's `database` cache past what
+                          the object store accepts in one PUT:
+
+                            Creating cache cache-pipeline-database-x86_64-...
+                            FATAL: received: 400 Bad Request
+                            Failed to create cache
+
+                          which leaves every test job in the pipeline without a
+                          source tree.  A one-module, one-fat-jar agent stays
+                          under the limit; four modules do not.
+                          Nothing needs the copies: both consumers want
+                          a list of jars, and that is what this file is.
+                        -->
+                        <id>emit-source-classpath</id>
+                        <phase>process-classes</phase>
+                        <goals>
+                            <goal>build-classpath</goal>
+                        </goals>
+                        <configuration>
+                            <outputFile>${project.build.directory}/classpath-src.txt</outputFile>
+                            <!-- Must select exactly what classpath.txt does. -->
+                            <includeScope>runtime</includeScope>
+                            <excludeTypes>pom</excludeTypes>
+                            <excludeArtifactIds>spring-boot-devtools</excludeArtifactIds>
+                            <fileSeparator>/</fileSeparator>
+                            <pathSeparator>:</pathSeparator>
+                        </configuration>
+                    </execution>
+                </executions>
+            </plugin>
+            <plugin>
                 <groupId>org.apache.maven.plugins</groupId>
                 <artifactId>maven-surefire-plugin</artifactId>
                 <version>2.22.2</version>
+                <configuration>
+                    <!--
+                      *IntegrationTest talks to a dlagent that must already be
+                      listening on localhost:8080 (see the class javadoc and
+                      test/make-test.sh, which starts the agent first and then
+                      runs `mvn test -Dtest=IcebergRestControllerIntegrationTest`).
+                      Left in the default run they fail every `mvn package` with
+                      ResourceAccessException, which is why `make all` passes
+                      -DskipTests. Excluding them here makes the default build
+                      meaningful again; an explicit -Dtest= selection overrides
+                      excludes, so make-test.sh still runs them.
+                    -->
+                    <excludes>
+                        <exclude>**/*IntegrationTest.java</exclude>
+                    </excludes>
+                </configuration>
             </plugin>
             <!-- #580 guard: ban legacy Log4j 1.x (log4j:log4j) from creeping back in transitively -->
             <plugin>
@@ -876,25 +836,19 @@
                                     </excludes>
                                     <message>Legacy Log4j 1.x (log4j:log4j) is excluded and replaced by reload4j + log4j-1.2-api; do not reintroduce it (see #580).</message>
                                 </bannedDependencies>
+                                <!--
+                                  Half of the "no version in a child pom" rule:
+                                  this catches a coordinate declared twice in one
+                                  pom. The other half - a child re-declaring a
+                                  version for something this parent already
+                                  manages - has no built-in enforcer rule, so it
+                                  is asserted by PomHygieneTest, which parses all
+                                  four poms.
+                                -->
+                                <banDuplicatePomDependencyVersions/>
                             </rules>
                             <fail>true</fail>
                         </configuration>
-                    </execution>
-                </executions>
-            </plugin>
-            <plugin>
-                <groupId>org.springframework.boot</groupId>
-                <artifactId>spring-boot-maven-plugin</artifactId>
-                <version>${spring-boot.version}</version>
-                <configuration>
-                    <mainClass>cloud.elastic.dlagent.service.ServiceApplication</mainClass>
-                </configuration>
-                <executions>
-                    <execution>
-                        <goals>
-                            <goal>repackage</goal>
-                            <goal>build-info</goal>
-                        </goals>
                     </execution>
                 </executions>
             </plugin>

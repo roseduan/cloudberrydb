@@ -191,8 +191,8 @@ done
 
 ## 4. Disable dlagent's Gopher default
 
-The `dlagent-1.0.0.jar` has `gopher.enabled=true` baked into
-`application.properties`. The open-source build can't reach a Gopher
+The agent (`dlagent-core` jar, shared by the REST and gRPC agents) has
+`gopher.enabled=true` baked into `application.properties`. The open-source build can't reach a Gopher
 daemon, so **every backend initialization will fail** unless you
 override it. Two places:
 
