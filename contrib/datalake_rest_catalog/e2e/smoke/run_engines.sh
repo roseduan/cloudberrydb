@@ -21,6 +21,12 @@
 #   DRC_READER_CRED    OAuth2 client-credentials         (default iceberg_reader:reader_pw)
 #   DRC_S3_ENDPOINT/DRC_S3_KEY/DRC_S3_SECRET             (default http://localhost:9000 / minioadmin)
 #   DRC_NS/DRC_TABLE   table to read                     (default sales/orders)
+#   DRC_WAREHOUSE      Iceberg REST warehouse = database to read from, for a gateway in
+#                      multi-database mode (pg.jdbcUrlTemplate set). Empty = default database,
+#                      except for DuckDB: its ATTACH always sends a warehouse, so it falls back to
+#                      the literal 'warehouse', which a multi-database gateway reads as a database
+#                      name. Set DRC_WAREHOUSE whenever DuckDB runs against such a gateway.
+#   DRC_EXPECT_NAMES   expected name column, in id order 1..N (default "ada grace linus")
 #   SPARK_HOME, TRINO_HOME, TRINO_CLI, DUCKDB_IMAGE      (see "Runtime locations")
 #   DRC_JAVA_HOME (JDK17 for Trino), SPARK_JAVA_HOME (JDK8/11/17 for Spark)
 set -uo pipefail
@@ -33,7 +39,13 @@ DRC_S3_KEY="${DRC_S3_KEY:-minioadmin}"
 DRC_S3_SECRET="${DRC_S3_SECRET:-minioadmin}"
 DRC_NS="${DRC_NS:-sales}"
 DRC_TABLE="${DRC_TABLE:-orders}"
-EXPECT_ROWS=3                       # sales.orders: ids 1,2,3 / names ada,grace,linus
+DRC_WAREHOUSE="${DRC_WAREHOUSE:-}"
+read -r -a EXPECT_NAMES <<< "${DRC_EXPECT_NAMES:-ada grace linus}"   # sales.orders seed: ids 1..3
+EXPECT_ROWS=${#EXPECT_NAMES[@]}
+[ "$EXPECT_ROWS" -gt 0 ] || { echo "ERROR: DRC_EXPECT_NAMES is set but empty"; exit 2; }
+FIRST_NAME="${EXPECT_NAMES[0]}"; LAST_NAME="${EXPECT_NAMES[$((EXPECT_ROWS - 1))]}"
+EXPECT_IDS="[$(seq -s, 1 "$EXPECT_ROWS" | sed 's/,/, /g')]"
+NAME_RE="$(IFS='|'; echo "${EXPECT_NAMES[*]}")"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 WORK="${DRC_SMOKE_WORK:-/tmp/drc-smoke-engines}"
@@ -81,17 +93,21 @@ smoke_pyiceberg() {
   cat > "$WORK/pyi_read.py" <<PY
 import os, sys
 from pyiceberg.catalog.rest import RestCatalog
-cat = RestCatalog("hd", uri="$DRC_URI", credential="$DRC_READER_CRED", **{
+props = {
     "ssl": {"cabundle": "$PEM"},
     "s3.endpoint": "$DRC_S3_ENDPOINT", "s3.access-key-id": "$DRC_S3_KEY",
-    "s3.secret-access-key": "$DRC_S3_SECRET", "s3.path-style-access": "true", "s3.region": "us-east-1"})
-t = cat.load_table("$DRC_NS.$DRC_TABLE"); r = t.scan().to_arrow()
-ids = sorted(r.column("id").to_pylist())
-print("pyiceberg rows=%d ids=%s" % (r.num_rows, ids))
-sys.exit(0 if (r.num_rows == $EXPECT_ROWS and ids == [1,2,3]) else 1)
+    "s3.secret-access-key": "$DRC_S3_SECRET", "s3.path-style-access": "true", "s3.region": "us-east-1"}
+if os.environ.get("DRC_WAREHOUSE"):
+    props["warehouse"] = os.environ["DRC_WAREHOUSE"]
+cat = RestCatalog("hd", uri="$DRC_URI", credential="$DRC_READER_CRED", **props)
+t = cat.load_table("$DRC_NS.$DRC_TABLE"); r = t.scan().to_arrow().sort_by("id")
+ids = r.column("id").to_pylist(); names = r.column("name").to_pylist()
+print("pyiceberg rows=%d ids=%s names=%s" % (r.num_rows, ids, names))
+sys.exit(0 if (ids == $EXPECT_IDS and names == os.environ["DRC_EXPECT_NAMES_PY"].split()) else 1)
 PY
   # centos7: pyiceberg 0.11 pyarrow needs a newer libstdc++ (GLIBCXX_3.4.29) if present
   local ld="${DRC_LIBSTDCXX_DIR:-/usr/local/toolchain/lib64}"
+  export DRC_WAREHOUSE; export DRC_EXPECT_NAMES_PY="${EXPECT_NAMES[*]}"
   if LD_LIBRARY_PATH="$ld:${LD_LIBRARY_PATH:-}" "$venv/bin/python" "$WORK/pyi_read.py"; then record pyiceberg PASS; else record pyiceberg "FAIL:read"; fi
 }
 
@@ -114,10 +130,11 @@ smoke_spark() {
     --conf spark.sql.catalog.hd.s3.path-style-access=true \
     --conf spark.sql.catalog.hd.client.region=us-east-1 \
     --conf spark.sql.catalog.hd.rest-metrics-reporting-enabled=false \
+    ${DRC_WAREHOUSE:+--conf spark.sql.catalog.hd.warehouse="$DRC_WAREHOUSE"} \
     --conf "spark.driver.extraJavaOptions=$ts" --conf "spark.executor.extraJavaOptions=$ts" \
     -e "SELECT id,name FROM hd.$DRC_NS.$DRC_TABLE ORDER BY id;" > "$out" 2>"$WORK/spark.err"
   local n; n=$(grep -cE '^[0-9]+\s' "$out")
-  if [ "$n" = "$EXPECT_ROWS" ] && grep -q $'1\tada' "$out" && grep -q $'3\tlinus' "$out"; then record spark PASS; else record spark "FAIL:rows=$n"; fi
+  if [ "$n" = "$EXPECT_ROWS" ] && grep -q $'1\t'"$FIRST_NAME" "$out" && grep -q "$EXPECT_ROWS"$'\t'"$LAST_NAME" "$out"; then record spark PASS; else record spark "FAIL:rows=$n"; fi
 }
 
 # --- Trino 435 (iceberg REST OAUTH2, native S3) ---------------------------------------------
@@ -153,6 +170,7 @@ s3.path-style-access=true
 s3.aws-access-key=$DRC_S3_KEY
 s3.aws-secret-key=$DRC_S3_SECRET
 CFG
+  [ -n "$DRC_WAREHOUSE" ] && echo "iceberg.rest-catalog.warehouse=$DRC_WAREHOUSE" >> "$etc/catalog/iceberg.properties"
   # start server fresh (a stale server caches an expired OAuth token)
   "$DRC_JAVA_HOME/bin/java" -cp "$TRINO_HOME/lib/*" -Dplugin.dir="$TRINO_HOME/plugin" \
     $(grep -vE '^\s*#' "$etc/jvm.config" | tr '\n' ' ') \
@@ -167,7 +185,7 @@ CFG
   local out; out=$($TO "$DRC_JAVA_HOME/bin/java" -jar "$TRINO_CLI" --server http://localhost:8080 --catalog iceberg \
     --execute "SELECT id,name FROM $DRC_NS.$DRC_TABLE ORDER BY id" 2>&1 | grep -aE '"[0-9]+","')
   local n; n=$(printf '%s\n' "$out" | grep -c '","')
-  if [ "$n" = "$EXPECT_ROWS" ] && printf '%s' "$out" | grep -q '"1","ada"' && printf '%s' "$out" | grep -q '"3","linus"'; then record trino PASS; else record trino "FAIL:rows=$n"; fi
+  if [ "$n" = "$EXPECT_ROWS" ] && printf '%s' "$out" | grep -q "\"1\",\"$FIRST_NAME\"" && printf '%s' "$out" | grep -q "\"$EXPECT_ROWS\",\"$LAST_NAME\""; then record trino PASS; else record trino "FAIL:rows=$n"; fi
   kill -9 $pid 2>/dev/null
 }
 
@@ -177,11 +195,14 @@ CFG
 # 2.17 is too old to run duckdb itself). Both trust the gateway's self-signed dev cert via the
 # system CA store.
 smoke_duckdb() {
+  # A database name may contain a single quote; double it for the SQL string literal.
+  local q="'" ddb_wh="${DRC_WAREHOUSE:-warehouse}"
+  ddb_wh="${ddb_wh//$q/$q$q}"
   cat > "$WORK/duck.sql" <<SQL
 INSTALL iceberg; LOAD iceberg; INSTALL httpfs; LOAD httpfs;
 CREATE SECRET ice (TYPE ICEBERG, CLIENT_ID '${DRC_READER_CRED%%:*}', CLIENT_SECRET '${DRC_READER_CRED#*:}', OAUTH2_SERVER_URI '$DRC_URI/v1/oauth/tokens');
 CREATE SECRET s3sec (TYPE S3, KEY_ID '$DRC_S3_KEY', SECRET '$DRC_S3_SECRET', ENDPOINT '${DRC_S3_ENDPOINT#*://}', URL_STYLE 'path', USE_SSL false);
-ATTACH 'warehouse' AS hd (TYPE ICEBERG, ENDPOINT '$DRC_URI');
+ATTACH '$ddb_wh' AS hd (TYPE ICEBERG, ENDPOINT '$DRC_URI');
 SELECT id,name FROM hd.$DRC_NS.$DRC_TABLE ORDER BY id;
 SQL
   local out
@@ -196,7 +217,7 @@ SQL
   else
     record duckdb "SKIP:no local duckdb binary and no DUCKDB_IMAGE sidecar"; return 0
   fi
-  local n; n=$(printf '%s\n' "$out" | grep -cE '\b(ada|grace|linus)\b')
+  local n; n=$(printf '%s\n' "$out" | grep -cE "\\b($NAME_RE)\\b")
   if [ "$n" = "$EXPECT_ROWS" ]; then record duckdb PASS; else record duckdb "FAIL:rows=$n"; fi
 }
 
@@ -217,7 +238,7 @@ for e in "${ENGINES[@]}"; do
   esac
 done
 
-echo; echo "==== datalake_rest_catalog four-engine read smoke ($DRC_NS.$DRC_TABLE, expect $EXPECT_ROWS rows) ===="
+echo; echo "==== datalake_rest_catalog four-engine read smoke (${DRC_WAREHOUSE:-<default db>}.$DRC_NS.$DRC_TABLE, expect $EXPECT_ROWS rows) ===="
 # A present-but-wrong engine (FAIL) fails the job; a missing runtime (SKIP) only warns, so the
 # job stays green until the CI image is extended with Spark/Trino/DuckDB (see README).  PyIceberg
 # is always available (python is in the base image) and is the hard always-on gate.

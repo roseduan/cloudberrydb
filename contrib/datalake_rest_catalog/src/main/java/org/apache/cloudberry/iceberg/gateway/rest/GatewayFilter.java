@@ -1,10 +1,14 @@
 package org.apache.cloudberry.iceberg.gateway.rest;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
+import org.apache.cloudberry.iceberg.gateway.auth.DatabaseRouter;
 import org.apache.cloudberry.iceberg.gateway.auth.JwtService;
 import java.io.IOException;
 import java.io.OutputStream;
 import java.io.PrintWriter;
+import java.net.URLDecoder;
+import java.net.URLEncoder;
+import java.nio.charset.StandardCharsets;
 import java.util.Map;
 import java.util.Set;
 import javax.servlet.Filter;
@@ -43,10 +47,23 @@ public final class GatewayFilter implements Filter {
 
     private static final Set<String> WRITE_METHODS = Set.of("POST", "PUT", "DELETE", "PATCH");
 
+    /**
+     * First path segments under {@code /v1/} that are routes of the Iceberg REST spec itself. Any
+     * other first segment on a protected path is a {@code prefix}, i.e. a database name.
+     */
+    static final Set<String> RESERVED_SEGMENTS = Set.of(
+            "namespaces", "tables", "views", "transactions", "config", "oauth", "oauth2");
+
     private final JwtService jwt;
+    private final DatabaseRouter registry; // null = single-database mode
 
     public GatewayFilter(JwtService jwt) {
+        this(jwt, null);
+    }
+
+    public GatewayFilter(JwtService jwt, DatabaseRouter registry) {
         this.jwt = jwt;
+        this.registry = registry;
     }
 
     @Override
@@ -95,18 +112,98 @@ public final class GatewayFilter implements Filter {
 
         CurrentUser.set(pgRole);
         try {
-            // (3) HEAD support — iceberg 1.6.1's test-fixture RESTCatalogAdapter registers no HEAD
+            // (3) Database selection — strip a /v1/{prefix}/ segment, bind it as the request's
+            // database and forward the prefix-less path the stock adapter routes on.
+            HttpServletRequest forward = req;
+            String routedPath = path;
+            String rawPrefix = rawPrefixOf(path);
+            String db;
+            try {
+                db = rawPrefix == null ? null : decodePrefix(rawPrefix);
+            } catch (IllegalArgumentException e) {
+                errorModel(resp, HttpServletResponse.SC_BAD_REQUEST, 400, "BadRequestException",
+                        "Malformed database name in the request path");
+                return;
+            }
+            if (db != null) {
+                try {
+                    // The authenticator's session is the one that connects, so PG never checks
+                    // the end user's CONNECT privilege for us. Unknown databases also land here
+                    // as 403, which keeps this from becoming a database-name oracle.
+                    if (!registry.canConnect(pgRole, db)) {
+                        LOG.warn("403 no CONNECT privilege: role {} database {} ({} {})",
+                                pgRole, db, req.getMethod(), path);
+                        errorModel(resp, HttpServletResponse.SC_FORBIDDEN, 403, "ForbiddenException",
+                                "No CONNECT privilege on database " + db);
+                        return;
+                    }
+                    registry.requireServable(db);
+                } catch (DatabaseRouter.UnservableDatabaseException e) {
+                    errorModel(resp, e.status(), e.status(), e.type(), e.getMessage());
+                    return;
+                } catch (RuntimeException e) {
+                    // The default database could not answer the CONNECT or pg_database lookup.
+                    LOG.warn("503 cannot check database {} ({} {})", db, req.getMethod(), path, e);
+                    errorModel(resp, HttpServletResponse.SC_SERVICE_UNAVAILABLE, 503,
+                            "ServiceUnavailableException",
+                            "Gateway cannot check database " + db + " right now (details in the gateway log)");
+                    return;
+                }
+                routedPath = "/v1/" + path.substring(("/v1/" + rawPrefix + "/").length());
+                forward = new PathOverrideRequest(req, routedPath);
+                CurrentDatabase.set(db);
+            }
+
+            // (4) HEAD support — iceberg 1.6.1's test-fixture RESTCatalogAdapter registers no HEAD
             // routes at all, so every HEAD request the servlet sees returns 400. We synthesize the
             // spec's HEAD semantics (namespaceExists / tableExists) ourselves by delegating to the
             // already-correct GET handler and mapping its outcome onto a bodyless HEAD response.
-            if ("HEAD".equals(req.getMethod().toUpperCase()) && isExistsRoute(path)) {
-                handleHeadAsGet(req, resp, chain);
+            if ("HEAD".equals(req.getMethod().toUpperCase()) && isExistsRoute(routedPath)) {
+                handleHeadAsGet(forward, resp, chain);
             } else {
-                chain.doFilter(request, response);
+                chain.doFilter(forward, response);
             }
         } finally {
+            CurrentDatabase.clear();
             CurrentUser.clear();
         }
+    }
+
+    /** The raw (still URL-encoded) prefix segment of a protected path, or null when there is none. */
+    private String rawPrefixOf(String path) {
+        if (registry == null || !registry.multiDb() || !path.startsWith("/v1/")) {
+            return null;
+        }
+        String[] seg = path.substring("/v1/".length()).split("/", 2);
+        if (seg.length < 2 || seg[0].isEmpty()) {
+            return null;
+        }
+        // Compare the decoded name: %6eamespaces is "namespaces" too, and taking it as a prefix
+        // would serve a database named like a spec route -- what ConfigEndpoint refuses to hand out.
+        String name;
+        try {
+            name = decodePrefix(seg[0]);
+        } catch (IllegalArgumentException e) {
+            return seg[0]; // malformed encoding: the caller's decodePrefix answers 400
+        }
+        if (RESERVED_SEGMENTS.contains(name)) {
+            return null;
+        }
+        return seg[0];
+    }
+
+    /**
+     * A database name as a URL path segment. Path segments are percent-encoded (RFC 3986), so a
+     * space is {@code %20}: the form encoding's {@code +} is a literal plus sign in a path, and a
+     * client that re-encodes the prefix would turn it into {@code %2B}.
+     */
+    static String encodePrefix(String db) {
+        return URLEncoder.encode(db, StandardCharsets.UTF_8).replace("+", "%20");
+    }
+
+    /** Inverse of {@link #encodePrefix}: a {@code +} in a path segment is a plus sign, not a space. */
+    static String decodePrefix(String raw) {
+        return URLDecoder.decode(raw.replace("+", "%2B"), StandardCharsets.UTF_8);
     }
 
     /**
@@ -154,6 +251,36 @@ public final class GatewayFilter implements Filter {
         Map<String, Object> body = Map.of("error",
                 Map.of("message", msg, "type", type, "code", code));
         MAPPER.writeValue(resp.getOutputStream(), body);
+    }
+
+    /**
+     * Presents a prefixed request to downstream handlers under its prefix-less path. The stock
+     * RESTCatalogServlet routes on {@code getRequestURI()}.
+     */
+    private static final class PathOverrideRequest extends HttpServletRequestWrapper {
+        private final String uri;
+
+        PathOverrideRequest(HttpServletRequest request, String uri) {
+            super(request);
+            this.uri = uri;
+        }
+
+        @Override
+        public String getRequestURI() {
+            return uri;
+        }
+
+        @Override
+        public StringBuffer getRequestURL() {
+            StringBuffer url = new StringBuffer(super.getRequestURL());
+            url.setLength(url.length() - super.getRequestURI().length());
+            return url.append(uri);
+        }
+
+        @Override
+        public String getPathInfo() {
+            return uri.substring(getServletPath().length());
+        }
     }
 
     /** Presents an incoming HEAD request as GET to downstream handlers. */

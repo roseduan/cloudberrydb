@@ -36,12 +36,32 @@ public final class RoleScopedConnection implements AutoCloseable {
 
     /** Explicit-args constructor, convenient for tests (e.g. a Testcontainers PostgreSQL). */
     public RoleScopedConnection(String jdbcUrl, String user, String password, int maxPoolSize) {
+        this(jdbcUrl, user, password, maxPoolSize, -1, -1, "pg-iceberg-authenticator");
+    }
+
+    /**
+     * Pool that drains to zero connections once idle. Used for the per-database pools of the
+     * multi-database mode: a pooled connection that merely sits idle on a database still blocks
+     * {@code DROP DATABASE} / {@code ALTER DATABASE ... RENAME} on it ("is being accessed by other
+     * users"), so those pools must not keep a floor of idle connections.
+     *
+     * @param minIdle negative keeps Hikari's default (minIdle == maxPoolSize)
+     * @param idleTimeoutMs negative keeps Hikari's default
+     */
+    public RoleScopedConnection(String jdbcUrl, String user, String password, int maxPoolSize,
+                                int minIdle, long idleTimeoutMs, String poolName) {
         HikariConfig hc = new HikariConfig();
         hc.setJdbcUrl(jdbcUrl);
         hc.setUsername(user);
         hc.setPassword(password);
         hc.setMaximumPoolSize(maxPoolSize);
-        hc.setPoolName("pg-iceberg-authenticator");
+        if (minIdle >= 0) {
+            hc.setMinimumIdle(minIdle);
+        }
+        if (idleTimeoutMs >= 0) {
+            hc.setIdleTimeout(idleTimeoutMs);
+        }
+        hc.setPoolName(poolName);
         this.dataSource = new HikariDataSource(hc);
     }
 

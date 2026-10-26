@@ -1,6 +1,8 @@
 package org.apache.cloudberry.iceberg.gateway.rest;
 
 import org.apache.cloudberry.iceberg.gateway.auth.AuthPreflight;
+import org.apache.cloudberry.iceberg.gateway.auth.DatabasePoolRegistry;
+import org.apache.cloudberry.iceberg.gateway.auth.DatabaseRouter;
 import org.apache.cloudberry.iceberg.gateway.auth.JwtService;
 import org.apache.cloudberry.iceberg.gateway.auth.PgCredentialVerifier;
 import org.apache.cloudberry.iceberg.gateway.auth.RateLimiter;
@@ -48,7 +50,8 @@ import org.slf4j.LoggerFactory;
  * </ul>
  *
  * <p>Routing / serialization / ErrorModel come from iceberg-core (design §3.1). The adapter routes
- * are prefix-less, matching the Phase 1 single-database-per-instance decision.
+ * are prefix-less; in multi-database mode {@link GatewayFilter} strips the {@code /v1/{db}/}
+ * prefix before they see the request (issue #935).
  */
 public final class GatewayServer {
 
@@ -61,6 +64,14 @@ public final class GatewayServer {
      */
     public static Server buildServer(int port, CatalogResolver resolver, JwtService jwt,
                                      PgCredentialVerifier verifier, GatewayConfig config) {
+        return buildServer(port, resolver, jwt, verifier, config, null);
+    }
+
+    /** As above; a non-null {@code registry} serves one database per Iceberg REST prefix. */
+    public static Server buildServer(int port, CatalogResolver resolver, JwtService jwt,
+                                     PgCredentialVerifier verifier, GatewayConfig config,
+                                     DatabaseRouter registry) {
+        boolean multiDb = registry != null && registry.multiDb();
         boolean httpsEnabled = config.getBool("server.https.enabled", true);
         boolean httpsRequired = config.getBool("server.https.required", false);
         if (httpsRequired && !httpsEnabled) {
@@ -126,11 +137,11 @@ public final class GatewayServer {
         RESTCatalogServlet restServlet = new RESTCatalogServlet(adapter);
 
         // The gate: 405 for writes + JWT auth for reads (skips config/token paths).
-        ctx.addFilter(new FilterHolder(new GatewayFilter(jwt)), "/v1/*",
+        ctx.addFilter(new FilterHolder(new GatewayFilter(jwt, registry)), "/v1/*",
                 EnumSet.of(DispatcherType.REQUEST));
 
         // Exact-path servlets win over the "/v1/*" catalog servlet in the servlet spec.
-        ctx.addServlet(new ServletHolder(new ConfigEndpoint(config)), "/v1/config");
+        ctx.addServlet(new ServletHolder(new ConfigEndpoint(config, multiDb)), "/v1/config");
         if (verifier != null) {
             // Brute-force guard (issue #382 C2 Task 3): trailing-window limiter keyed by
             // client_id + remote address, counting failed attempts too.
@@ -225,6 +236,7 @@ public final class GatewayServer {
         AuthPreflight.verifyOrExit(config);
 
         RoleScopedConnection pool = new RoleScopedConnection(config);
+        DatabasePoolRegistry registry = new DatabasePoolRegistry(config, pool);
         PgCredentialVerifier verifier = new PgCredentialVerifier(config);
         JwtService jwt = new JwtService(config);
 
@@ -236,12 +248,13 @@ public final class GatewayServer {
                 Integer.parseInt(config.get("catalog.metadataCache.maxEntries", "128")),
                 Integer.parseInt(config.get("catalog.metadataCache.maxDocBytes", "1048576")));
 
-        // Production resolver: bind each request to a PG-role-scoped read-only catalog.
+        // Production resolver: bind each request to a PG-role-scoped read-only catalog over the
+        // request's database (CurrentDatabase, null = default database).
         CatalogResolver resolver = pgRole ->
-                new PgIcebergCatalog(pool, store, sharedIO, pgRole);
+                new PgIcebergCatalog(registry.forDatabase(CurrentDatabase.get()), store, sharedIO, pgRole);
 
         int port = config.getInt("server.port", 8181);
-        Server server = buildServer(port, resolver, jwt, verifier, config);
+        Server server = buildServer(port, resolver, jwt, verifier, config, registry);
 
         Runtime.getRuntime().addShutdownHook(new Thread(() -> {
             try {
@@ -249,13 +262,14 @@ public final class GatewayServer {
             } catch (Exception e) {
                 LOG.warn("Error stopping server", e);
             }
-            pool.close();
+            registry.close();
         }));
 
         boolean httpsOn = config.getBool("server.https.enabled", true);
         int effectivePort = httpsOn ? config.getInt("server.https.port", 8443) : port;
-        LOG.info("Starting PG Iceberg REST gateway on {}://*:{} (single database, prefix-less)",
-                httpsOn ? "https" : "http", effectivePort);
+        LOG.info("Starting PG Iceberg REST gateway on {}://*:{} ({})",
+                httpsOn ? "https" : "http", effectivePort,
+                registry.multiDb() ? "multi-database, database = Iceberg REST prefix" : "single database, prefix-less");
         server.start();
         server.join();
     }

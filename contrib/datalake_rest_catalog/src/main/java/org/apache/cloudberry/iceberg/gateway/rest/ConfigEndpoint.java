@@ -20,13 +20,12 @@ import java.util.Map;
  * iceberg-core 1.6.1 has no {@code org.apache.iceberg.rest.Endpoint} constants to source these from,
  * so they are hardcoded here for the same read-only operation set.
  *
- * <p>We do <b>not</b> set a {@code prefix} property in {@code defaults}/{@code overrides}: Phase 1
- * serves a single PG database per gateway instance, and the gateway's actual routes are prefix-less
- * (the stock iceberg-core REST routes with no {@code {prefix}} segment resolved). Clients resolve
- * an empty prefix and call the prefix-less routes we actually serve — the advertised {@code
- * endpoints} strings are spec-shaped capability declarations only, not the literal paths to call.
- * Multi-database prefixes are Phase 3 and would require custom routing beyond the stock adapter
- * (see implementation-plan §Phase 3).
+ * <p>{@code prefix}: in single-database mode none is set, so clients resolve an empty prefix and
+ * call the prefix-less routes the stock iceberg-core adapter serves. In multi-database mode
+ * ({@code pg.jdbcUrlTemplate}, issue #935) a client's {@code warehouse} names the database and is
+ * returned as {@code overrides.prefix}; {@link GatewayFilter} strips that segment again before the
+ * stock adapter routes the request. Either way the advertised {@code endpoints} strings are
+ * spec-shaped capability declarations only, not the literal paths to call.
  *
  * <p><b>{@code s3.endpoint} is intentionally not advertised</b> (issue #382 C2 Task 4): this
  * endpoint stays unauthenticated per design decision C1 (clients call it pre-auth to discover the
@@ -55,18 +54,45 @@ public final class ConfigEndpoint extends HttpServlet {
     );
 
     private final GatewayConfig config;
+    private final boolean multiDb;
 
     public ConfigEndpoint(GatewayConfig config) {
+        this(config, false);
+    }
+
+    public ConfigEndpoint(GatewayConfig config, boolean multiDb) {
         this.config = config;
+        this.multiDb = multiDb;
     }
 
     @Override
     protected void doGet(HttpServletRequest req, HttpServletResponse resp) throws IOException {
         Map<String, Object> defaults = Map.of(
                 "s3.path-style-access", config.get("s3.path-style-access", "true"));
+        // In multi-database mode the client's warehouse names the database, handed back as the
+        // spec's prefix so every later call is routed /v1/{prefix}/... . Nothing is validated
+        // here: this endpoint is unauthenticated and must not answer "does database X exist".
+        // Existence and CONNECT are enforced by GatewayFilter on the first authenticated call.
+        String warehouse = req.getParameter("warehouse");
+        if (multiDb && warehouse != null && GatewayFilter.RESERVED_SEGMENTS.contains(warehouse)) {
+            // A prefix equal to a spec route segment cannot be told apart from that route, so
+            // GatewayFilter would not strip it and the request would be served from the default
+            // database. Refuse it here instead. This reveals nothing about which databases exist.
+            resp.setStatus(HttpServletResponse.SC_BAD_REQUEST);
+            resp.setContentType("application/json");
+            MAPPER.writeValue(resp.getOutputStream(), Map.of("error", Map.of(
+                    "message", "Database name '" + warehouse + "' collides with an Iceberg REST route"
+                            + " and cannot be served by this gateway",
+                    "type", "BadRequestException",
+                    "code", 400)));
+            return;
+        }
+        Map<String, Object> overrides = (multiDb && warehouse != null && !warehouse.isBlank())
+                ? Map.of("prefix", GatewayFilter.encodePrefix(warehouse))
+                : Map.of();
         Map<String, Object> body = Map.of(
                 "defaults", defaults,
-                "overrides", Map.of(),
+                "overrides", overrides,
                 "endpoints", READ_ONLY_ENDPOINTS
         );
         resp.setStatus(HttpServletResponse.SC_OK);
