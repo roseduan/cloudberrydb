@@ -44,6 +44,24 @@ import java.util.Optional;
 @Setter
 public class RequestContext {
     /**
+     * Set by createTable when the table already existed in the catalog and was
+     * adopted instead of created.  That is the intended outcome -- DROP TABLE
+     * on an external catalog removes only the local definition, so recreating
+     * the same name reattaches to the table still living out there -- but it
+     * is invisible to the caller otherwise, so the flag is carried back in the
+     * REST response and turned into a NOTICE on the C side.
+     */
+    private boolean tableAlreadyExisted;
+
+    /**
+     * The local definition a create-table or a mount's load-table is about to
+     * bind to the table, when the request carried one; null otherwise.  When
+     * the table turns out to exist, IcebergService checks it against the
+     * table's schema (service.iceberg.ExistingTableSchemaCheck, cloud#610).
+     */
+    private List<RequestedColumn> requestedColumns;
+
+    /**
      * The name of the server configuration for this request.
      */
     private String config;

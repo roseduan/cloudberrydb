@@ -518,7 +518,8 @@ execute_load_table_via_fdw(const char *catalogName,
 						   const char *volumeName,
 						   const char *cached_metadata_location,
 						   int64 cached_timestamp_ms,
-						   int metadata_cache_ttl)
+						   int metadata_cache_ttl,
+						   IcebergTableSchema *schema)
 {
 	FdwRoutine		   *fdwRoutine;
 	ForeignScanState   *scanstate;
@@ -534,7 +535,7 @@ execute_load_table_via_fdw(const char *catalogName,
 										foreignCatalogName,
 										volumeServer,
 										volumeName,
-										NULL);
+										schema);
 
 	/* issue #393: hand the cached head + TTL to the agent for the reuse/refresh decision. */
 	fdwState->request.metadataLocation = cached_metadata_location;
@@ -552,6 +553,23 @@ static char *
 extract_location_from_fdw_state(IcebergCatalogFdwState *fdwState)
 {
 	check_fdw_execution_error(fdwState, "Failed to create Iceberg table");
+
+	/*
+	 * The agent adopts a table that already exists in the catalog instead of
+	 * failing, and that is the behaviour we want: DROP TABLE on a catalog that
+	 * owns its storage removes only the local definition, so recreating the
+	 * same name is how you reattach.  It is still a different outcome from
+	 * creating an empty table -- the rows come back with it -- and nothing
+	 * else tells the user, so say it here.
+	 */
+	if (parse_create_table_already_existed(fdwState->response.responseBody))
+		ereport(NOTICE,
+				(errcode(ERRCODE_DUPLICATE_TABLE),
+				 errmsg("iceberg table \"%s\" already exists in catalog \"%s\"; registering the existing table",
+						fdwState->request.tableName,
+						fdwState->catalogInfo.catalog_name),
+				 errdetail("Its existing data is visible through this table.")));
+
 	return parse_metadata_location(fdwState->response.responseBody);
 }
 
@@ -914,8 +932,40 @@ pg_iceberg_load_table_cached(const char *catalogName,
 										  volumeName,
 										  cached_metadata_location,
 										  cached_timestamp_ms,
-										  metadata_cache_ttl);
+										  metadata_cache_ttl,
+										  NULL);
 	return extract_load_table_result_from_fdw_state(fdwState);
+}
+
+/*
+ * pg_iceberg_load_table_for_mount
+ *		pg_iceberg_load_table for binding `relation` to an existing table
+ *		(OPTIONS (table '...')).  Sends the relation's columns along so the
+ *		agent refuses a table they do not describe -- the same check a CREATE
+ *		that adopts an existing table gets (cloud#610).  Returns NULL when
+ *		the table does not exist, like pg_iceberg_load_table.
+ */
+IcebergLoadTableResult *
+pg_iceberg_load_table_for_mount(Relation relation,
+								const char *catalogName,
+								const char *nameSpace,
+								const char *tableName,
+								const char *catalogServer,
+								const char *foreignCatalogName,
+								const char *volumeServer,
+								const char *volumeName)
+{
+	IcebergTableSchema	   *schema = build_schema_from_pg_table(relation);
+	IcebergLoadTableResult *result;
+
+	/* Force-fresh, like pg_iceberg_load_table: a mount binds to the head. */
+	result = extract_load_table_result_from_fdw_state(
+		execute_load_table_via_fdw(catalogName, nameSpace, tableName,
+								   catalogServer, foreignCatalogName,
+								   volumeServer, volumeName,
+								   NULL, 0, 0, schema));
+	free_schema_info(schema);
+	return result;
 }
 
 void

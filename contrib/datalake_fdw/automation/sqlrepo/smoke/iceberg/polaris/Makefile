@@ -7,7 +7,8 @@ REGRESS = iceberg_polaris iceberg_polaris_types iceberg_polaris_statistics icebe
           iceberg_polaris_options iceberg_polaris_toolkit \
           iceberg_polaris_pathstyle iceberg_polaris_metadata_cache \
           iceberg_polaris_metadata_refresh iceberg_polaris_vacuum \
-          iceberg_polaris_drop
+          iceberg_polaris_drop iceberg_polaris_recreate_schema \
+          iceberg_polaris_mount_schema
 
 POLARIS_CLI = ../../../../docker/singlecluster/scripts/polaris_cli.sh
 # Multi-container topology (vs singlecluster all-in-one): override the
@@ -30,6 +31,9 @@ installcheck:
 		echo "WARNING: Polaris namespace creation failed (non-fatal)"
 	@mc alias set local $(MC_ALIAS_URL) $(MC_ALIAS_KEY) $(MC_ALIAS_SECRET) 2>/dev/null || true
 	@mc rm --recursive --force local/warehouse/public/ 2>/dev/null || true
+	@# iceberg_polaris_mount_schema: its hadoop / s3 tables survive DROP
+	@# by design, so a rerun would adopt them instead of creating them.
+	@mc rm --recursive --force local/warehouse/fieldid/ 2>/dev/null || true
 	$(pg_regress_installcheck) $(REGRESS)
 
 clean:

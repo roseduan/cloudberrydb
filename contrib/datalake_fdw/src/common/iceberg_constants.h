@@ -115,6 +115,12 @@
 #define DATALAKEFDW_ICEBERG_KEY_REQUIRED                 "required"
 #define DATALAKEFDW_ICEBERG_KEY_DOC                      "doc"
 #define DATALAKEFDW_ICEBERG_KEY_SCHEMAID                 "schema-id"
+/*
+ * The PostgreSQL type of each column of a definition about to be bound to an
+ * existing table, for the agent's check (cloud#610; agent side:
+ * api.model.RequestedColumn).
+ */
+#define DATALAKEFDW_ICEBERG_KEY_PG_TYPE                  "pg-type"
 
 /* ========== Partition Spec Keys ========== */
 #define DATALAKEFDW_ICEBERG_KEY_PARTITION_SPEC           "partition_spec"

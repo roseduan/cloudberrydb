@@ -602,6 +602,99 @@ parse_statistics_response(char *json_response)
 }
 
 /*
+ * "already-existed" in a create-table response
+ *
+ * The agent emits this key only when createTable found the table already
+ * present in the catalog and adopted it instead (IcebergServiceImpl catches
+ * AlreadyExistsException and falls back to loadTable).  Depth tracking keeps
+ * us on the top-level object: the nested "metadata" map carries user
+ * TBLPROPERTIES, and a property that happened to be named the same must not
+ * be mistaken for the agent's own flag.
+ */
+typedef struct AlreadyExistedParseState
+{
+	int				depth;
+	bool			at_field;
+	bool			already_existed;
+} AlreadyExistedParseState;
+
+static JsonParseErrorType
+already_existed_object_start(void *state)
+{
+	((AlreadyExistedParseState *) state)->depth++;
+	return JSON_SUCCESS;
+}
+
+static JsonParseErrorType
+already_existed_object_end(void *state)
+{
+	((AlreadyExistedParseState *) state)->depth--;
+	return JSON_SUCCESS;
+}
+
+static JsonParseErrorType
+already_existed_field_start(void *state, char *fname, bool isnull)
+{
+	AlreadyExistedParseState *s = (AlreadyExistedParseState *) state;
+
+	(void) isnull;
+
+	s->at_field = (s->depth == 1 &&
+				   pg_strcasecmp(fname, "already-existed") == 0);
+	return JSON_SUCCESS;
+}
+
+static JsonParseErrorType
+already_existed_scalar(void *state, char *token, JsonTokenType tokentype)
+{
+	AlreadyExistedParseState *s = (AlreadyExistedParseState *) state;
+
+	if (s->at_field && tokentype == JSON_TOKEN_TRUE)
+		s->already_existed = true;
+
+	s->at_field = false;
+	return JSON_SUCCESS;
+}
+
+/*
+ * parse_create_table_already_existed
+ *		True when the create-table response says the table was adopted rather
+ *		than created.  Absent key (any older agent) reads as false.
+ */
+bool
+parse_create_table_already_existed(char *json_response)
+{
+	JsonLexContext			   *lex;
+	JsonSemAction				sem;
+	AlreadyExistedParseState	parse_state;
+	bool						result;
+
+	if (json_response == NULL || json_response[0] == '\0')
+		return false;
+
+	memset(&parse_state, 0, sizeof(parse_state));
+
+	lex = makeJsonLexContextCstringLen(json_response,
+									   strlen(json_response),
+									   GetDatabaseEncoding(),
+									   true);
+
+	memset(&sem, 0, sizeof(sem));
+	sem.semstate = &parse_state;
+	sem.object_start = already_existed_object_start;
+	sem.object_end = already_existed_object_end;
+	sem.object_field_start = already_existed_field_start;
+	sem.scalar = already_existed_scalar;
+
+	pg_parse_json_or_ereport(lex, &sem);
+
+	result = parse_state.already_existed;
+	pfree(lex);
+
+	return result;
+}
+
+/*
  * pg_iceberg_extract_json_string
  *		Read one string-valued field out of an agent response, converting the
  *		JSON escapes (\n, \t, \\, \") back into real characters.

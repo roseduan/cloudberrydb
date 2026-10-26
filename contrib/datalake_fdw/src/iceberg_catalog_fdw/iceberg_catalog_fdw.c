@@ -146,6 +146,7 @@ static agentcli_cJSON* createIcebergAdditionalConfig(IcebergCatalogOptions *opti
 static agentcli_cJSON* createIcebergConfig(IcebergCatalogOptions *option, IcebergVolumeOptions *volumeOpt);
 static agentcli_cJSON* createSchemaFromRequest(IcebergCatalogRequest req);
 static agentcli_cJSON* createPartitionSpecFromRequest(IcebergCatalogRequest req);
+static agentcli_cJSON* createRequestedColumnsFromRequest(IcebergCatalogRequest req);
 static agentcli_cJSON* createBuildInProperties(IcebergCatalogOperation opration, IcebergCatalogOptions *option, IcebergCatalogRequest req);
 const char * createAppendRequestJson(IcebergCatalogFdwState* fdwState, IcebergCatalogOptions *option, IcebergVolumeOptions *volumeOpt, IcebergCatalogRequest req);
 const char * createUpdateRequestJson(IcebergCatalogFdwState* fdwState, IcebergCatalogOptions *option, IcebergVolumeOptions *volumeOpt, IcebergCatalogRequest req);
@@ -706,6 +707,18 @@ createLoadTableRequestJson(IcebergCatalogFdwState* fdwState, IcebergCatalogOptio
         DATALAKEFDW_ICEBERG_KEY_METADATA_CACHE, req.metadataCacheTtl);
     agentcli_cJSON_AddNumberToObject(request,
         DATALAKEFDW_ICEBERG_KEY_METADATA_TIMESTAMP, (double) req.metadataTimestamp);
+
+    /*
+     * A mount (OPTIONS (table '...')) sends the local definition so the agent
+     * can refuse a table it does not describe (cloud#610).  Plain loads leave
+     * req.schema NULL and send none.  Only load-table: this builder also
+     * serves get-statistics, whose request always carries the relation's
+     * schema and needs none of it.
+     */
+    if (fdwState->catalogOperation == ICEBERG_LOAD_TABLE && req.schema != NULL) {
+        agentcli_cJSON *schema = createRequestedColumnsFromRequest(req);
+        agentcli_cJSON_AddItemToObject(request, DATALAKEFDW_ICEBERG_KEY_SCHEMA, schema);
+    }
 
     char *json_string = agentcli_cJSON_PrintUnformatted(request);
     agentcli_cJSON_Delete(request);
@@ -1748,6 +1761,66 @@ const char* mapPostgresToIcebergType(Oid pgType, int32 typemod)
 }
 
 /*
+ * Tag a column's PostgreSQL type for the agent's existing-table check
+ * (cloud#610, see the agent's ExistingTableSchemaCheck).  The Iceberg type
+ * mapPostgresToIcebergType() produces is not enough there: it sends time,
+ * uuid, json and every other unmapped type as string, while the reader decodes
+ * the data files by the PostgreSQL type.  Types the reader handles get their
+ * own tag; every other type is "other", which the kernel writes as string.
+ */
+static const char *
+pgTypeTag(Oid pgType)
+{
+    switch (pgType) {
+        case BOOLOID:        return "bool";
+        case INT2OID:        return "int2";
+        case INT4OID:        return "int4";
+        case INT8OID:        return "int8";
+        case FLOAT4OID:      return "float4";
+        case FLOAT8OID:      return "float8";
+        case NUMERICOID:     return "numeric";
+        case TEXTOID:
+        case VARCHAROID:
+        case BPCHAROID:      return "text";
+        case BYTEAOID:       return "bytea";
+        case DATEOID:        return "date";
+        case TIMEOID:        return "time";
+        case TIMESTAMPOID:   return "timestamp";
+        case TIMESTAMPTZOID: return "timestamptz";
+        case UUIDOID:        return "uuid";
+        default:             return "other";
+    }
+}
+
+/*
+ * The local definition a mount (OPTIONS (table '...')) is about to bind, for
+ * the agent to check against the existing table (cloud#610): each column's
+ * name and type tag.  No Iceberg type, so no mapPostgresToIcebergType()
+ * warnings or errors for types the mount reads fine; and unlike
+ * createSchemaFromRequest() a relation without columns is sent too, as an
+ * empty list.
+ */
+static agentcli_cJSON *
+createRequestedColumnsFromRequest(IcebergCatalogRequest req)
+{
+    agentcli_cJSON *schema = agentcli_cJSON_CreateObject();
+    agentcli_cJSON *fields = agentcli_cJSON_CreateArray();
+    ListCell *lc;
+
+    foreach(lc, req.schema->columns) {
+        IcebergColumnDef *colDef = (IcebergColumnDef *) lfirst(lc);
+        agentcli_cJSON *field = agentcli_cJSON_CreateObject();
+
+        agentcli_cJSON_AddStringToObject(field, DATALAKEFDW_ICEBERG_KEY_NAME, colDef->columnName);
+        agentcli_cJSON_AddStringToObject(field, DATALAKEFDW_ICEBERG_KEY_PG_TYPE, pgTypeTag(colDef->dataType));
+        agentcli_cJSON_AddItemToArray(fields, field);
+    }
+
+    agentcli_cJSON_AddItemToObject(schema, DATALAKEFDW_ICEBERG_KEY_FIELDS, fields);
+    return schema;
+}
+
+/*
  * Create schema from request - use real schema if available, otherwise default
  */
 static agentcli_cJSON* createSchemaFromRequest(IcebergCatalogRequest req)
@@ -1768,6 +1841,8 @@ static agentcli_cJSON* createSchemaFromRequest(IcebergCatalogRequest req)
             agentcli_cJSON *field = agentcli_cJSON_CreateObject();
             agentcli_cJSON_AddNumberToObject(field, DATALAKEFDW_ICEBERG_KEY_ID, fieldId++);
             agentcli_cJSON_AddStringToObject(field, DATALAKEFDW_ICEBERG_KEY_NAME, colDef->columnName);
+            /* for the agent's check when the table already exists (cloud#610) */
+            agentcli_cJSON_AddStringToObject(field, DATALAKEFDW_ICEBERG_KEY_PG_TYPE, pgTypeTag(colDef->dataType));
             agentcli_cJSON_AddBoolToObject(field, DATALAKEFDW_ICEBERG_KEY_REQUIRED, !colDef->isNullable);
             agentcli_cJSON_AddStringToObject(field, DATALAKEFDW_ICEBERG_KEY_TYPE,
                 mapPostgresToIcebergType(colDef->dataType, colDef->typeModifier));

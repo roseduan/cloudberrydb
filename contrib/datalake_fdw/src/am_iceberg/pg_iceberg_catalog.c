@@ -728,14 +728,19 @@ pg_iceberg_create_table_with_catalog(Relation rel, bool *is_internal)
 		tableName = table_info->opts->table;
 		catalogName = table_info->opts->catalog;
 
-		/* Try to load it from the catalog */
-		load_result = pg_iceberg_load_table(catalogName,
-											nameSpace,
-											tableName,
-											table_info->catalog_server_name,
-											table_info->catalog_name,
-											table_info->volume_server_name,
-											table_info->volume_name);
+		/*
+		 * Try to load it from the catalog.  When it exists this relation is
+		 * bound to it, so let the agent check that our columns describe it
+		 * (cloud#610) -- the same check an adopting CREATE gets.
+		 */
+		load_result = pg_iceberg_load_table_for_mount(rel,
+													  catalogName,
+													  nameSpace,
+													  tableName,
+													  table_info->catalog_server_name,
+													  table_info->catalog_name,
+													  table_info->volume_server_name,
+													  table_info->volume_name);
 
 		if (load_result == NULL)
 		{

@@ -206,6 +206,10 @@ public class IcebergServiceImpl implements IcebergService {
          * must never be handed to anything that reads or commits.
          */
         Table table = catalog.loadTableMetadataOnly(tableId, context.getPath(), properties);
+        // A mount sends the local definition it is about to bind (cloud#610).
+        if (context.getRequestedColumns() != null) {
+            ExistingTableSchemaCheck.check(tableId, context.getRequestedColumns(), table.schema());
+        }
         if (catalog instanceof IcebergRestCatalog) {
             context.setCatalogProperties(
                     ((IcebergRestCatalog) catalog).catalogPropertiesEnvelope());
@@ -303,7 +307,19 @@ public class IcebergServiceImpl implements IcebergService {
             return table;
         } catch (org.apache.iceberg.exceptions.AlreadyExistsException e) {
             log.info("Table {} already exists, loading existing table", tableId);
-            return catalog.loadTableMetadataOnly(tableId, context.getPath(), properties);
+            /*
+             * Adopting the existing table is deliberate, but it is a different
+             * outcome from creating one and the caller cannot tell from the
+             * response.  Record it so the controller can say so; see
+             * RequestContext.tableAlreadyExisted.
+             */
+            context.setTableAlreadyExisted(true);
+            Table existing = catalog.loadTableMetadataOnly(tableId, context.getPath(), properties);
+            // The controller records the requested definition (cloud#610).
+            if (context.getRequestedColumns() != null) {
+                ExistingTableSchemaCheck.check(tableId, context.getRequestedColumns(), existing.schema());
+            }
+            return existing;
         } catch (org.apache.iceberg.exceptions.ValidationException e) {
             /*
              * Hive Metastore raises InvalidObjectException(message:database <ns>)

@@ -23,6 +23,12 @@ extern void free_schema_info(IcebergTableSchema *schema);
 
 /* JSON parsing for Iceberg responses */
 extern char *parse_metadata_location(char *json_response);
+
+/*
+ * True when a create-table response reports that the table already existed in
+ * the catalog and was adopted.  False for an agent that does not emit the key.
+ */
+extern bool parse_create_table_already_existed(char *json_response);
 /*
  * Like parse_metadata_location, but also returns the "written-metadata-files"
  * array (metadata-layer files the agent call newly wrote) when

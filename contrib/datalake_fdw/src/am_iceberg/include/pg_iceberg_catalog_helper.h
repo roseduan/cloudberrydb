@@ -173,6 +173,14 @@ extern IcebergLoadTableResult *pg_iceberg_load_table_cached(const char *catalogN
 									   const char *cached_metadata_location,
 									   int64 cached_timestamp_ms,
 									   int metadata_cache_ttl);
+extern IcebergLoadTableResult *pg_iceberg_load_table_for_mount(Relation relation,
+															   const char *catalogName,
+															   const char *nameSpace,
+															   const char *tableName,
+															   const char *catalogServer,
+															   const char *foreignCatalogName,
+															   const char *volumeServer,
+															   const char *volumeName);
 extern void pg_iceberg_free_load_table_result(IcebergLoadTableResult *result);
 
 /*

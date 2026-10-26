@@ -8,6 +8,7 @@ import cloud.elastic.dlagent.api.model.CleanupFromMetadataRequest;
 import cloud.elastic.dlagent.api.model.CleanupFromMetadataResponse;
 import cloud.elastic.dlagent.api.model.Fragment;
 import cloud.elastic.dlagent.api.model.RequestContext;
+import cloud.elastic.dlagent.api.model.RequestedColumn;
 import cloud.elastic.dlagent.api.utilities.FragmentMetadata;
 import cloud.elastic.dlagent.api.utilities.GpdbFragmentMetadata;
 import cloud.elastic.dlagent.constants.IcebergConfigConstants;
@@ -172,6 +173,19 @@ public class IcebergOperations {
         // Create request context
         RequestContext context = requestContextFactory.createRequestContext(namespace, table, properties);
         context.setTxnId(extractTxnId(request));
+
+        // A mount (OPTIONS (table '...')) sends the local definition it is
+        // about to bind as "schema"; the service refuses the load if it does
+        // not describe the table (cloud#610).  Plain loads send none.
+        Object requestedSchema = request.get("schema");
+        if (requestedSchema != null) {
+            if (!(requestedSchema instanceof Map)) {
+                throw new IllegalArgumentException("\"schema\" must be an object");
+            }
+            @SuppressWarnings("unchecked")
+            Map<String, Object> schemaObject = (Map<String, Object>) requestedSchema;
+            context.setRequestedColumns(RequestedColumn.fromSchemaMap(schemaObject, null));
+        }
 
         // Load the table using ServiceResult
         Table icebergTable = icebergService.loadTable(namespace, table, properties, context);
@@ -591,6 +605,11 @@ public class IcebergOperations {
         // Create request context
         RequestContext context = requestContextFactory.createRequestContext(namespace, tableName, properties);
 
+        // Checked against the table if it already exists (cloud#610); the
+        // fields' "pg-type" is what decides compatibility, see
+        // service.iceberg.ExistingTableSchemaCheck.
+        context.setRequestedColumns(RequestedColumn.fromSchemaMap(schemaMap, schema));
+
         // OSS Iceberg convention: persist only user-facing TBLPROPERTIES into
         // TableMetadata.properties. Runtime/catalog config must not be persisted.
         Map<String, String> userTableProperties =
@@ -618,6 +637,12 @@ public class IcebergOperations {
         response.put("metadata-location", metadataLocation);
         response.put("table-location", icebergTable.location());
         response.put("partition-spec-summary", metadataMapper.partitionSpecSummary(icebergTable));
+
+        // Only emitted when the table was adopted rather than created, so an
+        // older client that does not know the key sees the response unchanged.
+        if (context.isTableAlreadyExisted()) {
+            response.put("already-existed", true);
+        }
 
         // Add config to response
         Map<String, String> config = new HashMap<>();

@@ -1,0 +1,154 @@
+-- Mounting a table on an external catalog (issue #461).
+--
+-- The reader and the writer both take a column's attribute number as its
+-- Iceberg field-id.  A mount (OPTIONS (table ...)) is therefore bound only
+-- when the local definition declares every column of the table, in the
+-- table's order, with types the reader can decode -- the same as Spark, which
+-- binds a table only by its own schema.  Another order or only some of the
+-- columns used to bind and then read one column's bytes as another's.
+--
+-- Covered on polaris, hadoop (S3 storage) and s3; Hive is in
+-- smoke/iceberg/hive/iceberg_hive_mount_schema.
+SET client_min_messages = warning;
+CREATE EXTENSION IF NOT EXISTS datalake_fdw;
+RESET client_min_messages;
+
+-- ============================================================
+-- Setup: one S3 (MinIO) volume, polaris / hadoop / s3 catalogs
+-- ============================================================
+CREATE SERVER fieldid_vol_srv
+FOREIGN DATA WRAPPER iceberg_volume_fdw
+OPTIONS (
+    type 's3',
+    endpoint 'http://minio:9000',
+    region 'us-east-1',
+    bucket_name 'warehouse',
+    path_style_access 'true'
+);
+CREATE USER MAPPING FOR current_user
+SERVER fieldid_vol_srv
+OPTIONS (access_key_id 'admin', secret_access_key 'admin12345');
+CREATE FOREIGN VOLUME fieldid_vol SERVER fieldid_vol_srv
+OPTIONS (base_path '/fieldid/', allow_writes 'true');
+SET iceberg_default_volume = 'fieldid_vol';
+
+CREATE SERVER fieldid_pol_srv
+FOREIGN DATA WRAPPER iceberg_catalog_fdw
+OPTIONS (type 'polaris', url 'http://polaris:8181/api/catalog');
+CREATE USER MAPPING FOR current_user
+SERVER fieldid_pol_srv
+OPTIONS (client_id 'root', client_secret 's3cr3t', scope 'PRINCIPAL_ROLE:ALL');
+CREATE FOREIGN CATALOG fieldid_pol SERVER fieldid_pol_srv
+OPTIONS (catalog_name 'polaris_default_catalog');
+
+CREATE SERVER fieldid_hd_srv FOREIGN DATA WRAPPER iceberg_catalog_fdw
+OPTIONS (type 'hadoop');
+CREATE USER MAPPING FOR current_user SERVER fieldid_hd_srv;
+CREATE FOREIGN CATALOG fieldid_hd SERVER fieldid_hd_srv
+OPTIONS (warehouse_location_prefix 's3a://warehouse/fieldid/hadoop/');
+
+CREATE SERVER fieldid_s3_srv FOREIGN DATA WRAPPER iceberg_catalog_fdw
+OPTIONS (type 's3');
+CREATE USER MAPPING FOR current_user SERVER fieldid_s3_srv;
+CREATE FOREIGN CATALOG fieldid_s3 SERVER fieldid_s3_srv
+OPTIONS (warehouse_location_prefix 's3a://warehouse/fieldid/s3/');
+
+-- The agent's error is followed by a Java stack trace; keep only the
+-- agent's message so the expected output is stable.
+CREATE FUNCTION fieldid_try(stmt text) RETURNS text LANGUAGE plpgsql AS $$
+BEGIN
+    EXECUTE stmt;
+    RETURN 'ok';
+EXCEPTION WHEN OTHERS THEN
+    RETURN 'ERROR: ' || coalesce(substring(SQLERRM FROM 'IllegalArgumentException: ([^\n]*)'),
+                                 split_part(SQLERRM, E'\n', 1));
+END;
+$$;
+
+-- ============================================================
+-- polaris
+-- ============================================================
+SET iceberg_default_catalog = 'fieldid_pol';
+CREATE ICEBERG TABLE fieldid_pol_src (id int, v text);
+INSERT INTO fieldid_pol_src VALUES (1, 'a'), (2, 'b');
+-- Refused: another type, another order, only some of the columns, a column
+-- the table does not have.
+SELECT fieldid_try($$CREATE ICEBERG TABLE fieldid_pol_m (id text, v text)
+    OPTIONS (namespace 'public', table 'fieldid_pol_src')$$);
+SELECT fieldid_try($$CREATE ICEBERG TABLE fieldid_pol_m (v text, id int)
+    OPTIONS (namespace 'public', table 'fieldid_pol_src')$$);
+SELECT fieldid_try($$CREATE ICEBERG TABLE fieldid_pol_m (v text)
+    OPTIONS (namespace 'public', table 'fieldid_pol_src')$$);
+SELECT fieldid_try($$CREATE ICEBERG TABLE fieldid_pol_m (id int, v text, x int)
+    OPTIONS (namespace 'public', table 'fieldid_pol_src')$$);
+SELECT to_regclass('fieldid_pol_m') IS NULL AS not_mounted;
+-- Bound: the table's own definition, written and read through.
+CREATE ICEBERG TABLE fieldid_pol_m (id int, v text)
+OPTIONS (namespace 'public', table 'fieldid_pol_src');
+INSERT INTO fieldid_pol_m VALUES (3, 'c');
+SELECT * FROM fieldid_pol_m ORDER BY id;
+DROP TABLE fieldid_pol_m;
+DROP TABLE fieldid_pol_src;
+
+-- ============================================================
+-- hadoop (S3 storage)
+-- ============================================================
+SET iceberg_default_catalog = 'fieldid_hd';
+CREATE ICEBERG TABLE fieldid_hd_src (id int, v text);
+INSERT INTO fieldid_hd_src VALUES (1, 'a'), (2, 'b');
+SELECT fieldid_try($$CREATE ICEBERG TABLE fieldid_hd_m (id text, v text)
+    OPTIONS (namespace 'public', table 'fieldid_hd_src')$$);
+SELECT fieldid_try($$CREATE ICEBERG TABLE fieldid_hd_m (v text, id int)
+    OPTIONS (namespace 'public', table 'fieldid_hd_src')$$);
+SELECT fieldid_try($$CREATE ICEBERG TABLE fieldid_hd_m (v text)
+    OPTIONS (namespace 'public', table 'fieldid_hd_src')$$);
+SELECT fieldid_try($$CREATE ICEBERG TABLE fieldid_hd_m (id int, v text, x int)
+    OPTIONS (namespace 'public', table 'fieldid_hd_src')$$);
+SELECT to_regclass('fieldid_hd_m') IS NULL AS not_mounted;
+CREATE ICEBERG TABLE fieldid_hd_m (id int, v text)
+OPTIONS (namespace 'public', table 'fieldid_hd_src');
+INSERT INTO fieldid_hd_m VALUES (3, 'c');
+SELECT * FROM fieldid_hd_m ORDER BY id;
+DROP TABLE fieldid_hd_m;
+DROP TABLE fieldid_hd_src;
+
+-- ============================================================
+-- s3
+-- ============================================================
+SET iceberg_default_catalog = 'fieldid_s3';
+CREATE ICEBERG TABLE fieldid_s3_src (id int, v text);
+INSERT INTO fieldid_s3_src VALUES (1, 'a'), (2, 'b');
+SELECT fieldid_try($$CREATE ICEBERG TABLE fieldid_s3_m (id text, v text)
+    OPTIONS (namespace 'public', table 'fieldid_s3_src')$$);
+SELECT fieldid_try($$CREATE ICEBERG TABLE fieldid_s3_m (v text, id int)
+    OPTIONS (namespace 'public', table 'fieldid_s3_src')$$);
+SELECT fieldid_try($$CREATE ICEBERG TABLE fieldid_s3_m (v text)
+    OPTIONS (namespace 'public', table 'fieldid_s3_src')$$);
+SELECT fieldid_try($$CREATE ICEBERG TABLE fieldid_s3_m (id int, v text, x int)
+    OPTIONS (namespace 'public', table 'fieldid_s3_src')$$);
+SELECT to_regclass('fieldid_s3_m') IS NULL AS not_mounted;
+CREATE ICEBERG TABLE fieldid_s3_m (id int, v text)
+OPTIONS (namespace 'public', table 'fieldid_s3_src');
+INSERT INTO fieldid_s3_m VALUES (3, 'c');
+SELECT * FROM fieldid_s3_m ORDER BY id;
+DROP TABLE fieldid_s3_m;
+DROP TABLE fieldid_s3_src;
+
+-- ============================================================
+-- Cleanup
+-- ============================================================
+DROP FUNCTION fieldid_try(text);
+RESET iceberg_default_catalog;
+RESET iceberg_default_volume;
+DROP CATALOG fieldid_s3;
+DROP USER MAPPING FOR current_user SERVER fieldid_s3_srv;
+DROP SERVER fieldid_s3_srv;
+DROP CATALOG fieldid_hd;
+DROP USER MAPPING FOR current_user SERVER fieldid_hd_srv;
+DROP SERVER fieldid_hd_srv;
+DROP CATALOG fieldid_pol;
+DROP USER MAPPING FOR current_user SERVER fieldid_pol_srv;
+DROP SERVER fieldid_pol_srv;
+DROP VOLUME fieldid_vol;
+DROP USER MAPPING FOR current_user SERVER fieldid_vol_srv;
+DROP SERVER fieldid_vol_srv;
