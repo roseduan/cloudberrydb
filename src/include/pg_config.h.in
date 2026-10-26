@@ -61,6 +61,18 @@
    (--enable-thread-safety) */
 #undef ENABLE_THREAD_SAFETY
 
+/* Expiration date string for display. */
+#undef EXPIRATION_DATE_STR
+
+/* Expiration day (1-31). */
+#undef EXPIRATION_DAY
+
+/* Expiration month (1-12). */
+#undef EXPIRATION_MONTH
+
+/* Expiration year. */
+#undef EXPIRATION_YEAR
+
 /* Define to 1 to build with fault injector. */
 #undef FAULT_INJECTOR
 
@@ -71,7 +83,6 @@
 /* float8, int8, and related values are passed by value if 'true', by
    reference if 'false' (always true in GPDB) */
 #undef FLOAT8PASSBYVAL
-
 
 /* Define to 1 to build ORCA in debug (GPOS_DEBUG=1) */
 #undef GPOS_DEBUG
@@ -130,8 +141,8 @@
 /* Define to 1 if you have the `CRYPTO_lock' function. */
 #undef HAVE_CRYPTO_LOCK
 
-/* define if the compiler supports basic C++14 syntax */
-#undef HAVE_CXX14
+/* define if the compiler supports basic C++17 syntax */
+#undef HAVE_CXX17
 
 /* Define to 1 if you have the declaration of `fdatasync', and to 0 if you
    don't. */
@@ -210,10 +221,6 @@
 
 /* Define to 1 if fseeko (and presumably ftello) exists and is declared. */
 #undef HAVE_FSEEKO
-
-/* Define to 1 if you have __sync_lock_test_and_set(int *) and friends. */
-#undef HAVE_GCC_INT_ATOMICS
-
 
 /* Define to 1 if you have __atomic_compare_exchange_n(int *, int *, int). */
 #undef HAVE_GCC__ATOMIC_INT32_CAS
@@ -364,6 +371,9 @@
 /* Define to 1 if you have the `ssl' library (-lssl). */
 #undef HAVE_LIBSSL
 
+/* Define to 1 if you have the `uring' library (-luring). */
+#undef HAVE_LIBURING
+
 /* Define to 1 if you have the `uv' library (-luv). */
 #undef HAVE_LIBUV
 
@@ -429,18 +439,6 @@
 
 /* Define to 1 if you have the `ppoll' function. */
 #undef HAVE_PPOLL
-
-/* Define to 1 if you have the `pread' function. */
-#undef HAVE_PREAD
-
-/* Define if protobuf is available */
-#undef HAVE_PROTOBUF
-
-/* Define to 1 if you have the `pstat' function. */
-#undef HAVE_PSTAT
-
-/* Define to 1 if the PS_STRINGS thing exists. */
-#undef HAVE_PS_STRINGS
 
 /* Define if you have POSIX threads libraries and header files. */
 #undef HAVE_PTHREAD
@@ -586,6 +584,9 @@
 /* Define to 1 if you have the <time.h> header file. */
 #undef HAVE_TIME_H
 
+/* Define to 1 if you have the `timingsafe_bcmp' function. */
+#undef HAVE_TIMINGSAFE_BCMP
+
 /* Define to 1 if your compiler understands `typeof' or something similar. */
 #undef HAVE_TYPEOF
 
@@ -628,17 +629,11 @@
 /* Define to 1 if you have the `wcstombs_l' function. */
 #undef HAVE_WCSTOMBS_L
 
-/* Define to 1 if you have the <wctype.h> header file. */
-#undef HAVE_WCTYPE_H
-
-/* Define to 1 if you have the <winldap.h> header file. */
-#undef HAVE_WINLDAP_H
-
 /* Define to 1 if you have the <winsock2.h> header file. */
 #undef HAVE_WINSOCK2_H
 
-/* Define to 1 if you have the `writev' function. */
-#undef HAVE_WRITEV
+/* Define to 1 if you have the `X509_get_signature_info' function. */
+#undef HAVE_X509_GET_SIGNATURE_INFO
 
 /* Define to 1 if you have the `X509_get_signature_nid' function. */
 #undef HAVE_X509_GET_SIGNATURE_NID
@@ -651,9 +646,6 @@
 
 /* Define if zstd is available */
 #undef HAVE_ZSTD
-
-/* Define to 1 if the system has the type `_Bool'. */
-#undef HAVE__BOOL
 
 /* Define to 1 if your compiler understands __builtin_bswap16. */
 #undef HAVE__BUILTIN_BSWAP16
@@ -699,15 +691,6 @@
 
 /* Define to 1 if your compiler understands _Static_assert. */
 #undef HAVE__STATIC_ASSERT
-
-/* Define to 1 if you have the `etcdlib' library (-letcdlib). */
-#undef HAVE_LIBETCDLIB
-
-/* Define to 1 if you have the `__strtoll' function. */
-#undef HAVE___STRTOLL
-
-/* Define to 1 if you have the `__strtoull' function. */
-#undef HAVE___STRTOULL
 
 /* Define to the appropriate printf length modifier for 64-bit ints. */
 #undef INT64_MODIFIER
@@ -846,6 +829,15 @@
 /* Define to 1 to build with libcurl support. (--with-libcurl) */
 #undef USE_CURL
 
+/* Define to 1 to preload datalake */
+#undef USE_DATALAKE
+
+/* Define to 1 to preload dfs-tablespace */
+#undef USE_DFS_TABLESPACE
+
+/* Define to 1 if a database expiration date is configured. */
+#undef USE_EXPIRATION_DATE
+
 /* Define to 1 if you want float4 values to be passed by value. (Always
    defined in GPDB) */
 #undef USE_FLOAT4_BYVAL
@@ -853,6 +845,12 @@
 /* Define to 1 if you want float8, int8, etc values to be passed by value.
    (Always defined in GPDB) */
 #undef USE_FLOAT8_BYVAL
+
+/* Define to 1 if building with Gopher support */
+#undef USE_GOPHER
+
+/* Define to 1 to preload gophermeta */
+#undef USE_GOPHERMETA
 
 /* Define to 1 to build with gpcloud (--enable-gpcloud) */
 #undef USE_GPCLOUD
@@ -883,11 +881,11 @@
 /* Define to 1 to build with LZ4 support. (--with-lz4) */
 #undef USE_LZ4
 
-/* Define to 1 to build with MDB locales. (--with-mdblocales) */
-#undef USE_MDBLOCALES
-
 /* Define to 1 to build with Mapreduce capabilities (--enable-mapreduce) */
 #undef USE_MAPREDUCE
+
+/* Define to 1 to build with MDB locales. (--with-mdblocales) */
+#undef USE_MDBLOCALES
 
 /* Define to select named POSIX semaphores. */
 #undef USE_NAMED_POSIX_SEMAPHORES
@@ -898,41 +896,14 @@
 /* Define to 1 to build with Cloudberry ORCA optimizer. (--enable-orca) */
 #undef USE_ORCA
 
-/* Define to 1 to build with gophermeta. (--enable-gophermeta) */
-#undef USE_GOPHERMETA
-
-/* Define to 1 to build with datalake. (--enable-datalake) */
-#undef USE_DATALAKE
-
-/* Define to 1 to build with dfs-tablespace. (--enable-dfs-tablespace) */
-#undef USE_DFS_TABLESPACE
-
-/* Define to 1 to build with pax support. (--enable-pax) */
-#undef USE_PAX_STORAGE
-
-/* Define to 1 to build with vectorization. (--enable-vectorization) */
-#undef USE_VECTORIZATION
-
-/* Define to 1 to build with perfmon. (--enable-perfmon) */
-#undef USE_PERFMON
-
-/* Define to 1 if a database expiration date is configured. */
-#undef USE_EXPIRATION_DATE
-
-/* Expiration date components (only meaningful if USE_EXPIRATION_DATE is 1) */
-#undef EXPIRATION_YEAR
-#undef EXPIRATION_MONTH
-#undef EXPIRATION_DAY
-#undef EXPIRATION_DATE_STR
-
-/* Define to 1 to build with time_series extension. (--enable-time-series) */
-#undef USE_TIME_SERIES
-
 /* Define to 1 to build with PAM support. (--with-pam) */
 #undef USE_PAM
 
 /* Define to 1 to support PAX */
 #undef USE_PAX_STORAGE
+
+/* Define to 1 to support perfmon */
+#undef USE_PERFMON
 
 /* Define to 1 to build with shared Cloudberry backend capabilities
    (--enable-shared-postgres-backend) */
@@ -956,8 +927,17 @@
 /* Define to select SysV-style shared memory. */
 #undef USE_SYSV_SHARED_MEMORY
 
+/* Define to 1 to support time_series */
+#undef USE_TIME_SERIES
+
 /* Define to select unnamed POSIX semaphores. */
 #undef USE_UNNAMED_POSIX_SEMAPHORES
+
+/* Define to 1 to support VBF */
+#undef USE_VBF
+
+/* Define to 1 to support vectorization */
+#undef USE_VECTORIZATION
 
 /* Define to select Win32-style semaphores. */
 #undef USE_WIN32_SEMAPHORES
@@ -965,7 +945,7 @@
 /* Define to select Win32-style shared memory. */
 #undef USE_WIN32_SHARED_MEMORY
 
-/* Define to 1 to build with ZSTD support. (--with-zstd) */
+/* Define to build with zstd support. (--with-zstd) */
 #undef USE_ZSTD
 
 /* Define to 1 if `wcstombs_l' requires <xlocale.h>. */
