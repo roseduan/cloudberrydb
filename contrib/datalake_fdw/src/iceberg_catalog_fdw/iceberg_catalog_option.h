@@ -146,7 +146,8 @@ typedef struct IcebergForeignCatalogOptions
 	char *catalog_name;			 /* DATALAKE_ICEBERG_CATALOG_NAME */
 	char *default_namespace;		/* DATALAKE_ICEBERG_CATALOG_DEFAULT_NAMESPACE */
 	int metadata_cache;			 /* DATALAKE_ICEBERG_CATALOG_METADATA_CACHE;
-								  * minutes, 0 = no caching.  Catalog-level
+								  * minutes, 0 = no caching, -1 = unset
+								  * (datalake_fdw.metadata_cache_default).  Catalog-level
 								  * default for the per-table option of the
 								  * same name and unit. */
 	char *warehouse_location_prefix; /* DATALAKE_ICEBERG_CATALOG_WAREHOUSE_LOCATION_PREFIX */

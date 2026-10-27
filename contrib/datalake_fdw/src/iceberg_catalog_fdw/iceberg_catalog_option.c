@@ -39,7 +39,7 @@
 #define DATALAKE_ICEBERG_CATALOG_NAME "catalog_name"
 #define DATALAKE_ICEBERG_CATALOG_DEFAULT_NAMESPACE "default_namespace"
 /* Same name and unit (minutes) as the per-table option it is the default for.
- * 0 (or unset) = no caching.  Supersedes enable_metadata_cache /
+ * 0 = no caching; unset (-1) = datalake_fdw.metadata_cache_default.  Supersedes enable_metadata_cache /
  * metadata_cache_ttl / auto_refresh_metadata, which never worked in any
  * released version; those names are now unrecognized and thus ignored, like
  * any other unknown option. */
@@ -507,7 +507,7 @@ parseIcebergForeignCatalogOptions(IcebergForeignCatalogOptions *options, List *f
 {
     options->catalog_name = getStringOption(foreign_options, DATALAKE_ICEBERG_CATALOG_NAME);
     options->default_namespace = getStringOption(foreign_options, DATALAKE_ICEBERG_CATALOG_DEFAULT_NAMESPACE);
-    options->metadata_cache = getIntOption(foreign_options, DATALAKE_ICEBERG_CATALOG_METADATA_CACHE, 0);
+    options->metadata_cache = getIntOption(foreign_options, DATALAKE_ICEBERG_CATALOG_METADATA_CACHE, -1);
     options->warehouse_location_prefix = getStringOption(foreign_options, DATALAKE_ICEBERG_CATALOG_WAREHOUSE_LOCATION_PREFIX);
     options->total_segment = getgpsegmentCount();
     options->split_size = getIntOption(foreign_options, DATALAKE_ICEBERG_CATALOG_SPLIT_SIZE, 128);
@@ -581,7 +581,9 @@ getIcebergCatalogOptions(const char* catalogServerName, const char* catalogName)
 }
 
 /*
- * The FOREIGN CATALOG's metadata_cache, in minutes; 0 when unset or builtin.
+ * The FOREIGN CATALOG's metadata_cache, in minutes; -1 when unset or builtin
+ * (the caller then falls back to datalake_fdw.metadata_cache_default), so an
+ * explicit 0 stays "always resolve".
  *
  * Reads the catalog's own options only.  getIcebergCatalogOptions() also
  * resolves the user mapping, which a TTL does not need: asking it would make
@@ -595,10 +597,10 @@ getIcebergForeignCatalogMetadataCache(const char* catalogServerName, const char*
     HeapTuple   tuple;
     Datum       optionsDatum;
     bool        isnull;
-    int         metadata_cache = 0;
+    int         metadata_cache = -1;
 
     if (checkIsBuiltinCatalog(catalogServerName, catalogName))
-        return 0;
+        return -1;
 
     catalogOid = get_foreign_catalog_oid(catalogName, catalogServerName, false);
     tuple = SearchSysCache1(FOREIGNCATALOGOID, ObjectIdGetDatum(catalogOid));
@@ -609,7 +611,7 @@ getIcebergForeignCatalogMetadataCache(const char* catalogServerName, const char*
                                    Anum_pg_foreign_catalog_fcoptions, &isnull);
     if (!isnull)
         metadata_cache = getIntOption(untransformRelOptions(optionsDatum),
-                                      DATALAKE_ICEBERG_CATALOG_METADATA_CACHE, 0);
+                                      DATALAKE_ICEBERG_CATALOG_METADATA_CACHE, -1);
 
     ReleaseSysCache(tuple);
 

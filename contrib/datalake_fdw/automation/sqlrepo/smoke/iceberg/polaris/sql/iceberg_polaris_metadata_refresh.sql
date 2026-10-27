@@ -95,6 +95,7 @@ SELECT iceberg_refresh_metadata_cache(-1);
 SHOW datalake_fdw.metadata_refresh_min_interval;
 SHOW datalake_fdw.metadata_refresh_max_tables_per_cycle;
 SHOW datalake_fdw.metadata_refresh_ahead_percent;
+SHOW datalake_fdw.metadata_cache_default;
 
 -- ============================================================
 -- Fixture: an external table with a seeded cache stamp
@@ -147,17 +148,18 @@ SELECT metadata_cached_at = :after_refresh AS stamp_unchanged_within_ttl
 FROM pg_ext_aux.pg_iceberg_metadata WHERE relid = 'metaref_cached'::regclass;
 
 -- ============================================================
--- Test 5: what the sweep still will not touch -- a table with no TTL (with or
---         without a `table` OPTION), and a built-in-catalog table.  None is a
---         candidate, so each keeps a NULL stamp however many cycles run.
+-- Test 5: what the sweep still will not touch -- a table that opts out with
+--         metadata_cache 0 (with or without a `table` OPTION), and a
+--         built-in-catalog table.  None is a candidate, so each keeps a NULL
+--         stamp however many cycles run.
 -- ============================================================
 CREATE ICEBERG TABLE metaref_nocache (id bigint)
-OPTIONS (namespace 'public', table 'metaref_nocache');
+OPTIONS (namespace 'public', table 'metaref_nocache', metadata_cache '0');
 INSERT INTO metaref_nocache VALUES (1);
 SELECT count(*) AS rows_seen FROM metaref_nocache;
 
 -- On the Polaris catalog, without a `table` OPTION.
-CREATE ICEBERG TABLE metaref_nooption (id bigint);
+CREATE ICEBERG TABLE metaref_nooption (id bigint) OPTIONS (metadata_cache '0');
 INSERT INTO metaref_nooption VALUES (1);
 SELECT count(*) AS rows_seen FROM metaref_nooption;
 
@@ -211,6 +213,21 @@ SELECT iceberg_refresh_metadata_cache() >= 1 AS ran;
 
 SELECT metadata_cached_at IS NOT NULL AS swept_with_catalog_ttl
 FROM pg_ext_aux.pg_iceberg_metadata WHERE relid = 'metaref_catalog_ttl'::regclass;
+
+-- ============================================================
+-- Test 5d: neither the table nor its FOREIGN CATALOG sets metadata_cache, so
+--          the cluster default (datalake_fdw.metadata_cache_default, 5
+--          minutes) applies and the sweep keeps it warm (issue #461).  The
+--          default used to be 0: every read asked the catalog and nothing
+--          was ever refreshed.
+-- ============================================================
+CREATE ICEBERG TABLE metaref_default (id bigint);
+INSERT INTO metaref_default VALUES (1);
+
+SELECT iceberg_refresh_metadata_cache() >= 1 AS ran;
+
+SELECT metadata_cached_at IS NOT NULL AS swept_with_default_ttl
+FROM pg_ext_aux.pg_iceberg_metadata WHERE relid = 'metaref_default'::regclass;
 
 -- ============================================================
 -- Test 6: iceberg_refresh_metadata() re-points a mirror that has drifted
@@ -335,6 +352,7 @@ DROP TASK metaref_sweep;
 ALTER SYSTEM RESET datalake_fdw.metadata_refresh_enabled;
 SELECT pg_reload_conf();
 
+DROP TABLE metaref_default;
 DROP TABLE metaref_catalog_ttl;
 DROP TABLE metaref_nooption_ttl;
 DROP TABLE metaref_builtin_t;

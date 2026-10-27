@@ -547,7 +547,7 @@ iceberg_fetch_fragments_json(Relation rel, IcebergTableInfo *table_info,
 
 	if (allow_cache &&
 		pg_iceberg_tracker_get_table_state(RelationGetRelid(rel)) == NULL &&
-		pg_iceberg_table_is_external(table_info))
+		pg_iceberg_table_has_external_head(table_info))
 	{
 		/*
 		 * External-catalog table, not modified in this transaction, being read
@@ -555,14 +555,15 @@ iceberg_fetch_fragments_json(Relation rel, IcebergTableInfo *table_info,
 		 * catalog bounded by the effective metadata-cache TTL.  This is what
 		 * lets a SELECT observe snapshots committed externally -- the agent
 		 * reuses the cached head while younger than the TTL (TTL 0 = always
-		 * latest) and a refresh is persisted to pg_iceberg_metadata.
+		 * latest).  The head it returns serves this query only; a read never
+		 * writes pg_iceberg_metadata (see pg_iceberg_get_latest_metadata_location).
 		 *
-		 * The external test is pg_iceberg_table_is_external() rather than an
-		 * inline "has a table OPTION": a REST table created without an OPTIONS
-		 * clause is still external, and testing for the option here is what
-		 * previously sent those tables down the branch below, which answers
+		 * The test is the catalog, not the `table` OPTION: a table created
+		 * without one on any non-builtin catalog -- REST, Polaris, Hive -- is
+		 * committed to by other engines all the same.  Testing for the option
+		 * here is what sent those tables down the branch below, which answers
 		 * from the locally stored location and so never sees an externally
-		 * committed snapshot.
+		 * committed snapshot (REST first, then Polaris and Hive: issue #461).
 		 *
 		 * A table already tracked in this transaction must keep going through
 		 * the tracker instead, for Read-Your-Own-Writes; allow_cache is false
@@ -704,10 +705,35 @@ pg_iceberg_build_scan_am_private(Relation rel, struct PlanState *ps, int random_
 	if (!is_internal && checkIsPolarisCatalog(table_info->catalog_server_name, table_info->catalog_name))
 	{
 		IcebergLoadTableResult *load_result;
+		const char *nameSpace;
+		const char *tableName;
+		const char *catalogName;
 
-		load_result = pg_iceberg_load_table(table_info->opts->catalog,
-											table_info->opts->namespace,
-											table_info->opts->table,
+		/*
+		 * Resolve the identity as every other path does: a table created
+		 * without a `table` OPTION -- read as external since issue #461 -- is
+		 * known to the catalog by its relation name, and may carry no OPTIONS
+		 * at all.
+		 */
+		nameSpace = pg_iceberg_resolve_namespace(
+			table_info->opts ? table_info->opts->namespace : NULL,
+			table_info->catalog_server_name,
+			table_info->catalog_name,
+			RelationGetNamespace(rel));
+		if (table_info->opts == NULL || table_info->opts->table == NULL)
+		{
+			tableName = RelationGetRelationName(rel);
+			catalogName = NULL;
+		}
+		else
+		{
+			tableName = table_info->opts->table;
+			catalogName = table_info->opts->catalog;
+		}
+
+		load_result = pg_iceberg_load_table(catalogName,
+											nameSpace,
+											tableName,
 											table_info->catalog_server_name,
 											table_info->catalog_name,
 											table_info->volume_server_name,
@@ -717,8 +743,8 @@ pg_iceberg_build_scan_am_private(Relation rel, struct PlanState *ps, int random_
 			ereport(ERROR,
 					(errcode(ERRCODE_UNDEFINED_OBJECT),
 					 errmsg("iceberg table \"%s.%s\" does not exist in external catalog \"%s\"",
-							table_info->opts->namespace,
-							table_info->opts->table,
+							nameSpace,
+							tableName,
 							table_info->catalog_name)));
 
 		if (load_result->catalog_properties)

@@ -126,6 +126,7 @@
 #include "access/table.h"
 #include "access/xact.h"
 #include "commands/extension.h"
+#include "foreign/foreign.h"
 #include "datatype/timestamp.h"
 #include "fmgr.h"
 #include "miscadmin.h"
@@ -135,11 +136,11 @@
 #include "utils/rel.h"
 #include "utils/resowner.h"
 #include "utils/snapmgr.h"
+#include "utils/syscache.h"
 #include "utils/timestamp.h"
 
 #include "cdb/cdbvars.h"
 
-#include "../iceberg_catalog_fdw/iceberg_catalog_option.h"
 #include "include/iceberg_oids.h"
 #include "include/pg_iceberg_catalog.h"
 #include "include/pg_iceberg_catalog_helper.h"
@@ -152,6 +153,14 @@ static bool metadata_refresh_enabled = true;
 static int	metadata_refresh_min_interval = 30;
 static int	metadata_refresh_max_tables = 100;
 static int	metadata_refresh_ahead_percent = 70;
+
+/*
+ * Effective TTL, in minutes, of an external-catalog table neither it nor its
+ * FOREIGN CATALOG sets metadata_cache on (issue #461).  Read by the read path
+ * through pg_iceberg_catalog.c as well, hence not static; PGC_SIGHUP so that
+ * readers and the autovacuum refresher always agree on it.
+ */
+int			metadata_cache_default = 5;
 
 /* Hook-chaining state */
 static AutoVacWorkerPostHook_type prev_av_hook = NULL;
@@ -181,6 +190,7 @@ static char *refresh_resolve_and_store(Relation rel,
 									   bool require_agent_stamp);
 static int	refresh_candidate_cmp(const void *a, const void *b);
 static int64 current_epoch_ms(void);
+static bool user_mapping_exists(const char *server_name);
 
 
 /* ================================================================
@@ -194,7 +204,8 @@ pg_iceberg_metadata_refresh_init(void)
 		"datalake_fdw.metadata_refresh_enabled",
 		"Enable the autovacuum-driven refresh of the iceberg external-catalog "
 		"metadata cache.",
-		"Only affects external-catalog tables that set metadata_cache > 0; "
+		"Only affects external-catalog tables whose effective metadata cache "
+		"TTL is > 0 (see datalake_fdw.metadata_cache_default); "
 		"reads stay correct when disabled, they just stop being cached.",
 		&metadata_refresh_enabled,
 		true,
@@ -240,6 +251,21 @@ pg_iceberg_metadata_refresh_init(void)
 		10, 100,
 		PGC_SIGHUP,
 		0,
+		NULL, NULL, NULL);
+
+	DefineCustomIntVariable(
+		"datalake_fdw.metadata_cache_default",
+		"Default metadata cache TTL, in minutes, for external-catalog iceberg "
+		"tables.",
+		"Applies to a table when neither the table nor its FOREIGN CATALOG sets "
+		"metadata_cache.  A read within the TTL uses the locally stored metadata "
+		"location; past it, the location is resolved from the catalog for that "
+		"query.  0 resolves on every read.",
+		&metadata_cache_default,
+		5,
+		0, 10080,
+		PGC_SIGHUP,
+		GUC_UNIT_MIN,
 		NULL, NULL, NULL);
 
 	/* Chain ourselves into the hook (preserve any prior callback). */
@@ -564,16 +590,10 @@ refresh_one_table(Oid relid, int64 cached_at, int64 now_ms, bool *wrote)
 	 * Builtin catalog: PG is the catalog, so there is no external head to
 	 * re-resolve.  Every other catalog has one, whether or not the table
 	 * carries a `table` OPTION (issue #461): one created without it on a
-	 * Polaris or Hive catalog is moved by other engines all the same.
-	 *
-	 * checkIsBuiltinCatalog(), not pg_iceberg_is_builtin_catalog(): a catalog
-	 * server with no type but some other option is builtin to the former and
-	 * not to the latter.  Taking a builtin table for an external one would ask
-	 * the agent for a head it does not have, every cycle; the other direction
-	 * cannot happen, since an external catalog always names its type.
+	 * Polaris or Hive catalog is moved by other engines all the same.  The
+	 * same test the read path uses; see pg_iceberg_table_has_external_head().
 	 */
-	if (checkIsBuiltinCatalog(table_info->catalog_server_name,
-							  table_info->catalog_name))
+	if (!pg_iceberg_table_has_external_head(table_info))
 		goto out;
 
 	/*
@@ -598,6 +618,23 @@ refresh_one_table(Oid relid, int64 cached_at, int64 now_ms, bool *wrote)
 	due_after_ms = (int64) ttl * 60000 * metadata_refresh_ahead_percent / 100;
 	if (now_ms - cached_at < due_after_ms)
 		goto out;
+
+	/*
+	 * A refresh resolves the head with the catalog's and the volume's
+	 * credentials.  Without a user mapping for either there is nothing to
+	 * resolve with, every cycle: skip quietly rather than warn on each one.
+	 * Such a table cannot be read or written either, which is where its owner
+	 * finds out; the named-table iceberg_refresh_metadata() still raises.
+	 */
+	if (!user_mapping_exists(table_info->catalog_server_name) ||
+		(table_info->volume_server_name != NULL &&
+		 !user_mapping_exists(table_info->volume_server_name)))
+	{
+		elog(DEBUG1,
+			 "iceberg metadata refresh: skipping relation %u (no user mapping)",
+			 relid);
+		goto out;
+	}
 
 	attempted = true;
 	stored = refresh_resolve_and_store(rel, table_info, true);
@@ -642,8 +679,7 @@ pg_iceberg_refresh_table_head(Relation rel)
 	 * well-defined no-op rather than an error.  Reported as "not refreshed"
 	 * with the mirror unchanged, which is exactly what happened.
 	 */
-	if (!checkIsBuiltinCatalog(table_info->catalog_server_name,
-							   table_info->catalog_name))
+	if (pg_iceberg_table_has_external_head(table_info))
 		stored = refresh_resolve_and_store(rel, table_info, false);
 
 	pg_iceberg_free_table_info(table_info);
@@ -841,4 +877,30 @@ iceberg_refresh_metadata_cache(PG_FUNCTION_ARGS)
 	refreshed = pg_iceberg_refresh_metadata_cache_batch(max_tables);
 
 	PG_RETURN_INT32(refreshed);
+}
+
+
+/*
+ * Whether the current user can reach `server_name` through a user mapping --
+ * its own or PUBLIC's -- without raising when there is none, which
+ * GetUserMapping() would.
+ */
+static bool
+user_mapping_exists(const char *server_name)
+{
+	ForeignServer *server;
+
+	if (server_name == NULL)
+		return false;
+
+	server = GetForeignServerByName(server_name, true);
+	if (server == NULL)
+		return false;
+
+	return SearchSysCacheExists2(USERMAPPINGUSERSERVER,
+								 ObjectIdGetDatum(GetUserId()),
+								 ObjectIdGetDatum(server->serverid)) ||
+		SearchSysCacheExists2(USERMAPPINGUSERSERVER,
+							  ObjectIdGetDatum(InvalidOid),
+							  ObjectIdGetDatum(server->serverid));
 }

@@ -8,7 +8,7 @@ REGRESS = iceberg_polaris iceberg_polaris_types iceberg_polaris_statistics icebe
           iceberg_polaris_pathstyle iceberg_polaris_metadata_cache \
           iceberg_polaris_metadata_refresh iceberg_polaris_vacuum \
           iceberg_polaris_drop iceberg_polaris_recreate_schema \
-          iceberg_polaris_mount_schema
+          iceberg_polaris_mount_schema iceberg_polaris_read_head
 
 POLARIS_CLI = ../../../../docker/singlecluster/scripts/polaris_cli.sh
 # Multi-container topology (vs singlecluster all-in-one): override the

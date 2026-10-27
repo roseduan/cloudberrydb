@@ -43,6 +43,7 @@
 #include "src/common/parser_option.h"
 #include "include/pg_iceberg_catalog.h"
 #include "include/pg_iceberg_catalog_helper.h"
+#include "include/pg_iceberg_metadata_refresh.h"
 #include "include/pg_iceberg_options.h"
 
 bool
@@ -296,14 +297,40 @@ pg_iceberg_table_is_external(IcebergTableInfo *table_info)
 }
 
 /*
+ * Does `table_info`'s catalog hold the table's head, so that a reader has
+ * something to resolve?  Every catalog but the builtin one does, whether or
+ * not the table carries a `table` OPTION (issue #461): a table created
+ * without one on a Polaris or Hive catalog is committed to by other engines
+ * all the same, and reading only the locally stored location never sees
+ * those commits.
+ *
+ * The read path and the background refresh ask this; the write paths still
+ * ask pg_iceberg_table_is_external(), which a later change aligns.
+ * checkIsBuiltinCatalog() takes a catalog server with no type for builtin,
+ * so a builtin table is never sent to the agent for a head it does not have;
+ * an external catalog always names its type.
+ */
+bool
+pg_iceberg_table_has_external_head(IcebergTableInfo *table_info)
+{
+	if (table_info == NULL)
+		return false;
+
+	return !checkIsBuiltinCatalog(table_info->catalog_server_name,
+								  table_info->catalog_name);
+}
+
+/*
  * Effective metadata-cache TTL for `table_info`, in minutes; 0 = no caching.
  *
- * One option name, one unit, two levels: the per-table `metadata_cache`
+ * One option name, one unit, three levels: the per-table `metadata_cache`
  * (minutes) wins when set -- 0 there is an explicit per-table opt-out the
  * catalog must not override, and a negative value means the table said
  * nothing.  In that case the FOREIGN CATALOG option of the same name and
- * unit supplies the default; a catalog that does not set it means 0, i.e.
- * every read asks the external catalog for the latest head.
+ * unit supplies it, again with 0 an explicit opt-out; a catalog that does
+ * not set it either falls back to datalake_fdw.metadata_cache_default.  The
+ * default is not 0: the design reads the locally stored location until the
+ * TTL runs out, rather than asking the catalog on every read (issue #461).
  *
  * Callers must not ask from PRE_COMMIT: resolving the catalog options costs
  * syscache lookups, and the head resolver also runs from there, where it never
@@ -314,16 +341,26 @@ pg_iceberg_table_is_external(IcebergTableInfo *table_info)
 int
 pg_iceberg_effective_metadata_cache_ttl(IcebergTableInfo *table_info)
 {
+	int			catalog_ttl;
+
+	/* No table to ask, as in pg_iceberg_table_has_external_head(). */
+	if (table_info == NULL)
+		return metadata_cache_default;
+
 	if (table_info->opts != NULL && table_info->opts->metadata_cache >= 0)
 		return table_info->opts->metadata_cache;
 
 	/*
 	 * Not getIcebergCatalogOptions(): that resolves the user mapping too, so a
 	 * table whose mapping is gone would raise here -- in the background
-	 * refresh, on every cycle, for a table that has no TTL to begin with.
+	 * refresh, on every cycle, before its TTL is even known.
 	 */
-	return Max(getIcebergForeignCatalogMetadataCache(table_info->catalog_server_name,
-													 table_info->catalog_name), 0);
+	catalog_ttl = getIcebergForeignCatalogMetadataCache(table_info->catalog_server_name,
+														 table_info->catalog_name);
+	if (catalog_ttl >= 0)
+		return catalog_ttl;
+
+	return metadata_cache_default;
 }
 
 /*
@@ -348,8 +385,15 @@ pg_iceberg_get_latest_metadata_location(Oid relid, IcebergTableInfo *table_info,
 	 * short-circuited to the locally tracked copy just because the table was
 	 * created without an OPTIONS clause.  See the matching comment in
 	 * pg_iceberg_create_table_with_catalog.
+	 *
+	 * Only a read (allow_cache) decides by the catalog alone, as
+	 * iceberg_fetch_fragments_json() does before calling here; the write and
+	 * commit paths, which all pass allow_cache = false, keep the OPTION-based
+	 * test for now (issue #461).
 	 */
-	is_internal = !pg_iceberg_table_is_external(table_info);
+	is_internal = allow_cache ?
+		!pg_iceberg_table_has_external_head(table_info) :
+		!pg_iceberg_table_is_external(table_info);
 
 	if (is_internal)
 	{

@@ -118,6 +118,7 @@ extern char *pg_iceberg_commit_data_with_catalog(Relation rel,
  * a `table` OPTION; see the definition for what testing the option broke.
  */
 extern bool pg_iceberg_table_is_external(IcebergTableInfo *table_info);
+extern bool pg_iceberg_table_has_external_head(IcebergTableInfo *table_info);
 extern int	pg_iceberg_effective_metadata_cache_ttl(IcebergTableInfo *table_info);
 
 /*

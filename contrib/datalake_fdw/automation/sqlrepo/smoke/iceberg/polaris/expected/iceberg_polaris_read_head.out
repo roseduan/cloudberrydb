@@ -1,0 +1,137 @@
+-- Reading a table on an external catalog sees what other engines committed,
+-- whether or not the table carries a `table` OPTION, once the table's
+-- metadata cache TTL has run out (issue #461).
+--
+-- A table created without one on a Polaris (or Hive) catalog used to be read
+-- from the metadata location stored when this cluster last wrote it, so a
+-- commit made by another engine was never seen.  The read path now decides by
+-- the catalog: every non-builtin catalog holds the table's head, and a read
+-- resolves it through dlagent.  The head it resolves serves that query only;
+-- the stored location is not changed by a read.
+--
+-- There is no Spark here, so the "other engine" is a second local table bound
+-- to the same Polaris table through OPTIONS (table ...): its commits go to
+-- Polaris and never touch the first table's stored location.
+SET client_min_messages = warning;
+CREATE EXTENSION IF NOT EXISTS datalake_fdw;
+RESET client_min_messages;
+CREATE SERVER readhead_vol_srv
+FOREIGN DATA WRAPPER iceberg_volume_fdw
+OPTIONS (
+    type 's3',
+    endpoint 'http://minio:9000',
+    region 'us-east-1',
+    bucket_name 'warehouse',
+    path_style_access 'true'
+);
+CREATE USER MAPPING FOR current_user
+SERVER readhead_vol_srv
+OPTIONS (access_key_id 'admin', secret_access_key 'admin12345');
+CREATE FOREIGN VOLUME readhead_vol SERVER readhead_vol_srv OPTIONS (base_path '/');
+SET iceberg_default_volume = 'readhead_vol';
+CREATE SERVER readhead_cat_srv
+FOREIGN DATA WRAPPER iceberg_catalog_fdw
+OPTIONS (type 'polaris', url 'http://polaris:8181/api/catalog');
+CREATE USER MAPPING FOR current_user
+SERVER readhead_cat_srv
+OPTIONS (client_id 'root', client_secret 's3cr3t', scope 'PRINCIPAL_ROLE:ALL');
+CREATE FOREIGN CATALOG readhead_cat
+SERVER readhead_cat_srv
+OPTIONS (catalog_name 'polaris_default_catalog');
+SET iceberg_default_catalog = 'readhead_cat';
+-- ============================================================
+-- A table without a `table` OPTION, and another writer of it
+--
+-- metadata_cache 0, so every read resolves the head: the autovacuum refresh
+-- running alongside cannot leave a fresh stamp that would keep this read on
+-- the stored location.  Before the fix the read used the stored location
+-- whatever the TTL.
+-- ============================================================
+CREATE ICEBERG TABLE readhead_t (id int) OPTIONS (metadata_cache '0');
+INSERT INTO readhead_t VALUES (1);
+CREATE ICEBERG TABLE readhead_w (id int)
+OPTIONS (namespace 'public', table 'readhead_t');
+-- The other writer's commit moves the head readhead_t has stored behind;
+-- the catch-up warning names an OID and a metadata file, which vary per run.
+SET client_min_messages = error;
+INSERT INTO readhead_w VALUES (2);
+RESET client_min_messages;
+SELECT metadata_location AS stored_before
+FROM pg_ext_aux.pg_iceberg_metadata WHERE relid = 'readhead_t'::regclass
+\gset
+-- The read sees the other writer's row.
+SELECT id FROM readhead_t ORDER BY id;
+ id 
+----
+  1
+  2
+(2 rows)
+
+-- ... and has not written the stored location.
+SELECT metadata_location = :'stored_before' AS stored_location_unchanged
+FROM pg_ext_aux.pg_iceberg_metadata WHERE relid = 'readhead_t'::regclass;
+ stored_location_unchanged 
+---------------------------
+ t
+(1 row)
+
+-- ============================================================
+-- Within the TTL a read uses the stored location
+--
+-- readhead_ttl sets no metadata_cache, so the cluster default
+-- (datalake_fdw.metadata_cache_default, 5 minutes) applies.  Once a refresh
+-- has stamped it, reads inside the TTL stay on the stored location and do
+-- not see a newer commit until the next refresh (issue #461: "read local
+-- until the TTL runs out").  The stamp is set here by hand, so the
+-- autovacuum refresh has nothing due on this table for minutes.
+-- ============================================================
+CREATE ICEBERG TABLE readhead_ttl (id int);
+INSERT INTO readhead_ttl VALUES (1);
+CREATE ICEBERG TABLE readhead_tw (id int)
+OPTIONS (namespace 'public', table 'readhead_ttl');
+SET client_min_messages = warning;
+SELECT refreshed IS NOT NULL AS ran FROM iceberg_refresh_metadata('readhead_ttl');
+ ran 
+-----
+ t
+(1 row)
+
+SET client_min_messages = error;
+INSERT INTO readhead_tw VALUES (2);
+RESET client_min_messages;
+-- Inside the TTL: still the refreshed head, without the new row.
+SELECT id FROM readhead_ttl ORDER BY id;
+ id 
+----
+  1
+(1 row)
+
+-- A refresh moves the stored location on, and the read follows it.
+SET client_min_messages = warning;
+SELECT refreshed AS moved FROM iceberg_refresh_metadata('readhead_ttl');
+ moved 
+-------
+ t
+(1 row)
+
+RESET client_min_messages;
+SELECT id FROM readhead_ttl ORDER BY id;
+ id 
+----
+  1
+  2
+(2 rows)
+
+-- ============================================================
+-- Cleanup
+-- ============================================================
+DROP TABLE readhead_tw;
+DROP TABLE readhead_ttl;
+DROP TABLE readhead_w;
+DROP TABLE readhead_t;
+DROP CATALOG readhead_cat;
+DROP VOLUME readhead_vol;
+DROP USER MAPPING FOR current_user SERVER readhead_cat_srv;
+DROP SERVER readhead_cat_srv;
+DROP USER MAPPING FOR current_user SERVER readhead_vol_srv;
+DROP SERVER readhead_vol_srv;

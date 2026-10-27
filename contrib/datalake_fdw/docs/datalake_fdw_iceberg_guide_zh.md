@@ -523,7 +523,7 @@ CREATE FOREIGN VOLUME s3_vol SERVER s3_vol_srv
 | `server_name` | hive（SERVER） | 配置文件模式：未在 SQL OPTIONS 里写的连接配置从 `gphive.conf` 对应段补齐，SQL 里写了的优先（见 4.3 末尾"配置文件模式"） |
 | `catalog_name` | Hive / Polaris / REST | 远端 catalog 名称；REST 下即平台上的表桶名 |
 | `default_namespace` | 全部 | 默认命名空间 |
-| `metadata_cache` | 全部 | head 缓存 TTL（**分钟**），该 catalog 下所有表的默认值，单表可用同名表选项覆盖；`0` 或不写 = 不缓存，每次都取最新 head。它只影响**别的引擎**的提交多久可见——本集群自己的写入始终立刻可见；也与 manifest / metadata.json 的文件缓存无关（那由 gopher 管）。旧选项 `enable_metadata_cache` / `metadata_cache_ttl`（秒）/ `auto_refresh_metadata` 已废弃：写了不报错、无效果（它们在任何已发布版本中都从未生效过）；迁移时把 `metadata_cache_ttl '300'` 改写为 `metadata_cache '5'` |
+| `metadata_cache` | 全部 | head 缓存 TTL（**分钟**），该 catalog 下所有表的默认值，单表可用同名表选项覆盖；`0` = 不缓存，每次都取最新 head；不写则用集群默认值 `datalake_fdw.metadata_cache_default`（默认 5 分钟）。它只影响**别的引擎**的提交多久可见——本集群自己的写入始终立刻可见；也与 manifest / metadata.json 的文件缓存无关（那由 gopher 管）。旧选项 `enable_metadata_cache` / `metadata_cache_ttl`（秒）/ `auto_refresh_metadata` 已废弃：写了不报错、无效果（它们在任何已发布版本中都从未生效过）；迁移时把 `metadata_cache_ttl '300'` 改写为 `metadata_cache '5'` |
 | `warehouse_location_prefix` | Hive / Polaris / Hadoop / S3 | 仓库路径前缀；hadoop / s3 必填且带协议。REST 不用：位置由平台分配 |
 | `prefix` | REST（FOREIGN CATALOG） | REST 路由前缀，默认取 `catalog_name` |
 
@@ -987,7 +987,7 @@ OPTIONS (
 | `table` | string | 在 catalog 中暴露的表名（默认与 PG 表名一致） |
 | `location` | string | **仅外部 catalog 有意义**。builtin（内部）catalog 建表若指定该项直接报错 `location option is not allowed for builtin iceberg tables`——内部表路径固定为 Volume `base_path` 本身。 |
 | `autovacuum_enabled` | bool | 是否参与 `datalake.iceberg_autovacuum` 自动 VACUUM（默认 `true`） |
-| `metadata_cache` | int | **仅外部 catalog 有意义**。本表 head 缓存的 TTL，单位**分钟**。不写则继承 catalog 同名选项；写 `0` 表示本表显式不缓存，每次扫描都取最新 head（优先级高于 catalog 选项）。详见 4.8 的优先级表 |
+| `metadata_cache` | int | **仅外部 catalog 有意义**。本表 head 缓存的 TTL，单位**分钟**。不写则继承 catalog 同名选项，catalog 也没写则用 `datalake_fdw.metadata_cache_default`（默认 5 分钟）；写 `0` 表示本表显式不缓存，每次扫描都取最新 head（优先级高于 catalog 选项）。详见 4.8 的优先级表 |
 
 > ⚠️ 未识别的 OPTION **不会报错而是被静默忽略**，注意拼写（如误写 `table_name`、`base_location` 将不生效）。
 
@@ -1155,7 +1155,8 @@ VACUUM
   | 来源 | 单位 | 说明 |
   |------|------|------|
   | 表选项 `metadata_cache` | **分钟** | 写了就以它为准，`0` 表示本表显式不缓存 |
-  | catalog 选项 `metadata_cache` | **分钟** | 表没写时的默认；`0` 或不写 = 不缓存 |
+  | catalog 选项 `metadata_cache` | **分钟** | 表没写时的默认；`0` = 不缓存 |
+  | GUC `datalake_fdw.metadata_cache_default` | **分钟** | 表和 catalog 都没写时的默认，默认 `5`；`0` = 不缓存（SIGHUP） |
 
 > `maintenance_api` 只支持 `s3tables` 一个值，写错会在 `CREATE SERVER` /
 > `ALTER SERVER` 时就被拒绝，不会拖到 VACUUM 才报错。
@@ -1444,9 +1445,9 @@ SET datalake.disable_cache_file = on;          -- 关闭段上读路径的文件
 
 四个都是 `PGC_SIGHUP`，改完 `SELECT pg_reload_conf()` 生效。
 
-**它会刷哪些表**：外部 catalog 的表，且 `metadata_cache > 0`。就这两条。建表之后时间戳是 NULL，**NULL 按「无限陈旧」处理**，所以第一轮就会把它种上。
+**它会刷哪些表**：不在 builtin catalog 上的表（有没有 `table` 选项都算），且生效的 TTL > 0（表选项 → catalog 选项 → `datalake_fdw.metadata_cache_default`，后者默认 5 分钟）。建表之后时间戳是 NULL，**NULL 按「无限陈旧」处理**，所以第一轮就会把它种上。
 
-反过来说：一张挂着但从来没人查的表，只要设了 `metadata_cache`，也会每个 TTL 被刷一次（一次外部往返）。不想让它占这个开销，就别给它设 `metadata_cache` —— 没有 TTL 的表根本不是候选。
+反过来说：一张挂着但从来没人查的表，默认（不写 `metadata_cache`）也会每个 TTL 被刷一次（一次外部往返）。不想让它占这个开销，就给它显式设 `metadata_cache '0'` —— TTL 为 0 的表不是候选。
 
 **正在被 DDL 占用的表会被跳过，不会去等**：刷新对表只取 `AccessShareLock`，所以普通的读写（SELECT / INSERT / UPDATE / DELETE）跟它不冲突，照刷不误；真正冲突的是 `ALTER TABLE`、`DROP`、`TRUNCATE`、`VACUUM FULL`、`REINDEX` 这类拿 `AccessExclusiveLock` 的操作。遇到它们刷新器**立刻放弃这张表**，而不是排队等 —— 等下去会把 autovacuum worker 卡住、压着本轮事务的 xmin，还让同一轮里剩下的表陪着一起等。跳过没有代价：候选按最旧优先排，下一轮它就排在最前面。（内核 autovacuum 出于同样的理由也是这么做的。）
 

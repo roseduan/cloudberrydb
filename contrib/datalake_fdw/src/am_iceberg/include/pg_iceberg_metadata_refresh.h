@@ -22,6 +22,9 @@
 #include "utils/relcache.h"
 
 /* Define the GUCs that govern the batch cycle.  Call once from _PG_init. */
+/* datalake_fdw.metadata_cache_default, minutes */
+extern int	metadata_cache_default;
+
 extern void pg_iceberg_metadata_refresh_init(void);
 
 /*
