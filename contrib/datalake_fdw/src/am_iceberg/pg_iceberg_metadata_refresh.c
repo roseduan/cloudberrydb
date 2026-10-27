@@ -82,9 +82,11 @@
  * once the stamp has burned metadata_refresh_ahead_percent of its TTL, so a
  * live table's cache ideally never expires from a reader's point of view.
  *
- * Candidates.  Every external-catalog table carrying metadata_cache > 0, and
- * nothing else.  An earlier revision also required metadata_cached_at IS NOT
- * NULL, using it as a free "somebody actually reads this table" signal -- that
+ * Candidates.  Every table on a non-builtin catalog -- with or without a
+ * `table` OPTION -- whose effective TTL is > 0: its own metadata_cache, else
+ * its FOREIGN CATALOG's, the same rule the read path applies (issue #461).
+ * An earlier revision also required metadata_cached_at IS NOT NULL, using it
+ * as a free "somebody actually reads this table" signal -- that
  * worked only while the read path stamped the row on first read, which it no
  * longer does.  Keeping the filter would leave every table NULL-stamped
  * forever and the cycle with nothing to do.  The cost of dropping it is one
@@ -137,6 +139,7 @@
 
 #include "cdb/cdbvars.h"
 
+#include "../iceberg_catalog_fdw/iceberg_catalog_option.h"
 #include "include/iceberg_oids.h"
 #include "include/pg_iceberg_catalog.h"
 #include "include/pg_iceberg_catalog_helper.h"
@@ -464,13 +467,12 @@ collect_refresh_candidates(int *ncandidates)
 		relid = DatumGetObjectId(datum);
 
 		/*
-		 * Builtin-catalog tables have no external head to re-resolve: PG is
-		 * the catalog, and "refreshing" would be meaningless.
+		 * Not filtered on is_internal: that flag is true for a table created
+		 * without OPTIONS on a Polaris or Hive catalog, whose head another
+		 * engine moves all the same.  Whether a table has an external head is
+		 * a property of its catalog, which refresh_one_table() checks
+		 * (issue #461).
 		 */
-		datum = heap_getattr(tuple, Anum_pg_iceberg_metadata_is_internal,
-							 tupdesc, &isnull);
-		if (isnull || DatumGetBool(datum))
-			continue;
 
 		/*
 		 * A NULL stamp means this table has never been refreshed.  Since a read
@@ -559,21 +561,29 @@ refresh_one_table(Oid relid, int64 cached_at, int64 now_ms, bool *wrote)
 	table_info = pg_iceberg_get_table_info(relid);
 
 	/*
-	 * OPTIONS are the authoritative source for "is this external" and for the
-	 * TTL.  The catalog row's is_internal was already filtered, but a table can
-	 * only be refreshed through the external path when it actually carries an
-	 * external table name.
+	 * Builtin catalog: PG is the catalog, so there is no external head to
+	 * re-resolve.  Every other catalog has one, whether or not the table
+	 * carries a `table` OPTION (issue #461): one created without it on a
+	 * Polaris or Hive catalog is moved by other engines all the same.
+	 *
+	 * checkIsBuiltinCatalog(), not pg_iceberg_is_builtin_catalog(): a catalog
+	 * server with no type but some other option is builtin to the former and
+	 * not to the latter.  Taking a builtin table for an external one would ask
+	 * the agent for a head it does not have, every cycle; the other direction
+	 * cannot happen, since an external catalog always names its type.
 	 */
-	if (table_info->opts == NULL || table_info->opts->table == NULL)
+	if (checkIsBuiltinCatalog(table_info->catalog_server_name,
+							  table_info->catalog_name))
 		goto out;
 
 	/*
-	 * No TTL, nothing for a cache sweep to keep warm.  Such a table can still
-	 * carry a stamp -- iceberg_refresh_metadata() writes one whatever the TTL
-	 * -- so it can reach the candidate set; bailing here before the round trip
-	 * means it costs a slot in the array and nothing else.
+	 * The TTL readers use: the table's own metadata_cache, else the FOREIGN
+	 * CATALOG's.  Reading only the table's left a TTL set on the catalog
+	 * honoured by every reader and refreshed by nobody.  No TTL, nothing for a
+	 * cache sweep to keep warm; bailing before the round trip means such a
+	 * table costs a slot in the array and nothing else.
 	 */
-	ttl = table_info->opts->metadata_cache;
+	ttl = pg_iceberg_effective_metadata_cache_ttl(table_info);
 	if (ttl <= 0)
 		goto out;
 
@@ -632,7 +642,8 @@ pg_iceberg_refresh_table_head(Relation rel)
 	 * well-defined no-op rather than an error.  Reported as "not refreshed"
 	 * with the mirror unchanged, which is exactly what happened.
 	 */
-	if (table_info->opts != NULL && table_info->opts->table != NULL)
+	if (!checkIsBuiltinCatalog(table_info->catalog_server_name,
+							   table_info->catalog_name))
 		stored = refresh_resolve_and_store(rel, table_info, false);
 
 	pg_iceberg_free_table_info(table_info);
@@ -664,6 +675,8 @@ refresh_resolve_and_store(Relation rel, IcebergTableInfo *table_info,
 {
 	IcebergLoadTableResult *load_result;
 	const char	   *nameSpace;
+	const char	   *tableName;
+	const char	   *catalogName;
 	char		   *stored = NULL;
 
 	/*
@@ -683,15 +696,31 @@ refresh_resolve_and_store(Relation rel, IcebergTableInfo *table_info,
 						 "agent URL before refreshing an external-catalog "
 						 "table.")));
 
-	nameSpace = pg_iceberg_resolve_namespace(table_info->opts->namespace,
-											 table_info->catalog_server_name,
-											 table_info->catalog_name,
-											 RelationGetNamespace(rel));
+	nameSpace = pg_iceberg_resolve_namespace(
+		table_info->opts ? table_info->opts->namespace : NULL,
+		table_info->catalog_server_name,
+		table_info->catalog_name,
+		RelationGetNamespace(rel));
+
+	/*
+	 * A table created without a `table` OPTION is known to its catalog by the
+	 * relation's own name, as on every other path that resolves it.
+	 */
+	if (table_info->opts == NULL || table_info->opts->table == NULL)
+	{
+		tableName = RelationGetRelationName(rel);
+		catalogName = NULL;
+	}
+	else
+	{
+		tableName = table_info->opts->table;
+		catalogName = table_info->opts->catalog;
+	}
 
 	/* Force-fresh: never hand the agent our own stamp here (file header). */
-	load_result = pg_iceberg_load_table(table_info->opts->catalog,
+	load_result = pg_iceberg_load_table(catalogName,
 										nameSpace,
-										table_info->opts->table,
+										tableName,
 										table_info->catalog_server_name,
 										table_info->catalog_name,
 										table_info->volume_server_name,

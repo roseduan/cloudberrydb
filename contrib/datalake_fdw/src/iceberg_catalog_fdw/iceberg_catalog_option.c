@@ -580,6 +580,42 @@ getIcebergCatalogOptions(const char* catalogServerName, const char* catalogName)
     return options;
 }
 
+/*
+ * The FOREIGN CATALOG's metadata_cache, in minutes; 0 when unset or builtin.
+ *
+ * Reads the catalog's own options only.  getIcebergCatalogOptions() also
+ * resolves the user mapping, which a TTL does not need: asking it would make
+ * "is this table due?" fail for a table whose credentials are gone, before
+ * the answer -- usually "no TTL, nothing to do" -- is even known.
+ */
+int
+getIcebergForeignCatalogMetadataCache(const char* catalogServerName, const char* catalogName)
+{
+    Oid         catalogOid;
+    HeapTuple   tuple;
+    Datum       optionsDatum;
+    bool        isnull;
+    int         metadata_cache = 0;
+
+    if (checkIsBuiltinCatalog(catalogServerName, catalogName))
+        return 0;
+
+    catalogOid = get_foreign_catalog_oid(catalogName, catalogServerName, false);
+    tuple = SearchSysCache1(FOREIGNCATALOGOID, ObjectIdGetDatum(catalogOid));
+    if (!HeapTupleIsValid(tuple))
+        elog(ERROR, "foreign catalog \"%s\" does not exist", catalogName);
+
+    optionsDatum = SysCacheGetAttr(FOREIGNCATALOGOID, tuple,
+                                   Anum_pg_foreign_catalog_fcoptions, &isnull);
+    if (!isnull)
+        metadata_cache = getIntOption(untransformRelOptions(optionsDatum),
+                                      DATALAKE_ICEBERG_CATALOG_METADATA_CACHE, 0);
+
+    ReleaseSysCache(tuple);
+
+    return metadata_cache;
+}
+
 IcebergCatalogOptions*
 getIcebergPolarisCatalogOptions(const char* catalogServerName, const char* catalogName, List* catalogOptions)
 {

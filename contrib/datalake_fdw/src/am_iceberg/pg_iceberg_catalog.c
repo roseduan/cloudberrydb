@@ -305,24 +305,25 @@ pg_iceberg_table_is_external(IcebergTableInfo *table_info)
  * unit supplies the default; a catalog that does not set it means 0, i.e.
  * every read asks the external catalog for the latest head.
  *
- * Callers must only ask on a read path: resolving the catalog options costs
- * syscache lookups, and the head resolver also runs from PRE_COMMIT, which
- * never caches.
+ * Callers must not ask from PRE_COMMIT: resolving the catalog options costs
+ * syscache lookups, and the head resolver also runs from there, where it never
+ * caches.  The read path and the background refresh ask; both must use this
+ * one rule, or a TTL set only on the FOREIGN CATALOG is honoured by readers
+ * and never refreshed.
  */
-static int
-resolve_metadata_cache_ttl_min(IcebergTableInfo *table_info)
+int
+pg_iceberg_effective_metadata_cache_ttl(IcebergTableInfo *table_info)
 {
-	IcebergCatalogOptions  *catalog_options;
-
 	if (table_info->opts != NULL && table_info->opts->metadata_cache >= 0)
 		return table_info->opts->metadata_cache;
 
-	catalog_options = getIcebergCatalogOptions(table_info->catalog_server_name,
-											   table_info->catalog_name);
-	if (catalog_options == NULL)
-		return 0;
-
-	return Max(catalog_options->foreign_catalog.metadata_cache, 0);
+	/*
+	 * Not getIcebergCatalogOptions(): that resolves the user mapping too, so a
+	 * table whose mapping is gone would raise here -- in the background
+	 * refresh, on every cycle, for a table that has no TTL to begin with.
+	 */
+	return Max(getIcebergForeignCatalogMetadataCache(table_info->catalog_server_name,
+													 table_info->catalog_name), 0);
 }
 
 /*
@@ -393,7 +394,7 @@ pg_iceberg_get_latest_metadata_location(Oid relid, IcebergTableInfo *table_info,
 	 * Only resolved on a read path: this function also runs from PRE_COMMIT,
 	 * which never caches, and resolving the catalog options is not free.
 	 */
-	ttl = allow_cache ? resolve_metadata_cache_ttl_min(table_info) : 0;
+	ttl = allow_cache ? pg_iceberg_effective_metadata_cache_ttl(table_info) : 0;
 
 	/*
 	 * issue #393 metadata cache.  On read/scan paths (allow_cache) with a

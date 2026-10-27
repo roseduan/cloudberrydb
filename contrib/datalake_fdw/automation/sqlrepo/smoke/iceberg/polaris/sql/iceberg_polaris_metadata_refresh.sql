@@ -147,18 +147,28 @@ SELECT metadata_cached_at = :after_refresh AS stamp_unchanged_within_ttl
 FROM pg_ext_aux.pg_iceberg_metadata WHERE relid = 'metaref_cached'::regclass;
 
 -- ============================================================
--- Test 5: what the sweep still will not touch -- a table with no TTL, and a
---         built-in-catalog table.  Neither is a candidate, so both keep a NULL
---         stamp however many cycles run.
+-- Test 5: what the sweep still will not touch -- a table with no TTL (with or
+--         without a `table` OPTION), and a built-in-catalog table.  None is a
+--         candidate, so each keeps a NULL stamp however many cycles run.
 -- ============================================================
 CREATE ICEBERG TABLE metaref_nocache (id bigint)
 OPTIONS (namespace 'public', table 'metaref_nocache');
 INSERT INTO metaref_nocache VALUES (1);
 SELECT count(*) AS rows_seen FROM metaref_nocache;
 
-CREATE ICEBERG TABLE metaref_internal (id bigint);
-INSERT INTO metaref_internal VALUES (1);
-SELECT count(*) AS rows_seen FROM metaref_internal;
+-- On the Polaris catalog, without a `table` OPTION.
+CREATE ICEBERG TABLE metaref_nooption (id bigint);
+INSERT INTO metaref_nooption VALUES (1);
+SELECT count(*) AS rows_seen FROM metaref_nooption;
+
+-- On a built-in catalog.
+CREATE SERVER metaref_builtin_srv FOREIGN DATA WRAPPER iceberg_catalog_fdw;
+CREATE USER MAPPING FOR current_user SERVER metaref_builtin_srv;
+CREATE FOREIGN CATALOG metaref_builtin SERVER metaref_builtin_srv;
+CREATE ICEBERG TABLE metaref_builtin_t (id bigint) CATALOG metaref_builtin
+OPTIONS (metadata_cache '5');
+INSERT INTO metaref_builtin_t VALUES (1);
+SELECT count(*) AS rows_seen FROM metaref_builtin_t;
 
 SELECT iceberg_refresh_metadata_cache() >= 0 AS ran;
 
@@ -167,8 +177,40 @@ SELECT iceberg_refresh_metadata_cache() >= 0 AS ran;
 SELECT relid::regclass::text AS tbl,
        metadata_cached_at IS NULL AS untouched_by_sweep
 FROM pg_ext_aux.pg_iceberg_metadata
-WHERE relid IN ('metaref_nocache'::regclass, 'metaref_internal'::regclass)
+WHERE relid IN ('metaref_nocache'::regclass, 'metaref_nooption'::regclass,
+                'metaref_builtin_t'::regclass)
 ORDER BY 1;
+
+-- ============================================================
+-- Test 5b: the sweep decides by the catalog, not by the `table` OPTION
+--          (issue #461).  A table created without one on a Polaris catalog
+--          is moved by other engines all the same, and used to be skipped.
+-- ============================================================
+CREATE ICEBERG TABLE metaref_nooption_ttl (id bigint)
+OPTIONS (metadata_cache '5');
+INSERT INTO metaref_nooption_ttl VALUES (1);
+
+SELECT iceberg_refresh_metadata_cache() >= 1 AS ran;
+
+SELECT metadata_cached_at IS NOT NULL AS swept_without_table_option
+FROM pg_ext_aux.pg_iceberg_metadata WHERE relid = 'metaref_nooption_ttl'::regclass;
+
+-- ============================================================
+-- Test 5c: the sweep uses the TTL readers use -- the table's, else the
+--          FOREIGN CATALOG's.  A TTL set only on the catalog used to be
+--          honoured by readers and refreshed by nobody (issue #461).
+-- ============================================================
+CREATE FOREIGN CATALOG metaref_cat_ttl
+SERVER metaref_cat_srv
+OPTIONS (catalog_name 'polaris_default_catalog', metadata_cache '5');
+CREATE ICEBERG TABLE metaref_catalog_ttl (id bigint) CATALOG metaref_cat_ttl
+OPTIONS (namespace 'public', table 'metaref_catalog_ttl');
+INSERT INTO metaref_catalog_ttl VALUES (1);
+
+SELECT iceberg_refresh_metadata_cache() >= 1 AS ran;
+
+SELECT metadata_cached_at IS NOT NULL AS swept_with_catalog_ttl
+FROM pg_ext_aux.pg_iceberg_metadata WHERE relid = 'metaref_catalog_ttl'::regclass;
 
 -- ============================================================
 -- Test 6: iceberg_refresh_metadata() re-points a mirror that has drifted
@@ -217,8 +259,9 @@ FROM pg_ext_aux.pg_iceberg_metadata WHERE relid = 'metaref_cached'::regclass;
 
 -- ============================================================
 -- Test 7: the single-table function ignores the filters the sweep applies --
---         a table with no TTL and no stamp is refreshed on demand, and a
---         built-in-catalog table is a defined no-op rather than an error.
+--         a table with no TTL and no stamp is refreshed on demand, with or
+--         without a `table` OPTION, and a built-in-catalog table is a defined
+--         no-op rather than an error.
 -- ============================================================
 SET client_min_messages = warning;
 SELECT current_head IS NOT NULL AS resolved_a_head
@@ -228,8 +271,17 @@ RESET client_min_messages;
 SELECT metadata_cached_at IS NOT NULL AS stamped_on_demand
 FROM pg_ext_aux.pg_iceberg_metadata WHERE relid = 'metaref_nocache'::regclass;
 
+SET client_min_messages = warning;
+SELECT refreshed IS NOT NULL AS ran
+FROM iceberg_refresh_metadata('metaref_nooption');
+RESET client_min_messages;
+
+-- Only a round trip to the catalog stamps the row.
+SELECT metadata_cached_at IS NOT NULL AS stamped_without_table_option
+FROM pg_ext_aux.pg_iceberg_metadata WHERE relid = 'metaref_nooption'::regclass;
+
 SELECT refreshed, previous_head = current_head AS builtin_is_a_noop
-FROM iceberg_refresh_metadata('metaref_internal');
+FROM iceberg_refresh_metadata('metaref_builtin_t');
 
 -- ============================================================
 -- Test 8: a table this transaction has already written is refused -- moving
@@ -283,7 +335,13 @@ DROP TASK metaref_sweep;
 ALTER SYSTEM RESET datalake_fdw.metadata_refresh_enabled;
 SELECT pg_reload_conf();
 
-DROP TABLE metaref_internal;
+DROP TABLE metaref_catalog_ttl;
+DROP TABLE metaref_nooption_ttl;
+DROP TABLE metaref_builtin_t;
+DROP TABLE metaref_nooption;
+DROP CATALOG metaref_cat_ttl;
+DROP CATALOG metaref_builtin;
+DROP SERVER metaref_builtin_srv CASCADE;
 DROP TABLE metaref_nocache;
 DROP TABLE metaref_cached;
 DROP CATALOG metaref_cat;

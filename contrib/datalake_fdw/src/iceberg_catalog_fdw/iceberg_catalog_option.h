@@ -201,6 +201,7 @@ extern char *deriveEndpointFromUrl(const char *url);
 extern void validateRestServerOptionList(List *server_options);
 
 IcebergCatalogOptions *getIcebergCatalogOptions(const char* catalogServerName, const char* catalogName);
+int getIcebergForeignCatalogMetadataCache(const char* catalogServerName, const char* catalogName);
 
 IcebergCatalogOptions*
 getIcebergPolarisCatalogOptions(const char* catalogServerName, const char* catalogName, List* catalogOptions);
