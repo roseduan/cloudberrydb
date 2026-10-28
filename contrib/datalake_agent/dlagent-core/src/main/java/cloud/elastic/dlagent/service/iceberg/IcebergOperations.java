@@ -349,6 +349,21 @@ public class IcebergOperations {
             requestContextFactory.populateFilterTupleDescription(request, context);
         }
 
+        // A read of a table on an external catalog asks to be checked against
+        // the schema it is about to scan: another engine may have changed it
+        // since the table was bound (lightning issue #461).  The local
+        // definition is the request's "schema", tagged with PostgreSQL types
+        // as for the bind-time check.
+        if (Boolean.TRUE.equals(request.get("check-schema"))) {
+            Object requestedSchema = request.get("schema");
+            if (!(requestedSchema instanceof Map)) {
+                throw new IllegalArgumentException("\"check-schema\" requires a \"schema\" object");
+            }
+            @SuppressWarnings("unchecked")
+            Map<String, Object> schemaObject = (Map<String, Object>) requestedSchema;
+            context.setRequestedColumns(RequestedColumn.fromSchemaMap(schemaObject, null));
+        }
+
         // Get table metadata fragment using ServiceResult
         String fragment = icebergService.getTableFragment(namespace, table, properties, context);
 

@@ -897,6 +897,9 @@ createCreateRequestJson(IcebergCatalogFdwState* fdwState, IcebergCatalogOptions 
             DATALAKEFDW_ICEBERG_KEY_PROPERTIES, properties);
     }
 
+    if (fdwState->catalogOperation == ICEBERG_GET_FRAGMENT && req.checkSchema)
+        agentcli_cJSON_AddBoolToObject(request, "check-schema", 1);
+
     char *json_string = agentcli_cJSON_PrintUnformatted(request);
     agentcli_cJSON_Delete(request);
     return json_string;

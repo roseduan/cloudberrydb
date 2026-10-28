@@ -74,6 +74,38 @@ public final class ExistingTableSchemaCheck {
     }
 
     public static void check(TableIdentifier tableId, List<RequestedColumn> requested, Schema existing) {
+        List<String> errors = problems(requested, existing, false);
+        if (!errors.isEmpty()) {
+            throw new IllegalArgumentException(String.format(
+                    "Table %s already exists in the catalog with a different schema, so it cannot be "
+                    + "used by this table: %s. Existing schema: %s. Declare the columns to match "
+                    + "the existing schema.",
+                    tableId, String.join("; ", errors), existing.asStruct()));
+        }
+    }
+
+    /**
+     * The same rules at read time (lightning issue #461): the table was bound
+     * by them, but another engine has since changed its schema, so the local
+     * definition no longer reads it correctly.  Refuse the read rather than
+     * return values decoded as the wrong column or type.  Columns appended
+     * after the declared ones are the one change that reads correctly, and
+     * pass.
+     */
+    public static void checkForRead(TableIdentifier tableId, List<RequestedColumn> requested,
+                                    Schema current) {
+        List<String> errors = problems(requested, current, true);
+        if (!errors.isEmpty()) {
+            throw new IllegalArgumentException(String.format(
+                    "Table %s in the catalog no longer matches this table's definition, so it "
+                    + "cannot be read: %s. Current schema: %s. Its schema was changed outside this "
+                    + "database; recreate the table to match the current schema.",
+                    tableId, String.join("; ", errors), current.asStruct()));
+        }
+    }
+
+    static List<String> problems(List<RequestedColumn> requested, Schema existing,
+                                 boolean allowAppended) {
         List<String> errors = new ArrayList<>();
         List<Types.NestedField> columns = existing.columns();
         // Top-level columns by case-folded name; a list, because the table may
@@ -91,11 +123,16 @@ public final class ExistingTableSchemaCheck {
             indexLeaves(f, f.name(), firstLeaf, leafPath);
         }
 
-        if (requested.size() != columns.size()) {
+        // Columns another engine appended after the ones the local table
+        // declares change nothing it reads: they are past its last attribute
+        // and their ids are past its last field-id.  Allowed at read time only;
+        // a bind still declares the table in full.
+        int compared = allowAppended ? Math.min(requested.size(), columns.size()) : columns.size();
+        if (allowAppended ? requested.size() > columns.size() : requested.size() != columns.size()) {
             errors.add(String.format("the local table declares %d columns, the existing table has %d",
                     requested.size(), columns.size()));
         }
-        for (int i = 0; i < columns.size(); i++) {
+        for (int i = 0; i < compared; i++) {
             if (columns.get(i).fieldId() != i + 1) {
                 errors.add(String.format("existing column \"%s\" has field-id %d at position %d; "
                         + "only a table whose field-ids are its column positions can be bound",
@@ -141,13 +178,7 @@ public final class ExistingTableSchemaCheck {
             }
         }
 
-        if (!errors.isEmpty()) {
-            throw new IllegalArgumentException(String.format(
-                    "Table %s already exists in the catalog with a different schema, so it cannot be "
-                    + "used by this table: %s. Existing schema: %s. Declare the columns to match "
-                    + "the existing schema.",
-                    tableId, String.join("; ", errors), existing.asStruct()));
-        }
+        return errors;
     }
 
     /*

@@ -20,6 +20,7 @@
 package cloud.elastic.dlagent.plugins.iceberg;
 
 import cloud.elastic.dlagent.api.error.UnsupportedTypeException;
+import cloud.elastic.dlagent.service.iceberg.ExistingTableSchemaCheck;
 import cloud.elastic.dlagent.api.filter.Operator;
 import cloud.elastic.dlagent.api.filter.TreeTraverser;
 import cloud.elastic.dlagent.api.filter.FilterParser;
@@ -1119,6 +1120,17 @@ public class IcebergMetadataFetcher extends BasePlugin implements MetadataFetche
                 projSchema = table.schemas().get(sid);
             }
         }
+        // A read of a table on an external catalog: refuse it when another
+        // engine has changed the schema since the table was bound, rather than
+        // decode the files by a definition that no longer describes them
+        // (lightning issue #461).  Not for time travel: an older snapshot's
+        // schema may differ from the definition by design.
+        if (context.getRequestedColumns() != null && requestedSnapshotId <= 0L) {
+            ExistingTableSchemaCheck.checkForRead(
+                    TableIdentifier.parse(context.getDataSource()),
+                    context.getRequestedColumns(), table.schema());
+        }
+
         scan = scan.project(expectedSchema(table, projSchema));
 
         // Apply predicate pushdown so manifest column bounds prune data files,

@@ -268,6 +268,17 @@ execute_get_fragments_via_fdw(const char *metadata_location,
 	/* Time travel: the target snapshot (0 = HEAD) for the agent to useSnapshot. */
 	fdwState->request.snapshotId = snapshot_id;
 
+	/*
+	 * A table on an external catalog is committed to by other engines, which
+	 * may change its schema after it was bound; have the agent refuse the read
+	 * when this relation's columns no longer describe it (lightning issue
+	 * #461).  Not for time travel, whose snapshot may predate the definition,
+	 * and not for the builtin catalog, whose schema only this cluster changes.
+	 */
+	fdwState->request.checkSchema =
+		snapshot_id <= 0 &&
+		!checkIsBuiltinCatalog(catalogServer, foreignCatalogName);
+
 	scanstate->fdw_state = fdwState;
 	fdwRoutine->BeginForeignScan(scanstate, 0);
 	fdwRoutine->EndForeignScan(scanstate);

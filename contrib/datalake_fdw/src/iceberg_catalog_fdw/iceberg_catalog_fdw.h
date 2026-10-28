@@ -130,6 +130,12 @@ typedef struct IcebergCatalogRequest {
 	List* schemaOps;  /* List of IcebergSchemaOp*, for ICEBERG_UPDATE_SCHEMA ALTER TABLE (#401) */
 	int64 snapshotId;  /* time travel: read this Iceberg snapshot (0 = HEAD/current) */
 	/*
+	 * get-fragment only: ask the agent to check `schema` against the schema
+	 * it is about to scan and refuse the read when another engine has changed
+	 * it since the table was bound (lightning issue #461).
+	 */
+	bool checkSchema;
+	/*
 	 * issue #393 external-catalog metadata cache (load-table only).  On a
 	 * load-table the AM layer passes the cached head (metadataLocation above),
 	 * when it was last refreshed (metadataTimestamp, epoch ms) and the per-table
