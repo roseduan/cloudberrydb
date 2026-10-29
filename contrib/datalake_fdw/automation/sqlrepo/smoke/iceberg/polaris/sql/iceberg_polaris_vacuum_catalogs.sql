@@ -1,0 +1,147 @@
+-- VACUUM compaction on the hadoop and s3 catalogs (issue #463).
+--
+-- iceberg_polaris_vacuum covers Polaris.  The fix it pins -- commit a
+-- non-builtin table's compaction through the catalog (COMMIT_REWRITE) and
+-- never queue its rewritten files for deletion -- applies to every
+-- non-builtin catalog, and the hadoop and s3 catalogs reach it through their
+-- own catalog implementations, so they are checked here the same way: with
+-- and without OPTIONS, the compaction must survive a later INSERT, nothing
+-- may be queued for deletion, and the data must be intact.
+--
+-- The consumer is held off while the queue is inspected, so a wrongly queued
+-- row cannot be drained before it is seen.
+SET client_min_messages = warning;
+CREATE EXTENSION IF NOT EXISTS datalake_fdw;
+RESET client_min_messages;
+
+ALTER SYSTEM SET datalake_fdw.deletion_queue_enabled = off;
+SELECT pg_reload_conf();
+
+CREATE SERVER vaccat_vol_srv
+FOREIGN DATA WRAPPER iceberg_volume_fdw
+OPTIONS (
+    type 's3',
+    endpoint 'http://minio:9000',
+    region 'us-east-1',
+    bucket_name 'warehouse',
+    path_style_access 'true'
+);
+CREATE USER MAPPING FOR current_user
+SERVER vaccat_vol_srv
+OPTIONS (access_key_id 'admin', secret_access_key 'admin12345');
+CREATE FOREIGN VOLUME vaccat_vol SERVER vaccat_vol_srv
+OPTIONS (base_path '/vaccat/', allow_writes 'true');
+SET iceberg_default_volume = 'vaccat_vol';
+
+CREATE SERVER vaccat_hd_srv FOREIGN DATA WRAPPER iceberg_catalog_fdw
+OPTIONS (type 'hadoop');
+CREATE USER MAPPING FOR current_user SERVER vaccat_hd_srv;
+CREATE FOREIGN CATALOG vaccat_hd SERVER vaccat_hd_srv
+OPTIONS (warehouse_location_prefix 's3a://warehouse/vaccat/hadoop/');
+
+CREATE SERVER vaccat_s3_srv FOREIGN DATA WRAPPER iceberg_catalog_fdw
+OPTIONS (type 's3');
+CREATE USER MAPPING FOR current_user SERVER vaccat_s3_srv;
+CREATE FOREIGN CATALOG vaccat_s3 SERVER vaccat_s3_srv
+OPTIONS (warehouse_location_prefix 's3a://warehouse/vaccat/s3/');
+
+-- One file per INSERT: six files, above the default threshold of five.
+CREATE FUNCTION vaccat_seed(tbl regclass) RETURNS void AS $$
+BEGIN
+    FOR i IN 1..6 LOOP
+        EXECUTE format('INSERT INTO %s VALUES (%s, %L)', tbl, i, 'v' || i);
+    END LOOP;
+END $$ LANGUAGE plpgsql;
+
+CREATE FUNCTION vaccat_state(tbl regclass)
+RETURNS TABLE (operation text, data_files int, records int) AS $$
+    SELECT operation,
+           (summary->>'total-data-files')::int,
+           (summary->>'total-records')::int
+      FROM iceberg_snapshot_list(tbl)
+     WHERE is_current;
+$$ LANGUAGE SQL;
+
+-- VACUUM, then check the compaction, the queue, a later INSERT and the data.
+CREATE FUNCTION vaccat_check(tbl regclass)
+RETURNS TABLE (compacted bool, queued bigint, replace_snapshots bigint,
+               still_compacted bool, records int, rows_seen bigint, id_sum bigint) AS $$
+DECLARE
+    c bool;
+    q bigint;
+BEGIN
+    SELECT s.data_files < 6 INTO c FROM vaccat_state(tbl) s;
+    SELECT count(*) INTO q FROM pg_ext_aux.pg_iceberg_deletion_queue
+     WHERE table_name = tbl;
+    EXECUTE format('INSERT INTO %s VALUES (7, %L)', tbl, 'v7');
+    RETURN QUERY
+        SELECT c, q,
+               (SELECT count(*) FILTER (WHERE l.operation = 'replace')
+                  FROM iceberg_snapshot_list(tbl) l),
+               s.data_files < 7, s.records,
+               (SELECT count(*) FROM vaccat_rows(tbl)),
+               (SELECT sum(id) FROM vaccat_rows(tbl))
+          FROM vaccat_state(tbl) s;
+END $$ LANGUAGE plpgsql;
+
+CREATE FUNCTION vaccat_rows(tbl regclass) RETURNS TABLE (id int) AS $$
+BEGIN
+    RETURN QUERY EXECUTE format('SELECT id FROM %s', tbl);
+END $$ LANGUAGE plpgsql;
+
+-- ============================================================
+-- hadoop catalog (S3 storage)
+-- ============================================================
+SET iceberg_default_catalog = 'vaccat_hd';
+CREATE ICEBERG TABLE vaccat_hd_plain (id int, name text);
+CREATE ICEBERG TABLE vaccat_hd_src (id int, name text);
+CREATE ICEBERG TABLE vaccat_hd_opts (id int, name text)
+OPTIONS (namespace 'public', table 'vaccat_hd_src');
+SELECT vaccat_seed('vaccat_hd_plain');
+SELECT vaccat_seed('vaccat_hd_opts');
+VACUUM vaccat_hd_plain;
+VACUUM vaccat_hd_opts;
+SELECT * FROM vaccat_check('vaccat_hd_plain');
+SELECT * FROM vaccat_check('vaccat_hd_opts');
+
+-- ============================================================
+-- s3 catalog
+-- ============================================================
+SET iceberg_default_catalog = 'vaccat_s3';
+CREATE ICEBERG TABLE vaccat_s3_plain (id int, name text);
+CREATE ICEBERG TABLE vaccat_s3_src (id int, name text);
+CREATE ICEBERG TABLE vaccat_s3_opts (id int, name text)
+OPTIONS (namespace 'public', table 'vaccat_s3_src');
+SELECT vaccat_seed('vaccat_s3_plain');
+SELECT vaccat_seed('vaccat_s3_opts');
+VACUUM vaccat_s3_plain;
+VACUUM vaccat_s3_opts;
+SELECT * FROM vaccat_check('vaccat_s3_plain');
+SELECT * FROM vaccat_check('vaccat_s3_opts');
+
+-- ============================================================
+-- Cleanup
+-- ============================================================
+DROP TABLE vaccat_hd_opts;
+DROP TABLE vaccat_hd_src;
+DROP TABLE vaccat_hd_plain;
+DROP TABLE vaccat_s3_opts;
+DROP TABLE vaccat_s3_src;
+DROP TABLE vaccat_s3_plain;
+ALTER SYSTEM RESET datalake_fdw.deletion_queue_enabled;
+SELECT pg_reload_conf();
+RESET iceberg_default_catalog;
+RESET iceberg_default_volume;
+DROP FUNCTION vaccat_check(regclass);
+DROP FUNCTION vaccat_rows(regclass);
+DROP FUNCTION vaccat_state(regclass);
+DROP FUNCTION vaccat_seed(regclass);
+DROP CATALOG vaccat_s3;
+DROP USER MAPPING FOR current_user SERVER vaccat_s3_srv;
+DROP SERVER vaccat_s3_srv;
+DROP CATALOG vaccat_hd;
+DROP USER MAPPING FOR current_user SERVER vaccat_hd_srv;
+DROP SERVER vaccat_hd_srv;
+DROP VOLUME vaccat_vol;
+DROP USER MAPPING FOR current_user SERVER vaccat_vol_srv;
+DROP SERVER vaccat_vol_srv;

@@ -1,0 +1,138 @@
+-- DROP TABLE of an external-catalog iceberg table must not delete its files
+-- (issue #462).
+--
+-- A table on an external catalog (polaris, rest, hive, hadoop, s3) stays
+-- registered there after DROP; only the local definition goes, and
+-- recreating the name reattaches to it.  The OAT_DROP hook used to decide
+-- whether to enqueue the table's files for deletion by is_internal, which a
+-- table created on an external catalog without OPTIONS (table ...) records
+-- as true -- so DROP queued, and the autovacuum consumer then deleted, the
+-- files of a table the external catalog still holds.
+--
+-- Every assertion runs INSIDE the DROP's transaction, so the result is
+-- immune to the async consumer (it cannot see uncommitted queue rows).  A
+-- builtin-catalog table is the control: its DROP must still enqueue.
+SET client_min_messages = warning;
+CREATE EXTENSION IF NOT EXISTS datalake_fdw;
+RESET client_min_messages;
+
+-- ============================================================
+-- Setup: one S3 (MinIO) volume, and polaris / hadoop / s3 / builtin catalogs
+-- ============================================================
+CREATE SERVER dropkeep_vol_srv
+FOREIGN DATA WRAPPER iceberg_volume_fdw
+OPTIONS (
+    type 's3',
+    endpoint 'http://minio:9000',
+    region 'us-east-1',
+    bucket_name 'warehouse',
+    path_style_access 'true'
+);
+CREATE USER MAPPING FOR current_user
+SERVER dropkeep_vol_srv
+OPTIONS (access_key_id 'admin', secret_access_key 'admin12345');
+CREATE FOREIGN VOLUME dropkeep_vol SERVER dropkeep_vol_srv
+OPTIONS (base_path '/dropkeep/', allow_writes 'true');
+SET iceberg_default_volume = 'dropkeep_vol';
+
+CREATE SERVER dropkeep_pol_srv
+FOREIGN DATA WRAPPER iceberg_catalog_fdw
+OPTIONS (type 'polaris', url 'http://polaris:8181/api/catalog');
+CREATE USER MAPPING FOR current_user
+SERVER dropkeep_pol_srv
+OPTIONS (client_id 'root', client_secret 's3cr3t', scope 'PRINCIPAL_ROLE:ALL');
+CREATE FOREIGN CATALOG dropkeep_pol SERVER dropkeep_pol_srv
+OPTIONS (catalog_name 'polaris_default_catalog');
+
+CREATE SERVER dropkeep_hd_srv FOREIGN DATA WRAPPER iceberg_catalog_fdw
+OPTIONS (type 'hadoop');
+CREATE USER MAPPING FOR current_user SERVER dropkeep_hd_srv;
+CREATE FOREIGN CATALOG dropkeep_hd SERVER dropkeep_hd_srv
+OPTIONS (warehouse_location_prefix 's3a://warehouse/dropkeep/hadoop/');
+
+CREATE SERVER dropkeep_s3_srv FOREIGN DATA WRAPPER iceberg_catalog_fdw
+OPTIONS (type 's3');
+CREATE USER MAPPING FOR current_user SERVER dropkeep_s3_srv;
+CREATE FOREIGN CATALOG dropkeep_s3 SERVER dropkeep_s3_srv
+OPTIONS (warehouse_location_prefix 's3a://warehouse/dropkeep/s3/');
+
+CREATE SERVER dropkeep_builtin_srv FOREIGN DATA WRAPPER iceberg_catalog_fdw;
+CREATE USER MAPPING FOR current_user SERVER dropkeep_builtin_srv;
+CREATE FOREIGN CATALOG dropkeep_builtin SERVER dropkeep_builtin_srv;
+
+-- ============================================================
+-- Tables: no OPTIONS on every catalog, plus an OPTIONS mount on polaris
+-- ============================================================
+SET iceberg_default_catalog = 'dropkeep_pol';
+CREATE ICEBERG TABLE dropkeep_pol_t (id int, v text);
+INSERT INTO dropkeep_pol_t VALUES (1, 'keep');
+CREATE ICEBERG TABLE dropkeep_pol_mount (id int, v text)
+OPTIONS (namespace 'public', table 'dropkeep_pol_t');
+
+SET iceberg_default_catalog = 'dropkeep_hd';
+CREATE ICEBERG TABLE dropkeep_hd_t (id int, v text);
+INSERT INTO dropkeep_hd_t VALUES (1, 'keep');
+
+SET iceberg_default_catalog = 'dropkeep_s3';
+CREATE ICEBERG TABLE dropkeep_s3_t (id int, v text);
+INSERT INTO dropkeep_s3_t VALUES (1, 'keep');
+
+SET iceberg_default_catalog = 'dropkeep_builtin';
+CREATE ICEBERG TABLE dropkeep_builtin_t (id int, v text);
+INSERT INTO dropkeep_builtin_t VALUES (1, 'gone');
+
+-- The external tables created without OPTIONS record is_internal = true:
+-- that flag is not what decides who owns the files.
+SELECT c.relname, m.is_internal
+  FROM pg_ext_aux.pg_iceberg_metadata m
+  JOIN pg_class c ON c.oid = m.relid
+ WHERE c.relname LIKE 'dropkeep%'
+ ORDER BY c.relname;
+
+-- ============================================================
+-- DROP: only the builtin table may be queued for file deletion
+-- ============================================================
+BEGIN;
+DROP TABLE dropkeep_pol_mount;
+DROP TABLE dropkeep_pol_t;
+DROP TABLE dropkeep_hd_t;
+DROP TABLE dropkeep_s3_t;
+DROP TABLE dropkeep_builtin_t;
+SELECT table_qname
+  FROM pg_ext_aux.pg_iceberg_deletion_queue
+ WHERE table_qname LIKE '%dropkeep%'
+ ORDER BY table_qname;
+-- The local bookkeeping goes for all of them.
+SELECT count(*) AS metadata_rows_left
+  FROM pg_ext_aux.pg_iceberg_metadata m
+  JOIN pg_class c ON c.oid = m.relid
+ WHERE c.relname LIKE 'dropkeep%';
+COMMIT;
+
+-- ============================================================
+-- Cleanup
+-- ============================================================
+-- The builtin table's queued deletion would outlive the volume dropped
+-- below and then fail on every consumer pass, so remove it (the queue table
+-- has a pinned system OID).  Its files sit under dropkeep/, which
+-- installcheck clears.
+SET allow_system_table_mods = on;
+DELETE FROM pg_ext_aux.pg_iceberg_deletion_queue WHERE table_qname LIKE '%dropkeep%';
+SET allow_system_table_mods = off;
+RESET iceberg_default_catalog;
+RESET iceberg_default_volume;
+DROP CATALOG dropkeep_builtin;
+DROP USER MAPPING FOR current_user SERVER dropkeep_builtin_srv;
+DROP SERVER dropkeep_builtin_srv;
+DROP CATALOG dropkeep_s3;
+DROP USER MAPPING FOR current_user SERVER dropkeep_s3_srv;
+DROP SERVER dropkeep_s3_srv;
+DROP CATALOG dropkeep_hd;
+DROP USER MAPPING FOR current_user SERVER dropkeep_hd_srv;
+DROP SERVER dropkeep_hd_srv;
+DROP CATALOG dropkeep_pol;
+DROP USER MAPPING FOR current_user SERVER dropkeep_pol_srv;
+DROP SERVER dropkeep_pol_srv;
+DROP VOLUME dropkeep_vol;
+DROP USER MAPPING FOR current_user SERVER dropkeep_vol_srv;
+DROP SERVER dropkeep_vol_srv;

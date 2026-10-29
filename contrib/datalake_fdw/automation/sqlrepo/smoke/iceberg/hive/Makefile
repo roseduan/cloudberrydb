@@ -3,7 +3,8 @@
 PGXS := $(shell pg_config --pgxs)
 include $(PGXS)
 
-REGRESS = iceberg_hive iceberg_hive_deferred_commit iceberg_hive_options iceberg_hive_mount_schema
+REGRESS = iceberg_hive iceberg_hive_deferred_commit iceberg_hive_options iceberg_hive_mount_schema \
+          iceberg_hive_drop_vacuum
 
 # Hive Metastore requires the "public" database to exist (PG schema maps to Hive DB).
 # -n hive matters: without a user beeline connects anonymously, and creating
