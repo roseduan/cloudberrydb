@@ -13,6 +13,18 @@ m/\(insert\.c:\d+\)/
 s/\(insert\.c:\d+\)/(insert.c:NNN)/
 m/\(refresh\.c:\d+\)/
 s/\(refresh\.c:\d+\)/(refresh.c:NNN)/
+# Mask PL/pgSQL line numbers in error CONTEXT, e.g.
+#   CONTEXT:  PL/pgSQL function add_job(...) line 104 at RAISE
+# The number is an offset inside the function body, so ANY edit to the
+# extension SQL above that statement shifts it -- adding one DECLARE
+# entry moved 18 references across three expected files.  Normalize it
+# for the same reason the C elog line numbers above are normalized.
+# NOTE: pg_regress already diffs with -I CONTEXT:, which hides drift on
+# lines that START with "CONTEXT:" but NOT on the continuation lines of
+# a multi-line context -- that asymmetry made the drift look like a
+# single-line failure.  This rule covers both.
+m/PL\/pgSQL function .* line \d+ at /
+s/ line \d+ at / line X at /
 -- end_matchsubs
 
 -- start_matchignore

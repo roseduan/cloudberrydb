@@ -734,8 +734,24 @@ DROP PROCEDURE noop_grid_test(int, jsonb);
 === BGW-FULL-RETRY-BACKOFF: retry uses retry_period, not schedule_interval ===
 CREATE PROCEDURE noop_retry_fail(jid int, cfg jsonb) LANGUAGE plpgsql AS $$
 BEGIN RAISE EXCEPTION 'retry-test deliberate failure'; END$$;
+-- initial_start MUST be anchored on the mock timeline.  add_job
+-- defaults fixed_schedule => true and initial_start => now(), and
+-- now() is the REAL wall clock while everything else in this test
+-- runs on the mock clock (2024-01-04).  The failure-backoff path
+-- caps next_start at the next fixed-schedule slot
+-- (job_stat.c:calculate_next_start_on_failure), and those slots sit
+-- at initial_start + N * 1 hour -- i.e. at a real-wall-clock
+-- sub-hour offset.  Whenever add_job happened to run within ~15 s
+-- after the top of a wall-clock hour, that cap chopped the 30 s
+-- retry backoff down to a few seconds and retry_not_too_fast
+-- flipped to false (~0.4% of CI runs).  Anchoring initial_start to
+-- a whole hour on the mock timeline puts the next slot at
+-- 13:00:00, far beyond any retry_period backoff, so the cap can
+-- never bind.
 SELECT add_job('noop_retry_fail'::regproc,
-               '1 hour'::interval) AS jid_retry \gset
+               '1 hour'::interval,
+               initial_start => '2024-01-04 12:00:00+00'::timestamptz)
+       AS jid_retry \gset
 -- retry_period is not in add_job's signature; set it via alter_job.
 SELECT (alter_job(:jid_retry,
                   retry_period => '30 seconds'::interval)).id IS NOT NULL
