@@ -522,19 +522,18 @@ tracker_commit_external_table(TableMetadataState *state,
 		return NULL;
 
 	/*
-	 * For internal tables on a non-builtin catalog (Polaris/Hive used as
-	 * iceberg_default_catalog), table_info->opts->table is NULL because the
-	 * table was created without explicit OPTIONS. The commit endpoint then
-	 * needs the relation to derive the table name. External tables with
-	 * explicit OPTIONS keep the existing path and never open the rel.
+	 * The relation is opened for every table here: a table created without a
+	 * `table` OPTION is known to the catalog by the relation's name, and the
+	 * commit carries the relation's columns so the agent can refuse files
+	 * written against a schema another engine has changed since (issue #461).
+	 * This transaction already holds the DML's lock on it.
 	 *
 	 * The namespace never needs the relation: state->namespace_oid was
 	 * recorded at register time and is passed separately, so the resolver's
 	 * PG-schema fallback stays reachable on the external path too (issue
 	 * #411).
 	 */
-	if (table_info->opts == NULL || table_info->opts->table == NULL)
-		rel = table_open(state->relid, AccessShareLock);
+	rel = table_open(state->relid, AccessShareLock);
 
 	committed_metadata_location = pg_iceberg_commit_data_with_catalog(
 		rel,
@@ -649,8 +648,7 @@ tracker_commit_all(void)
 		 *     duplicate the snapshot.
 		 */
 		table_info = pg_iceberg_get_table_info(state->relid);
-		non_builtin_catalog = !pg_iceberg_is_builtin_catalog(
-			table_info->catalog_server_name);
+		non_builtin_catalog = pg_iceberg_table_has_external_head(table_info);
 
 		/*
 		 * CAS commit loop: rebase + conditional catalog update.
@@ -1423,7 +1421,7 @@ pg_iceberg_tracker_register_table(Oid relid,
 		state->is_builtin_catalog =
 			(reg_table_info != NULL &&
 			 reg_table_info->catalog_server_name != NULL)
-			? pg_iceberg_is_builtin_catalog(reg_table_info->catalog_server_name)
+			? !pg_iceberg_table_has_external_head(reg_table_info)
 			: false;
 
 		if (reg_table_info != NULL)

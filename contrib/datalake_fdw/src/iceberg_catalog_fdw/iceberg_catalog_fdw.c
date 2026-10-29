@@ -922,6 +922,23 @@ createCreateRequestJson(IcebergCatalogFdwState* fdwState, IcebergCatalogOptions 
  * Only the operations that actually move the catalog pointer get one; the
  * intermediate metadata-generating calls are not commits and stay unchanged.
  */
+/*
+ * A DML commit to a table on an external catalog carries the local
+ * definition and "check-schema" so the agent refuses to commit files written
+ * against a schema another engine has changed since (lightning issue #461).
+ * req.checkSchema is set only for such commits.
+ */
+static void
+addCommitSchemaCheck(agentcli_cJSON *request, IcebergCatalogRequest req)
+{
+    if (!req.checkSchema || req.schema == NULL)
+        return;
+
+    agentcli_cJSON_AddItemToObject(request, DATALAKEFDW_ICEBERG_KEY_SCHEMA,
+                                   createRequestedColumnsFromRequest(req));
+    agentcli_cJSON_AddBoolToObject(request, "check-schema", 1);
+}
+
 static void
 addCommitTxnId(agentcli_cJSON *request, IcebergCatalogFdwState *fdwState)
 {
@@ -1051,6 +1068,7 @@ createAppendRequestJson(IcebergCatalogFdwState* fdwState, IcebergCatalogOptions 
         agentcli_cJSON_AddItemToObject(request, DATALAKEFDW_ICEBERG_KEY_PROPERTIES, buildInProp);
     }
 
+    addCommitSchemaCheck(request, req);
     addCommitTxnId(request, fdwState);
 
     char *json_string = agentcli_cJSON_PrintUnformatted(request);
@@ -1142,6 +1160,7 @@ createUpdateRequestJson(IcebergCatalogFdwState* fdwState, IcebergCatalogOptions 
         agentcli_cJSON_AddItemToObject(request, DATALAKEFDW_ICEBERG_KEY_PROPERTIES, buildInProp);
     }
 
+    addCommitSchemaCheck(request, req);
     addCommitTxnId(request, fdwState);
 
     char *json_string = agentcli_cJSON_PrintUnformatted(request);

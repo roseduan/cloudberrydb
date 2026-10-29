@@ -22,6 +22,7 @@ package cloud.elastic.dlagent.service.iceberg;
 
 import cloud.elastic.dlagent.api.model.RequestedColumn;
 import java.io.IOException;
+import java.io.UncheckedIOException;
 import java.nio.file.Path;
 import java.util.Arrays;
 import java.util.List;
@@ -56,7 +57,10 @@ public class ReadSchemaCheckTest {
             Arrays.asList(new RequestedColumn("id", "int4", null),
                           new RequestedColumn("v", "text", null));
 
-    /** The catalog behind newTable(); its Table keeps using it, so it is closed after the test. */
+    /**
+     * The catalog behind the last newTable(); its Table keeps using it, so it
+     * stays open until the test ends or newTable() is called again.
+     */
     private HadoopCatalog catalog;
 
     @AfterEach
@@ -67,7 +71,13 @@ public class ReadSchemaCheckTest {
         }
     }
 
+    /** A new table in its own catalog; the previous one is closed first. */
     private Table newTable(Path dir) {
+        try {
+            closeCatalog();
+        } catch (IOException e) {
+            throw new UncheckedIOException(e);
+        }
         catalog = new HadoopCatalog(new Configuration(), dir.toString());
         return catalog.createTable(ID, new Schema(
                 Types.NestedField.optional(1, "id", Types.IntegerType.get()),
@@ -132,6 +142,34 @@ public class ReadSchemaCheckTest {
         t.updateSchema().addColumn("extra", Types.IntegerType.get()).commit();
         t.refresh();
         ExistingTableSchemaCheck.checkForRead(ID, LOCAL, t.schema());
+    }
+
+    @Test
+    void writeIsRefusedLikeARead(@TempDir Path dir) {
+        // Commit-time check (issue #461): files written against (id int, v text)
+        // must not be committed once v is gone or id has been widened.
+        Table t = newTable(dir);
+        t.updateSchema().deleteColumn("v").commit();
+        t.refresh();
+        String msg = assertThrows(IllegalArgumentException.class,
+                () -> ExistingTableSchemaCheck.checkForWrite(ID, LOCAL, t.schema())).getMessage();
+        assertTrue(msg.contains("cannot be written"), msg);
+        assertTrue(msg.contains("column \"v\": not in the existing table"), msg);
+
+        Table w = newTable(dir.resolve("w"));
+        w.updateSchema().updateColumn("id", Types.LongType.get()).commit();
+        w.refresh();
+        assertThrows(IllegalArgumentException.class,
+                () -> ExistingTableSchemaCheck.checkForWrite(ID, LOCAL, w.schema()));
+    }
+
+    @Test
+    void writeToATableWithAnAppendedColumnIsAllowed(@TempDir Path dir) {
+        // The written files lack the appended column, which then reads NULL.
+        Table t = newTable(dir);
+        t.updateSchema().addColumn("extra", Types.IntegerType.get()).commit();
+        t.refresh();
+        ExistingTableSchemaCheck.checkForWrite(ID, LOCAL, t.schema());
     }
 
     @Test

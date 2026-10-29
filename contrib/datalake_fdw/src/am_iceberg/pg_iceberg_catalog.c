@@ -267,36 +267,6 @@ pg_iceberg_free_table_info(IcebergTableInfo *info)
 }
 
 /*
- * Does the external catalog own `table_info`'s metadata location?
- *
- * A table carrying a `table` OPTION names a remote identifier, so the catalog
- * owns it.  A table created without one normally means the builtin catalog --
- * except on a generic REST catalog, which assigns the table's storage itself
- * and is therefore authoritative for its head no matter where the identifier
- * came from.
- *
- * Exported, and used by the scan path as well as the resolver below, because
- * those two disagreed once: the scan path kept the pre-REST `opts->table !=
- * NULL` test after the resolver learned about REST, so a REST table created
- * without an OPTIONS clause read the locally stored metadata_location on every
- * scan and never re-resolved -- it could not observe a snapshot committed
- * outside this cluster, and the metadata cache never applied to it either.
- * One predicate, one place, so the next caller cannot drift from it.
- */
-bool
-pg_iceberg_table_is_external(IcebergTableInfo *table_info)
-{
-	if (table_info == NULL)
-		return false;
-
-	if (table_info->opts != NULL && table_info->opts->table != NULL)
-		return true;
-
-	return checkIsGenericRestCatalog(table_info->catalog_server_name,
-									 table_info->catalog_name);
-}
-
-/*
  * Does `table_info`'s catalog hold the table's head, so that a reader has
  * something to resolve?  Every catalog but the builtin one does, whether or
  * not the table carries a `table` OPTION (issue #461): a table created
@@ -304,8 +274,7 @@ pg_iceberg_table_is_external(IcebergTableInfo *table_info)
  * all the same, and reading only the locally stored location never sees
  * those commits.
  *
- * The read path and the background refresh ask this; the write paths still
- * ask pg_iceberg_table_is_external(), which a later change aligns.
+ * The read path, the write path and the background refresh all ask this.
  * checkIsBuiltinCatalog() takes a catalog server with no type for builtin,
  * so a builtin table is never sent to the agent for a head it does not have;
  * an external catalog always names its type.
@@ -386,14 +355,12 @@ pg_iceberg_get_latest_metadata_location(Oid relid, IcebergTableInfo *table_info,
 	 * created without an OPTIONS clause.  See the matching comment in
 	 * pg_iceberg_create_table_with_catalog.
 	 *
-	 * Only a read (allow_cache) decides by the catalog alone, as
-	 * iceberg_fetch_fragments_json() does before calling here; the write and
-	 * commit paths, which all pass allow_cache = false, keep the OPTION-based
-	 * test for now (issue #461).
+	 * Reads and writes alike decide by the catalog alone (issue #461): a table
+	 * created without a `table` OPTION on a Polaris or Hive catalog is
+	 * committed to by other engines too, so a write must start from the
+	 * catalog's head, not from the location this cluster last stored.
 	 */
-	is_internal = allow_cache ?
-		!pg_iceberg_table_has_external_head(table_info) :
-		!pg_iceberg_table_is_external(table_info);
+	is_internal = !pg_iceberg_table_has_external_head(table_info);
 
 	if (is_internal)
 	{
@@ -540,10 +507,7 @@ pg_iceberg_get_latest_metadata_and_mode(Oid relid, bool *is_internal_out)
 
 	/* Same qualification as pg_iceberg_get_latest_metadata_location. */
 	if (is_internal_out != NULL)
-		*is_internal_out =
-			(table_info->opts == NULL || table_info->opts->table == NULL) &&
-			!checkIsGenericRestCatalog(table_info->catalog_server_name,
-									   table_info->catalog_name);
+		*is_internal_out = !pg_iceberg_table_has_external_head(table_info);
 
 	/*
 	 * and_mode() feeds the DML tracker's base; always resolve the latest head

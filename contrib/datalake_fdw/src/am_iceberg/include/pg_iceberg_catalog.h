@@ -109,25 +109,17 @@ extern char *pg_iceberg_commit_data_with_catalog(Relation rel,
 												 const char *metadata_location,
 												 CmdType operation);
 
-/*
- * Does the external catalog own this table's metadata location?  True for any
- * table naming a remote identifier, and for every table on a generic REST
- * catalog -- including one created without an OPTIONS clause, which has no
- * remote identifier but whose head the catalog still owns.  Callers deciding
- * whether to resolve the head externally must use this rather than testing for
- * a `table` OPTION; see the definition for what testing the option broke.
- */
-extern bool pg_iceberg_table_is_external(IcebergTableInfo *table_info);
 extern bool pg_iceberg_table_has_external_head(IcebergTableInfo *table_info);
 extern int	pg_iceberg_effective_metadata_cache_ttl(IcebergTableInfo *table_info);
 
 /*
- * Resolve the current metadata head.  For external-catalog tables, allow_cache
+ * Resolve the current metadata head.  A table on any non-builtin catalog
+ * (pg_iceberg_table_has_external_head) is resolved through the catalog; a
+ * builtin one answers from pg_iceberg_metadata.  For the former, allow_cache
  * enables the issue #393 metadata cache: when the effective TTL is positive the
  * agent may reuse the last-resolved head instead of hitting the external
- * catalog, and a refresh is persisted back to pg_iceberg_metadata.  The
- * effective TTL is the table's `metadata_cache` OPTION when it set one, else
- * the FOREIGN CATALOG option of the same name and unit (minutes).
+ * catalog; nothing is persisted.  The effective TTL is
+ * pg_iceberg_effective_metadata_cache_ttl().
  * Read/scan paths pass true; write/maintenance paths (DML, commit, vacuum,
  * tracker) pass false to always resolve the latest head.
  */

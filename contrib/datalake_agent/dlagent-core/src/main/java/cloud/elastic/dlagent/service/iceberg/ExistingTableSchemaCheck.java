@@ -104,6 +104,27 @@ public final class ExistingTableSchemaCheck {
         }
     }
 
+    /**
+     * The same rules at commit time (lightning issue #461): a write was
+     * planned and its files written against the local definition; if another
+     * engine has changed the schema since, committing them would put values
+     * under the wrong columns or types.  Checked against the schema the
+     * commit is about to apply to, so a change made between the write and the
+     * commit is caught too.  Columns appended after the declared ones pass, as
+     * for a read: the files simply lack them.
+     */
+    public static void checkForWrite(TableIdentifier tableId, List<RequestedColumn> requested,
+                                     Schema current) {
+        List<String> errors = problems(requested, current, true);
+        if (!errors.isEmpty()) {
+            throw new IllegalArgumentException(String.format(
+                    "Table %s in the catalog no longer matches this table's definition, so it "
+                    + "cannot be written: %s. Current schema: %s. Its schema was changed outside "
+                    + "this database; recreate the table to match the current schema.",
+                    tableId, String.join("; ", errors), current.asStruct()));
+        }
+    }
+
     static List<String> problems(List<RequestedColumn> requested, Schema existing,
                                  boolean allowAppended) {
         List<String> errors = new ArrayList<>();

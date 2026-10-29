@@ -849,6 +849,15 @@ public class IcebergMetadataFetcher extends BasePlugin implements MetadataFetche
         if (alreadyCommitted(table, "commitAppend")) {
             return ((HasTableOperations) table).operations().current().metadataFileLocation();
         }
+        // The files were written against the local definition; refuse to
+        // commit them under a schema another engine has changed since
+        // (lightning issue #461).  After the idempotency check, so a retried
+        // commit that already landed is not refused.
+        if (context.getRequestedColumns() != null) {
+            ExistingTableSchemaCheck.checkForWrite(
+                    TableIdentifier.parse(context.getDataSource()),
+                    context.getRequestedColumns(), table.schema());
+        }
         prefetchFallbackMetrics(table, context.getFragments());
         Snapshot base = table.currentSnapshot();
         Set<String> newFilePaths = new HashSet<>();
@@ -878,6 +887,15 @@ public class IcebergMetadataFetcher extends BasePlugin implements MetadataFetche
         healLegacyTableProperties(table);
         if (alreadyCommitted(table, "commitUpdate")) {
             return ((HasTableOperations) table).operations().current().metadataFileLocation();
+        }
+        // The files were written against the local definition; refuse to
+        // commit them under a schema another engine has changed since
+        // (lightning issue #461).  After the idempotency check, so a retried
+        // commit that already landed is not refused.
+        if (context.getRequestedColumns() != null) {
+            ExistingTableSchemaCheck.checkForWrite(
+                    TableIdentifier.parse(context.getDataSource()),
+                    context.getRequestedColumns(), table.schema());
         }
         prefetchFallbackMetrics(table, context.getFragments());
         Snapshot base = table.currentSnapshot();

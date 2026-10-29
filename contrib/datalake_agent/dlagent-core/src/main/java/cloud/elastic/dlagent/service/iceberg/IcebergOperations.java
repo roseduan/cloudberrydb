@@ -350,19 +350,8 @@ public class IcebergOperations {
         }
 
         // A read of a table on an external catalog asks to be checked against
-        // the schema it is about to scan: another engine may have changed it
-        // since the table was bound (lightning issue #461).  The local
-        // definition is the request's "schema", tagged with PostgreSQL types
-        // as for the bind-time check.
-        if (Boolean.TRUE.equals(request.get("check-schema"))) {
-            Object requestedSchema = request.get("schema");
-            if (!(requestedSchema instanceof Map)) {
-                throw new IllegalArgumentException("\"check-schema\" requires a \"schema\" object");
-            }
-            @SuppressWarnings("unchecked")
-            Map<String, Object> schemaObject = (Map<String, Object>) requestedSchema;
-            context.setRequestedColumns(RequestedColumn.fromSchemaMap(schemaObject, null));
-        }
+        // the schema it is about to scan (lightning issue #461).
+        applyRequestedSchemaCheck(request, context);
 
         // Get table metadata fragment using ServiceResult
         String fragment = icebergService.getTableFragment(namespace, table, properties, context);
@@ -920,6 +909,26 @@ public class IcebergOperations {
         return ServiceResult.success((Object) result).withHeader("ETag", etag);
     }
 
+    /**
+     * A request on a table on an external catalog may carry "check-schema":
+     * another engine may have changed the table's schema since it was bound
+     * (lightning issue #461), so the local definition -- the request's
+     * "schema", tagged with PostgreSQL types as for the bind-time check -- is
+     * checked against the schema the read scans or the commit applies to.
+     */
+    private static void applyRequestedSchemaCheck(Map<String, Object> request, RequestContext context) {
+        if (!Boolean.TRUE.equals(request.get("check-schema"))) {
+            return;
+        }
+        Object requestedSchema = request.get("schema");
+        if (!(requestedSchema instanceof Map)) {
+            throw new IllegalArgumentException("\"check-schema\" requires a \"schema\" object");
+        }
+        @SuppressWarnings("unchecked")
+        Map<String, Object> schemaObject = (Map<String, Object>) requestedSchema;
+        context.setRequestedColumns(RequestedColumn.fromSchemaMap(schemaObject, null));
+    }
+
     public ServiceResult<Object> commitAppend(
             String prefix,
             String table,
@@ -941,6 +950,9 @@ public class IcebergOperations {
         if (fragmentMaps == null || fragmentMaps.isEmpty()) {
             return ServiceResult.failure("Fragments are required for commitAppend", "BadRequestException", 400);
         }
+
+        // Checked against the schema the commit applies to (issue #461).
+        applyRequestedSchemaCheck(request, context);
 
         List<Fragment> fragments = convertToFragments(fragmentMaps);
         context.setFragments(fragments);
@@ -990,6 +1002,9 @@ public class IcebergOperations {
             Fragment fragment = new Fragment(path, metadata);
             fragments.add(fragment);
         }
+        // Checked against the schema the commit applies to (issue #461).
+        applyRequestedSchemaCheck(request, context);
+
         context.setFragments(fragments);
 
         Map<String, Object> result = icebergService.commitUpdate(namespace, table, properties, context);

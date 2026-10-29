@@ -510,6 +510,18 @@ execute_catalog_op_via_fdw(IcebergCatalogOperation op,
 
 	fdwState->request.appendJson = data_locations;
 
+	/*
+	 * A DML commit to a table on an external catalog: have the agent check
+	 * the local definition against the schema the commit applies to, and
+	 * refuse when another engine has changed it since the files were written
+	 * (lightning issue #461).
+	 */
+	fdwState->request.checkSchema =
+		schema != NULL && !is_internal &&
+		(op == ICEBERG_COMMIT_APPEND || op == ICEBERG_COMMIT_UPDATE ||
+		 op == ICEBERG_COMMIT_DELETE) &&
+		!checkIsBuiltinCatalog(catalogServer, foreignCatalogName);
+
 	resultRelInfo->ri_FdwState = fdwState;
 
 	fdwRoutine->BeginForeignInsert(NULL, resultRelInfo);
