@@ -587,6 +587,42 @@ CREATE TABLE time_series.cagg_invalidation_threshold (
 -- and exposes the jsonb fields as relational columns for convenience.
 
 -- =========================================================================
+--  job_now: the one clock the job timeline is allowed to read
+-- =========================================================================
+-- Every timestamp that the scheduler compares against -- next_start,
+-- initial_start, execution_start/finish -- must come from the SAME
+-- clock.  The C side already funnels every read through
+-- timer_get_current_timestamp() (src/bgw/timer.c), which the mock-time
+-- test suite swaps for a virtual clock via timer_set().  SQL-level
+-- now() bypasses that indirection: under mock time it returns the real
+-- wall clock while the scheduler is running years away on the virtual
+-- one, and the two then get subtracted from each other.
+--
+-- job_now() exposes the timer abstraction to SQL so both sides agree.
+-- In production the timer is standard_timer, i.e. GetCurrentTimestamp(),
+-- so job_now() is now() modulo the (sub-millisecond) difference between
+-- transaction start and statement execution.
+--
+-- Rule 1: anything written into bgw_job / bgw_job_stat /
+-- bgw_job_stat_history, or compared against a column in them, uses
+-- job_now().  Pure audit columns (creation_time, created_at) may keep
+-- now().  test/regress/sql/mock_clock_purity.sql enforces this.
+--
+-- Rule 2: ALWAYS resolve job_now() into a local variable first; never
+-- call it inline in a query that also touches a distributed table.  It
+-- reports the clock of whichever process evaluates it, and such a query
+-- may evaluate it on a QE -- which has neither the mock timer nor the
+-- coordinator's clock (in production, not even the same host clock).
+-- now() did not have this problem: the coordinator's transaction
+-- timestamp is dispatched to the segments.
+CREATE FUNCTION time_series.job_now()
+RETURNS timestamptz
+AS 'MODULE_PATHNAME', 'ts_job_now'
+LANGUAGE C VOLATILE;
+COMMENT ON FUNCTION time_series.job_now() IS
+    'current time on the BGW job timeline (mock-clock aware)';
+
+-- =========================================================================
 --  BGW Job Scheduling Tables (generic framework, matches upstream bgw_job)
 -- =========================================================================
 
@@ -750,6 +786,7 @@ CREATE OR REPLACE FUNCTION time_series.bgw_job_stat_history_purge(
 ) RETURNS bigint LANGUAGE plpgsql AS $$
 DECLARE
     v_deleted bigint;
+    v_cutoff  timestamptz;
 BEGIN
     IF p_older_than IS NULL OR p_older_than <= '0'::interval THEN
         RAISE EXCEPTION 'p_older_than must be a positive interval';
@@ -764,11 +801,16 @@ BEGIN
     --       grows unbounded across long-stability runs even with the
     --       retention policy enabled.  Compare execution_start instead
     --       (set by mark_start before the policy proc fired).
+    -- Resolved once, on the coordinator (see job_now()'s header): the
+    -- cutoff must be a single constant dispatched to every segment, not
+    -- a per-QE clock read.
+    v_cutoff := time_series.job_now() - p_older_than;
+
     DELETE FROM time_series.bgw_job_stat_history
      WHERE (execution_finish IS NOT NULL
-            AND execution_finish < now() - p_older_than)
+            AND execution_finish < v_cutoff)
         OR (execution_finish IS NULL
-            AND execution_start  < now() - p_older_than);
+            AND execution_start  < v_cutoff);
     GET DIAGNOSTICS v_deleted = ROW_COUNT;
     RETURN v_deleted;
 END $$;
@@ -1149,6 +1191,10 @@ DECLARE
     v_job_id    int;
     v_app_name  text;
     v_config    jsonb;
+    -- Resolved once, on the coordinator: job_now() reads
+    -- process-local timer state, so a QE evaluating it inline
+    -- inside a distributed DML would read a different clock.
+    v_now       timestamptz := time_series.job_now();
 BEGIN
     -- Resolve the regclass to a fully schema-qualified, quote_ident'd
     -- name.  Everything below (and the stored config) uses this text
@@ -1204,7 +1250,7 @@ BEGIN
     END;
 
     -- Validate offset semantics: when both are non-NULL, the refresh window
-    -- spans (now() - start_offset, now() - end_offset], so we require
+    -- spans (job_now() - start_offset, job_now() - end_offset], so we require
     -- start_offset > end_offset (i.e. start_time < end_time).  Mirrors
     -- upstream add_continuous_aggregate_policy validation.
     IF start_offset IS NOT NULL AND end_offset IS NOT NULL
@@ -1333,7 +1379,7 @@ BEGIN
     -- time_series.cagg_default_max_retries GUCs (see scheduler.c).
     --
     -- initial_start / timezone:
-    --   - NULL initial_start  → anchor to now() so the first run fires
+    --   - NULL initial_start  → anchor to job_now() so the first run fires
     --     immediately (legacy behavior).
     --   - non-NULL            → align fixed-schedule ticks at that anchor.
     --   - timezone is honored by the scheduler's next_start computation
@@ -1349,15 +1395,15 @@ BEGIN
          current_setting('time_series.cagg_default_max_retries')::int,
          '5 minutes'::interval, 'time_series'::name, 'policy_refresh_cagg'::name,
          true, true,
-         COALESCE(initial_start, now()), v_cagg_id, v_config, timezone)
+         COALESCE(initial_start, v_now), v_cagg_id, v_config, timezone)
     RETURNING id INTO v_job_id;
 
     -- Initialize job stat.  When the caller provided an explicit
     -- initial_start in the future, honor it so the worker doesn't fire
-    -- immediately; otherwise default to now() to mirror the legacy
+    -- immediately; otherwise default to job_now() to mirror the legacy
     -- "fire on first tick" behavior.
     INSERT INTO time_series.bgw_job_stat (job_id, next_start)
-    VALUES (v_job_id, COALESCE(initial_start, now()));
+    VALUES (v_job_id, COALESCE(initial_start, v_now));
 
     -- Broadcast relcache invalidation so the scheduler reloads on next tick
     PERFORM time_series.bgw_invalidate_cache();
@@ -1505,6 +1551,10 @@ DECLARE
     v_owner     regrole;
     v_app_name  name;
     v_config    jsonb;
+    -- Resolved once, on the coordinator: job_now() reads
+    -- process-local timer state, so a QE evaluating it inline
+    -- inside a distributed DML would read a different clock.
+    v_now       timestamptz := time_series.job_now();
 BEGIN
     -- compress_after must be positive: a recurring policy that compresses
     -- the current chunk before it is written-out would race INSERT/compress
@@ -1587,14 +1637,14 @@ BEGIN
          '1 hour'::interval,
          'time_series'::name, 'policy_compression'::name,
          true, true,
-         COALESCE(initial_start, now()),
+         COALESCE(initial_start, v_now),
          table_name::oid::int4,
          v_config,
          timezone)
     RETURNING id INTO v_job_id;
 
     INSERT INTO time_series.bgw_job_stat (job_id, next_start)
-    VALUES (v_job_id, COALESCE(initial_start, now()));
+    VALUES (v_job_id, COALESCE(initial_start, v_now));
 
     -- Wake the scheduler so it picks up the new job without waiting for
     -- the next tick.
@@ -1668,8 +1718,14 @@ $BODY$
 DECLARE
     drop_after INTERVAL;
     numrows INTEGER;
+    v_cutoff timestamptz;
 BEGIN
     drop_after := config->>'drop_after';
+
+    -- Resolved once, on the coordinator (see job_now()'s header): the
+    -- cutoff must be a single constant dispatched to every segment, not
+    -- a per-QE clock read.
+    v_cutoff := time_series.job_now() - drop_after;
 
     -- Delete BOTH closed rows (execution_finish set by mark_end) AND
     -- ghost rows (worker crashed mid-run; execution_finish stays NULL
@@ -1680,9 +1736,9 @@ BEGIN
     -- the divergence is a single OR clause and is documented inline.
     DELETE
     FROM time_series.bgw_job_stat_history
-    WHERE (execution_finish < (now() - drop_after))
+    WHERE (execution_finish < v_cutoff)
        OR (execution_finish IS NULL
-           AND execution_start < (now() - drop_after));
+           AND execution_start < v_cutoff);
 
     GET DIAGNOSTICS numrows = ROW_COUNT;
 
@@ -1926,8 +1982,8 @@ GRANT SELECT ON time_series.job_errors TO PUBLIC;
 --   - For CAGG policies, modifying `config` re-validates that `cagg_name`
 --     is still present.  Other fields are not validated structurally.
 --   - When `schedule_interval` is changed, the next_start in bgw_job_stat is
---     recomputed to (now() + schedule_interval) so the change takes effect on
---     the next scheduler tick.
+--     recomputed to (job_now() + schedule_interval) so the change takes
+--     effect on the next scheduler tick.
 --   - `next_start` overrides any other recomputation when explicitly given.
 -- =========================================================================
 CREATE OR REPLACE FUNCTION time_series.alter_job(
@@ -1946,6 +2002,10 @@ CREATE OR REPLACE FUNCTION time_series.alter_job(
 ) RETURNS time_series.bgw_job AS $$
 DECLARE
     v_job time_series.bgw_job;
+    -- Resolved once, on the coordinator: job_now() reads process-local
+    -- timer state, so a QE evaluating it inline inside a distributed
+    -- UPDATE would read a different clock.
+    v_now timestamptz := time_series.job_now();
 BEGIN
     SELECT * INTO v_job FROM time_series.bgw_job WHERE id = alter_job.job_id;
 
@@ -2024,7 +2084,7 @@ BEGIN
          WHERE bgw_job_stat.job_id = alter_job.job_id;
     ELSIF alter_job.schedule_interval IS NOT NULL THEN
         UPDATE time_series.bgw_job_stat
-           SET next_start = now() + alter_job.schedule_interval
+           SET next_start = v_now + alter_job.schedule_interval
          WHERE bgw_job_stat.job_id = alter_job.job_id;
     END IF;
 
@@ -2097,6 +2157,10 @@ DECLARE
     v_proc_kind     "char";
     v_check_schema  name;
     v_check_name    name;
+    -- Resolved once, on the coordinator: job_now() reads
+    -- process-local timer state, so a QE evaluating it inline
+    -- inside a distributed DML would read a different clock.
+    v_now           timestamptz := time_series.job_now();
 BEGIN
     -- 1. schedule_interval must be a positive interval (avoid busy-loop)
     IF schedule_interval IS NULL OR schedule_interval <= '0'::interval THEN
@@ -2206,7 +2270,7 @@ BEGIN
          '5 minutes'::interval,
          v_proc_schema, v_proc_name,
          scheduled, fixed_schedule,
-         COALESCE(initial_start, now()),
+         COALESCE(initial_start, v_now),
          0,                -- hypertable_id reserved for cagg policies
          config,
          v_check_schema, v_check_name,
@@ -2214,7 +2278,7 @@ BEGIN
     RETURNING id INTO v_job_id;
 
     INSERT INTO time_series.bgw_job_stat (job_id, next_start)
-    VALUES (v_job_id, COALESCE(initial_start, now()));
+    VALUES (v_job_id, COALESCE(initial_start, v_now));
 
     PERFORM time_series.bgw_invalidate_cache();
 

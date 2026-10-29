@@ -24,6 +24,7 @@
 #include <utils/snapmgr.h>
 
 #include "params.h"
+#include "timer_mock.h"
 
 typedef struct TestParamsWrapper
 {
@@ -247,6 +248,26 @@ Datum
 bgw_params_reset_time(PG_FUNCTION_ARGS)
 {
 	ts_params_set_time(PG_GETARG_INT64(0), PG_GETARG_BOOL(1));
+
+	/*
+	 * Put THIS backend on the mock clock as well.
+	 *
+	 * bgw_params_reset_time() is called from the test's psql session,
+	 * and that session goes on to run add_job() / alter_job() /
+	 * add_*_policy(), all of which stamp timestamps onto the job
+	 * timeline via time_series.job_now().  Without this timer_set the
+	 * session would stamp real wall-clock values into bgw_job and
+	 * bgw_job_stat while the scheduler and its workers read the virtual
+	 * clock -- the two then get compared and subtracted inside
+	 * calculate_next_start_on_failure(), the fixed-schedule slot
+	 * computation and the job-history retention policies.
+	 *
+	 * The timer is process-local state, so this only affects the
+	 * calling backend; production backends never reach this function
+	 * (the mock params DSM does not exist there).
+	 */
+	timer_set(&ts_mock_timer);
+
 	PG_RETURN_VOID();
 }
 
@@ -289,5 +310,14 @@ bgw_params_destroy(PG_FUNCTION_ARGS)
 	 * Removing shared memory segment unpin for now to keep parity with
 	 * TSDB upstream — see their comment about EXEC_BACKEND quirks.
 	 */
+
+	/*
+	 * Undo the timer_set done by bgw_params_reset_time so the rest of
+	 * this session reads the real clock again.  Tests drop
+	 * public.bgw_dsm_handle_store right after calling us, and the mock
+	 * timer cannot resolve the params segment without it.
+	 */
+	timer_set(get_standard_timer());
+
 	PG_RETURN_VOID();
 }

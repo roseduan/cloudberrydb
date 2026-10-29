@@ -216,10 +216,19 @@ SELECT count(*) > 0 AS view_populated FROM cv_full;
 SELECT (alter_job(:jid, schedule_interval => '5 minutes'::interval)).schedule_interval;
 SELECT schedule_interval FROM time_series.bgw_job WHERE id = :jid;
 
--- alter_job recomputes next_start to (now() + new schedule_interval) so the
--- change takes effect on the next scheduler tick.  We don't pin the real
--- clock, just check next_start landed in the future relative to now().
-SELECT next_start > now() AS next_start_in_future
+-- alter_job recomputes next_start to (job_now() + new schedule_interval)
+-- so the change takes effect on the next scheduler tick.  We don't pin an
+-- exact instant, just check next_start landed in the future relative to
+-- the job timeline's clock -- which under mock time is the virtual clock,
+-- NOT wall-clock now().  Comparing against now() here would assert that a
+-- 2024 mock timestamp is later than the real 20xx wall clock.
+--
+-- job_now() must be read in a query of its own: it reports the clock of
+-- whichever process evaluates it, and a query that also touches a
+-- distributed table may evaluate it on a QE -- which has neither the mock
+-- timer nor the coordinator's clock.  \gset pins the coordinator value.
+SELECT time_series.job_now() AS mock_now \gset
+SELECT next_start > :'mock_now'::timestamptz AS next_start_in_future
   FROM time_series.bgw_job_stat WHERE job_id = :jid;
 
 -- ============================================================

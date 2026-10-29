@@ -10,7 +10,7 @@ PG_REGRESS = $(top_builddir)/src/test/regress/pg_regress
 
 REGRESS = cagg_bgw_policy_scheduler_run bgw_scheduler \
           cagg_bgw_policy_e2e cagg_bgw_policy_multidb_e2e \
-          bgw_launcher bgw_mock_time \
+          bgw_launcher bgw_mock_time mock_clock_purity \
           cagg_bgw_policy_permissions \
           cagg_bgw_policy_api cagg_bgw_policy_run bgw_job \
           time_bucket gapfill gapfill_mpp \

@@ -1,0 +1,308 @@
+-- ============================================================
+-- mock_clock_purity.sql
+--
+-- Guards ONE invariant: every timestamp on the BGW job timeline --
+-- bgw_job.initial_start, bgw_job_stat.next_start / last_finish,
+-- bgw_job_stat_history.execution_start / execution_finish -- is read
+-- from the SAME clock.
+--
+-- The C side funnels every read through timer_get_current_timestamp()
+-- (src/bgw/timer.c), which the mock-time suite swaps for a virtual
+-- clock via timer_set().  SQL-level now() bypasses that indirection:
+-- under mock time it returns the real wall clock while the scheduler
+-- runs years away on the virtual one, and the two then get compared
+-- and subtracted from each other.
+--
+-- That mix is not merely cosmetic.  It silently randomized the
+-- fixed-schedule slot cap in calculate_next_start_on_failure(): slots
+-- sit at initial_start + N * schedule_interval, so with initial_start
+-- taken from the real wall clock the cap landed at a uniformly random
+-- offset relative to the mock-clock last_finish, and roughly 0.4% of
+-- CI runs saw a 30 s retry backoff chopped down to a few seconds
+-- (BGW-FULL-RETRY-BACKOFF in cagg_bgw_policy_scheduler_run).
+--
+-- time_series.job_now() exposes the timer abstraction to SQL so both
+-- sides agree.  In production the timer is standard_timer, i.e.
+-- GetCurrentTimestamp(), so job_now() is now() modulo the difference
+-- between transaction start and statement execution.
+-- ============================================================
+SET optimizer = off;
+SET timezone = 'UTC';
+DROP EXTENSION IF EXISTS time_series CASCADE;
+NOTICE:  extension "time_series" does not exist, skipping
+DROP TABLE IF EXISTS public.bgw_dsm_handle_store CASCADE;
+NOTICE:  table "bgw_dsm_handle_store" does not exist, skipping
+CREATE EXTENSION time_series;
+WARNING:  referential integrity (FOREIGN KEY) constraints are not supported in Apache Cloudberry, will not be enforced
+SET search_path TO public, time_series;
+-- The launcher auto-spawns a real (wall-clock) scheduler in every DB that
+-- has time_series installed.  This test registers a job and then drops the
+-- extension; if that scheduler is attached it holds bgw_job locks and the
+-- DROP EXTENSION deadlocks against it (the scheduler's job-list read and
+-- DROP take the same catalogs in opposite orders).  Suppressing it keeps
+-- the teardown -- and the next test file's DROP EXTENSION -- deterministic.
+-- Same pattern as bgw_job.sql and cagg_bgw_policy_scheduler_run.sql.
+SELECT time_series.stop_background_workers();
+ stop_background_workers 
+-------------------------
+ t
+(1 row)
+
+-- ============================================================
+-- CLOCK-01: job_now() tracks the real clock in an ordinary session
+--
+-- No mock params exist yet, so the timer is standard_timer and
+-- job_now() must be indistinguishable from now() for any practical
+-- purpose.  This is what makes the production behaviour of add_job /
+-- alter_job / add_*_policy unchanged by the job_now() refactor.
+-- ============================================================
+\echo '=== CLOCK-01: job_now() == wall clock without mock time ==='
+=== CLOCK-01: job_now() == wall clock without mock time ===
+SELECT abs(extract(epoch from (time_series.job_now() - now()))) < 5
+       AS job_now_tracks_wall_clock;
+ job_now_tracks_wall_clock 
+---------------------------
+ t
+(1 row)
+
+-- ============================================================
+-- CLOCK-02: no job-timeline SQL function reads now() directly
+--
+-- Source-level guard.  C functions keep their symbol name in prosrc
+-- and never match; only pl/pgsql and SQL bodies are scanned.  The
+-- pattern deliberately does not match job_now() (preceded by '_').
+--
+-- If this test fails, the offending function writes or compares a
+-- job-timeline timestamp with the wall clock.  Use
+-- time_series.job_now() instead.  Pure audit columns
+-- (ts_hypertable.creation_time, ts_chunk.compressed_at,
+-- continuous_agg.created_at) legitimately default to now() -- they are
+-- table defaults, not function bodies, so they are out of scope here.
+-- ============================================================
+\echo '=== CLOCK-02: extension SQL bodies free of bare now() ==='
+=== CLOCK-02: extension SQL bodies free of bare now() ===
+SELECT p.proname, p.pronargs
+  FROM pg_proc p
+  JOIN pg_namespace n ON n.oid = p.pronamespace
+ WHERE n.nspname = 'time_series'
+   AND p.prosrc ~ '(^|[^_[:alnum:]])now[[:space:]]*\('
+ ORDER BY p.proname, p.pronargs;
+ proname | pronargs 
+---------+----------
+(0 rows)
+
+-- ============================================================
+-- CLOCK-02b: every job_now() call is hoisted into a local variable
+--
+-- job_now() reports the clock of whichever process evaluates it.  Called
+-- inline in a query that also touches a distributed table, a QE may
+-- evaluate it -- and a QE has neither the mock timer nor (in production)
+-- the coordinator's host clock.  SQL now() is immune because the
+-- coordinator's transaction timestamp is dispatched to the segments.
+--
+-- The rule is therefore: resolve it once into a local, then use the
+-- local.  Enforced by counting schema-qualified calls and requiring every
+-- one of them to be the right-hand side of an assignment.  (Prose
+-- mentions of job_now() in comments are written unqualified on purpose,
+-- so they do not count as calls.)
+-- ============================================================
+\echo '=== CLOCK-02b: job_now() calls are assignments, never inline ==='
+=== CLOCK-02b: job_now() calls are assignments, never inline ===
+SELECT p.proname, p.pronargs
+  FROM pg_proc p
+  JOIN pg_namespace n ON n.oid = p.pronamespace
+ WHERE n.nspname = 'time_series'
+   AND p.prosrc ~ 'time_series\.job_now[[:space:]]*\('
+   AND (SELECT count(*) FROM regexp_matches(p.prosrc,
+            'time_series\.job_now[[:space:]]*\(', 'g'))
+     <> (SELECT count(*) FROM regexp_matches(p.prosrc,
+            ':=[[:space:]]*time_series\.job_now[[:space:]]*\(', 'g'))
+ ORDER BY p.proname, p.pronargs;
+ proname | pronargs 
+---------+----------
+(0 rows)
+
+-- ============================================================
+-- Mock-time setup.  bgw_params_create() stores the params DSM handle
+-- in public.bgw_dsm_handle_store, and bgw_params_reset_time() puts
+-- THIS backend on the mock clock so the job-management SQL below
+-- stamps virtual, not real, timestamps.
+-- ============================================================
+CREATE TABLE public.bgw_dsm_handle_store(handle BIGINT) DISTRIBUTED REPLICATED;
+INSERT INTO public.bgw_dsm_handle_store VALUES (0);
+SELECT time_series.bgw_params_create();
+ bgw_params_create 
+-------------------
+ 
+(1 row)
+
+SELECT time_series.bgw_params_reset_time(
+    extract(epoch from '2024-01-04 12:00:00+00'::timestamptz)::bigint * 1000000,
+    false);
+ bgw_params_reset_time 
+-----------------------
+ 
+(1 row)
+
+\echo '=== CLOCK-03: job_now() follows the mock clock in this session ==='
+=== CLOCK-03: job_now() follows the mock clock in this session ===
+SELECT time_series.job_now() = '2024-01-04 12:00:00+00'::timestamptz
+       AS job_now_is_mock_clock;
+ job_now_is_mock_clock 
+-----------------------
+ t
+(1 row)
+
+-- ============================================================
+-- CLOCK-04: add_job() anchors initial_start / next_start on the
+--           mock timeline
+--
+-- Before the job_now() refactor both columns got now(), i.e. the real
+-- wall clock -- years away from where the scheduler believes it is.
+-- ============================================================
+\echo '=== CLOCK-04: add_job stamps the mock clock ==='
+=== CLOCK-04: add_job stamps the mock clock ===
+CREATE PROCEDURE noop_clock(jid int, cfg jsonb) LANGUAGE plpgsql AS $$
+BEGIN END$$;
+SELECT add_job('noop_clock'::regproc, '1 hour'::interval) AS jid_clock \gset
+SELECT initial_start = '2024-01-04 12:00:00+00'::timestamptz
+       AS initial_start_on_mock_clock,
+       fixed_schedule AS fixed_schedule_default_on
+  FROM time_series.bgw_job WHERE id = :jid_clock;
+ initial_start_on_mock_clock | fixed_schedule_default_on 
+-----------------------------+---------------------------
+ t                           | t
+(1 row)
+
+SELECT next_start = '2024-01-04 12:00:00+00'::timestamptz
+       AS next_start_on_mock_clock
+  FROM time_series.bgw_job_stat WHERE job_id = :jid_clock;
+ next_start_on_mock_clock 
+--------------------------
+ t
+(1 row)
+
+-- ============================================================
+-- CLOCK-05: the fixed-schedule grid is aligned to the mock timeline
+--
+-- This is the direct regression guard for the retry-backoff flake:
+-- with initial_start anchored on the mock clock the next slot after
+-- 12:00:00 is 13:00:00, an hour away, so the slot cap inside
+-- calculate_next_start_on_failure() can never chop a retry_period
+-- backoff (seconds to minutes) down to a few seconds.
+--
+-- With a wall-clock initial_start the slot would sit at a random
+-- sub-hour offset and the gap below would be anything in (0, 1 hour].
+-- ============================================================
+\echo '=== CLOCK-05: next fixed-schedule slot is a whole hour away ==='
+=== CLOCK-05: next fixed-schedule slot is a whole hour away ===
+SELECT time_series.test_next_scheduled_execution_slot(
+           '1 hour'::interval,
+           '2024-01-04 12:00:00+00'::timestamptz,   -- finish_time
+           j.initial_start,
+           NULL)
+       = '2024-01-04 13:00:00+00'::timestamptz AS next_slot_on_grid,
+       time_series.test_next_scheduled_execution_slot(
+           '1 hour'::interval,
+           '2024-01-04 12:00:00+00'::timestamptz,
+           j.initial_start,
+           NULL)
+       - '2024-01-04 12:00:00+00'::timestamptz
+       > '10 minutes'::interval AS slot_cannot_chop_retry_backoff
+  FROM time_series.bgw_job j WHERE j.id = :jid_clock;
+ next_slot_on_grid | slot_cannot_chop_retry_backoff 
+-------------------+--------------------------------
+ t                 | t
+(1 row)
+
+-- ============================================================
+-- CLOCK-06: alter_job(schedule_interval) re-anchors on the mock clock
+--
+-- alter_job recomputes next_start as job_now() + schedule_interval
+-- when the interval changes.  With now() the job jumped to the real
+-- wall clock -- i.e. years into the scheduler's future -- and simply
+-- stopped being dispatched for the rest of the test.
+-- ============================================================
+\echo '=== CLOCK-06: alter_job(schedule_interval) stays on the mock clock ==='
+=== CLOCK-06: alter_job(schedule_interval) stays on the mock clock ===
+SELECT (alter_job(:jid_clock,
+                  schedule_interval => '30 minutes'::interval)).id IS NOT NULL
+       AS interval_altered;
+ interval_altered 
+------------------
+ t
+(1 row)
+
+SELECT next_start = '2024-01-04 12:30:00+00'::timestamptz
+       AS next_start_reanchored_on_mock_clock
+  FROM time_series.bgw_job_stat WHERE job_id = :jid_clock;
+ next_start_reanchored_on_mock_clock 
+-------------------------------------
+ t
+(1 row)
+
+-- ============================================================
+-- CLOCK-07: job history retention compares like with like
+--
+-- execution_start / execution_finish are written by the worker from
+-- the job timer; the retention cutoff must come from the same clock.
+-- With now() every mock-clock row looked ~2 years old and a 30-day
+-- retention window deleted the lot, so "rows inside the window
+-- survive" was untestable.
+-- ============================================================
+\echo '=== CLOCK-07: history retention cutoff uses the job clock ==='
+=== CLOCK-07: history retention cutoff uses the job clock ===
+INSERT INTO time_series.bgw_job_stat_history
+       (job_id, execution_start, execution_finish, succeeded)
+VALUES (:jid_clock,
+        '2024-01-04 11:00:00+00'::timestamptz,
+        '2024-01-04 11:30:00+00'::timestamptz,
+        true);
+-- 30 days before the mock clock is 2023-12-05: the row is inside the
+-- window and must survive.
+SELECT time_series.bgw_job_stat_history_purge('30 days'::interval)
+       = 0 AS row_inside_window_survives;
+ row_inside_window_survives 
+----------------------------
+ t
+(1 row)
+
+-- 10 minutes before the mock clock is 11:50: the row is now older
+-- than the cutoff and must go.
+SELECT time_series.bgw_job_stat_history_purge('10 minutes'::interval)
+       = 1 AS row_outside_window_deleted;
+ row_outside_window_deleted 
+----------------------------
+ t
+(1 row)
+
+-- ============================================================
+-- Cleanup.  bgw_params_destroy() puts this backend back on the real
+-- clock, so it must run before the handle store goes away.
+-- ============================================================
+SELECT delete_job(:jid_clock);
+ delete_job 
+------------
+ 
+(1 row)
+
+DROP PROCEDURE noop_clock(int, jsonb);
+SELECT time_series.bgw_params_destroy();
+ bgw_params_destroy 
+--------------------
+ 
+(1 row)
+
+\echo '=== CLOCK-08: destroy restores the wall clock ==='
+=== CLOCK-08: destroy restores the wall clock ===
+SELECT abs(extract(epoch from (time_series.job_now() - now()))) < 5
+       AS job_now_back_on_wall_clock;
+ job_now_back_on_wall_clock 
+----------------------------
+ t
+(1 row)
+
+DROP TABLE public.bgw_dsm_handle_store;
+-- start_ignore
+DROP EXTENSION time_series CASCADE;
+-- end_ignore

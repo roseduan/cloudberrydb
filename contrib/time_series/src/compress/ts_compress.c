@@ -57,6 +57,7 @@
 #include "../include/access/ts_tableam.h"
 #include "../include/compress/ts_compress.h"
 #include "../include/access/ts_wal.h"
+#include "../include/bgw/timer.h"
 
 PG_FUNCTION_INFO_V1(ts_set_compress_config);
 PG_FUNCTION_INFO_V1(ts_compress_chunks);
@@ -1969,8 +1970,18 @@ find_all_active_chunks(Oid relid, bool has_older_than,
 	}
 	else
 	{
-		TimestampTz cutoff = DatumGetTimestampTz(DirectFunctionCall2(timestamptz_mi_interval,
-			TimestampTzGetDatum(GetCurrentTimestamp()), IntervalPGetDatum(older_than)));
+		/*
+		 * The cutoff must come from the job timeline's clock, not the
+		 * raw wall clock: a compression policy dispatched by the BGW
+		 * scheduler shares that timeline with every other policy on the
+		 * same hypertable (see ts_job_now in bgw/timer.c).  In
+		 * production this is GetCurrentTimestamp() as before.
+		 */
+		TimestampTz now = timer_get_current_timestamp();
+		TimestampTz cutoff = DatumGetTimestampTz(
+			DirectFunctionCall2(timestamptz_mi_interval,
+								TimestampTzGetDatum(now),
+								IntervalPGetDatum(older_than)));
 		Datum d = DirectFunctionCall1(timestamptz_out, TimestampTzGetDatum(cutoff));
 
 		appendStringInfo(&cmd,
