@@ -104,13 +104,16 @@
  * folding an external head change into this cluster's own commit lineage, which
  * the orphan-file bookkeeping reads.  An external writer's commit is not ours.
  *
- * Concurrency.  Racing a local DML on the same table is safe in both
- * directions.  If the DML's tracker commits first, our heap_update waits on its
- * row lock and then returns TM_Updated, which pg_iceberg_update_metadata_cache()
- * drops silently (last-writer-wins).  If we commit first, the DML's CAS sees an
- * unexpected base and rebases.  Either way the external catalog remains the
- * source of truth for external tables -- every write path resolves force-fresh --
- * so a lost refresh only costs read freshness until the next cycle.
+ * Concurrency.  A refresh resolves the head first and stores it afterwards,
+ * so a local DML on the same table can commit in between and store a newer
+ * head than the one we hold.  Storing ours then would take the table back to
+ * the older head, and every reader within the TTL would miss that commit
+ * (issue #461).  So the stored head is read before resolving and handed to
+ * pg_iceberg_update_metadata_cache() as the expected one: if it has moved,
+ * nothing is written.  A DML still committing when we store makes our
+ * heap_update wait and return TM_Updated, which is dropped the same way.  If
+ * we store first, the DML's CAS sees an unexpected base and rebases.  A
+ * dropped refresh leaves the stamp as it was, so the next cycle tries again.
  *
  * IDENTIFICATION
  *    contrib/datalake_fdw/src/am_iceberg/pg_iceberg_metadata_refresh.c
@@ -710,6 +713,8 @@ refresh_resolve_and_store(Relation rel, IcebergTableInfo *table_info,
 						  bool require_agent_stamp)
 {
 	IcebergLoadTableResult *load_result;
+	IcebergMetadataInfo *meta_info;
+	char		   *expected;
 	const char	   *nameSpace;
 	const char	   *tableName;
 	const char	   *catalogName;
@@ -753,6 +758,16 @@ refresh_resolve_and_store(Relation rel, IcebergTableInfo *table_info,
 		catalogName = table_info->opts->catalog;
 	}
 
+	/*
+	 * The stored head before resolving: the write-back only proceeds if it is
+	 * still the stored one, so a local commit made meanwhile is not undone
+	 * (file header).
+	 */
+	meta_info = pg_iceberg_get_metadata_info(RelationGetRelid(rel));
+	expected = meta_info->metadata_location ?
+		pstrdup(meta_info->metadata_location) : NULL;
+	pg_iceberg_free_metadata_info(meta_info);
+
 	/* Force-fresh: never hand the agent our own stamp here (file header). */
 	load_result = pg_iceberg_load_table(catalogName,
 										nameSpace,
@@ -762,7 +777,11 @@ refresh_resolve_and_store(Relation rel, IcebergTableInfo *table_info,
 										table_info->volume_server_name,
 										table_info->volume_name);
 	if (load_result == NULL)
+	{
+		if (expected != NULL)
+			pfree(expected);
 		return NULL;
+	}
 
 	if (load_result->metadata_location != NULL &&
 		load_result->metadata_location[0] != '\0' &&
@@ -771,13 +790,21 @@ refresh_resolve_and_store(Relation rel, IcebergTableInfo *table_info,
 		int64		stamp = load_result->timestamp_present ?
 			load_result->timestamp : current_epoch_ms();
 
-		pg_iceberg_update_metadata_cache(RelationGetRelid(rel),
-										 load_result->metadata_location,
-										 stamp);
-		stored = pstrdup(load_result->metadata_location);
+		if (pg_iceberg_update_metadata_cache(RelationGetRelid(rel),
+											 expected,
+											 load_result->metadata_location,
+											 stamp))
+			stored = pstrdup(load_result->metadata_location);
+		else
+			elog(DEBUG1,
+				 "iceberg metadata refresh: relation %u moved to a newer head "
+				 "while it was being resolved; not storing %s",
+				 RelationGetRelid(rel), load_result->metadata_location);
 	}
 
 	pg_iceberg_free_load_table_result(load_result);
+	if (expected != NULL)
+		pfree(expected);
 
 	return stored;
 }

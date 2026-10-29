@@ -29,6 +29,7 @@
 #include "utils/builtins.h"
 #include "utils/syscache.h"
 #include "utils/rel.h"
+#include "utils/snapmgr.h"
 #include "utils/lsyscache.h"
 #include "include/iceberg_oids.h"
 #include "include/pg_iceberg_metadata.h"
@@ -167,6 +168,13 @@ iceberg_metadata_heap_update(Relation metadata_rel, ItemPointer otid,
 }
 
 /*
+ * How often pg_iceberg_update_metadata_cas() reads the tuple again after a
+ * concurrent update before giving up.  The only writers are commits and head
+ * refreshes of one table, so more than one in a row is already unusual.
+ */
+#define METADATA_CAS_RESCANS	3
+
+/*
  * pg_iceberg_update_metadata_cas
  *    Update metadata location with optional Compare-And-Swap semantics.
  *
@@ -185,8 +193,10 @@ iceberg_metadata_heap_update(Relation metadata_rel, ItemPointer otid,
  *   The CAS check uses the scan snapshot visible to this transaction.
  *   For concurrent commits already visible in the snapshot, the CAS
  *   check detects the conflict and returns false for a graceful retry.
- *   For truly concurrent commits not yet visible, heap_update's
- *   row-level locking provides the final safety net (ERROR on conflict).
+ *   For truly concurrent commits not yet visible, heap_update waits for
+ *   them; if one updated the tuple, the tuple is read again and the CAS
+ *   check repeated on the location it now holds, so an update that left the
+ *   location alone (a head refresh's stamp) is not taken for a conflict.
  */
 bool
 pg_iceberg_update_metadata_cas(Oid relid,
@@ -205,6 +215,7 @@ pg_iceberg_update_metadata_cas(Oid relid,
 	bool		replaces[Natts_pg_iceberg_metadata];
 	Datum		old_metadata_datum;
 	bool		old_metadata_isnull;
+	int			attempts = 0;
 
 	/* Iceberg native catalog: OIDs are pinned at initdb (iceberg-cdbinit). */
 	metadata_relid = ICEBERG_METADATA_RELID;
@@ -212,6 +223,7 @@ pg_iceberg_update_metadata_cas(Oid relid,
 
 	metadata_rel = table_open(metadata_relid, RowExclusiveLock);
 
+rescan:
 	/* Search by relid using unique index */
 	ScanKeyInit(&skey[0],
 				Anum_pg_iceberg_metadata_relid,
@@ -243,6 +255,19 @@ pg_iceberg_update_metadata_cas(Oid relid,
 	{
 		char   *old_location = TextDatumGetCString(old_metadata_datum);
 		bool	conflict = (strcmp(old_location, expected_base) != 0);
+
+		/*
+		 * An external table's commit goes to the catalog before it reaches
+		 * here, so a head refresh in between can already have stored the
+		 * very head we are about to store (issue #461).  That is our own
+		 * commit, not someone else's: finish it, with expected_base as the
+		 * previous location, as if the refresh had not run.
+		 */
+		if (conflict && strcmp(old_location, metadata_location) == 0)
+		{
+			conflict = false;
+			old_metadata_datum = CStringGetTextDatum(expected_base);
+		}
 
 		pfree(old_location);
 
@@ -290,9 +315,29 @@ pg_iceberg_update_metadata_cas(Oid relid,
 				break;
 
 			case TM_Updated:
+				/*
+				 * Another transaction updated the tuple after we read it and
+				 * has committed.  That is not necessarily a conflict: a head
+				 * refresh stamps metadata_cached_at, and stores the location
+				 * we already have, on every cycle.  Read the tuple again: the
+				 * CAS check above then decides on the location alone, and
+				 * fails only if it really moved (issue #461).  Without this, a
+				 * refresh landing during a commit made an external table's
+				 * commit take the "external commit" catch-up path.
+				 */
+				heap_freetuple(newtuple);
+				systable_endscan(scan);
+				if (++attempts <= METADATA_CAS_RESCANS)
+				{
+					InvalidateCatalogSnapshot();
+					goto rescan;
+				}
+				table_close(metadata_rel, RowExclusiveLock);
+				return false;
+
 			case TM_Deleted:
 				/*
-				 * Another transaction modified/deleted this tuple.
+				 * Another transaction deleted this tuple.
 				 * Clean up and return false to let the caller retry.
 				 */
 				heap_freetuple(newtuple);
@@ -338,14 +383,16 @@ pg_iceberg_update_metadata(Oid relid, const char *metadata_location)
  * previous_metadata_location: an external head change is not our own commit,
  * so it must not enter our commit lineage / orphan-cleanup bookkeeping.
  *
- * Last-writer-wins: two concurrent readers may both refresh; the loser's
- * heap_update sees TM_Updated and is silently dropped (see
- * iceberg_metadata_heap_update), which is harmless since both persist a freshly
- * resolved head.  Callers must guard against read-only transactions / hot
- * standby before invoking.
+ * Not last-writer-wins: the head was resolved before this call, so a stored
+ * head that moved in the meantime is newer than ours.  With expected_location
+ * set, a head that no longer matches it is left alone; a concurrent update of
+ * the tuple is left alone too.  Returns whether the head was written.
+ * Callers must guard against read-only transactions / hot standby before
+ * invoking.
  */
-void
+bool
 pg_iceberg_update_metadata_cache(Oid relid,
+								 const char *expected_location,
 								 const char *metadata_location,
 								 int64 cached_at_ms)
 {
@@ -359,6 +406,7 @@ pg_iceberg_update_metadata_cache(Oid relid,
 	Datum		values[Natts_pg_iceberg_metadata];
 	bool		nulls[Natts_pg_iceberg_metadata];
 	bool		replaces[Natts_pg_iceberg_metadata];
+	TM_Result	result;
 
 	/* Iceberg native catalog: OIDs are pinned at initdb (iceberg-cdbinit). */
 	metadata_relid = ICEBERG_METADATA_RELID;
@@ -380,6 +428,32 @@ pg_iceberg_update_metadata_cache(Oid relid,
 				(errcode(ERRCODE_UNDEFINED_OBJECT),
 				 errmsg("iceberg metadata entry not found for relation %u", relid)));
 
+	/*
+	 * The head being written was resolved before this scan.  If the stored
+	 * head moved in between -- a local commit stores the head it just made --
+	 * ours is the older one, and writing it would hide that commit from every
+	 * reader until the next refresh or write.  Leave the newer head alone.
+	 */
+	if (expected_location != NULL)
+	{
+		bool		isnull;
+		Datum		cur = heap_getattr(tuple,
+									   Anum_pg_iceberg_metadata_metadata_location,
+									   RelationGetDescr(metadata_rel), &isnull);
+		char	   *cur_location = isnull ? NULL : TextDatumGetCString(cur);
+		bool		moved = (cur_location == NULL ||
+							 strcmp(cur_location, expected_location) != 0);
+
+		if (cur_location != NULL)
+			pfree(cur_location);
+		if (moved)
+		{
+			systable_endscan(scan);
+			table_close(metadata_rel, RowExclusiveLock);
+			return false;
+		}
+	}
+
 	memset(values, 0, sizeof(values));
 	memset(nulls, false, sizeof(nulls));
 	memset(replaces, false, sizeof(replaces));
@@ -399,16 +473,19 @@ pg_iceberg_update_metadata_cache(Oid relid,
 								 values, nulls, replaces);
 
 	/*
-	 * Last-writer-wins: if a concurrent reader refreshed the same tuple first,
-	 * heap_update returns TM_Updated/TM_Deleted.  Their write already persisted
-	 * a freshly resolved head, so silently drop ours rather than let
-	 * CatalogTupleUpdate raise "tuple concurrently updated" and fail the SELECT.
+	 * If a concurrent transaction updated the tuple first -- another refresh,
+	 * or a local commit still in progress when we scanned -- heap_update
+	 * waits for it and returns TM_Updated/TM_Deleted.  That writer stored a
+	 * head at least as new as ours, so drop ours rather than let
+	 * CatalogTupleUpdate raise "tuple concurrently updated".
 	 */
-	(void) iceberg_metadata_heap_update(metadata_rel, &tuple->t_self, newtuple);
+	result = iceberg_metadata_heap_update(metadata_rel, &tuple->t_self, newtuple);
 
 	heap_freetuple(newtuple);
 	systable_endscan(scan);
 	table_close(metadata_rel, RowExclusiveLock);
+
+	return result == TM_Ok;
 }
 
 void

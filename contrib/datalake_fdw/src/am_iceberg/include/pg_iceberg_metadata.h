@@ -79,10 +79,15 @@ extern void pg_iceberg_update_metadata(Oid relid, const char *metadata_location)
 /*
  * Write back the result of an external-catalog head refresh (issue #393):
  * update metadata_location and stamp metadata_cached_at with the agent-supplied
- * epoch-millis timestamp.  Unconditional (last-writer-wins); intended for the
- * read/scan refresh path, never for commit lineage (does not roll previous).
+ * epoch-millis timestamp.  Never for commit lineage (does not roll previous).
+ *
+ * expected_location is the stored head the refresh started from.  When it is
+ * not NULL and the stored head has moved since, nothing is written and false
+ * is returned: the head was resolved before that move, so writing it would
+ * take the table back to an older head (issue #461).
  */
-extern void pg_iceberg_update_metadata_cache(Oid relid,
+extern bool pg_iceberg_update_metadata_cache(Oid relid,
+											 const char *expected_location,
 											 const char *metadata_location,
 											 int64 cached_at_ms);
 
