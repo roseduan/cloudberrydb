@@ -391,6 +391,9 @@ test: vec_aggsplit_intermediate
 # vectorized SUBSTRING()/substr() with non-constant offsets must fall back (#125)
 test: vec_substring_nonconst_fallback
 
+# vectorized substr() with a constant subject and column offsets must fall back (#134)
+test: vec_substr_const_subject_fallback
+
 # vectorized Sonic hash join routing (EXPLAIN visibility + correctness)
 
 # vectorized Sonic hash agg spill-to-disk (correctness + concurrent eviction)
