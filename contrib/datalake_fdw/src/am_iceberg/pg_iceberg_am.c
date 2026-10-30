@@ -56,6 +56,8 @@
 #include "utils/builtins.h"
 #include "utils/portal.h"
 #include "utils/snapmgr.h"
+#include "access/xact.h"
+#include "storage/proc.h"
 #include "cdb/cdbdisp.h"
 #include "cdb/cdbdisp_query.h"
 #include "cdb/cdbdispatchresult.h"
@@ -534,6 +536,76 @@ pg_iceberg_resolve_scan_metadata_location(Oid relid, bool *is_internal_out)
 	return scan_metadata_location;
 }
 
+/* ----------------------------------------------------------------
+ * Transaction-pinned external heads (issue #461, design point 14)
+ *
+ * The first read of a table on an external catalog in a transaction resolves
+ * its head through the catalog; later reads reuse it, so a commit another
+ * engine makes in between is not half-seen.  The scope follows PostgreSQL's
+ * own snapshots: REPEATABLE READ and SERIALIZABLE keep the head for the
+ * whole transaction, READ COMMITTED for one statement, so that the next
+ * statement sees the latest commit as it would on a heap table.  A table this
+ * transaction has written goes through the tracker instead (read your own
+ * writes), and time travel never gets here.  QD only, like every head
+ * resolution.
+ * ----------------------------------------------------------------
+ */
+typedef struct PinnedHeadEntry
+{
+	Oid				relid;			/* hash key */
+	LocalTransactionId lxid;		/* transaction that resolved it */
+	TimestampTz		stmt_start;		/* statement that resolved it */
+	char		   *location;		/* TopMemoryContext */
+} PinnedHeadEntry;
+
+static HTAB *pinned_heads = NULL;
+
+/* The head this transaction (or statement) already read, or NULL. */
+static char *
+pinned_head_lookup(Oid relid)
+{
+	PinnedHeadEntry *entry;
+
+	if (pinned_heads == NULL)
+		return NULL;
+
+	entry = (PinnedHeadEntry *) hash_search(pinned_heads, &relid, HASH_FIND, NULL);
+	if (entry == NULL || entry->location == NULL ||
+		entry->lxid != MyProc->lxid ||
+		(!IsolationUsesXactSnapshot() &&
+		 entry->stmt_start != GetCurrentStatementStartTimestamp()))
+		return NULL;
+
+	return pstrdup(entry->location);
+}
+
+static void
+pinned_head_store(Oid relid, const char *location)
+{
+	PinnedHeadEntry *entry;
+	bool		found;
+
+	if (pinned_heads == NULL)
+	{
+		HASHCTL		ctl;
+
+		MemSet(&ctl, 0, sizeof(ctl));
+		ctl.keysize = sizeof(Oid);
+		ctl.entrysize = sizeof(PinnedHeadEntry);
+		ctl.hcxt = TopMemoryContext;
+		pinned_heads = hash_create("iceberg pinned external heads", 16, &ctl,
+								   HASH_ELEM | HASH_BLOBS | HASH_CONTEXT);
+	}
+
+	entry = (PinnedHeadEntry *) hash_search(pinned_heads, &relid, HASH_ENTER, &found);
+	/* One entry per table: the previous transaction's head is replaced. */
+	if (found && entry->location != NULL)
+		pfree(entry->location);
+	entry->lxid = MyProc->lxid;
+	entry->stmt_start = GetCurrentStatementStartTimestamp();
+	entry->location = MemoryContextStrdup(TopMemoryContext, location);
+}
+
 static char *
 iceberg_fetch_fragments_json(Relation rel, IcebergTableInfo *table_info,
 							 const char *pushdown_filter,
@@ -568,10 +640,18 @@ iceberg_fetch_fragments_json(Relation rel, IcebergTableInfo *table_info,
 		 * A table already tracked in this transaction must keep going through
 		 * the tracker instead, for Read-Your-Own-Writes; allow_cache is false
 		 * for DML fragment seeding and for time travel (see the call sites).
+		 *
+		 * Pinned for the transaction (or, in READ COMMITTED, the statement):
+		 * see "Transaction-pinned external heads" above.
 		 */
-		scan_metadata_location =
-			pg_iceberg_get_latest_metadata_location(RelationGetRelid(rel),
-													table_info, true);
+		scan_metadata_location = pinned_head_lookup(RelationGetRelid(rel));
+		if (scan_metadata_location == NULL)
+		{
+			scan_metadata_location =
+				pg_iceberg_get_latest_metadata_location(RelationGetRelid(rel),
+														table_info, true);
+			pinned_head_store(RelationGetRelid(rel), scan_metadata_location);
+		}
 		is_internal = false;
 	}
 	else
