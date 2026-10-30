@@ -1,0 +1,161 @@
+-- Regression test for lightning issue #125: SUBSTRING() with a non-constant
+-- start offset has to fall back to the row executor instead of failing.
+--
+-- substring()/substr() are translated to Arrow's utf8_slice_codeunits, whose
+-- start and stop travel in GArrowSliceOptions: they are fixed when the plan is
+-- built, not evaluated per row, so they can only come from constants.  Before
+-- this fix pg_vec.dat listed the four substring/substr OIDs as 'alway_support',
+-- the planner accepted every argument shape, and
+-- utf8_slice_codeunits_expression() raised
+--     ERROR:  unrecognized node type: 156 (execMain.c:1873)
+-- once the plan was already running -- an ordinary query simply failed.
+--
+-- Coverage:
+--   contrib/vectorization/pg_vec.dat
+--     (procoid 936/937/877/883 -> check_slice_args)
+--   contrib/vectorization/src/backend/utils/arrow/fmgr.c
+--     (check_slice_args: start and length must be non-null pass-by-value Consts)
+create schema vec_sub125;
+set search_path = vec_sub125, public;
+set vector.enable_vectorization = on;
+create table t (a text, s int, n int) using ao_column distributed by (s);
+insert into t values ('abcdefgh', 2, 3), ('zyxwvu', 1, 4), (NULL, 2, 2);
+analyze t;
+-- Printing the plan itself would embed the segment count of whatever machine
+-- runs the test, so only ask whether any node of it is vectorized.
+create function is_vectorized(q text) returns boolean as $$
+declare
+  line text;
+begin
+  for line in execute 'explain (costs off) ' || q loop
+    if line like '%Vec %' then
+      return true;
+    end if;
+  end loop;
+  return false;
+end;
+$$ language plpgsql;
+-- The reported shape: the start offset comes from a column.  Falls back, and
+-- the answer is the row executor's.
+select is_vectorized('select substring(a from s for 3) from t');
+ is_vectorized 
+---------------
+ f
+(1 row)
+
+select s, substring(a from s for 3) from t order by s, 2;
+ s | substring 
+---+-----------
+ 1 | zyx
+ 2 | bcd
+ 2 | 
+(3 rows)
+
+-- A non-constant length is the same situation.
+select is_vectorized('select substring(a from 2 for n) from t');
+ is_vectorized 
+---------------
+ f
+(1 row)
+
+select s, substring(a from 2 for n) from t order by s, 2;
+ s | substring 
+---+-----------
+ 1 | yxwv
+ 2 | bcd
+ 2 | 
+(3 rows)
+
+-- Both non-constant.
+select is_vectorized('select substring(a from s for n) from t');
+ is_vectorized 
+---------------
+ f
+(1 row)
+
+select s, substring(a from s for n) from t order by s, 2;
+ s | substring 
+---+-----------
+ 1 | zyxw
+ 2 | bcd
+ 2 | 
+(3 rows)
+
+-- A NULL constant offset has no value for the slice options to carry; the
+-- row executor returns NULL for the whole call.
+select is_vectorized('select substring(a from NULL::int for 3) from t');
+ is_vectorized 
+---------------
+ t
+(1 row)
+
+select s, substring(a from NULL::int for 3) from t order by s, 2;
+ s | substring 
+---+-----------
+ 1 | 
+ 2 | 
+ 2 | 
+(3 rows)
+
+-- The two-argument form with a column offset.
+select is_vectorized('select substr(a, s) from t');
+ is_vectorized 
+---------------
+ f
+(1 row)
+
+select s, substr(a, s) from t order by s, 2;
+ s | substr  
+---+---------
+ 1 | zyxwvu
+ 2 | bcdefgh
+ 2 | 
+(3 rows)
+
+-- Control: constant offsets still vectorize, and still give the same answers.
+select is_vectorized('select substring(a from 1 for 4) from t');
+ is_vectorized 
+---------------
+ t
+(1 row)
+
+select s, substring(a from 1 for 4) from t order by s, 2;
+ s | substring 
+---+-----------
+ 1 | zyxw
+ 2 | abcd
+ 2 | 
+(3 rows)
+
+select is_vectorized('select substr(a, 2, 3) from t');
+ is_vectorized 
+---------------
+ t
+(1 row)
+
+select s, substr(a, 2, 3) from t order by s, 2;
+ s | substr 
+---+--------
+ 1 | yxw
+ 2 | bcd
+ 2 | 
+(3 rows)
+
+-- Control: the fallback answers match the row executor exactly.
+set vector.enable_vectorization = off;
+create table ref as select s, substring(a from s for 3) r from t distributed by (s);
+set vector.enable_vectorization = on;
+select count(*) as mismatches
+from ((select s, substring(a from s for 3) r from t)
+      except all
+      (select s, r from ref)) d;
+ mismatches 
+------------
+          0
+(1 row)
+
+drop schema vec_sub125 cascade;
+psql:sql/vec_substring_nonconst_fallback.sql:79: NOTICE:  drop cascades to 3 other objects
+DETAIL:  drop cascades to table t
+drop cascades to function is_vectorized(text)
+drop cascades to table ref

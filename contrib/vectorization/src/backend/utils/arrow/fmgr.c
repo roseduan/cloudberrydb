@@ -140,6 +140,48 @@ check_numeric_adjust(List* args) {
 	return true;
 }
 
+/*
+ * substring()/substr() become Arrow's utf8_slice_codeunits, whose start and
+ * stop are carried in GArrowSliceOptions: they are baked into the plan when it
+ * is built, not evaluated per row.  Both offsets therefore have to be
+ * constants whose value can be read right here.  A column reference, a
+ * parameter or any computed offset cannot be expressed at all; a NULL constant
+ * has no value to read; and a constant that is not passed by value is not read
+ * by the builder either -- it would silently slice from offset 0.
+ *
+ * Saying so here is what makes the planner leave the plan to the row executor.
+ * Without it utf8_slice_codeunits_expression() raises "unrecognized node type"
+ * once the plan is already running and the query simply fails.
+ */
+static bool
+check_slice_args(List *args)
+{
+	Const	   *start;
+	int			nargs = list_length(args);
+
+	if (nargs != 2 && nargs != 3)
+		return false;
+
+	if (!IsA(lsecond(args), Const))
+		return false;
+	start = (Const *) lsecond(args);
+	if (start->constisnull || !start->constbyval)
+		return false;
+
+	if (nargs == 3)
+	{
+		Const	   *len;
+
+		if (!IsA(lthird(args), Const))
+			return false;
+		len = (Const *) lthird(args);
+		if (len->constisnull || !len->constbyval)
+			return false;
+	}
+
+	return true;
+}
+
 const FuncTable arrow_func_tables[] = {ARROW_FMGR};
 /*
  * Search pg_aggregate table by SQL to get PG aggregate function information

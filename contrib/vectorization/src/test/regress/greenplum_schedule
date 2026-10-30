@@ -388,6 +388,9 @@ test: window_hashagg_empty_partition
 # without a combinefn
 test: vec_aggsplit_intermediate
 
+# vectorized SUBSTRING()/substr() with non-constant offsets must fall back (#125)
+test: vec_substring_nonconst_fallback
+
 # vectorized Sonic hash join routing (EXPLAIN visibility + correctness)
 
 # vectorized Sonic hash agg spill-to-disk (correctness + concurrent eviction)
