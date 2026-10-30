@@ -466,12 +466,39 @@ public class BaseConfigurationFactory implements ConfigurationFactory {
                 }
             }
 
+            // Gopher logs in with its own keytab into its own ticket cache;
+            // without them the gopher store runs "kinit -k -t '' -c ''" and the
+            // connect fails (dev_collaboration#1004).  dlproxy forwards neither,
+            // so derive them the way the native path does
+            // (gopherFileSystem.cpp): the server's keytab, and
+            // <data dir>/gophermeta/krb5cc_<principal> -- the agent runs in the
+            // coordinator's data directory.
+            String keytab = (String) serverMap.get("krb_principal_keytab");
+            if (isGopherMode && keytab != null && !keytab.isEmpty()) {
+                if (isBlank(configuration.get("fs.gopher.krb_server_key_file"))) {
+                    configuration.set("fs.gopher.krb_server_key_file", keytab);
+                }
+                String principal = (String) serverMap.get("krb_principal");
+                if (principal == null || principal.isEmpty()) {
+                    principal = servicePrincipal;
+                }
+                if (principal != null && !principal.isEmpty()
+                        && isBlank(configuration.get("fs.gopher.krb5_ticket_cache_path"))) {
+                    configuration.set("fs.gopher.krb5_ticket_cache_path",
+                            System.getProperty("user.dir") + "/gophermeta/krb5cc_"
+                                    + principal.replaceAll("[^A-Za-z0-9]", "_"));
+                }
+            }
+
             String transferProtection = (String) serverMap.get("data_transfer_protection");
             if (transferProtection != null) {
                 if (isGopherMode) {
-                    // Gopher handles its own data transfer protection, including "none"
+                    // Gopher handles its own data transfer protection, including "none".
+                    // data_transfer_protocol is a separate boolean: writing the
+                    // protection level into it made Hadoop discard it as an invalid
+                    // boolean (dev_collaboration#1004).
                     configuration.set("dfs.data.transfer.protection", transferProtection);
-                    configuration.set("fs.gopher.data_transfer_protocol", transferProtection);
+                    configuration.set("fs.gopher.data_transfer_protection", transferProtection);
                 } else if (!"none".equalsIgnoreCase(transferProtection)) {
                     // HadoopFileIO: only set valid QualityOfProtection values (authentication/integrity/privacy).
                     // "none" is not a valid enum value and DataTransferSaslUtil copies dfs.data.transfer.protection
@@ -572,5 +599,9 @@ public class BaseConfigurationFactory implements ConfigurationFactory {
                 configuration.set("fs.gopher.dfs_client_use_datanode_hostname", "true");
             }
         }
+    }
+
+    private static boolean isBlank(String s) {
+        return s == null || s.trim().isEmpty();
     }
 }

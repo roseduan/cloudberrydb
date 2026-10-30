@@ -103,6 +103,14 @@ public class IcebergHadoopCatalog implements IcebergCatalog {
         return catalogLocation;
     }
 
+    /** Request-supplied gopher.* paths GopherFileSystem needs from the Configuration. */
+    private static final String[] GOPHER_FS_PATH_KEYS = {
+        "gopher.connect_path",
+        "gopher.connect_plasma_path",
+        "gopher.worker_path",
+        "gopher.krb5_ticket_cache_path",
+    };
+
     public void createGopherHadoopCatalog(String catalogLocation,
                                           IcebergUtilities icebergUtilities,
                                           Configuration configuration,
@@ -128,6 +136,22 @@ public class IcebergHadoopCatalog implements IcebergCatalog {
         if (gopherProperties != null) {
             for (Map.Entry<String, String> entry : gopherProperties.entrySet()) {
                 props.put(entry.getKey(), entry.getValue());
+            }
+            // HadoopCatalog.initialize opens the warehouse through
+            // GopherFileSystem, which reads fs.gopher.* from the Hadoop
+            // Configuration, not the catalog properties.  Without this the
+            // request's connect_path never reached it, and it dialled the
+            // default /tmp/.gopher.socket (dev_collaboration#1004).  Only the
+            // local paths are copied, and only where the server config has not
+            // set them: credentials, principals and endpoints stay the server's.
+            for (String key : GOPHER_FS_PATH_KEYS) {
+                String value = gopherProperties.get(key);
+                String fsKey = "fs." + key;
+                String current = configuration.get(fsKey);
+                if (value != null && !value.isEmpty()
+                        && (current == null || current.isEmpty())) {
+                    configuration.set(fsKey, value);
+                }
             }
         }
         // Register GopherFileIO (matches IcebergUtilities.composeGopherCatalogProperties).
