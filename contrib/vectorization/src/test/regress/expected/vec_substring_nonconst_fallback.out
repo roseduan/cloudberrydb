@@ -154,8 +154,5 @@ from ((select s, substring(a from s for 3) r from t)
           0
 (1 row)
 
+set client_min_messages = warning;
 drop schema vec_sub125 cascade;
-psql:sql/vec_substring_nonconst_fallback.sql:79: NOTICE:  drop cascades to 3 other objects
-DETAIL:  drop cascades to table t
-drop cascades to function is_vectorized(text)
-drop cascades to table ref

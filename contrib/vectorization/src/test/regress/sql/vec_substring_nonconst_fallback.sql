@@ -76,4 +76,5 @@ from ((select s, substring(a from s for 3) r from t)
       except all
       (select s, r from ref)) d;
 
+set client_min_messages = warning;
 drop schema vec_sub125 cascade;
