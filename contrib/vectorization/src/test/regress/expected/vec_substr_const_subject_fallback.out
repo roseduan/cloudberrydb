@@ -118,9 +118,5 @@ from ((select s2.c0, s4.c1, substr('UzLIabcd', s2.c0, s4.c1) r from s2, s4)
           0
 (1 row)
 
+set client_min_messages = warning;
 drop schema vec_substr134 cascade;
-psql:sql/vec_substr_const_subject_fallback.sql:75: NOTICE:  drop cascades to 4 other objects
-DETAIL:  drop cascades to table s2
-drop cascades to table s4
-drop cascades to function is_vectorized(text)
-drop cascades to table ref

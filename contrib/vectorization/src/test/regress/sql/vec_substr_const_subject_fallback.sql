@@ -72,4 +72,5 @@ from ((select s2.c0, s4.c1, substr('UzLIabcd', s2.c0, s4.c1) r from s2, s4)
       except all
       (select c0, c1, r from ref)) d;
 
+set client_min_messages = warning;
 drop schema vec_substr134 cascade;
