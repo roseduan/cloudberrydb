@@ -649,7 +649,17 @@ refresh_one_table(Oid relid, int64 cached_at, int64 now_ms, bool *wrote)
 
 out:
 	pg_iceberg_free_table_info(table_info);
-	relation_close(rel, AccessShareLock);
+
+	/*
+	 * If this refresh updated the table's pg_iceberg_metadata row, keep the
+	 * lock until the cycle commits.  Released here, a DROP TABLE could take
+	 * its AccessExclusiveLock at once, read the row as it was before that
+	 * update, and fail deleting it with "tuple concurrently updated" when the
+	 * cycle commits (issue #461).  A table the cycle did not write has no such
+	 * row change pending; release it now, so that DDL on it does not wait for
+	 * the rest of the cycle and a long cycle does not pile up locks.
+	 */
+	relation_close(rel, *wrote ? NoLock : AccessShareLock);
 
 	return attempted;
 }

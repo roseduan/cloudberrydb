@@ -177,7 +177,11 @@ iceberg_refresh_metadata(PG_FUNCTION_ARGS)
 						refresh_relname(relid)),
 				 errdetail("was %s, now %s", previous_head, current_head)));
 
-	relation_close(rel, AccessShareLock);
+	/*
+	 * Held until commit, as in the scheduled refresh: the row just updated
+	 * must not be deleted by a DROP TABLE that read it before the update.
+	 */
+	relation_close(rel, NoLock);
 
 	if (get_call_result_type(fcinfo, NULL, &tupdesc) != TYPEFUNC_COMPOSITE)
 		elog(ERROR, "return type must be a row type");
