@@ -389,6 +389,8 @@ test: window_hashagg_empty_partition
 test: vec_aggsplit_intermediate
 test: vec_zero_column_scan
 
+test: vec_dropped_column_scan
+
 # vectorized SUBSTRING()/substr() with non-constant offsets must fall back (#125)
 test: vec_substring_nonconst_fallback
 
