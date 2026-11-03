@@ -107,6 +107,10 @@ class PaxVecReader : public MicroPartitionReaderProxy {
 
   // Visibility bitmap for checking deleted-but-not-vacuumed rows
   std::shared_ptr<Bitmap8> micro_partition_visibility_bitmap_;
+  // Whether micro_partition_visibility_bitmap_ is this reader's own copy.
+  // The one Open() gets wraps the visimap that LoadVisimap() caches for the
+  // whole backend, so the fast filter must copy it before marking rows.
+  bool owns_visibility_bitmap_ = false;
 };
 
 }  // namespace pax

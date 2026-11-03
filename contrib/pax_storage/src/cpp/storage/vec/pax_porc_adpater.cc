@@ -56,11 +56,21 @@ static inline struct varlena *VarlenaShortTo4B(struct varlena *attr) {
   return new_attr;
 }
 
-static void CopyFixedRawBufferWithNull(
-    PaxColumn *column, std::shared_ptr<Bitmap8> visibility_map_bitset,
-    size_t bitset_index_begin, size_t range_begin, size_t range_lens,
-    size_t data_index_begin, size_t data_range_lens,
-    DataBuffer<char> *out_data_buffer) {
+// The copy functions below come in two forms: one copies every row of the
+// range, the other ("Selected") only the visible rows `sel`, given as offsets
+// from `range_begin` in increasing order.  The visible rows are worked out
+// once per batch (VisibleRowOffsets), so a filter that keeps few rows costs
+// each column a pass over those rows rather than over the whole range.
+//
+// PORC stores only the non-null values of a column, so the value of row `row`
+// is the n-th one, n being the number of non-null rows in [range_begin, row);
+// the selected forms get n from a SetBitCounter on the null bitmap.
+
+static void CopyFixedRawBufferWithNull(PaxColumn *column, size_t range_begin,
+                                       size_t range_lens,
+                                       size_t data_index_begin,
+                                       size_t data_range_lens,
+                                       DataBuffer<char> *out_data_buffer) {
   char *buffer;
   size_t buffer_len;
 
@@ -71,14 +81,6 @@ static void CopyFixedRawBufferWithNull(
   size_t non_null_offset = 0;
   size_t type_len = column->GetTypeLength();
   for (size_t i = range_begin; i < (range_begin + range_lens); i++) {
-    // filted by row_filter or bloom_filter
-    if (visibility_map_bitset &&
-        visibility_map_bitset->Test(i - range_begin + bitset_index_begin)) {
-      if (null_bitmap->Test(i)) {
-        non_null_offset += type_len;
-      }
-      continue;
-    }
     if (null_bitmap->Test(i)) {
       out_data_buffer->Write(buffer + non_null_offset, type_len);
       non_null_offset += type_len;
@@ -93,116 +95,124 @@ static inline void CopyFixedRawBuffer(char *buffer, size_t len,
   data_buffer->Brush(len);
 }
 
-static void CopyFixedBuffer(PaxColumn *column,
-                            std::shared_ptr<Bitmap8> visibility_map_bitset,
-                            size_t bitset_index_begin, size_t range_begin,
+static void CopyFixedBuffer(PaxColumn *column, size_t range_begin,
                             size_t range_lens, size_t data_index_begin,
                             size_t data_range_lens,
                             DataBuffer<char> *out_data_buffer) {
   if (column->HasNull()) {
-    CopyFixedRawBufferWithNull(
-        column, visibility_map_bitset, bitset_index_begin, range_begin,
-        range_lens, data_index_begin, data_range_lens, out_data_buffer);
+    CopyFixedRawBufferWithNull(column, range_begin, range_lens,
+                               data_index_begin, data_range_lens,
+                               out_data_buffer);
   } else {
     char *buffer;
     size_t buffer_len;
     std::tie(buffer, buffer_len) =
         column->GetRangeBuffer(data_index_begin, data_range_lens);
-
-    if (visibility_map_bitset == nullptr) {
-      CopyFixedRawBuffer(buffer, buffer_len, out_data_buffer);
-    } else {
-      size_t non_null_offset = 0;
-      size_t type_len = column->GetTypeLength();
-      for (size_t i = range_begin; i < (range_begin + range_lens); i++) {
-        if (visibility_map_bitset &&
-            visibility_map_bitset->Test(i - range_begin + bitset_index_begin)) {
-          non_null_offset += type_len;
-          continue;
-        }
-        out_data_buffer->Write(buffer + non_null_offset, type_len);
-        out_data_buffer->Brush(type_len);
-        non_null_offset += type_len;
-      }
-    }
+    CopyFixedRawBuffer(buffer, buffer_len, out_data_buffer);
   }
 }
 
-static void CopyNonFixedBuffer(PaxColumn *column,
-                               std::shared_ptr<Bitmap8> visibility_map_bitset,
-                               size_t bitset_index_begin, size_t range_begin,
+static void CopySelectedFixedBuffer(PaxColumn *column, size_t range_begin,
+                                    const uint32 *sel, size_t sel_count,
+                                    size_t data_index_begin,
+                                    size_t data_range_lens,
+                                    DataBuffer<char> *out_data_buffer) {
+  char *buffer;
+  size_t buffer_len;
+  std::tie(buffer, buffer_len) =
+      column->GetRangeBuffer(data_index_begin, data_range_lens);
+
+  size_t type_len = column->GetTypeLength();
+  Assert(out_data_buffer->Available() >= sel_count * type_len);
+  char *dst = out_data_buffer->GetAvailableBuffer();
+
+  if (!column->HasNull()) {
+    GatherFixedValues(buffer, type_len, sel, sel_count, dst);
+  } else {
+    // A null row keeps an unset slot, as in CopyFixedRawBufferWithNull.
+    const auto &null_bitmap = column->GetBitmap();
+    SetBitCounter non_nulls(*null_bitmap, range_begin);
+    for (size_t k = 0; k < sel_count; k++) {
+      size_t row = range_begin + sel[k];
+      if (null_bitmap->Test(row)) {
+        size_t n = non_nulls.CountTo(row);
+        Assert(n < data_range_lens);
+        memcpy(dst + k * type_len, buffer + n * type_len, type_len);
+      }
+    }
+  }
+  out_data_buffer->Brush(sel_count * type_len);
+}
+
+// Appends the non-null value `data_index` of `column`, which is row `row`.
+static void AppendNonFixedValue(PaxColumn *column, size_t row,
+                                size_t data_index,
+                                DataBuffer<int32> *offset_buffer,
+                                DataBuffer<char> *out_data_buffer,
+                                bool is_bpchar, size_t *dst_offset) {
+  char *buffer;
+  size_t buffer_len;
+  std::tie(buffer, buffer_len) = column->GetBuffer(data_index);
+
+  // deal toast
+  if (column->IsToast(row)) {
+    auto et_buffer = column->GetExternalToastDataBuffer();
+
+#ifdef USE_ASSERT_CHECKING
+    auto toast_raw_size = pax_toast_raw_size(PointerGetDatum(buffer));
+    Assert(toast_raw_size <= out_data_buffer->Available());
+#endif
+
+    auto decompress_size = pax_detoast_raw(
+        PointerGetDatum(buffer), out_data_buffer->GetAvailableBuffer(),
+        out_data_buffer->Available(), et_buffer ? et_buffer->Start() : nullptr,
+        et_buffer ? et_buffer->Used() : 0);
+    out_data_buffer->Brush(decompress_size);
+
+    offset_buffer->Write(*dst_offset);
+    offset_buffer->Brush(sizeof(int32));
+
+    *dst_offset += decompress_size;
+  } else {
+    size_t read_len = 0;
+    char *read_data;
+    VarlenaToRawBuffer(buffer, buffer_len, &read_data, &read_len);
+
+    // In vec, bpchar not allow store empty char after the actual characters
+    if (is_bpchar) {
+      read_len = bpchartruelen(read_data, read_len);
+    }
+
+    out_data_buffer->Write(read_data, read_len);
+    out_data_buffer->Brush(read_len);
+
+    offset_buffer->Write(*dst_offset);
+    offset_buffer->Brush(sizeof(int32));
+
+    *dst_offset += read_len;
+  }
+}
+
+static void CopyNonFixedBuffer(PaxColumn *column, size_t range_begin,
                                size_t range_lens, size_t data_index_begin,
                                size_t data_range_lens,
                                DataBuffer<int32> *offset_buffer,
                                DataBuffer<char> *out_data_buffer,
                                bool is_bpchar) {
   size_t dst_offset = out_data_buffer->Used();
-  char *buffer = nullptr;
-  size_t buffer_len = 0;
   size_t non_null_offset = 0;
 
+  // null_bitmap: 0 represents null, 1 represents non-null
   const auto &null_bitmap = column->GetBitmap();
 
   for (size_t i = range_begin; i < (range_begin + range_lens); i++) {
-    if (visibility_map_bitset &&
-        visibility_map_bitset->Test(i - range_begin + bitset_index_begin)) {
-      // tuples that are marked for deletion also need to calculate
-      // non-null-offset, which is used to calculate the address of valid
-      // data. null_bitmap: 0 represents null, 1 represents non-null
-      if (!null_bitmap || null_bitmap->Test(i)) {
-        non_null_offset++;
-      }
-      continue;
-    }
-
     if (null_bitmap && !null_bitmap->Test(i)) {
       offset_buffer->Write(dst_offset);
       offset_buffer->Brush(sizeof(int32));
-
     } else {
-      size_t read_len = 0;
-      char *read_data;
-
-      std::tie(buffer, buffer_len) =
-          column->GetBuffer(data_index_begin + non_null_offset);
-
-      // deal toast
-      if (column->IsToast(i)) {
-        auto et_buffer = column->GetExternalToastDataBuffer();
-
-#ifdef USE_ASSERT_CHECKING
-        auto toast_raw_size = pax_toast_raw_size(PointerGetDatum(buffer));
-        Assert(toast_raw_size <= out_data_buffer->Available());
-#endif
-
-        auto decompress_size = pax_detoast_raw(
-            PointerGetDatum(buffer), out_data_buffer->GetAvailableBuffer(),
-            out_data_buffer->Available(),
-            et_buffer ? et_buffer->Start() : nullptr,
-            et_buffer ? et_buffer->Used() : 0);
-        out_data_buffer->Brush(decompress_size);
-
-        offset_buffer->Write(dst_offset);
-        offset_buffer->Brush(sizeof(int32));
-
-        dst_offset += decompress_size;
-      } else {
-        VarlenaToRawBuffer(buffer, buffer_len, &read_data, &read_len);
-
-        // In vec, bpchar not allow store empty char after the actual characters
-        if (is_bpchar) {
-          read_len = bpchartruelen(read_data, read_len);
-        }
-
-        out_data_buffer->Write(read_data, read_len);
-        out_data_buffer->Brush(read_len);
-
-        offset_buffer->Write(dst_offset);
-        offset_buffer->Brush(sizeof(int32));
-
-        dst_offset += read_len;
-      }
-
+      AppendNonFixedValue(column, i, data_index_begin + non_null_offset,
+                          offset_buffer, out_data_buffer, is_bpchar,
+                          &dst_offset);
       non_null_offset++;
     }
   }
@@ -210,128 +220,190 @@ static void CopyNonFixedBuffer(PaxColumn *column,
   offset_buffer->Write(dst_offset);
   offset_buffer->Brush(sizeof(int32));
 
-  AssertImply(visibility_map_bitset == nullptr,
-              non_null_offset == data_range_lens);
-  AssertImply(visibility_map_bitset, non_null_offset <= data_range_lens);
+  CBDB_CHECK(non_null_offset == data_range_lens,
+             cbdb::CException::ExType::kExTypeOutOfRange,
+             fmt("The data range len may invalid or logic error here [end "
+                 "read offset=%lu, range len=%lu]",
+                 non_null_offset, data_range_lens));
+}
 
-  // if not the marking deletion，the non_null_offset is equal to the
-  // data_range_lens; when there is a Visibility Map, part of the data is
-  // invalid. Non_null_offset may be less than the data_range_lens.
-  if (visibility_map_bitset == nullptr) {
-    CBDB_CHECK(non_null_offset == data_range_lens,
-               cbdb::CException::ExType::kExTypeOutOfRange,
-               fmt("The data range len may invalid or logic error here [end "
-                   "read offset=%lu, range len=%lu]",
-                   non_null_offset, data_range_lens));
+static void CopySelectedNonFixedBuffer(
+    PaxColumn *column, size_t range_begin, const uint32 *sel, size_t sel_count,
+    size_t data_index_begin, size_t data_range_lens,
+    DataBuffer<int32> *offset_buffer, DataBuffer<char> *out_data_buffer,
+    bool is_bpchar) {
+  size_t dst_offset = out_data_buffer->Used();
+
+  const auto &null_bitmap = column->GetBitmap();
+  if (null_bitmap) {
+    SetBitCounter non_nulls(*null_bitmap, range_begin);
+    for (size_t k = 0; k < sel_count; k++) {
+      size_t row = range_begin + sel[k];
+      if (!null_bitmap->Test(row)) {
+        offset_buffer->Write(dst_offset);
+        offset_buffer->Brush(sizeof(int32));
+        continue;
+      }
+      size_t n = non_nulls.CountTo(row);
+      Assert(n < data_range_lens);
+      AppendNonFixedValue(column, row, data_index_begin + n, offset_buffer,
+                          out_data_buffer, is_bpchar, &dst_offset);
+    }
+  } else {
+    for (size_t k = 0; k < sel_count; k++) {
+      Assert(sel[k] < data_range_lens);
+      AppendNonFixedValue(column, range_begin + sel[k],
+                          data_index_begin + sel[k], offset_buffer,
+                          out_data_buffer, is_bpchar, &dst_offset);
+    }
+  }
+
+  offset_buffer->Write(dst_offset);
+  offset_buffer->Brush(sizeof(int32));
+}
+
+// Converts the non-null numeric value `data_index` of `column` into the
+// 16-byte vec numeric at `dest_buff`.
+static void ConvertDecimalValue(PaxColumn *column, size_t data_index,
+                                char *dest_buff) {
+  Numeric numeric;
+  bool should_free = false;
+  size_t num_len = 0;
+  char *buffer;
+  size_t buffer_len;
+  std::tie(buffer, buffer_len) = column->GetBuffer(data_index);
+
+  auto vl = (struct varlena *)DatumGetPointer(buffer);
+  Assert(!(VARATT_IS_EXTERNAL(vl) || VARATT_IS_COMPRESSED(vl)));
+  num_len = VARSIZE_ANY_EXHDR(vl);
+  // it has been detoasted in OrcWriter::PrepareWriteTuple, except numeric
+  // type with short header should be detoasted to 4B header
+  if (unlikely(VARATT_IS_SHORT(vl))) {
+    numeric = (Numeric)VarlenaShortTo4B(vl);
+    should_free = true;
+  } else {  // direct cast
+    numeric = (Numeric)(buffer);
+  }
+
+  pg_short_numeric_to_vec_short_numeric(numeric, num_len, (int64 *)dest_buff,
+                                        (int64 *)(dest_buff + sizeof(int64)));
+
+  if (should_free) {
+    free(numeric);
   }
 }
 
-static void CopyDecimalBuffer(PaxColumn *column,
-                              std::shared_ptr<Bitmap8> visibility_map_bitset,
-                              size_t bitset_index_begin, size_t range_begin,
+static void CopyDecimalBuffer(PaxColumn *column, size_t range_begin,
                               size_t range_lens, size_t data_index_begin,
                               size_t data_range_lens,
                               DataBuffer<char> *out_data_buffer) {
   size_t non_null_offset = 0;
-  char *buffer = nullptr;
-  size_t buffer_len = 0;
-  int32 type_len;
+  int32 type_len = VEC_SHORT_NUMERIC_STORE_BYTES;
 
   const auto &null_bitmap = column->GetBitmap();
-  type_len = VEC_SHORT_NUMERIC_STORE_BYTES;
 
   for (size_t i = range_begin; i < (range_begin + range_lens); i++) {
-    if (visibility_map_bitset &&
-        visibility_map_bitset->Test(i - range_begin + bitset_index_begin)) {
-      if (!null_bitmap || null_bitmap->Test(i)) {
-        non_null_offset++;
-      }
-      continue;
-    }
-
     if (null_bitmap && !null_bitmap->Test(i)) {
       out_data_buffer->Brush(type_len);
     } else {
-      Numeric numeric;
-      bool should_free = false;
-      size_t num_len = 0;
-      std::tie(buffer, buffer_len) =
-          column->GetBuffer(data_index_begin + non_null_offset);
-
-      auto vl = (struct varlena *)DatumGetPointer(buffer);
-      Assert(!(VARATT_IS_EXTERNAL(vl) || VARATT_IS_COMPRESSED(vl)));
-      num_len = VARSIZE_ANY_EXHDR(vl);
-      // it has been detoasted in OrcWriter::PrepareWriteTuple, except numeric
-      // type with short header should be detoasted to 4B header
-      if (unlikely(VARATT_IS_SHORT(vl))) {
-        numeric = (Numeric) VarlenaShortTo4B(vl);
-        should_free = true;
-      } else {  // direct cast
-        numeric = (Numeric)(buffer);
-      }
-
-      char *dest_buff = out_data_buffer->GetAvailableBuffer();
       Assert(out_data_buffer->Available() >= (size_t)type_len);
-      pg_short_numeric_to_vec_short_numeric(
-          numeric, num_len, (int64 *)dest_buff,
-          (int64 *)(dest_buff + sizeof(int64)));
+      ConvertDecimalValue(column, data_index_begin + non_null_offset,
+                          out_data_buffer->GetAvailableBuffer());
       out_data_buffer->Brush(type_len);
       non_null_offset++;
-
-      if (should_free) {
-        free(numeric);
-      }
     }
   }
 
-  AssertImply(visibility_map_bitset == nullptr,
-              non_null_offset == data_range_lens);
-  AssertImply(visibility_map_bitset, non_null_offset <= data_range_lens);
-
-  if (visibility_map_bitset == nullptr) {
-    CBDB_CHECK(non_null_offset == data_range_lens,
-               cbdb::CException::ExType::kExTypeOutOfRange,
-               fmt("The data range len may invalid or logic error here [end "
-                   "read offset=%lu, range len=%lu]",
-                   non_null_offset, data_range_lens));
-  }
+  CBDB_CHECK(non_null_offset == data_range_lens,
+             cbdb::CException::ExType::kExTypeOutOfRange,
+             fmt("The data range len may invalid or logic error here [end "
+                 "read offset=%lu, range len=%lu]",
+                 non_null_offset, data_range_lens));
 }
 
-void CopyBitPackedBuffer(PaxColumn *column,
-                         std::shared_ptr<Bitmap8> visibility_map_bitset,
-                         size_t group_base_offset, size_t range_begin,
-                         size_t range_lens, size_t data_index_begin,
-                         size_t data_range_lens, Bitmap8 *out_data_buffer) {
+static void CopySelectedDecimalBuffer(PaxColumn *column, size_t range_begin,
+                                      const uint32 *sel, size_t sel_count,
+                                      size_t data_index_begin,
+                                      size_t data_range_lens,
+                                      DataBuffer<char> *out_data_buffer) {
+  const size_t type_len = VEC_SHORT_NUMERIC_STORE_BYTES;
+  Assert(out_data_buffer->Available() >= sel_count * type_len);
+  char *dst = out_data_buffer->GetAvailableBuffer();
+
+  const auto &null_bitmap = column->GetBitmap();
+  if (null_bitmap) {
+    SetBitCounter non_nulls(*null_bitmap, range_begin);
+    for (size_t k = 0; k < sel_count; k++) {
+      size_t row = range_begin + sel[k];
+      if (!null_bitmap->Test(row)) continue;
+      size_t n = non_nulls.CountTo(row);
+      Assert(n < data_range_lens);
+      ConvertDecimalValue(column, data_index_begin + n, dst + k * type_len);
+    }
+  } else {
+    for (size_t k = 0; k < sel_count; k++) {
+      Assert(sel[k] < data_range_lens);
+      ConvertDecimalValue(column, data_index_begin + sel[k],
+                          dst + k * type_len);
+    }
+  }
+  out_data_buffer->Brush(sel_count * type_len);
+}
+
+static void CopyBitPackedBuffer(PaxColumn *column, size_t range_begin,
+                                size_t range_lens, size_t data_index_begin,
+                                size_t data_range_lens,
+                                Bitmap8 *out_data_buffer) {
   char *buffer;
   size_t buffer_len;
   std::tie(buffer, buffer_len) =
       column->GetRangeBuffer(data_index_begin, data_range_lens);
 
-  size_t bit_index = 0;
   size_t non_null_offset = 0;
   size_t type_len = column->GetTypeLength();
-  size_t tuple_offset = group_base_offset + range_begin;
   const auto &null_bitmap = column->GetBitmap();
+  bool has_null = column->HasNull();
+  AssertImply(has_null, null_bitmap != nullptr);
 
   for (size_t i = 0; i < range_lens; i++) {
-    bool is_visible = !visibility_map_bitset ||
-                      !visibility_map_bitset->Test(tuple_offset + i);
-    bool has_null = column->HasNull();
-    AssertImply(has_null, null_bitmap != nullptr);
     bool is_null = has_null && !null_bitmap->Test(range_begin + i);
-
-    if (is_visible) {
-      if (!is_null) {
-        bool value = *(bool *)(buffer + non_null_offset);
-        if (value) {
-          out_data_buffer->Set(bit_index);
-        }
-      }
-      bit_index++;
-    }
-
     if (!is_null) {
+      bool value = *(bool *)(buffer + non_null_offset);
+      if (value) {
+        out_data_buffer->Set(i);
+      }
       non_null_offset += type_len;
+    }
+  }
+}
+
+static void CopySelectedBitPackedBuffer(PaxColumn *column, size_t range_begin,
+                                        const uint32 *sel, size_t sel_count,
+                                        size_t data_index_begin,
+                                        size_t data_range_lens,
+                                        Bitmap8 *out_data_buffer) {
+  char *buffer;
+  size_t buffer_len;
+  std::tie(buffer, buffer_len) =
+      column->GetRangeBuffer(data_index_begin, data_range_lens);
+
+  size_t type_len = column->GetTypeLength();
+  const auto &null_bitmap = column->GetBitmap();
+  bool has_null = column->HasNull();
+  AssertImply(has_null, null_bitmap != nullptr);
+
+  if (has_null) {
+    SetBitCounter non_nulls(*null_bitmap, range_begin);
+    for (size_t k = 0; k < sel_count; k++) {
+      size_t row = range_begin + sel[k];
+      if (!null_bitmap->Test(row)) continue;
+      size_t n = non_nulls.CountTo(row);
+      Assert(n < data_range_lens);
+      if (*(bool *)(buffer + n * type_len)) out_data_buffer->Set(k);
+    }
+  } else {
+    for (size_t k = 0; k < sel_count; k++) {
+      if (*(bool *)(buffer + sel[k] * type_len)) out_data_buffer->Set(k);
     }
   }
 }
@@ -369,8 +441,9 @@ static size_t CalcRecordBatchDataBufferSize(PaxColumn *column,
 std::pair<size_t, size_t> VecAdapter::AppendPorcFormat(PaxColumns *columns,
                                                        size_t range_begin,
                                                        size_t range_lens) {
-  size_t filter_count;
   size_t out_range_lens;
+  // visible rows as offsets from `range_begin`; nullptr when all are visible
+  const uint32 *sel = nullptr;
 
   // recompute `range_lens`, if remain data LT `max_batch_size_`
   // then should reduce `range_lens`
@@ -378,9 +451,15 @@ std::pair<size_t, size_t> VecAdapter::AppendPorcFormat(PaxColumns *columns,
     range_lens = columns->GetRows() - range_begin;
   }
 
-  filter_count = GetInvisibleNumber(range_begin, range_lens);
-  Assert(range_lens >= filter_count);
-  out_range_lens = range_lens - filter_count;
+  if (micro_partition_visibility_bitmap_) {
+    visible_rows_.resize(range_lens);
+    out_range_lens = VisibleRowOffsets(*micro_partition_visibility_bitmap_,
+                                       group_base_offset_ + range_begin,
+                                       range_lens, visible_rows_.data());
+    if (out_range_lens < range_lens) sel = visible_rows_.data();
+  } else {
+    out_range_lens = range_lens;
+  }
 
   if (out_range_lens == 0) {
     return std::make_pair(0, range_begin + range_lens);
@@ -412,11 +491,15 @@ std::pair<size_t, size_t> VecAdapter::AppendPorcFormat(PaxColumns *columns,
 
     // copy null bitmap
     vec_cache_buffer_[index].null_counts = 0;
-    CopyBitmapBuffer(column, micro_partition_visibility_bitmap_,
-                     range_begin + group_base_offset_, range_begin, range_lens,
-                     num_of_not_nulls, out_range_lens,
-                     &(vec_cache_buffer_[index].null_bits_buffer),
-                     &(vec_cache_buffer_[index].null_counts));
+    if (sel == nullptr) {
+      CopyBitmapBuffer(column, range_begin, range_lens, num_of_not_nulls,
+                       &(vec_cache_buffer_[index].null_bits_buffer),
+                       &(vec_cache_buffer_[index].null_counts));
+    } else if (column->HasNull()) {
+      CopySelectedBitmapBuffer(column, range_begin, sel, out_range_lens,
+                               &(vec_cache_buffer_[index].null_bits_buffer),
+                               &(vec_cache_buffer_[index].null_counts));
+    }
 
     // copy data
     std::tie(raw_buffer, buffer_len) =
@@ -552,10 +635,14 @@ std::pair<size_t, size_t> VecAdapter::AppendPorcFormat(PaxColumns *columns,
 
         vec_buffer->Set(BlockBuffer::Alloc<char>(align_size), align_size);
 
-        CopyDecimalBuffer(column, micro_partition_visibility_bitmap_,
-                          range_begin + group_base_offset_, range_begin,
-                          range_lens, data_index_begin, num_of_not_nulls,
-                          vec_buffer);
+        if (sel == nullptr) {
+          CopyDecimalBuffer(column, range_begin, range_lens, data_index_begin,
+                            num_of_not_nulls, vec_buffer);
+        } else {
+          CopySelectedDecimalBuffer(column, range_begin, sel, out_range_lens,
+                                    data_index_begin, num_of_not_nulls,
+                                    vec_buffer);
+        }
         break;
       }
       case PaxColumnTypeInMem::kTypeBpChar:
@@ -571,11 +658,16 @@ std::pair<size_t, size_t> VecAdapter::AppendPorcFormat(PaxColumns *columns,
         offset_buffer->Set(BlockBuffer::Alloc<char>(offset_align_bytes),
                            offset_align_bytes);
 
-        CopyNonFixedBuffer(column, micro_partition_visibility_bitmap_,
-                           range_begin + group_base_offset_, range_begin,
-                           range_lens, data_index_begin, num_of_not_nulls,
-                           offset_buffer, vec_buffer,
-                           column_type == PaxColumnTypeInMem::kTypeBpChar);
+        bool is_bpchar = column_type == PaxColumnTypeInMem::kTypeBpChar;
+        if (sel == nullptr) {
+          CopyNonFixedBuffer(column, range_begin, range_lens, data_index_begin,
+                             num_of_not_nulls, offset_buffer, vec_buffer,
+                             is_bpchar);
+        } else {
+          CopySelectedNonFixedBuffer(column, range_begin, sel, out_range_lens,
+                                     data_index_begin, num_of_not_nulls,
+                                     offset_buffer, vec_buffer, is_bpchar);
+        }
 
         break;
       }
@@ -586,10 +678,14 @@ std::pair<size_t, size_t> VecAdapter::AppendPorcFormat(PaxColumns *columns,
         Assert(!vec_buffer->GetBuffer());
 
         vec_buffer->Set(BlockBuffer::Alloc<char>(align_size), align_size);
-        CopyFixedBuffer(column, micro_partition_visibility_bitmap_,
-                        range_begin + group_base_offset_, range_begin,
-                        range_lens, data_index_begin, num_of_not_nulls,
-                        vec_buffer);
+        if (sel == nullptr) {
+          CopyFixedBuffer(column, range_begin, range_lens, data_index_begin,
+                          num_of_not_nulls, vec_buffer);
+        } else {
+          CopySelectedFixedBuffer(column, range_begin, sel, out_range_lens,
+                                  data_index_begin, num_of_not_nulls,
+                                  vec_buffer);
+        }
 
         break;
       }
@@ -606,10 +702,15 @@ std::pair<size_t, size_t> VecAdapter::AppendPorcFormat(PaxColumns *columns,
         Bitmap8 vec_bool_bitmap(
             BitmapRaw<uint8>((uint8 *)(boolean_buffer), align_size));
 
-        CopyBitPackedBuffer(column, micro_partition_visibility_bitmap_,
-                            group_base_offset_, range_begin, range_lens,
-                            data_index_begin, num_of_not_nulls,
-                            &vec_bool_bitmap);
+        if (sel == nullptr) {
+          CopyBitPackedBuffer(column, range_begin, range_lens,
+                              data_index_begin, num_of_not_nulls,
+                              &vec_bool_bitmap);
+        } else {
+          CopySelectedBitPackedBuffer(column, range_begin, sel, out_range_lens,
+                                      data_index_begin, num_of_not_nulls,
+                                      &vec_bool_bitmap);
+        }
         break;
       }
       default: {

@@ -33,6 +33,7 @@
 #include "comm/guc.h"
 #include "comm/log.h"
 #include "comm/pax_memory.h"
+#include "comm/vec_numeric.h"
 #include "storage/columns/pax_columns.h"
 #include "storage/columns/pax_vec_column.h"
 #include "storage/filter/pax_fast_filter.h"
@@ -70,6 +71,7 @@ struct ColumnGroupDesc {
   int filter_start;      // start index into FastFilterContext::filters
   int filter_count;      // number of filters on this column
   bool is_string;        // true if type_len == -1
+  bool missing_passes;   // the column's missing value passes every filter
 };
 
 struct ThreadFilterState {
@@ -160,6 +162,9 @@ static void InitColumnGroups(ThreadFilterState *tl,
     int j = i + 1;
     while (j < nfast && fast_ctx->filters[j].attno == cg.attno) j++;
     cg.filter_count = j - i;
+    cg.missing_passes = true;
+    for (int k = i; k < j; k++)
+      cg.missing_passes &= fast_ctx->filters[k].missing_passes;
     tl->col_groups.push_back(cg);
     if (!cg.is_string) tl->int_group_count++;
     i = j;
@@ -170,6 +175,22 @@ static void InitColumnGroups(ThreadFilterState *tl,
   for (int k = 0; k < ncg; k++) tl->eval_order[k] = k;
   tl->reject_counts.assign(ncg, 0);
   tl->group_count = 0;
+}
+
+// The group's column `attno`, or nullptr if the group's file does not have
+// it (written before ALTER TABLE ADD COLUMN): PaxColumns holds only the
+// file's columns.
+static PaxColumn *GetGroupColumn(PaxColumns *columns, AttrNumber attno) {
+  size_t index = static_cast<size_t>(attno - 1);
+  return index < columns->GetColumns() ? (*columns)[index].get() : nullptr;
+}
+
+// A column the file does not have reads as its missing value in every row
+// (VecAdapter::FillMissColumn).  Apply the filters to that: every row passes
+// them or none does.
+static void ApplyMissingColumn(const ColumnGroupDesc &cg, uint8_t *bm,
+                               size_t nrows) {
+  if (!cg.missing_passes) memset(bm, 0, (nrows + 7) / 8);
 }
 
 // Build a single-column projection vector (only one attno set to true).
@@ -230,12 +251,117 @@ static inline bool EvalIntFilters(T value, const FastFilterDesc *filters,
         }
       }
       if (!found) return false;
+    } else if (fd.op == FastFilterOp::kRangeSet) {
+      if (!KeyInRanges(static_cast<int64>(value), fd.ranges, fd.range_count))
+        return false;
     } else {
       if (!CompareValue(value, fd.op, GetDatumAs<T>(fd.const_value)))
         return false;
     }
   }
   return true;
+}
+
+// ---------------------------------------------------------------------------
+// Column evaluation: numeric columns
+//
+// Every filter on a numeric column is a kRangeSet over numeric keys (see
+// numeric_key in pax_fast_filter.h).  PORC_VEC stores a 16-byte vec numeric
+// for every row, nulls included; PORC stores one varlena per non-null row.
+// ---------------------------------------------------------------------------
+
+static inline bool EvalNumericFilters(int64 key, const FastFilterDesc *filters,
+                                      int filter_count) {
+  for (int f = 0; f < filter_count; f++) {
+    Assert(filters[f].op == FastFilterOp::kRangeSet);
+    if (!KeyInRanges(key, filters[f].ranges, filters[f].range_count))
+      return false;
+  }
+  return true;
+}
+
+// Numeric key of the value at buffer position `buf_pos` (row for PORC_VEC,
+// non-null element for PORC).
+// `row` is the row in the group, `buf_pos` its value's position in the buffer
+// (the same for PORC_VEC, the non-null rank for PORC).
+static inline int64 NumericKeyAt(PaxColumn *column, const char *vec_data,
+                                 bool is_vec, size_t row, size_t buf_pos,
+                                 int scale) {
+  if (is_vec) {
+    int64 low, high;
+    memcpy(&low, vec_data + buf_pos * VEC_SHORT_NUMERIC_STORE_BYTES,
+           sizeof(low));
+    memcpy(&high,
+           vec_data + buf_pos * VEC_SHORT_NUMERIC_STORE_BYTES + sizeof(low),
+           sizeof(high));
+    return NumericKeyFromVecNumeric(low, high, scale);
+  }
+  // A numeric never reaches PAX toast (it is far below the toast size), and
+  // the writer stores it detoasted.
+  CBDB_CHECK(!column->IsToast(row),
+             cbdb::CException::ExType::kExTypeLogicError,
+             "unexpected toasted numeric in fast filter");
+  char *ptr = column->GetBuffer(buf_pos).first;
+  CBDB_CHECK(!VARATT_IS_EXTERNAL(ptr) && !VARATT_IS_COMPRESSED(ptr),
+             cbdb::CException::ExType::kExTypeLogicError,
+             "unexpected external or compressed numeric in fast filter");
+  return NumericKeyFromPgNumeric(VARDATA_ANY(ptr), VARSIZE_ANY_EXHDR(ptr),
+                                 scale);
+}
+
+// Full scan: evaluate all rows, write results to col_bm (bit=1 = pass).
+static void EvalColumnNumericFullScan(PaxColumn *column, const uint8_t *null_bm,
+                                      const FastFilterDesc *filters,
+                                      int filter_count, bool is_vec,
+                                      size_t nrows, uint8_t *col_bm) {
+  size_t nwords = (nrows + 7) / 8;
+  memset(col_bm, 0, nwords);
+
+  const char *vec_data = is_vec ? column->GetBuffer().first : nullptr;
+  int scale = filters[0].numeric_scale;
+  size_t non_null_count = 0;
+  for (size_t row = 0; row < nrows; row++) {
+    size_t w = row >> 3;
+    uint8_t bit = static_cast<uint8_t>(1U << (row & 7));
+
+    bool row_is_null = (null_bm && !(null_bm[w] & bit));
+    size_t buf_pos = is_vec ? row : non_null_count;
+    if (!row_is_null) non_null_count++;
+    if (row_is_null) continue;
+
+    int64 key = NumericKeyAt(column, vec_data, is_vec, row, buf_pos, scale);
+    if (EvalNumericFilters(key, filters, filter_count))
+      col_bm[w] |= bit;
+  }
+}
+
+// Selective scan: evaluate only rows still passing in combined_bm (in-place).
+// Walks every row to keep the PORC non-null position in step.
+static void EvalColumnNumericSelective(PaxColumn *column,
+                                       const uint8_t *null_bm,
+                                       const FastFilterDesc *filters,
+                                       int filter_count, bool is_vec,
+                                       size_t nrows, uint8_t *combined_bm) {
+  const char *vec_data = is_vec ? column->GetBuffer().first : nullptr;
+  int scale = filters[0].numeric_scale;
+  size_t non_null_count = 0;
+  for (size_t row = 0; row < nrows; row++) {
+    size_t w = row >> 3;
+    uint8_t bit = static_cast<uint8_t>(1U << (row & 7));
+
+    bool row_is_null = (null_bm && !(null_bm[w] & bit));
+    size_t buf_pos = is_vec ? row : non_null_count;
+    if (!row_is_null) non_null_count++;
+
+    if (!(combined_bm[w] & bit)) continue;  // already rejected
+    if (row_is_null) {
+      combined_bm[w] &= ~bit;
+      continue;
+    }
+    int64 key = NumericKeyAt(column, vec_data, is_vec, row, buf_pos, scale);
+    if (!EvalNumericFilters(key, filters, filter_count))
+      combined_bm[w] &= ~bit;
+  }
 }
 
 // Full scan: evaluate all rows, write results to col_bm (bit=1 = pass).
@@ -1495,13 +1621,19 @@ static void EvalColumnGroupFullScan(PaxColumn *column,
     return;
   }
 
-  auto [buffer, buf_size] = column->GetBuffer();
   const uint8_t *null_bm = nullptr;
   if (column->HasNull()) {
     auto bm = column->GetBitmap().get();
     if (bm) null_bm = bm->Raw().bitmap;
   }
 
+  if (filters[0].IsNumericFilter()) {
+    EvalColumnNumericFullScan(column, null_bm, filters, filter_count, is_vec,
+                              nrows, col_bm);
+    return;
+  }
+
+  auto [buffer, buf_size] = column->GetBuffer();
   switch (filters[0].type_len) {
     case 8:
       EvalColumnIntFullScan(reinterpret_cast<int64 *>(buffer), null_bm,
@@ -1533,13 +1665,19 @@ static void EvalColumnGroupSelective(PaxColumn *column,
     return;
   }
 
-  auto [buffer, buf_size] = column->GetBuffer();
   const uint8_t *null_bm = nullptr;
   if (column->HasNull()) {
     auto bm = column->GetBitmap().get();
     if (bm) null_bm = bm->Raw().bitmap;
   }
 
+  if (filters[0].IsNumericFilter()) {
+    EvalColumnNumericSelective(column, null_bm, filters, filter_count, is_vec,
+                               nrows, combined_bm);
+    return;
+  }
+
+  auto [buffer, buf_size] = column->GetBuffer();
   switch (filters[0].type_len) {
     case 8:
       EvalColumnIntSelective(reinterpret_cast<int64 *>(buffer), null_bm,
@@ -1574,6 +1712,7 @@ PaxVecReader::PaxVecReader(std::unique_ptr<MicroPartitionReader> &&reader,
 void PaxVecReader::Open(const ReaderOptions &options) {
   auto visimap = options.visibility_bitmap;
   micro_partition_visibility_bitmap_ = visimap;
+  owns_visibility_bitmap_ = false;
 
   // Two-stage requires disabling reused_buffer (Phase 1 and Phase 2 data
   // cannot share buffer). Current vec path already sets reused_buffer=nullptr,
@@ -1633,13 +1772,23 @@ retry_next_group:
     if (has_fast_filter) {
       auto ff_result = FastFilterGroup(group_index);
 
-      // Merge filter bitmap into visibility bitmap.
+      // Merge filter bitmap into visibility bitmap.  A visibility bitmap
+      // from Open() is the backend's cached visimap: marking filtered rows
+      // in it would hide them from every later scan of this file (or raise,
+      // once a row lies past the end of the visimap), so work on a copy.
       if (ff_result.bitmap) {
         if (!micro_partition_visibility_bitmap_) {
           micro_partition_visibility_bitmap_ =
               std::shared_ptr<Bitmap8>(ff_result.bitmap.release());
+          owns_visibility_bitmap_ = true;
           adapter_->SetVisibitilyMapInfo(micro_partition_visibility_bitmap_);
         } else {
+          if (!owns_visibility_bitmap_) {
+            micro_partition_visibility_bitmap_ = std::shared_ptr<Bitmap8>(
+                micro_partition_visibility_bitmap_->Clone().release());
+            owns_visibility_bitmap_ = true;
+            adapter_->SetVisibitilyMapInfo(micro_partition_visibility_bitmap_);
+          }
           const auto &filt_raw = ff_result.bitmap->Raw();
           for (size_t w = 0; w < filt_raw.size; w++) {
             if (filt_raw.bitmap[w] == 0) continue;
@@ -1735,15 +1884,19 @@ static void FastFilterSampling(ThreadFilterState *tl,
   for (int ci = 0; ci < ncg; ci++) {
     int g = tl->eval_order[ci];
     auto &cg = tl->col_groups[g];
-    PaxColumn *column = (*all_columns)[cg.attno - 1].get();
-    if (!column) continue;
+    PaxColumn *column = GetGroupColumn(all_columns, cg.attno);
 
     const FastFilterDesc *filters = &fast_ctx->filters[cg.filter_start];
     int filter_count = cg.filter_count;
 
     // Always full scan during sampling to collect independent rejection counts.
-    EvalColumnGroupFullScan(column, filters, filter_count, cg.is_string,
-                            is_vec, nrows, tl->col_bm.data());
+    if (column) {
+      EvalColumnGroupFullScan(column, filters, filter_count, cg.is_string,
+                              is_vec, nrows, tl->col_bm.data());
+    } else {
+      memset(tl->col_bm.data(), 0xFF, nwords);
+      ApplyMissingColumn(cg, tl->col_bm.data(), nrows);
+    }
     for (size_t w = 0; w < nwords; w++)
       tl->combined_bm[w] &= tl->col_bm[w];
 
@@ -1790,6 +1943,7 @@ static std::unique_ptr<MicroPartitionReader::Group> FastFilterInterleaved(
   size_t nrows = 0;
   size_t row_offset = 0;
   bool is_vec = true;
+  bool format_known = false;
 
   for (int ci = 0; ci < ncg; ci++) {
     int g = tl->eval_order[ci];
@@ -1803,11 +1957,6 @@ static std::unique_ptr<MicroPartitionReader::Group> FastFilterInterleaved(
       nrows = col_group->GetRows();
       row_offset = col_group->GetRowOffset();
 
-      // Detect storage format from first column.
-      PaxColumn *first_col =
-          (*col_group->GetAllColumns())[cg.attno - 1].get();
-      if (first_col) is_vec = COLUMN_STORAGE_FORMAT_IS_VEC(first_col);
-
       // Setup bitmaps.
       tl->EnsureBitmapCapacity(nrows);
       InitCombinedBmWithVisibility(tl->combined_bm.data(), nrows,
@@ -1815,9 +1964,19 @@ static std::unique_ptr<MicroPartitionReader::Group> FastFilterInterleaved(
     }
 
     size_t nwords = (nrows + 7) / 8;
-    PaxColumn *column = (*col_group->GetAllColumns())[cg.attno - 1].get();
+    PaxColumn *column =
+        GetGroupColumn(col_group->GetAllColumns().get(), cg.attno);
 
-    if (column) {
+    // Detect the storage format from the first column the file has; every
+    // column of a file has the same format.
+    if (column && !format_known) {
+      is_vec = COLUMN_STORAGE_FORMAT_IS_VEC(column);
+      format_known = true;
+    }
+
+    if (!column) {
+      ApplyMissingColumn(cg, tl->combined_bm.data(), nrows);
+    } else {
       const FastFilterDesc *filters = &fast_ctx->filters[cg.filter_start];
       int filter_count = cg.filter_count;
 
@@ -1910,8 +2069,8 @@ PaxVecReader::FastFilterResult PaxVecReader::FastFilterGroup(
     // Detect storage format.
     is_vec = true;
     for (int g = 0; g < ncg; g++) {
-      PaxColumn *col =
-          (*filter_group->GetAllColumns())[tl->col_groups[g].attno - 1].get();
+      PaxColumn *col = GetGroupColumn(filter_group->GetAllColumns().get(),
+                                      tl->col_groups[g].attno);
       if (col) {
         is_vec = COLUMN_STORAGE_FORMAT_IS_VEC(col);
         break;

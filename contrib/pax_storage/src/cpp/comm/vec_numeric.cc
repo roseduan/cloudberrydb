@@ -35,7 +35,17 @@
 
 // The vec numeric defined
 
-static const int64 digits_base[] = {1LL, 10LL, 100LL, 1000LL, 10000LL};
+// 10^0 .. 10^38; 10^38 still fits in int128.
+#define POW10_INT128_SIZE 39
+struct Pow10Int128 {
+  int128 v[POW10_INT128_SIZE];
+};
+static constexpr Pow10Int128 pow10_int128 = [] {
+  Pow10Int128 t{};
+  t.v[0] = 1;
+  for (int k = 1; k < POW10_INT128_SIZE; k++) t.v[k] = t.v[k - 1] * 10;
+  return t;
+}();
 
 #define VEC_SHORT_NUMERIC_SCALE_MASK             \
   (((1ULL << VEC_SHORT_NUMERIC_SCALE_WIDTH) - 1) \
@@ -239,17 +249,37 @@ void pg_short_numeric_to_vec_short_numeric(Numeric num, int num_len,
         val += digits[i];
       }
     }
-    for (int i = 0; i < scale; i++) val *= 10;
+    if (likely(scale < POW10_INT128_SIZE)) {
+      val *= pow10_int128.v[scale];
+    } else {
+      for (int i = 0; i < scale; i++) val *= 10;
+    }
   }
   int frac_offset = weight >= 0 ? 0 : (abs(weight) - 1) * 4;
   // fractional part
   while (frac_offset < scale) {
-    frac_val = frac_val * NBASE;
+    int digit = i < ndigits ? digits[i] : 0;
     frac_offset += DEC_DIGITS;
-    if (i < ndigits) frac_val += digits[i];
     if (frac_offset > scale) {
-      Assert((DEC_DIGITS - scale % DEC_DIGITS) < (int)lengthof(digits_base));
-      frac_val = frac_val / digits_base[DEC_DIGITS - scale % DEC_DIGITS];
+      // The last group goes past the scale; keep only its leading digits.
+      // NBASE is a multiple of the divisor, so dividing the digit alone gives
+      // the same result as dividing (frac_val * NBASE + digit). Constant
+      // divisors compile to multiplications, avoiding an int128 division
+      // (__divti3) per value.
+      switch (scale % DEC_DIGITS) {
+        case 1:
+          frac_val = frac_val * 10 + digit / 1000;
+          break;
+        case 2:
+          frac_val = frac_val * 100 + digit / 100;
+          break;
+        default:
+          Assert(scale % DEC_DIGITS == 3);
+          frac_val = frac_val * 1000 + digit / 10;
+          break;
+      }
+    } else {
+      frac_val = frac_val * NBASE + digit;
     }
     i++;
   }

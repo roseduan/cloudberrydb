@@ -74,60 +74,46 @@ void VarlenaToRawBuffer(char *buffer, size_t buffer_len, char **out_data,
   *out_data = VARDATA_ANY(vl);
 }
 
-void CopyBitmapBuffer(PaxColumn *column,
-                      std::shared_ptr<Bitmap8> visibility_map_bitset,
-                      size_t bitset_index_begin, size_t range_begin,
-                      size_t range_lens, size_t data_range_lens,
-                      size_t out_range_lens, DataBuffer<char> *null_bits_buffer,
-                      size_t *out_visable_null_counts) {
+void CopyBitmapBuffer(PaxColumn *column, size_t range_begin, size_t range_lens,
+                      size_t data_range_lens,
+                      DataBuffer<char> *null_bits_buffer,
+                      size_t *out_null_counts) {
   if (column->HasNull()) {
-    if (visibility_map_bitset == nullptr) {
-      // null length depends on `range_lens`
-      auto null_align_bytes =
-          TYPEALIGN(MEMORY_ALIGN_SIZE, BITS_TO_BYTES(range_lens));
-      Assert(!null_bits_buffer->GetBuffer());
-      null_bits_buffer->Set(BlockBuffer::Alloc<char>(null_align_bytes),
-                            null_align_bytes);
-      const auto &bitmap = column->GetBitmap();
-      Assert(bitmap);
-      CopyBitmap(bitmap.get(), range_begin, range_lens, null_bits_buffer);
-      *out_visable_null_counts = range_lens - data_range_lens;
+    // null length depends on `range_lens`
+    auto null_align_bytes =
+        TYPEALIGN(MEMORY_ALIGN_SIZE, BITS_TO_BYTES(range_lens));
+    Assert(!null_bits_buffer->GetBuffer());
+    null_bits_buffer->Set(BlockBuffer::Alloc<char>(null_align_bytes),
+                          null_align_bytes);
+    const auto &bitmap = column->GetBitmap();
+    Assert(bitmap);
+    CopyBitmap(bitmap.get(), range_begin, range_lens, null_bits_buffer);
+    *out_null_counts = range_lens - data_range_lens;
+  }
+}
+
+void CopySelectedBitmapBuffer(PaxColumn *column, size_t range_begin,
+                              const uint32 *sel, size_t sel_count,
+                              DataBuffer<char> *null_bits_buffer,
+                              size_t *out_visible_null_counts) {
+  const auto &bitmap = column->GetBitmap();
+  Assert(bitmap);
+
+  auto null_bytes = TYPEALIGN(MEMORY_ALIGN_SIZE, BITS_TO_BYTES(sel_count));
+  Assert(!null_bits_buffer->GetBuffer());
+  null_bits_buffer->Set(BlockBuffer::Alloc0<char>(null_bytes), null_bytes);
+
+  auto out = reinterpret_cast<uint8 *>(null_bits_buffer->GetBuffer());
+  size_t null_count = 0;
+  for (size_t k = 0; k < sel_count; k++) {
+    if (bitmap->Test(range_begin + sel[k])) {
+      out[k >> 3] |= static_cast<uint8>(1U << (k & 7));
     } else {
-      const auto &bitmap = column->GetBitmap();
-      Assert(bitmap);
-
-      Bitmap8 null_bitmap(out_range_lens);
-      size_t null_count = 0;
-      size_t null_index = 0;
-      for (size_t i = range_begin; i < range_begin + range_lens; i++) {
-        // only calculate the null bitmap corresponding to the unmarked
-        // deleted tuple.
-        if (!visibility_map_bitset->Test(i - range_begin +
-                                         bitset_index_begin)) {
-          // is null
-          if (!bitmap->Test(i)) {
-            null_count++;
-          } else {
-            // not null
-            null_bitmap.Set(null_index);
-          }
-          null_index++;
-        }
-      }
-
-      auto null_bytes =
-          TYPEALIGN(MEMORY_ALIGN_SIZE, BITS_TO_BYTES(out_range_lens));
-      Assert(!null_bits_buffer->GetBuffer());
-      null_bits_buffer->Set(BlockBuffer::Alloc0<char>(null_bytes), null_bytes);
-      CopyBitmap(&null_bitmap, 0, out_range_lens, null_bits_buffer);
-      *out_visable_null_counts = null_count;
-      CBDB_CHECK(out_range_lens == null_index,
-                 cbdb::CException::ExType::kExTypeOutOfRange,
-                 fmt("The required range len not match the null counts [range "
-                     "len=%lu, null count=%lu]",
-                     out_range_lens, null_index));
+      null_count++;
     }
   }
+  null_bits_buffer->Brush(BITS_TO_BYTES(sel_count));
+  *out_visible_null_counts = null_count;
 }
 
 }  // namespace pax

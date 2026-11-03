@@ -113,18 +113,6 @@ class VecAdapter final {
                                              size_t range_lens);
   std::pair<size_t, size_t> AppendPorcVecFormat(PaxColumns *columns);
 
-  inline size_t GetInvisibleNumber(size_t range_begin, size_t range_lens) {
-    if (micro_partition_visibility_bitmap_ == nullptr) {
-      return 0;
-    }
-
-    // The number of bits which set to 1 in visibility map is the number of
-    // invisible tuples
-    auto begin = group_base_offset_ + range_begin;
-    return micro_partition_visibility_bitmap_->CountBits(
-        begin, begin + range_lens - 1);
-  }
-
   void BuildCtidOffset(size_t range_begin, size_t range_lengs);
 
   std::shared_ptr<arrow::Buffer> FullWithCTID2(int block_num, int offset);
@@ -147,6 +135,9 @@ class VecAdapter final {
   int32 block_no_;
   // only referenced
   std::shared_ptr<Bitmap8> micro_partition_visibility_bitmap_ = nullptr;
+  // visible rows of the batch being appended (see AppendPorcFormat and
+  // AppendPorcVecFormat), kept to reuse its memory across batches
+  std::vector<uint32> visible_rows_;
 
   // ctid offset in current batch range
   std::shared_ptr<DataBuffer<int32>> ctid_offset_in_current_range_;

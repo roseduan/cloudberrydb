@@ -25,14 +25,24 @@
  *-------------------------------------------------------------------------
  */
 
+#include <random>
+
 #include "comm/gtest_wrappers.h"
 #include "comm/singleton.h"
+#include "comm/vec_numeric.h"
 #include "pax_gtest_helper.h"
+#include "storage/columns/pax_bitpacked_column.h"
+#include "storage/columns/pax_bpchar_column.h"
 #include "storage/columns/pax_encoding_non_fixed_column.h"
+#include "storage/columns/pax_numeric_column.h"
+#include "storage/columns/pax_vec_bitpacked_column.h"
+#include "storage/columns/pax_vec_bpchar_column.h"
+#include "storage/columns/pax_vec_column.h"
 #include "storage/columns/pax_vec_numeric_column.h"
 #include "storage/local_file_system.h"
 #include "storage/pax.h"
 #include "storage/vec/pax_vec_adapter.h"
+#include "storage/vec/pax_vec_comm.h"
 #ifdef VEC_BUILD
 #pragma GCC diagnostic push
 #pragma GCC diagnostic ignored "-Wunused-but-set-variable"
@@ -1529,6 +1539,310 @@ TEST_P(PaxVecTest, PaxVecReaderTest) {
   reader->Close();
   DeleteTupleSlot(tuple_slot);
   cbdb::Pfree(relation);
+}
+
+// VisibleRowOffsets and SetBitCounter read the bitmap 64 bits at a time; they
+// must agree with Bitmap8::Test() bit by bit, for any start bit and length,
+// including ranges that run past the end of the bitmap.
+TEST(PaxVecBitsTest, VisibleRowOffsetsAndSetBitCounter) {
+  std::mt19937 rng(20261022);
+  const double densities[] = {0.0, 0.03, 0.5, 0.97, 1.0};
+  for (int iter = 0; iter < 3000; iter++) {
+    size_t nbits = rng() % 400;
+    double density = densities[rng() % 5];
+    Bitmap8 bm(16);
+    for (size_t i = 0; i < nbits; i++) {
+      if (std::uniform_real_distribution<double>(0, 1)(rng) < density)
+        bm.Set(i);
+    }
+    size_t begin = rng() % 300;
+    size_t count = rng() % 300;
+
+    std::vector<uint32> expected;
+    for (size_t r = 0; r < count; r++) {
+      if (!bm.Test(begin + r)) expected.push_back(r);
+    }
+    std::vector<uint32> got(count + 1);
+    size_t n = VisibleRowOffsets(bm, begin, count, got.data());
+    got.resize(n);
+    ASSERT_EQ(got, expected) << "begin=" << begin << " count=" << count;
+
+    // Count the set bits up to rows that only move forward, with gaps both
+    // under and over 64 bits.
+    SetBitCounter counter(bm, begin);
+    size_t row = begin;
+    size_t naive = 0;
+    while (row < begin + count) {
+      ASSERT_EQ(counter.CountTo(row), naive) << "row=" << row;
+      size_t step = (rng() % 4 == 0) ? rng() % 200 : rng() % 3;
+      for (size_t r = row; r < row + step; r++) naive += bm.Test(r);
+      row += step;
+    }
+  }
+}
+
+// AppendPorcFormat and AppendPorcVecFormat copy only the visible rows of
+// each column.  Random columns of every PORC and PORC_VEC column kind, with
+// random nulls (including trailing ones, which leave the null bitmap shorter
+// than the column) and random visibility (including a bitmap that ends before
+// the group does), must come out exactly as the visible rows of the input.
+TEST_P(PaxVecTest, VisibleRowsOfEveryColumnKind) {
+  auto with_visimap = ::testing::get<1>(GetParam());
+  std::mt19937 rng(with_visimap ? 7 : 11);
+  auto chance = [&rng](double p) {
+    return std::uniform_real_distribution<double>(0, 1)(rng) < p;
+  };
+  PaxEncoder::EncodingOption encoding_option;
+  encoding_option.column_encode_type = ColumnEncoding_Kind_NO_ENCODED;
+  // as the writer sets it for every non-fixed column
+  encoding_option.offsets_encode_type = ColumnEncoding_Kind_DIRECT_DELTA;
+
+  const Oid types[] = {INT4OID, INT8OID, TEXTOID, BPCHAROID, NUMERICOID,
+                       BOOLOID};
+  const int natts = lengthof(types);
+  const double null_densities[] = {0.0, 0.05, 0.5};
+  const double invisible_densities[] = {0.0, 0.03, 0.5, 0.97, 1.0};
+  const size_t base_offsets[] = {0, 3, 64, 1001};
+
+  for (int iter = 0; iter < 120; iter++) {
+    bool porc_vec = iter % 2 == 1;
+    size_t nrows = 1 + rng() % 3000;
+    size_t base = base_offsets[rng() % 4];
+
+    // expected values, by row
+    std::vector<std::vector<bool>> is_null(natts,
+                                           std::vector<bool>(nrows, false));
+    for (int c = 0; c < natts; c++) {
+      if (c == 1) continue;  // the int8 column has no nulls
+      double p = null_densities[rng() % 3];
+      size_t trailing = chance(0.3) ? rng() % 100 : 0;
+      for (size_t r = 0; r < nrows; r++)
+        is_null[c][r] = chance(p) || r + trailing >= nrows;
+    }
+    auto i4 = [](size_t r) { return static_cast<int32>(r * 7) - 3000; };
+    auto i8 = [](size_t r) {
+      return static_cast<int64>(r) * 1000000007LL - 5000000000LL;
+    };
+    auto text = [](size_t r) {
+      return std::string(r % 13, static_cast<char>('a' + r % 26)) +
+             std::to_string(r);
+    };
+    auto num = [](size_t r) { return static_cast<int64>(r) * 37 - 5000; };
+    auto boolean = [](size_t r) { return (r * 3) % 5 < 2; };
+
+    auto tuple_desc = reinterpret_cast<TupleDescData *>(cbdb::Palloc0(
+        sizeof(TupleDescData) + sizeof(FormData_pg_attribute) * natts));
+    tuple_desc->natts = natts;
+    for (int c = 0; c < natts; c++) {
+      auto &attr = tuple_desc->attrs[c];
+      attr.atttypid = types[c];
+      attr.attstorage = TYPSTORAGE_PLAIN;
+      switch (types[c]) {
+        case INT4OID:
+          attr.attlen = 4, attr.attbyval = true, attr.attalign = TYPALIGN_INT;
+          break;
+        case INT8OID:
+          attr.attlen = 8, attr.attbyval = true;
+          attr.attalign = TYPALIGN_DOUBLE;
+          break;
+        case BOOLOID:
+          attr.attlen = 1, attr.attbyval = true, attr.attalign = TYPALIGN_CHAR;
+          break;
+        default:
+          attr.attlen = -1, attr.attbyval = false;
+          attr.attalign = TYPALIGN_INT;
+          attr.attcollation =
+              types[c] == NUMERICOID ? InvalidOid : DEFAULT_COLLATION_OID;
+          break;
+      }
+    }
+    TupleTableSlot *tuple_slot =
+        MakeTupleTableSlot(tuple_desc, &TTSOpsVecTuple);
+
+    std::vector<std::unique_ptr<PaxColumn>> cols;
+    if (porc_vec) {
+      // PORC_VEC columns want capacities in whole 8-byte words
+      uint32 cap = TYPEALIGN(64, nrows);
+      cols.emplace_back(std::make_unique<PaxVecCommColumn<int32>>(cap));
+      cols.emplace_back(std::make_unique<PaxVecCommColumn<int64>>(cap));
+      cols.emplace_back(std::make_unique<PaxVecNonFixedColumn>(cap, cap));
+      cols.emplace_back(
+          std::make_unique<PaxVecBpCharColumn>(cap, cap, encoding_option));
+      cols.emplace_back(
+          std::make_unique<PaxShortNumericColumn>(cap, encoding_option));
+      cols.emplace_back(
+          std::make_unique<PaxVecBitPackedColumn>(cap, encoding_option));
+    } else {
+      cols.emplace_back(std::make_unique<PaxCommColumn<int32>>(nrows));
+      cols.emplace_back(std::make_unique<PaxCommColumn<int64>>(nrows));
+      cols.emplace_back(std::make_unique<PaxNonFixedColumn>(nrows, nrows));
+      cols.emplace_back(
+          std::make_unique<PaxBpCharColumn>(nrows, nrows, encoding_option));
+      cols.emplace_back(
+          std::make_unique<PaxPgNumericColumn>(nrows, nrows, encoding_option));
+      cols.emplace_back(
+          std::make_unique<PaxBitPackedColumn>(nrows, encoding_option));
+    }
+
+    for (size_t r = 0; r < nrows; r++) {
+      for (int c = 0; c < natts; c++) {
+        if (is_null[c][r]) {
+          cols[c]->AppendNull();
+          continue;
+        }
+        switch (c) {
+          case 0: {
+            int32 v = i4(r);
+            cols[c]->Append(reinterpret_cast<char *>(&v), sizeof(v));
+            break;
+          }
+          case 1: {
+            int64 v = i8(r);
+            cols[c]->Append(reinterpret_cast<char *>(&v), sizeof(v));
+            break;
+          }
+          case 2:
+          case 3: {
+            // bpchar values carry trailing blanks, which come out trimmed;
+            // PORC_VEC takes them blank-padded to the char(n) width, and
+            // non-fixed values without their varlena header
+            std::string s = text(r);
+            if (c == 3)
+              s += std::string(porc_vec ? 32 - s.size() : r % 4, ' ');
+            if (porc_vec) {
+              cols[c]->Append(s.data(), s.size());
+              break;
+            }
+            auto data = cbdb::DatumFromCString(s.data(), s.size());
+            int len = -1;
+            auto vl = cbdb::PointerAndLenFromDatum(data, &len);
+            cols[c]->Append(reinterpret_cast<char *>(vl), len);
+            break;
+          }
+          case 4: {
+            // both the 4-byte and the 1-byte varlena header
+            Numeric n = int64_to_numeric(num(r));
+            size_t data_len = VARSIZE(n) - VARHDRSZ;
+            if (r % 2 == 0) {
+              cols[c]->Append(reinterpret_cast<char *>(n), VARSIZE(n));
+            } else {
+              char buf[VARHDRSZ_SHORT + 64];
+              SET_VARSIZE_SHORT(buf, VARHDRSZ_SHORT + data_len);
+              memcpy(buf + VARHDRSZ_SHORT, VARDATA(n), data_len);
+              cols[c]->Append(buf, VARHDRSZ_SHORT + data_len);
+            }
+            break;
+          }
+          case 5: {
+            int8 v = boolean(r);
+            cols[c]->Append(reinterpret_cast<char *>(&v), sizeof(v));
+            break;
+          }
+        }
+      }
+    }
+
+    if (porc_vec) {
+      // close the offsets, as the writer does before it flushes them
+      for (int c : {2, 3})
+        static_cast<PaxVecNonFixedColumn *>(cols[c].get())
+            ->GetOffsetBuffer(true);
+    }
+
+    auto columns = std::make_unique<PaxColumns>();
+    for (auto &col : cols) columns->Append(std::move(col));
+    columns->AddRows(nrows);
+    if (porc_vec)
+      columns->SetStorageFormat(PaxStorageFormat::kTypeStoragePorcVec);
+
+    std::vector<size_t> visible;
+    std::shared_ptr<Bitmap8> visimap = nullptr;
+    if (with_visimap) {
+      visimap = std::make_shared<Bitmap8>(16);
+      double p = invisible_densities[rng() % 5];
+      // sometimes leave the end of the group past the end of the bitmap,
+      // which reads as visible
+      size_t marked = chance(0.3) ? nrows / 2 : nrows;
+      for (size_t r = 0; r < nrows; r++) {
+        if (r < marked && chance(p))
+          visimap->Set(base + r);
+        else
+          visible.push_back(r);
+      }
+    } else {
+      for (size_t r = 0; r < nrows; r++) visible.push_back(r);
+    }
+
+    auto adapter = std::make_shared<VecAdapter>(tuple_desc, false);
+    adapter->SetDataSource(columns.get(), base);
+    if (with_visimap) adapter->SetVisibitilyMapInfo(visimap);
+
+    auto append_rc = adapter->AppendToVecBuffer();
+    ASSERT_EQ(static_cast<size_t>(append_rc), visible.size());
+    size_t flush_counts = adapter->FlushVecBuffer(tuple_slot);
+    ASSERT_EQ(flush_counts, visible.size());
+    if (visible.empty()) {
+      DeleteTupleSlot(tuple_slot);
+      continue;
+    }
+
+    auto rb = (ArrowRecordBatch *)((VecTupleTableSlot *)tuple_slot)
+                  ->tts_recordbatch;
+    ASSERT_NE(rb, nullptr);
+    ASSERT_EQ(rb->batch.n_children, natts);
+    for (int c = 0; c < natts; c++) {
+      ArrowArray *child = rb->batch.children[c];
+      ASSERT_EQ(static_cast<size_t>(child->length), visible.size());
+      auto validity = (const uint8 *)child->buffers[0];
+      int64 null_count = 0;
+      for (size_t k = 0; k < visible.size(); k++) {
+        size_t r = visible[k];
+        bool valid =
+            validity == nullptr || arrow::bit_util::GetBit(validity, k);
+        ASSERT_EQ(valid, !is_null[c][r])
+            << "iter=" << iter << " col=" << c << " row=" << r;
+        if (!valid) {
+          null_count++;
+          continue;
+        }
+        switch (c) {
+          case 0:
+            ASSERT_EQ(((const int32 *)child->buffers[1])[k], i4(r));
+            break;
+          case 1:
+            ASSERT_EQ(((const int64 *)child->buffers[1])[k], i8(r));
+            break;
+          case 2:
+          case 3: {
+            auto offsets = (const int32 *)child->buffers[1];
+            auto data = (const char *)child->buffers[2];
+            std::string got(data + offsets[k], offsets[k + 1] - offsets[k]);
+            ASSERT_EQ(got, text(r)) << "col=" << c << " row=" << r;
+            break;
+          }
+          case 4: {
+            // the row's own value, in the vec numeric layout
+            Numeric n = int64_to_numeric(num(r));
+            int64 low, high;
+            pg_short_numeric_to_vec_short_numeric(n, VARSIZE(n) - VARHDRSZ,
+                                                  &low, &high);
+            auto words = (const int64 *)child->buffers[1];
+            ASSERT_EQ(words[2 * k], low) << "row=" << r;
+            ASSERT_EQ(words[2 * k + 1], high) << "row=" << r;
+            break;
+          }
+          case 5:
+            ASSERT_EQ(arrow::bit_util::GetBit((const uint8 *)child->buffers[1],
+                                              k),
+                      boolean(r))
+                << "row=" << r;
+            break;
+        }
+      }
+      ASSERT_EQ(child->null_count, null_count) << "col=" << c;
+    }
+    DeleteTupleSlot(tuple_slot);
+  }
 }
 
 INSTANTIATE_TEST_SUITE_P(PaxVecTestCombine, PaxVecTest,

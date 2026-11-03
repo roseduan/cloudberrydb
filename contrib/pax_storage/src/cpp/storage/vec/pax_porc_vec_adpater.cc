@@ -55,10 +55,13 @@ static std::pair<bool, size_t> ColumnTransMemory(PaxColumn *column) {
   return {false, 0};
 }
 
-static void CopyNonFixedBuffer(PaxVecNonFixedColumn *column,
-                               std::shared_ptr<Bitmap8> visibility_map_bitset,
-                               size_t group_base_offset, size_t invisible_rows,
-                               size_t total_rows,
+// The copy functions below take the rows to copy as offsets `sel` (in
+// increasing order); a null `sel` means every one of the `count` rows.
+// PORC_VEC keeps a slot for every row, nulls included, so row `r` is value
+// `r` of the column.
+
+static void CopyNonFixedBuffer(PaxVecNonFixedColumn *column, const uint32 *sel,
+                               size_t count,
                                DataBuffer<int32> *out_offset_buffer,
                                DataBuffer<char> *out_data_buffer) {
   char *buffer;
@@ -69,7 +72,6 @@ static void CopyNonFixedBuffer(PaxVecNonFixedColumn *column,
   std::tie(offset_buffer_raw, offset_buffer_len) = column->GetOffsetBuffer(false);
 
   auto const typlen = sizeof(int32);
-  auto visible_num = total_rows - invisible_rows;
   auto offset_array = reinterpret_cast<int32 *>(offset_buffer_raw);
 
   bool has_toast = column->ToastCounts() > 0;
@@ -77,15 +79,12 @@ static void CopyNonFixedBuffer(PaxVecNonFixedColumn *column,
 
   // Pass 1: Build offset buffer and calculate total data size.
   // For toast rows, use pax_toast_raw_size to get the detoasted size.
-  auto visible_len = TYPEALIGN(MEMORY_ALIGN_SIZE, typlen * (visible_num + 1));
+  auto visible_len = TYPEALIGN(MEMORY_ALIGN_SIZE, typlen * (count + 1));
   out_offset_buffer->Set(BlockBuffer::Alloc<char>(visible_len), visible_len);
 
   int32 adjust_offset = 0;
-  for (size_t i = 0; i < total_rows; i++) {
-    if (visibility_map_bitset &&
-        visibility_map_bitset->Test(group_base_offset + i)) {
-      continue;
-    }
+  for (size_t k = 0; k < count; k++) {
+    size_t i = sel ? sel[k] : k;
     out_offset_buffer->Write(&adjust_offset, typlen);
     out_offset_buffer->Brush(typlen);
 
@@ -104,11 +103,8 @@ static void CopyNonFixedBuffer(PaxVecNonFixedColumn *column,
   auto data_len = TYPEALIGN(MEMORY_ALIGN_SIZE, adjust_offset);
   out_data_buffer->Set(BlockBuffer::Alloc<char>(data_len), data_len);
 
-  for (size_t i = 0; i < total_rows; i++) {
-    if (visibility_map_bitset &&
-        visibility_map_bitset->Test(group_base_offset + i)) {
-      continue;
-    }
+  for (size_t k = 0; k < count; k++) {
+    size_t i = sel ? sel[k] : k;
     auto value_size = offset_array[i + 1] - offset_array[i];
     if (value_size > 0) {
       if (has_toast && column->IsToast(i)) {
@@ -127,41 +123,60 @@ static void CopyNonFixedBuffer(PaxVecNonFixedColumn *column,
   }
 }
 
-static void CopyFixedBuffer(PaxColumn *column,
-                            std::shared_ptr<Bitmap8> visibility_map_bitset,
-                            size_t group_base_offset, size_t invisible_rows,
-                            size_t total_rows,
-                            DataBuffer<char> *out_data_buffer) {
+static void CopySelectedFixedBuffer(PaxColumn *column, const uint32 *sel,
+                                    size_t sel_count,
+                                    DataBuffer<char> *out_data_buffer) {
   char *buffer;
   size_t pg_attribute_unused() buffer_len;
-  Assert(invisible_rows > 0);
-  Assert(visibility_map_bitset);
-
   std::tie(buffer, buffer_len) = column->GetBuffer();
 
-  const auto typlen = column->GetTypeLength();
-  auto visible_len = (total_rows - invisible_rows) * typlen;
-  visible_len = TYPEALIGN(MEMORY_ALIGN_SIZE, visible_len);
+  const size_t typlen = column->GetTypeLength();
+  Assert(buffer_len >= (sel_count ? (sel[sel_count - 1] + 1) * typlen : 0));
+  auto visible_len = TYPEALIGN(MEMORY_ALIGN_SIZE, sel_count * typlen);
   out_data_buffer->Set(BlockBuffer::Alloc<char>(visible_len), visible_len);
 
-  for (size_t i = 0; i < total_rows; i++) {
-    if (!visibility_map_bitset->Test(group_base_offset + i)) {
-      out_data_buffer->Write(buffer, typlen);
-      out_data_buffer->Brush(typlen);
-    }
-    buffer += typlen;
+  GatherFixedValues(buffer, typlen, sel, sel_count,
+                    out_data_buffer->GetAvailableBuffer());
+  out_data_buffer->Brush(sel_count * typlen);
+}
+
+// Bool columns keep one bit per row.
+static void CopySelectedBitPackedBuffer(PaxColumn *column, const uint32 *sel,
+                                        size_t sel_count,
+                                        DataBuffer<char> *out_data_buffer) {
+  char *buffer;
+  size_t pg_attribute_unused() buffer_len;
+  std::tie(buffer, buffer_len) = column->GetBuffer();
+  Assert(buffer_len * 8 >= (sel_count ? sel[sel_count - 1] + 1 : 0));
+
+  auto in = reinterpret_cast<const uint8 *>(buffer);
+  auto visible_len = TYPEALIGN(MEMORY_ALIGN_SIZE, BITS_TO_BYTES(sel_count));
+  out_data_buffer->Set(BlockBuffer::Alloc0<char>(visible_len), visible_len);
+
+  auto out = reinterpret_cast<uint8 *>(out_data_buffer->GetBuffer());
+  for (size_t k = 0; k < sel_count; k++) {
+    uint32 r = sel[k];
+    if (in[r >> 3] & (1U << (r & 7))) out[k >> 3] |= 1U << (k & 7);
   }
+  out_data_buffer->Brush(BITS_TO_BYTES(sel_count));
 }
 
 std::pair<size_t, size_t> VecAdapter::AppendPorcVecFormat(PaxColumns *columns) {
-  size_t invisible_rows;
-  size_t total_rows;
+  size_t total_rows = columns->GetRows();
+  size_t visible_rows = total_rows;
+  // visible rows as offsets in the group; nullptr when all are visible, in
+  // which case the column buffers can be handed over whole
+  const uint32 *sel = nullptr;
 
-  total_rows = columns->GetRows();
-  invisible_rows = GetInvisibleNumber(0, total_rows);
-  Assert(invisible_rows <= total_rows);
+  if (micro_partition_visibility_bitmap_) {
+    visible_rows_.resize(total_rows);
+    visible_rows = VisibleRowOffsets(*micro_partition_visibility_bitmap_,
+                                     group_base_offset_, total_rows,
+                                     visible_rows_.data());
+    if (visible_rows < total_rows) sel = visible_rows_.data();
+  }
 
-  if (invisible_rows == total_rows) {
+  if (visible_rows == 0) {
     return {0, total_rows};
   }
 
@@ -183,12 +198,16 @@ std::pair<size_t, size_t> VecAdapter::AppendPorcVecFormat(PaxColumns *columns) {
     size_t cap_len = 0;
 
     vec_cache_buffer_[index].null_counts = 0;
-    CopyBitmapBuffer(column, micro_partition_visibility_bitmap_,
-                     group_base_offset_, 0, total_rows,
-                     column->GetRangeNonNullRows(0, total_rows),
-                     total_rows - invisible_rows,
-                     &(vec_cache_buffer_[index].null_bits_buffer),
-                     &(vec_cache_buffer_[index].null_counts));
+    if (sel == nullptr) {
+      CopyBitmapBuffer(column, 0, total_rows,
+                       column->GetRangeNonNullRows(0, total_rows),
+                       &(vec_cache_buffer_[index].null_bits_buffer),
+                       &(vec_cache_buffer_[index].null_counts));
+    } else if (column->HasNull()) {
+      CopySelectedBitmapBuffer(column, 0, sel, visible_rows,
+                               &(vec_cache_buffer_[index].null_bits_buffer),
+                               &(vec_cache_buffer_[index].null_counts));
+    }
 
     switch (column->GetPaxColumnTypeInMem()) {
       case PaxColumnTypeInMem::kTypeVecBpChar:
@@ -201,11 +220,9 @@ std::pair<size_t, size_t> VecAdapter::AppendPorcVecFormat(PaxColumns *columns) {
         // per-row copy.  Toast entries are small pointers that expand
         // into full-size data after detoasting, so zero-copy is not
         // possible when toast is present.
-        if (invisible_rows != 0 || column->ToastCounts() > 0) {
-          CopyNonFixedBuffer(dynamic_cast<PaxVecNonFixedColumn*>(column),
-                             micro_partition_visibility_bitmap_,
-                             group_base_offset_, invisible_rows, total_rows,
-                             offset_buffer, vec_buffer);
+        if (sel != nullptr || column->ToastCounts() > 0) {
+          CopyNonFixedBuffer(dynamic_cast<PaxVecNonFixedColumn*>(column), sel,
+                             visible_rows, offset_buffer, vec_buffer);
 
           break;
         }
@@ -237,10 +254,8 @@ std::pair<size_t, size_t> VecAdapter::AppendPorcVecFormat(PaxColumns *columns) {
       }
       case PaxColumnTypeInMem::kTypeVecDecimal: {
         Assert(!vec_buffer->GetBuffer());
-        if (invisible_rows != 0) {
-          CopyFixedBuffer(column, micro_partition_visibility_bitmap_,
-                          group_base_offset_, invisible_rows, total_rows,
-                          vec_buffer);
+        if (sel != nullptr) {
+          CopySelectedFixedBuffer(column, sel, visible_rows, vec_buffer);
           break;
         }
 
@@ -264,10 +279,13 @@ std::pair<size_t, size_t> VecAdapter::AppendPorcVecFormat(PaxColumns *columns) {
       case PaxColumnTypeInMem::kTypeFixed: {
         Assert(!vec_buffer->GetBuffer());
 
-        if (invisible_rows != 0) {
-          CopyFixedBuffer(column, micro_partition_visibility_bitmap_,
-                          group_base_offset_, invisible_rows, total_rows,
-                          vec_buffer);
+        if (sel != nullptr) {
+          if (column->GetPaxColumnTypeInMem() ==
+              PaxColumnTypeInMem::kTypeVecBitPacked) {
+            CopySelectedBitPackedBuffer(column, sel, visible_rows, vec_buffer);
+          } else {
+            CopySelectedFixedBuffer(column, sel, visible_rows, vec_buffer);
+          }
           break;
         }
 
@@ -319,7 +337,7 @@ std::pair<size_t, size_t> VecAdapter::AppendPorcVecFormat(PaxColumns *columns) {
     }
   }
 
-  return std::make_pair(total_rows - invisible_rows, total_rows);
+  return std::make_pair(visible_rows, total_rows);
 }
 
 }  // namespace pax
