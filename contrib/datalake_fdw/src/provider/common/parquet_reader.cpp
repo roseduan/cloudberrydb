@@ -5,6 +5,7 @@
 #include "common.h"
 #include "datalake_random_file.h"
 #include "datalake_numeric.h"
+#include "parquet_scanner_guard.h"
 
 extern "C"
 {
@@ -438,7 +439,7 @@ ParquetReader::fillNumericBatch(const TypeInfo &typInfo, NumericColumnBatch &b)
 	const int    N = NUMERIC_BATCH_SIZE;
 	const int    scale = typInfo.scale_;
 	const size_t numSz = NUMERIC_HDRSZ + IntDigitsTraits<__int128>::digits * sizeof(NumericDigit);
-	parquet::Scanner *scanner = scanners_[typInfo.columnIndex_].get();
+	auto &scanner = scanners_[typInfo.columnIndex_];
 
 	b.pos = 0;
 	b.filled = 0;
@@ -458,7 +459,7 @@ ParquetReader::fillNumericBatch(const TypeInfo &typInfo, NumericColumnBatch &b)
 	{
 		case INT4OID:
 		{
-			auto *sc = (parquet::TypedScanner<parquet::Int32Type> *) scanner;
+			auto *sc = dlCheckedScanner<parquet::Int32Type>(scanner, typInfo.pgTypeId_, filePath_.c_str());
 			for (int i = 0; i < N; i++)
 			{
 				int32_t v;
@@ -474,7 +475,7 @@ ParquetReader::fillNumericBatch(const TypeInfo &typInfo, NumericColumnBatch &b)
 		}
 		case INT8OID:
 		{
-			auto *sc = (parquet::TypedScanner<parquet::Int64Type> *) scanner;
+			auto *sc = dlCheckedScanner<parquet::Int64Type>(scanner, typInfo.pgTypeId_, filePath_.c_str());
 			for (int i = 0; i < N; i++)
 			{
 				int64_t v;
@@ -490,7 +491,7 @@ ParquetReader::fillNumericBatch(const TypeInfo &typInfo, NumericColumnBatch &b)
 		}
 		default:	/* DECIMAL stored as fixed-length byte array */
 		{
-			auto      *sc = (parquet::TypedScanner<parquet::FLBAType> *) scanner;
+			auto      *sc = dlCheckedScanner<parquet::FLBAType>(scanner, typInfo.pgTypeId_, filePath_.c_str());
 			const bool fits64 = (typInfo.precision_ > 0 && typInfo.precision_ <= 18);
 			for (int i = 0; i < N; i++)
 			{
@@ -524,18 +525,18 @@ ParquetReader::readPrimitive(const TypeInfo &typInfo, bool &isNull)
 	{
 		case BOOLOID:
 		{
-			((parquet::TypedScanner<parquet::BooleanType> *)scanner.get())->NextValue(&d.boolValue, &isNull);
+			dlCheckedScanner<parquet::BooleanType>(scanner, typInfo.pgTypeId_, filePath_.c_str())->NextValue(&d.boolValue, &isNull);
 			return BoolGetDatum(d.boolValue);
 		}
 		case INT2OID:
 		{
 			/* Parquet stores SMALLINT as INT32; read and truncate */
-			((parquet::TypedScanner<parquet::Int32Type> *)scanner.get())->NextValue(&d.int32Value, &isNull);
+			dlCheckedScanner<parquet::Int32Type>(scanner, typInfo.pgTypeId_, filePath_.c_str())->NextValue(&d.int32Value, &isNull);
 			return Int16GetDatum((int16) d.int32Value);
 		}
 		case INT4OID:
 		{
-			((parquet::TypedScanner<parquet::Int32Type> *)scanner.get())->NextValue(&d.int32Value, &isNull);
+			dlCheckedScanner<parquet::Int32Type>(scanner, typInfo.pgTypeId_, filePath_.c_str())->NextValue(&d.int32Value, &isNull);
 			return Int32GetDatum(d.int32Value);
 		}
 		case TIMEOID:
@@ -550,15 +551,15 @@ ParquetReader::readPrimitive(const TypeInfo &typInfo, bool &isNull)
 			 */
 			if (typInfo.fileTypeId_ == INT4OID)
 			{
-				((parquet::TypedScanner<parquet::Int32Type> *)scanner.get())->NextValue(&d.int32Value, &isNull);
+				dlCheckedScanner<parquet::Int32Type>(scanner, typInfo.pgTypeId_, filePath_.c_str())->NextValue(&d.int32Value, &isNull);
 				return Int64GetDatum((int64) d.int32Value);
 			}
-			((parquet::TypedScanner<parquet::Int64Type> *)scanner.get())->NextValue(&d.int64Value, &isNull);
+			dlCheckedScanner<parquet::Int64Type>(scanner, typInfo.pgTypeId_, filePath_.c_str())->NextValue(&d.int64Value, &isNull);
 			return Int64GetDatum(d.int64Value);
 		}
 		case FLOAT4OID:
 		{
-			((parquet::TypedScanner<parquet::FloatType> *)scanner.get())->NextValue(&d.floatValue, &isNull);
+			dlCheckedScanner<parquet::FloatType>(scanner, typInfo.pgTypeId_, filePath_.c_str())->NextValue(&d.floatValue, &isNull);
 			return Float4GetDatum(d.floatValue);
 		}
 		case FLOAT8OID:
@@ -566,10 +567,10 @@ ParquetReader::readPrimitive(const TypeInfo &typInfo, bool &isNull)
 			/* Read-time widening for ALTER COLUMN TYPE real->double (#401). */
 			if (typInfo.fileTypeId_ == FLOAT4OID)
 			{
-				((parquet::TypedScanner<parquet::FloatType> *)scanner.get())->NextValue(&d.floatValue, &isNull);
+				dlCheckedScanner<parquet::FloatType>(scanner, typInfo.pgTypeId_, filePath_.c_str())->NextValue(&d.floatValue, &isNull);
 				return Float8GetDatum((double) d.floatValue);
 			}
-			((parquet::TypedScanner<parquet::DoubleType> *)scanner.get())->NextValue(&d.doubleValue, &isNull);
+			dlCheckedScanner<parquet::DoubleType>(scanner, typInfo.pgTypeId_, filePath_.c_str())->NextValue(&d.doubleValue, &isNull);
 			return Float8GetDatum(d.doubleValue);
 		}
 		case BYTEAOID:
@@ -577,7 +578,7 @@ ParquetReader::readPrimitive(const TypeInfo &typInfo, bool &isNull)
 		case VARCHAROID:
 		{
 			parquet::ByteArray value;
-			((parquet::TypedScanner<parquet::ByteArrayType> *)scanner.get())->NextValue(&value, &isNull);
+			dlCheckedScanner<parquet::ByteArrayType>(scanner, typInfo.pgTypeId_, filePath_.c_str())->NextValue(&value, &isNull);
 			if (isNull)
 				PG_RETURN_DATUM(0);
 
@@ -611,7 +612,7 @@ ParquetReader::readPrimitive(const TypeInfo &typInfo, bool &isNull)
 			 * unbounded `char` with no length, which is never padded.
 			 */
 			parquet::ByteArray value;
-			((parquet::TypedScanner<parquet::ByteArrayType> *)scanner.get())->NextValue(&value, &isNull);
+			dlCheckedScanner<parquet::ByteArrayType>(scanner, typInfo.pgTypeId_, filePath_.c_str())->NextValue(&value, &isNull);
 			if (isNull)
 				PG_RETURN_DATUM(0);
 
@@ -658,19 +659,39 @@ ParquetReader::readPrimitive(const TypeInfo &typInfo, bool &isNull)
 		}
 		case UUIDOID:
 		{
-			parquet::ByteArray value;
-			((parquet::TypedScanner<parquet::ByteArrayType> *)scanner.get())->NextValue(&value, &isNull);
+			/*
+			 * A uuid is FIXED_LEN_BYTE_ARRAY(16) in the Parquet spec, and the
+			 * batch leg (FILL_UUID) has always read it as one.  This leg read
+			 * it through a ByteArrayType scanner, so it took a {len, ptr} pair
+			 * out of a buffer holding bare pointers: the length was garbage,
+			 * the allocation was sized from it, and the copy ran past the end
+			 * of a palloc that had no varlena header set either.  Whether a
+			 * uuid column could be read at all came down to
+			 * pg_iceberg_enable_batch_read.
+			 */
+			parquet::FixedLenByteArray value;
+			dlCheckedScanner<parquet::FLBAType>(scanner, typInfo.pgTypeId_, filePath_.c_str())->NextValue(&value, &isNull);
 			if (isNull)
 				PG_RETURN_DATUM(0);
 
+			const int uuidLen = 16;
+
 			if (!buffer_)
 			{
-				bytea *result = (bytea *) gpdbPalloc(value.len);
-				memcpy(VARDATA(result), value.ptr, 16);
+				/*
+				 * uuid is a fixed-length 16-byte by-reference type, not a
+				 * varlena: the datum points straight at the bytes, which is
+				 * what the buffered path below hands back.  Writing them at
+				 * VARDATA() would put the first four bytes of every uuid
+				 * four bytes too far along.
+				 */
+				void *result = gpdbPalloc(uuidLen);
+
+				memcpy(result, value.ptr, uuidLen);
 				return PointerGetDatum(result);
-			}	
+			}
 			dataBuff *colBuffer = buffer_->getDataBuffer(typInfo.columnIndex_);
-			memcpy(colBuffer->buffer, value.ptr, 16);
+			memcpy(colBuffer->buffer, value.ptr, uuidLen);
 			return PointerGetDatum(colBuffer->buffer);
 		}
 		case TIMESTAMPOID:
@@ -687,7 +708,7 @@ ParquetReader::readPrimitive(const TypeInfo &typInfo, bool &isNull)
 			static const int64 UNIX_TO_PG_EPOCH_USECS =
 				((int64)(POSTGRES_EPOCH_JDATE - UNIX_EPOCH_JDATE)) * SECS_PER_DAY * USECS_PER_SEC;
 
-			((parquet::TypedScanner<parquet::Int64Type> *)scanner.get())->NextValue(&d.int64Value, &isNull);
+			dlCheckedScanner<parquet::Int64Type>(scanner, typInfo.pgTypeId_, filePath_.c_str())->NextValue(&d.int64Value, &isNull);
 			if (isNull)
 				PG_RETURN_DATUM(0);
 
@@ -716,7 +737,7 @@ ParquetReader::readPrimitive(const TypeInfo &typInfo, bool &isNull)
 		}
 		case DATEOID:
 		{
-			((parquet::TypedScanner<parquet::Int32Type> *)scanner.get())->NextValue(&d.int32Value, &isNull);
+			dlCheckedScanner<parquet::Int32Type>(scanner, typInfo.pgTypeId_, filePath_.c_str())->NextValue(&d.int32Value, &isNull);
 			return DateADTGetDatum(d.int32Value + (UNIX_EPOCH_JDATE - POSTGRES_EPOCH_JDATE));
 		}
 		case NUMERICOID:
@@ -752,7 +773,7 @@ ParquetReader::readDecimal(std::shared_ptr<parquet::Scanner> &scanner, const Typ
 	{
 		case INT4OID:
 		{
-			((parquet::TypedScanner<parquet::Int32Type> *)scanner.get())->NextValue(&d.int32Value, &isNull);
+			dlCheckedScanner<parquet::Int32Type>(scanner, typInfo.pgTypeId_, filePath_.c_str())->NextValue(&d.int32Value, &isNull);
 			if (isNull)
 				PG_RETURN_DATUM(0);
 			int_to_numeric_with_scale(d.int32Value, scale, (Numeric) out_buf);
@@ -760,7 +781,7 @@ ParquetReader::readDecimal(std::shared_ptr<parquet::Scanner> &scanner, const Typ
 		}
 		case INT8OID:
 		{
-			((parquet::TypedScanner<parquet::Int64Type> *)scanner.get())->NextValue(&d.int64Value, &isNull);
+			dlCheckedScanner<parquet::Int64Type>(scanner, typInfo.pgTypeId_, filePath_.c_str())->NextValue(&d.int64Value, &isNull);
 			if (isNull)
 				PG_RETURN_DATUM(0);
 			int_to_numeric_with_scale(d.int64Value, scale, (Numeric) out_buf);
@@ -768,7 +789,7 @@ ParquetReader::readDecimal(std::shared_ptr<parquet::Scanner> &scanner, const Typ
 		}
 		default:
 		{
-			((parquet::TypedScanner<parquet::FLBAType> *)scanner.get())->NextValue(&value, &isNull);
+			dlCheckedScanner<parquet::FLBAType>(scanner, typInfo.pgTypeId_, filePath_.c_str())->NextValue(&value, &isNull);
 			if (isNull)
 				PG_RETURN_DATUM(0);
 			/*
@@ -802,7 +823,7 @@ ParquetReader::readBoolColumn(BaseFileReader *r, int idx, bool &isNull)
 {
 	auto *self = static_cast<ParquetReader *>(r);
 	bool value;
-	((parquet::TypedScanner<parquet::BooleanType> *)self->scanners_[idx].get())->NextValue(&value, &isNull);
+	dlCheckedScanner<parquet::BooleanType>(self->scanners_[idx], BOOLOID, self->filePath_.c_str())->NextValue(&value, &isNull);
 	return BoolGetDatum(value);
 }
 
@@ -811,7 +832,7 @@ ParquetReader::readInt16Column(BaseFileReader *r, int idx, bool &isNull)
 {
 	auto *self = static_cast<ParquetReader *>(r);
 	int32_t value;
-	((parquet::TypedScanner<parquet::Int32Type> *)self->scanners_[idx].get())->NextValue(&value, &isNull);
+	dlCheckedScanner<parquet::Int32Type>(self->scanners_[idx], INT2OID, self->filePath_.c_str())->NextValue(&value, &isNull);
 	return Int16GetDatum((int16) value);
 }
 
@@ -820,7 +841,7 @@ ParquetReader::readInt32Column(BaseFileReader *r, int idx, bool &isNull)
 {
 	auto *self = static_cast<ParquetReader *>(r);
 	int32_t value;
-	((parquet::TypedScanner<parquet::Int32Type> *)self->scanners_[idx].get())->NextValue(&value, &isNull);
+	dlCheckedScanner<parquet::Int32Type>(self->scanners_[idx], INT4OID, self->filePath_.c_str())->NextValue(&value, &isNull);
 	return Int32GetDatum(value);
 }
 
@@ -829,7 +850,7 @@ ParquetReader::readInt64Column(BaseFileReader *r, int idx, bool &isNull)
 {
 	auto *self = static_cast<ParquetReader *>(r);
 	int64_t value;
-	((parquet::TypedScanner<parquet::Int64Type> *)self->scanners_[idx].get())->NextValue(&value, &isNull);
+	dlCheckedScanner<parquet::Int64Type>(self->scanners_[idx], INT8OID, self->filePath_.c_str())->NextValue(&value, &isNull);
 	return Int64GetDatum(value);
 }
 
@@ -838,7 +859,7 @@ ParquetReader::readFloat4Column(BaseFileReader *r, int idx, bool &isNull)
 {
 	auto *self = static_cast<ParquetReader *>(r);
 	float value;
-	((parquet::TypedScanner<parquet::FloatType> *)self->scanners_[idx].get())->NextValue(&value, &isNull);
+	dlCheckedScanner<parquet::FloatType>(self->scanners_[idx], FLOAT4OID, self->filePath_.c_str())->NextValue(&value, &isNull);
 	return Float4GetDatum(value);
 }
 
@@ -847,7 +868,7 @@ ParquetReader::readFloat8Column(BaseFileReader *r, int idx, bool &isNull)
 {
 	auto *self = static_cast<ParquetReader *>(r);
 	double value;
-	((parquet::TypedScanner<parquet::DoubleType> *)self->scanners_[idx].get())->NextValue(&value, &isNull);
+	dlCheckedScanner<parquet::DoubleType>(self->scanners_[idx], FLOAT8OID, self->filePath_.c_str())->NextValue(&value, &isNull);
 	return Float8GetDatum(value);
 }
 
@@ -856,7 +877,7 @@ ParquetReader::readDateColumn(BaseFileReader *r, int idx, bool &isNull)
 {
 	auto *self = static_cast<ParquetReader *>(r);
 	int32_t value;
-	((parquet::TypedScanner<parquet::Int32Type> *)self->scanners_[idx].get())->NextValue(&value, &isNull);
+	dlCheckedScanner<parquet::Int32Type>(self->scanners_[idx], DATEOID, self->filePath_.c_str())->NextValue(&value, &isNull);
 	return DateADTGetDatum(value + (UNIX_EPOCH_JDATE - POSTGRES_EPOCH_JDATE));
 }
 
@@ -1181,7 +1202,7 @@ ParquetReader::refillColumnBatch(int idx)
 	{
 		case FILL_BOOL:
 		{
-			auto *tr = static_cast<parquet::BoolReader *>(b.reader.get());
+			auto *tr = dlCheckedReader<parquet::BooleanType>(b.reader, ti.pgTypeId_, filePath_.c_str());
 			b.raw.resize(N * sizeof(bool));
 			bool *vals = (bool *) b.raw.data();
 
@@ -1195,7 +1216,7 @@ ParquetReader::refillColumnBatch(int idx)
 		case FILL_INT4:
 		case FILL_DATE:
 		{
-			auto *tr = static_cast<parquet::Int32Reader *>(b.reader.get());
+			auto *tr = dlCheckedReader<parquet::Int32Type>(b.reader, ti.pgTypeId_, filePath_.c_str());
 			b.raw.resize(N * sizeof(int32_t));
 			int32_t *vals = (int32_t *) b.raw.data();
 
@@ -1212,7 +1233,7 @@ ParquetReader::refillColumnBatch(int idx)
 		}
 		case FILL_INT8:
 		{
-			auto *tr = static_cast<parquet::Int64Reader *>(b.reader.get());
+			auto *tr = dlCheckedReader<parquet::Int64Type>(b.reader, ti.pgTypeId_, filePath_.c_str());
 			b.raw.resize(N * sizeof(int64_t));
 			int64_t *vals = (int64_t *) b.raw.data();
 
@@ -1224,7 +1245,7 @@ ParquetReader::refillColumnBatch(int idx)
 		}
 		case FILL_FLOAT4:
 		{
-			auto *tr = static_cast<parquet::FloatReader *>(b.reader.get());
+			auto *tr = dlCheckedReader<parquet::FloatType>(b.reader, ti.pgTypeId_, filePath_.c_str());
 			b.raw.resize(N * sizeof(float));
 			float *vals = (float *) b.raw.data();
 
@@ -1236,7 +1257,7 @@ ParquetReader::refillColumnBatch(int idx)
 		}
 		case FILL_FLOAT8:
 		{
-			auto *tr = static_cast<parquet::DoubleReader *>(b.reader.get());
+			auto *tr = dlCheckedReader<parquet::DoubleType>(b.reader, ti.pgTypeId_, filePath_.c_str());
 			b.raw.resize(N * sizeof(double));
 			double *vals = (double *) b.raw.data();
 
@@ -1250,7 +1271,7 @@ ParquetReader::refillColumnBatch(int idx)
 		{
 			static const int64 UNIX_TO_PG_EPOCH_USECS =
 				((int64)(POSTGRES_EPOCH_JDATE - UNIX_EPOCH_JDATE)) * SECS_PER_DAY * USECS_PER_SEC;
-			auto *tr = static_cast<parquet::Int64Reader *>(b.reader.get());
+			auto *tr = dlCheckedReader<parquet::Int64Type>(b.reader, ti.pgTypeId_, filePath_.c_str());
 			b.raw.resize(N * sizeof(int64_t));
 			int64_t *vals = (int64_t *) b.raw.data();
 
@@ -1283,7 +1304,7 @@ ParquetReader::refillColumnBatch(int idx)
 
 			if (b.kind == FILL_NUMERIC_I32)
 			{
-				auto *tr = static_cast<parquet::Int32Reader *>(b.reader.get());
+				auto *tr = dlCheckedReader<parquet::Int32Type>(b.reader, ti.pgTypeId_, filePath_.c_str());
 				b.raw.resize(N * sizeof(int32_t));
 				int32_t *vals = (int32_t *) b.raw.data();
 
@@ -1296,7 +1317,7 @@ ParquetReader::refillColumnBatch(int idx)
 			}
 			else
 			{
-				auto *tr = static_cast<parquet::Int64Reader *>(b.reader.get());
+				auto *tr = dlCheckedReader<parquet::Int64Type>(b.reader, ti.pgTypeId_, filePath_.c_str());
 				b.raw.resize(N * sizeof(int64_t));
 				int64_t *vals = (int64_t *) b.raw.data();
 
@@ -1317,7 +1338,7 @@ ParquetReader::refillColumnBatch(int idx)
 			const int scale = ti.scale_;
 			const int typeLen = ti.typeLength_;
 			const bool fits64 = (ti.precision_ > 0 && ti.precision_ <= 18);
-			auto *tr = static_cast<parquet::FixedLenByteArrayReader *>(b.reader.get());
+			auto *tr = dlCheckedReader<parquet::FLBAType>(b.reader, ti.pgTypeId_, filePath_.c_str());
 
 			b.raw.resize(N * sizeof(parquet::FixedLenByteArray));
 			parquet::FixedLenByteArray *vals = (parquet::FixedLenByteArray *) b.raw.data();
@@ -1339,7 +1360,7 @@ ParquetReader::refillColumnBatch(int idx)
 		}
 		case FILL_TEXT:
 		{
-			auto *tr = static_cast<parquet::ByteArrayReader *>(b.reader.get());
+			auto *tr = dlCheckedReader<parquet::ByteArrayType>(b.reader, ti.pgTypeId_, filePath_.c_str());
 
 			b.raw.resize(N * sizeof(parquet::ByteArray));
 			parquet::ByteArray *vals = (parquet::ByteArray *) b.raw.data();
@@ -1372,7 +1393,7 @@ ParquetReader::refillColumnBatch(int idx)
 		}
 		case FILL_BPCHAR:
 		{
-			auto *tr = static_cast<parquet::ByteArrayReader *>(b.reader.get());
+			auto *tr = dlCheckedReader<parquet::ByteArrayType>(b.reader, ti.pgTypeId_, filePath_.c_str());
 			const int typeMod = ti.typeMod_;
 
 			b.raw.resize(N * sizeof(parquet::ByteArray));
@@ -1426,7 +1447,7 @@ ParquetReader::refillColumnBatch(int idx)
 		}
 		case FILL_UUID:
 		{
-			auto *tr = static_cast<parquet::FixedLenByteArrayReader *>(b.reader.get());
+			auto *tr = dlCheckedReader<parquet::FLBAType>(b.reader, ti.pgTypeId_, filePath_.c_str());
 
 			b.raw.resize(N * sizeof(parquet::FixedLenByteArray));
 			parquet::FixedLenByteArray *vals = (parquet::FixedLenByteArray *) b.raw.data();
@@ -1697,7 +1718,7 @@ ParquetReader::refillColumnBatchDict(ColumnBatch &b, const TypeInfo &ti)
 		{
 			const int32_t *d = nullptr;
 
-			levels = static_cast<parquet::Int32Reader *>(b.reader.get())->ReadBatchWithDictionary(
+			levels = dlCheckedReader<parquet::Int32Type>(b.reader, ti.pgTypeId_, filePath_.c_str())->ReadBatchWithDictionary(
 				N, defs, nullptr, indices, &indicesRead, &d, &dictLen);
 			dict = d;
 			break;
@@ -1706,7 +1727,7 @@ ParquetReader::refillColumnBatchDict(ColumnBatch &b, const TypeInfo &ti)
 		{
 			const int64_t *d = nullptr;
 
-			levels = static_cast<parquet::Int64Reader *>(b.reader.get())->ReadBatchWithDictionary(
+			levels = dlCheckedReader<parquet::Int64Type>(b.reader, ti.pgTypeId_, filePath_.c_str())->ReadBatchWithDictionary(
 				N, defs, nullptr, indices, &indicesRead, &d, &dictLen);
 			dict = d;
 			break;
@@ -1715,7 +1736,7 @@ ParquetReader::refillColumnBatchDict(ColumnBatch &b, const TypeInfo &ti)
 		{
 			const parquet::FixedLenByteArray *d = nullptr;
 
-			levels = static_cast<parquet::FixedLenByteArrayReader *>(b.reader.get())->ReadBatchWithDictionary(
+			levels = dlCheckedReader<parquet::FLBAType>(b.reader, ti.pgTypeId_, filePath_.c_str())->ReadBatchWithDictionary(
 				N, defs, nullptr, indices, &indicesRead, &d, &dictLen);
 			dict = d;
 			break;
@@ -1725,7 +1746,7 @@ ParquetReader::refillColumnBatchDict(ColumnBatch &b, const TypeInfo &ti)
 		{
 			const parquet::ByteArray *d = nullptr;
 
-			levels = static_cast<parquet::ByteArrayReader *>(b.reader.get())->ReadBatchWithDictionary(
+			levels = dlCheckedReader<parquet::ByteArrayType>(b.reader, ti.pgTypeId_, filePath_.c_str())->ReadBatchWithDictionary(
 				N, defs, nullptr, indices, &indicesRead, &d, &dictLen);
 			dict = d;
 			break;

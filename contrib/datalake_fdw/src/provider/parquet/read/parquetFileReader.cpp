@@ -3,6 +3,7 @@
 #include "parquetFileReader.h"
 #include "parquetInputStream.h"
 #include "src/provider/common/datalake_numeric.h"
+#include "src/provider/common/parquet_scanner_guard.h"
 
 
 extern "C"
@@ -189,7 +190,7 @@ Datum parquetFileReader::read(Oid typeOid, int column_index, bool &isNull, int &
     {
         case BOOLOID:
         {
-            parquet::TypedScanner<parquet::BooleanType>* scanner_ = reinterpret_cast<parquet::TypedScanner<parquet::BooleanType>*>(scanner.get());
+            parquet::TypedScanner<parquet::BooleanType>* scanner_ = dlCheckedScanner<parquet::BooleanType>(scanner, des, typeOid, name.c_str());
             bool values = false;
             bool hasRow = scanner_->NextValue(&values, &isNull);
             if (!hasRow)
@@ -206,7 +207,7 @@ Datum parquetFileReader::read(Oid typeOid, int column_index, bool &isNull, int &
         }
         case INT8OID:
         {
-            parquet::TypedScanner<parquet::Int64Type>* scanner_ = reinterpret_cast<parquet::TypedScanner<parquet::Int64Type>*>(scanner.get());
+            parquet::TypedScanner<parquet::Int64Type>* scanner_ = dlCheckedScanner<parquet::Int64Type>(scanner, des, typeOid, name.c_str());
             int64_t values = 0;
             bool hasRow = scanner_->NextValue(&values, &isNull);
             if (!hasRow)
@@ -223,7 +224,7 @@ Datum parquetFileReader::read(Oid typeOid, int column_index, bool &isNull, int &
         }
         case INT4OID:
         {
-            parquet::TypedScanner<parquet::Int32Type>* scanner_ = reinterpret_cast<parquet::TypedScanner<parquet::Int32Type>*>(scanner.get());
+            parquet::TypedScanner<parquet::Int32Type>* scanner_ = dlCheckedScanner<parquet::Int32Type>(scanner, des, typeOid, name.c_str());
             int32_t values = 0;
             bool hasRow = scanner_->NextValue(&values, &isNull);
             if (!hasRow)
@@ -240,7 +241,7 @@ Datum parquetFileReader::read(Oid typeOid, int column_index, bool &isNull, int &
         }
         case INT2OID:
         {
-            parquet::TypedScanner<parquet::Int32Type>* scanner_ = reinterpret_cast<parquet::TypedScanner<parquet::Int32Type>*>(scanner.get());
+            parquet::TypedScanner<parquet::Int32Type>* scanner_ = dlCheckedScanner<parquet::Int32Type>(scanner, des, typeOid, name.c_str());
             int32_t values = 0;
             bool hasRow = scanner_->NextValue(&values, &isNull);
             if (!hasRow)
@@ -257,7 +258,7 @@ Datum parquetFileReader::read(Oid typeOid, int column_index, bool &isNull, int &
         }
         case FLOAT4OID:
         {
-            parquet::TypedScanner<parquet::FloatType>* scanner_ = reinterpret_cast<parquet::TypedScanner<parquet::FloatType>*>(scanner.get());
+            parquet::TypedScanner<parquet::FloatType>* scanner_ = dlCheckedScanner<parquet::FloatType>(scanner, des, typeOid, name.c_str());
             float values = 0;
             bool hasRow = scanner_->NextValue(&values, &isNull);
             if (!hasRow)
@@ -274,7 +275,7 @@ Datum parquetFileReader::read(Oid typeOid, int column_index, bool &isNull, int &
         }
         case FLOAT8OID:
         {
-            parquet::TypedScanner<parquet::DoubleType>* scanner_ = reinterpret_cast<parquet::TypedScanner<parquet::DoubleType>*>(scanner.get());
+            parquet::TypedScanner<parquet::DoubleType>* scanner_ = dlCheckedScanner<parquet::DoubleType>(scanner, des, typeOid, name.c_str());
             double values = 0;
             bool hasRow = scanner_->NextValue(&values, &isNull);
             if (!hasRow)
@@ -291,7 +292,7 @@ Datum parquetFileReader::read(Oid typeOid, int column_index, bool &isNull, int &
         }
         case INTERVALOID:
         {
-            parquet::TypedScanner<parquet::ByteArrayType>* scanner_ = reinterpret_cast<parquet::TypedScanner<parquet::ByteArrayType>*>(scanner.get());
+            parquet::TypedScanner<parquet::ByteArrayType>* scanner_ = dlCheckedScanner<parquet::ByteArrayType>(scanner, des, typeOid, name.c_str());
             parquet::ByteArray values;
             bool hasRow = scanner_->NextValue(&values, &isNull);
             if (!hasRow)
@@ -310,7 +311,7 @@ Datum parquetFileReader::read(Oid typeOid, int column_index, bool &isNull, int &
         }
         case DATEOID:
         {
-            parquet::TypedScanner<parquet::Int32Type>* scanner_ = reinterpret_cast<parquet::TypedScanner<parquet::Int32Type>*>(scanner.get());
+            parquet::TypedScanner<parquet::Int32Type>* scanner_ = dlCheckedScanner<parquet::Int32Type>(scanner, des, typeOid, name.c_str());
             int32_t values = 0;
             bool hasRow = scanner_->NextValue(&values, &isNull);
             if (!hasRow)
@@ -327,7 +328,7 @@ Datum parquetFileReader::read(Oid typeOid, int column_index, bool &isNull, int &
         }
         case TIMEOID:
         {
-            parquet::TypedScanner<parquet::ByteArrayType>* scanner_ = reinterpret_cast<parquet::TypedScanner<parquet::ByteArrayType>*>(scanner.get());
+            parquet::TypedScanner<parquet::ByteArrayType>* scanner_ = dlCheckedScanner<parquet::ByteArrayType>(scanner, des, typeOid, name.c_str());
             parquet::ByteArray values;
             bool hasRow = scanner_->NextValue(&values, &isNull);
             if (!hasRow)
@@ -356,7 +357,7 @@ Datum parquetFileReader::read(Oid typeOid, int column_index, bool &isNull, int &
                 /* INT64 MICROS: microseconds since Unix epoch */
                 static const int64_t UNIX_TO_PG_EPOCH_USECS =
                     ((int64_t)(POSTGRES_EPOCH_JDATE - UNIX_EPOCH_JDATE)) * SECS_PER_DAY * USECS_PER_SEC;
-                parquet::TypedScanner<parquet::Int64Type>* scanner_ = reinterpret_cast<parquet::TypedScanner<parquet::Int64Type>*>(scanner.get());
+                parquet::TypedScanner<parquet::Int64Type>* scanner_ = dlCheckedScanner<parquet::Int64Type>(scanner, des, typeOid, name.c_str());
                 int64_t values = 0;
                 bool hasRow = scanner_->NextValue(&values, &isNull);
                 if (!hasRow) { state = -1; return 0; }
@@ -366,7 +367,7 @@ Datum parquetFileReader::read(Oid typeOid, int column_index, bool &isNull, int &
             else
             {
                 /* INT96 legacy: Julian day + nanoseconds within day */
-                parquet::TypedScanner<parquet::Int96Type>* scanner_ = reinterpret_cast<parquet::TypedScanner<parquet::Int96Type>*>(scanner.get());
+                parquet::TypedScanner<parquet::Int96Type>* scanner_ = dlCheckedScanner<parquet::Int96Type>(scanner, des, typeOid, name.c_str());
                 parquet::Int96 values;
                 bool hasRow = scanner_->NextValue(&values, &isNull);
                 if (!hasRow) { state = -1; return 0; }
@@ -383,7 +384,7 @@ Datum parquetFileReader::read(Oid typeOid, int column_index, bool &isNull, int &
             switch(des->physical_type())
             {
                 case ::parquet::Type::INT32: {
-                    parquet::TypedScanner<parquet::Int32Type>* scanner_ = reinterpret_cast<parquet::TypedScanner<parquet::Int32Type>*>(scanner.get());
+                    parquet::TypedScanner<parquet::Int32Type>* scanner_ = dlCheckedScanner<parquet::Int32Type>(scanner, des, typeOid, name.c_str());
                     int32_t values = 0;
                     uint scale = des->type_scale();
                     bool hasRow = scanner_->NextValue(&values, &isNull);
@@ -402,7 +403,7 @@ Datum parquetFileReader::read(Oid typeOid, int column_index, bool &isNull, int &
 			        return NumericGetDatum((Numeric) res->buffer);
                 }
                 case ::parquet::Type::INT64: {
-                    parquet::TypedScanner<parquet::Int64Type>* scanner_ = reinterpret_cast<parquet::TypedScanner<parquet::Int64Type>*>(scanner.get());
+                    parquet::TypedScanner<parquet::Int64Type>* scanner_ = dlCheckedScanner<parquet::Int64Type>(scanner, des, typeOid, name.c_str());
                     int64_t values = 0;
                     uint scale = des->type_scale();
                     bool hasRow = scanner_->NextValue(&values, &isNull);
@@ -431,7 +432,7 @@ Datum parquetFileReader::read(Oid typeOid, int column_index, bool &isNull, int &
                     {
                         //TODO
                     }
-                    parquet::TypedScanner<parquet::ByteArrayType>* scanner_ = reinterpret_cast<parquet::TypedScanner<parquet::ByteArrayType>*>(scanner.get());
+                    parquet::TypedScanner<parquet::ByteArrayType>* scanner_ = dlCheckedScanner<parquet::ByteArrayType>(scanner, des, typeOid, name.c_str());
                     parquet::ByteArray values;
                     bool hasRow = scanner_->NextValue(&values, &isNull);
                     if (!hasRow)
@@ -460,7 +461,7 @@ Datum parquetFileReader::read(Oid typeOid, int column_index, bool &isNull, int &
                         //TODO
                     }
                     auto type_len = des->type_length();
-                    parquet::TypedScanner<parquet::FLBAType>* scanner_ = reinterpret_cast<parquet::TypedScanner<parquet::FLBAType>*>(scanner.get());
+                    parquet::TypedScanner<parquet::FLBAType>* scanner_ = dlCheckedScanner<parquet::FLBAType>(scanner, des, typeOid, name.c_str());
                     parquet::FixedLenByteArray values;
                     bool hasRow = scanner_->NextValue(&values, &isNull);
                     if (!hasRow)
@@ -486,7 +487,7 @@ Datum parquetFileReader::read(Oid typeOid, int column_index, bool &isNull, int &
         }
         case CHAROID:
         {
-            parquet::TypedScanner<parquet::ByteArrayType>* scanner_ = reinterpret_cast<parquet::TypedScanner<parquet::ByteArrayType>*>(scanner.get());
+            parquet::TypedScanner<parquet::ByteArrayType>* scanner_ = dlCheckedScanner<parquet::ByteArrayType>(scanner, des, typeOid, name.c_str());
             parquet::ByteArray values;
             bool hasRow = scanner_->NextValue(&values, &isNull);
             if (!hasRow)
@@ -511,7 +512,7 @@ Datum parquetFileReader::read(Oid typeOid, int column_index, bool &isNull, int &
             switch(des->physical_type())
             {
                 case ::parquet::Type::BYTE_ARRAY: {
-                    parquet::TypedScanner<parquet::ByteArrayType>* scanner_ = reinterpret_cast<parquet::TypedScanner<parquet::ByteArrayType>*>(scanner.get());
+                    parquet::TypedScanner<parquet::ByteArrayType>* scanner_ = dlCheckedScanner<parquet::ByteArrayType>(scanner, des, typeOid, name.c_str());
                     parquet::ByteArray values;
                     bool hasRow = scanner_->NextValue(&values, &isNull);
                     if (!hasRow)
@@ -540,9 +541,19 @@ Datum parquetFileReader::read(Oid typeOid, int column_index, bool &isNull, int &
                     }
                 }
                 case ::parquet::Type::FIXED_LEN_BYTE_ARRAY: {
+                    /*
+                     * This branch is written for FLBA -- it asks the
+                     * descriptor for type_length() -- but it decoded through a
+                     * ByteArrayType scanner, so values.len was read out of a
+                     * buffer that holds bare pointers.  It then sized the
+                     * allocation and the varlena header from that garbage
+                     * length while copying type_len bytes, or the reverse.
+                     * A fixed-length column carries its length in the schema;
+                     * take it from there and use the one number throughout.
+                     */
                     int type_len = des->type_length();
-                    parquet::TypedScanner<parquet::ByteArrayType>* scanner_ = reinterpret_cast<parquet::TypedScanner<parquet::ByteArrayType>*>(scanner.get());
-                    parquet::ByteArray values;
+                    parquet::TypedScanner<parquet::FLBAType>* scanner_ = dlCheckedScanner<parquet::FLBAType>(scanner, des, typeOid, name.c_str());
+                    parquet::FixedLenByteArray values;
                     bool hasRow = scanner_->NextValue(&values, &isNull);
                     if (!hasRow)
                     {
@@ -554,18 +565,18 @@ Datum parquetFileReader::read(Oid typeOid, int column_index, bool &isNull, int &
                     {
                         return 0;
                     }
-                    if (values.len > BUFFER_LENGTH)
+                    if (type_len > BUFFER_LENGTH)
                     {
-                        bytea *result = (bytea*)palloc(values.len + VARHDRSZ);
+                        bytea *result = (bytea*)palloc(type_len + VARHDRSZ);
                         memcpy(VARDATA(result), values.ptr, type_len);
-                        SET_VARSIZE(result, values.len + VARHDRSZ);
+                        SET_VARSIZE(result, type_len + VARHDRSZ);
                         return PointerGetDatum(result);
                     }
                     else
                     {
                         dataBuffer* ptr = options.buffer.getDataBuffer(column_index);
-                        memcpy(VARDATA(ptr->buffer), values.ptr, values.len);
-                        SET_VARSIZE(ptr->buffer, values.len + VARHDRSZ);
+                        memcpy(VARDATA(ptr->buffer), values.ptr, type_len);
+                        SET_VARSIZE(ptr->buffer, type_len + VARHDRSZ);
                         return PointerGetDatum(ptr->buffer);
                     }
                 }
