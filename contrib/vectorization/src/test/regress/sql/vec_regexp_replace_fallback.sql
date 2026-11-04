@@ -1,0 +1,77 @@
+-- Regression test for lightning issue #140: REGEXP_REPLACE() whose subject is
+-- not a bare Var has to fall back to the row executor instead of failing.
+--
+-- regexp_replace() is translated to Arrow's replace_substring_regex.  The
+-- pattern and the replacement travel in GArrowReplaceSubstringOptions, so they
+-- have to be constants, and replace_substring_regex_expression() takes the
+-- subject straight out of a Var -- anything wrapped around it is not handled.
+-- A char(n) or varchar column reaches a text function under a RelabelType, so
+-- it is not a bare Var, and before this fix the planner still vectorized the
+-- plan and the builder raised
+--     ERROR:  unrecognized node type: 164 (execMain.c:1928)
+-- with the plan already running.
+--
+-- The issue title says char(n), but the type is not what matters: a varchar
+-- column fails the same way, and so does any computed subject.
+--
+-- Coverage:
+--   contrib/vectorization/pg_vec.dat               (procoid 2284 -> check_replace_args)
+--   contrib/vectorization/src/backend/utils/arrow/fmgr.c  (check_replace_args)
+
+create schema vec_regexp140;
+set search_path = vec_regexp140, public;
+set vector.enable_vectorization = on;
+
+create table t (id int, c char(10), v varchar(20), a text) using ao_column
+  distributed by (id);
+insert into t values (1, 'bcdefg', 'abcdefgh', 'abcdefgh'),
+                     (2, 'yxwv',   'zyxwvu',   'zyxwvu'),
+                     (3, NULL,     NULL,       NULL);
+analyze t;
+
+create function is_vectorized(q text) returns boolean as $$
+declare
+  line text;
+begin
+  for line in execute 'explain (costs off) ' || q loop
+    if line like '%Vec %' then
+      return true;
+    end if;
+  end loop;
+  return false;
+end;
+$$ language plpgsql;
+
+-- The reported shape: a char(n) column, so the subject is a RelabelType.
+select is_vectorized('select regexp_replace(c, ''b'', ''X'') from t');
+select id, regexp_replace(c, 'b', 'X') from t order by id;
+
+-- A varchar column fails in exactly the same way; the type is not the point.
+select is_vectorized('select regexp_replace(v, ''b'', ''X'') from t');
+select id, regexp_replace(v, 'b', 'X') from t order by id;
+
+-- A computed subject is not a Var either.
+select is_vectorized('select regexp_replace(a || ''!'', ''b'', ''X'') from t');
+select id, regexp_replace(a || '!', 'b', 'X') from t order by id;
+
+-- A non-constant pattern cannot travel in the options.
+select is_vectorized('select regexp_replace(a, a, ''X'') from t');
+select id, regexp_replace(a, a, 'X') from t order by id;
+
+-- Control: a bare text column with constant pattern and replacement still
+-- vectorizes.
+select is_vectorized('select regexp_replace(a, ''b'', ''X'') from t');
+select id, regexp_replace(a, 'b', 'X') from t order by id;
+
+-- Control: the fallback answers match the row executor exactly.
+set vector.enable_vectorization = off;
+create table ref as select id, regexp_replace(c, 'b', 'X') r from t
+  distributed by (id);
+set vector.enable_vectorization = on;
+select count(*) as mismatches
+from ((select id, regexp_replace(c, 'b', 'X') r from t)
+      except all
+      (select id, r from ref)) d;
+
+set client_min_messages = warning;
+drop schema vec_regexp140 cascade;

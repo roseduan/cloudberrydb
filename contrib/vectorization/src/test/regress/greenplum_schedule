@@ -394,6 +394,12 @@ test: vec_substring_nonconst_fallback
 # vectorized substr() with a constant subject and column offsets must fall back (#134)
 test: vec_substr_const_subject_fallback
 
+# vectorized REGEXP_REPLACE() whose subject is not a bare Var must fall back (#140)
+test: vec_regexp_replace_fallback
+
+# vectorized REPLACE()/EXTRACT() shapes the builders cannot express must fall back (#124)
+test: vec_replace_extract_fallback
+
 # vectorized Sonic hash join routing (EXPLAIN visibility + correctness)
 
 # vectorized Sonic hash agg spill-to-disk (correctness + concurrent eviction)

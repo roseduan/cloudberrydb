@@ -182,6 +182,111 @@ check_slice_args(List *args)
 	return true;
 }
 
+/*
+ * replace() and regexp_replace() become Arrow's replace_substring and
+ * replace_substring_regex.  The pattern and the replacement travel in
+ * GArrowReplaceSubstringOptions, so both have to be constants that are not
+ * NULL, and the builders take the subject straight out of a Var -- anything
+ * wrapped around it is not handled, and a RelabelType over a char(n) or
+ * varchar column is the ordinary way that happens.
+ *
+ * Reporting it here makes the planner keep the row executor for the plan,
+ * instead of letting the builder raise "unrecognized node type" once the plan
+ * is already running.
+ */
+static bool
+check_replace_args(List *args)
+{
+	Const	   *pattern;
+	Const	   *replacement;
+
+	if (list_length(args) != 3)
+		return false;
+
+	if (!IsA(linitial(args), Var))
+		return false;
+
+	if (!IsA(lsecond(args), Const))
+		return false;
+	pattern = (Const *) lsecond(args);
+	if (pattern->constisnull)
+		return false;
+
+	if (!IsA(lthird(args), Const))
+		return false;
+	replacement = (Const *) lthird(args);
+	if (replacement->constisnull)
+		return false;
+
+	return true;
+}
+
+/*
+ * EXTRACT(<unit> FROM <value>) is translated by extract_expression(), which
+ * decodes the unit with DecodeUnits() and then maps it to an Arrow temporal
+ * component function.  Only eleven units have such a mapping; everything else
+ * -- dow, doy, week, epoch, quarter, timezone... -- reaches the switch's
+ * default and raises
+ *
+ *     ERROR:  Failed to call extract type (31)
+ *
+ * with the plan already running.  Decode the unit here, the same way the
+ * builder will, and let the planner keep the row executor for the units that
+ * have no mapping.
+ *
+ * The unit must also be a non-null text Const, and the value must not be one,
+ * because the builder's loop only reaches the switch on a non-Const argument.
+ */
+static bool
+check_extract_args(List *args)
+{
+	Expr	   *unit_expr;
+	Const	   *con;
+	char	   *unit_str;
+	char	   *lowunits;
+	int			type;
+	int			val;
+
+	if (list_length(args) != 2)
+		return false;
+
+	unit_expr = (Expr *) linitial(args);
+	if (!IsA(unit_expr, Const))
+		return false;
+	con = (Const *) unit_expr;
+	if (con->constisnull || con->consttype != TEXTOID)
+		return false;
+	if (IsA(lsecond(args), Const))
+		return false;
+
+	unit_str = text_to_cstring(DatumGetTextP(con->constvalue));
+	lowunits = downcase_truncate_identifier(unit_str, strlen(unit_str), false);
+	pfree(unit_str);
+	type = DecodeUnits(0, lowunits, &val);
+	pfree(lowunits);
+
+	if (type != UNITS)
+		return false;
+
+	switch (val)
+	{
+		case DTK_MICROSEC:
+		case DTK_MILLISEC:
+		case DTK_SECOND:
+		case DTK_MINUTE:
+		case DTK_HOUR:
+		case DTK_DAY:
+		case DTK_MONTH:
+		case DTK_YEAR:
+		case DTK_DECADE:
+		case DTK_CENTURY:
+		case DTK_MILLENNIUM:
+			return true;
+		default:
+			return false;
+	}
+}
+
 const FuncTable arrow_func_tables[] = {ARROW_FMGR};
 /*
  * Search pg_aggregate table by SQL to get PG aggregate function information
