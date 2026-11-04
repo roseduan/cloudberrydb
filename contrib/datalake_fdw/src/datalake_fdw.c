@@ -1474,12 +1474,7 @@ dataLakeReScanForeignScan(ForeignScanState *node)
 {
 	elog(DEBUG5, "datalake_fdw: dataLakeReScanForeignScan starts on segment: %d", DATALAKE_SEGMENT_ID);
 	dataLakeFdwScanState *dataLakesstate = (dataLakeFdwScanState*)node->fdw_state;
-	if (FORMAT_IS_CUSTOM(dataLakesstate->options->format))
-	{
-		datalake_to_exttable_ReScanForeignScan(node);
-	}
-	fdwfunction_endScanStatus(dataLakesstate);
-	fdwfunction_initScanStatue(node, dataLakesstate);
+	fdwfunction_rescanScanStatus(node, dataLakesstate);
 	elog(DEBUG5, "datalake_fdw: dataLakeReScanForeignScan ends on segment: %d", DATALAKE_SEGMENT_ID);
 }
 

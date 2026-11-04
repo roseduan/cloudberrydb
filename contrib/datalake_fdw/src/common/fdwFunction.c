@@ -309,6 +309,109 @@ fdwfunction_endScanStatus(dataLakeFdwScanState *dataLakesstate)
 	datalakeFreeDatalakeOptions(dataLakesstate->options);
 }
 
+/*
+ * Restart a read scan from the beginning (ReScanForeignScan).
+ *
+ * This cannot go through fdwfunction_endScanStatus(): that one ends a scan
+ * for good.  It destroys the provider and leaves the pointer NULL, and it
+ * frees dataLakesstate->options -- and fdwfunction_initScanStatue(), called
+ * right afterwards, needs both.  It dereferences the NULL provider first
+ * (createHandler), so the freed options never got the chance to bite.
+ *
+ * Only the Iceberg providers implement Provider::reScan(); the base class
+ * returns without doing anything, so a provider of any other format has to
+ * be rebuilt rather than rewound.  Either way options, fragments and the
+ * selected segments stay exactly as BeginForeignScan left them.
+ */
+void
+fdwfunction_rescanScanStatus(ForeignScanState *node,
+							 dataLakeFdwScanState *dataLakesstate)
+{
+	/*
+	 * No reader to restart: the dispatcher builds none, and neither does a
+	 * segment that was given no partition (BeginForeignScan returns before
+	 * initScanStatue).
+	 */
+	if (Gp_role == GP_ROLE_DISPATCH || dataLakesstate->provider == NULL ||
+		fdwfunction_hasZeorSelectedPartition(dataLakesstate))
+		return;
+
+	/*
+	 * Custom (external table) format.  datalake_to_exttable_ReScanForeignScan()
+	 * looks like it restarts the scan, but external_stopscan() is an empty stub
+	 * and external_rescan() only clears parse-state counters: nothing rewinds
+	 * the provider, whose file cursor stays at EOF.  Rebuilding it the way the
+	 * formats below are rebuilt would mean ending and re-beginning the external
+	 * scan too, and there is no case here that exercises it.
+	 *
+	 * Rescanning this format has never worked -- before #479 it reached
+	 * createHandler(NULL) and crashed -- so refuse it plainly rather than
+	 * return a second pass that is silently short.
+	 */
+	if (FORMAT_IS_CUSTOM(dataLakesstate->options->format))
+		ereport(ERROR,
+				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+				 errmsg("cannot rescan a foreign table in custom format"),
+				 errdetail("The external scan cannot be restarted, so a second "
+						   "pass would read no rows."),
+				 errhint("Materialize the scan, for example by setting "
+						 "enable_material to on.")));
+
+	/*
+	 * Iceberg rewinds in place.  The provider keeps the task list it already
+	 * fetched, its position-delete index and its file-id map; rebuilding it
+	 * would drop the tasks the first pass consumed and read nothing at all on
+	 * the second.
+	 */
+	if (FORMAT_IS_ICEBERG(dataLakesstate->options->format))
+	{
+		reScanProvider(dataLakesstate->provider);
+		return;
+	}
+
+	if (dataLakesstate->cstate.cstate_scan != NULL &&
+		(FORMAT_IS_CSV(dataLakesstate->options->format) ||
+		 FORMAT_IS_TEXT(dataLakesstate->options->format)))
+	{
+#if (PG_VERSION_NUM < 140000)
+		EndCopyFrom(dataLakesstate->cstate.cstate_scan);
+#else
+		EndCopyScan(dataLakesstate->cstate.cstate_scan);
+#endif
+		dataLakesstate->cstate.cstate_scan = NULL;
+	}
+
+	/*
+	 * Unlink before destroying.  destroyHandler() turns a C++ exception into
+	 * ereport(ERROR), and a provider still reachable from dataLakesstate at
+	 * that point would be destroyed a second time by EndForeignScan.
+	 */
+	{
+		providerWrapper doomed = dataLakesstate->provider;
+
+		dataLakesstate->provider = NULL;
+		destroyHandler(doomed);
+		destroyProvider(doomed);
+	}
+
+	/* initScanStatue creates both again; drop this pass's. */
+	if (dataLakesstate->rowcontext != NULL)
+	{
+		MemoryContextDelete(dataLakesstate->rowcontext);
+		dataLakesstate->rowcontext = NULL;
+	}
+	if (dataLakesstate->initcontext != NULL)
+	{
+		MemoryContextDelete(dataLakesstate->initcontext);
+		dataLakesstate->initcontext = NULL;
+	}
+
+	dataLakesstate->provider = initProvider(dataLakesstate->options->format,
+											DL_OP_READ,
+											dataLakesstate->options->vectorization);
+	fdwfunction_initScanStatue(node, dataLakesstate);
+}
+
 static void
 freeFdwPrivateList(List *fdw_private)
 {

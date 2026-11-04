@@ -19,6 +19,9 @@ void fdwfunction_iterateRecordBatch(dataLakeFdwScanState *dataLakesstate, Virtua
 
 void fdwfunction_endScanStatus(dataLakeFdwScanState *dataLakesstate);
 
+void fdwfunction_rescanScanStatus(ForeignScanState *node,
+								  dataLakeFdwScanState *dataLakesstate);
+
 
 void fdwfunction_freeFdwPrivate(dataLakeFdwScanState *sstate, ForeignScan *foreignScan);
 
