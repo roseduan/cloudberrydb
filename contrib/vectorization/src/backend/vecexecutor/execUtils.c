@@ -179,7 +179,27 @@ BuildDescForScanExtract(TupleDesc tupdesc, List *targetlist, List *qual, int *ma
 	bool		found = false;
 	int 		j = 0;
 
-	cols = palloc0(natts * sizeof(*cols));
+	/*
+	 * A relation with no columns at all reaches here with natts == 0, and
+	 * palloc0(0) hands back a chunk with no usable bytes.  The "nothing named
+	 * a column, so scan the first one" fallback below then writes cols[0]
+	 * straight past the end of it, which is the corruption reported in
+	 * lightning issue #13:
+	 *
+	 *     WARNING:  problem in alloc set MessageContext:
+	 *               detected write past chunk end
+	 *
+	 * It fired on every scan of such a relation, the ones that go on to be
+	 * declined included -- the descriptor is built before anything looks at
+	 * whether the plan can be vectorized.  So room for that one flag is
+	 * reserved whatever natts says.
+	 *
+	 * What comes out is unchanged: a descriptor holding a single attribute
+	 * that the loop below never fills, so its atttypid stays 0, and the
+	 * callers' is_type_vectorable() declines it and the plan falls back to
+	 * the row executor as it already did.
+	 */
+	cols = palloc0(Max(natts, 1) * sizeof(*cols));
 
 	found |= vec_extractcolumns_from_node((Node *)targetlist, cols, natts, &extract_natts);
 	found |= vec_extractcolumns_from_node((Node *)qual, cols, natts, &extract_natts);
