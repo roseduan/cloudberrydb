@@ -64,26 +64,22 @@ select explain_filter('explain (analyze) select * from int8_tbl i8');
                                                    explain_filter                                                   
 --------------------------------------------------------------------------------------------------------------------
  Vec Gather Motion N:N  (slice1; segments: N)  (cost=N.N..N.N rows=N width=N) (actual time=N.N..N.N rows=N loops=N)
-   Executor Memory: NkB  Segments: N  Max: NkB (segment N)
    ->  Vec Seq Scan on int8_tbl i8  (cost=N.N..N.N rows=N width=N) (actual time=N.N..N.N rows=N loops=N)
-         Executor Memory: NkB  Segments: N  Max: NkB (segment N)
  Planning Time: N.N ms
    (slice0)    Executor memory: 1044K bytes.
    (slice1)    Executor memory: 1037K bytes avg x N workers, 1037K bytes max (seg0).
  Memory used:  NkB
  Optimizer: Postgres query optimizer
  Execution Time: N.N ms
-(10 rows)
+(8 rows)
 
 select explain_filter('explain (analyze, verbose) select * from int8_tbl i8');
                                                    explain_filter                                                   
 --------------------------------------------------------------------------------------------------------------------
  Vec Gather Motion N:N  (slice1; segments: N)  (cost=N.N..N.N rows=N width=N) (actual time=N.N..N.N rows=N loops=N)
    Output: q1, q2
-   Executor Memory: NkB  Segments: N  Max: NkB (segment N)
    ->  Vec Seq Scan on public.int8_tbl i8  (cost=N.N..N.N rows=N width=N) (actual time=N.N..N.N rows=N loops=N)
          Output: q1, q2
-         Executor Memory: NkB  Segments: N  Max: NkB (segment N)
  Settings: optimizer = 'off', enable_parallel = 'off'
  Planning Time: N.N ms
    (slice0)    Executor memory: 1044K bytes.
@@ -91,22 +87,20 @@ select explain_filter('explain (analyze, verbose) select * from int8_tbl i8');
  Memory used:  NkB
  Optimizer: Postgres query optimizer
  Execution Time: N.N ms
-(13 rows)
+(11 rows)
 
 select explain_filter('explain (analyze, buffers, format text) select * from int8_tbl i8');
                                                    explain_filter                                                   
 --------------------------------------------------------------------------------------------------------------------
  Vec Gather Motion N:N  (slice1; segments: N)  (cost=N.N..N.N rows=N width=N) (actual time=N.N..N.N rows=N loops=N)
-   Executor Memory: NkB  Segments: N  Max: NkB (segment N)
    ->  Vec Seq Scan on int8_tbl i8  (cost=N.N..N.N rows=N width=N) (actual time=N.N..N.N rows=N loops=N)
-         Executor Memory: NkB  Segments: N  Max: NkB (segment N)
  Planning Time: N.N ms
    (slice0)    Executor memory: 1044K bytes.
    (slice1)    Executor memory: 1037K bytes avg x N workers, 1037K bytes max (seg0).
  Memory used:  NkB
  Optimizer: Postgres query optimizer
  Execution Time: N.N ms
-(10 rows)
+(8 rows)
 
 select explain_filter('explain (analyze, buffers, format json) select * from int8_tbl i8');
                 explain_filter                 
@@ -130,10 +124,6 @@ select explain_filter('explain (analyze, buffers, format json) select * from int
        "Actual Total Time": N.N,              +
        "Actual Rows": N,                      +
        "Actual Loops": N,                     +
-       "Executor Memory": N,                  +
-       "Executor Memory Segments": N,         +
-       "Executor Max Memory": N,              +
-       "Executor Max Memory Segment": N,      +
        "Shared Hit Blocks": N,                +
        "Shared Read Blocks": N,               +
        "Shared Dirtied Blocks": N,            +
@@ -163,10 +153,6 @@ select explain_filter('explain (analyze, buffers, format json) select * from int
            "Actual Total Time": N.N,          +
            "Actual Rows": N,                  +
            "Actual Loops": N,                 +
-           "Executor Memory": N,              +
-           "Executor Memory Segments": N,     +
-           "Executor Max Memory": N,          +
-           "Executor Max Memory Segment": N,  +
            "Shared Hit Blocks": N,            +
            "Shared Read Blocks": N,           +
            "Shared Dirtied Blocks": N,        +
@@ -221,114 +207,106 @@ select explain_filter('explain (analyze, buffers, format json) select * from int
 (1 row)
 
 select explain_filter('explain (analyze, buffers, format xml) select * from int8_tbl i8');
-                             explain_filter                             
-------------------------------------------------------------------------
- <explain xmlns="http://www.postgresql.org/N/explain">                 +
-   <Query>                                                             +
-     <Plan>                                                            +
-       <Node-Type>Vec Gather Motion</Node-Type>                        +
-       <Senders>N</Senders>                                            +
-       <Receivers>N</Receivers>                                        +
-       <Slice>N</Slice>                                                +
-       <Segments>N</Segments>                                          +
-       <Gang-Type>primary reader</Gang-Type>                           +
-       <Parallel-Aware>false</Parallel-Aware>                          +
-       <Async-Capable>false</Async-Capable>                            +
-       <Startup-Cost>N.N</Startup-Cost>                                +
-       <Total-Cost>N.N</Total-Cost>                                    +
-       <Plan-Rows>N</Plan-Rows>                                        +
-       <Plan-Width>N</Plan-Width>                                      +
-       <Actual-Startup-Time>N.N</Actual-Startup-Time>                  +
-       <Actual-Total-Time>N.N</Actual-Total-Time>                      +
-       <Actual-Rows>N</Actual-Rows>                                    +
-       <Actual-Loops>N</Actual-Loops>                                  +
-       <Executor-Memory>N</Executor-Memory>                            +
-       <Executor-Memory-Segments>N</Executor-Memory-Segments>          +
-       <Executor-Max-Memory>N</Executor-Max-Memory>                    +
-       <Executor-Max-Memory-Segment>N</Executor-Max-Memory-Segment>    +
-       <Shared-Hit-Blocks>N</Shared-Hit-Blocks>                        +
-       <Shared-Read-Blocks>N</Shared-Read-Blocks>                      +
-       <Shared-Dirtied-Blocks>N</Shared-Dirtied-Blocks>                +
-       <Shared-Written-Blocks>N</Shared-Written-Blocks>                +
-       <Local-Hit-Blocks>N</Local-Hit-Blocks>                          +
-       <Local-Read-Blocks>N</Local-Read-Blocks>                        +
-       <Local-Dirtied-Blocks>N</Local-Dirtied-Blocks>                  +
-       <Local-Written-Blocks>N</Local-Written-Blocks>                  +
-       <Temp-Read-Blocks>N</Temp-Read-Blocks>                          +
-       <Temp-Written-Blocks>N</Temp-Written-Blocks>                    +
-       <Plans>                                                         +
-         <Plan>                                                        +
-           <Node-Type>Vec Seq Scan</Node-Type>                         +
-           <Parent-Relationship>Outer</Parent-Relationship>            +
-           <Slice>N</Slice>                                            +
-           <Segments>N</Segments>                                      +
-           <Gang-Type>primary reader</Gang-Type>                       +
-           <Parallel-Aware>false</Parallel-Aware>                      +
-           <Async-Capable>false</Async-Capable>                        +
-           <Relation-Name>int8_tbl</Relation-Name>                     +
-           <Alias>i8</Alias>                                           +
-           <Startup-Cost>N.N</Startup-Cost>                            +
-           <Total-Cost>N.N</Total-Cost>                                +
-           <Plan-Rows>N</Plan-Rows>                                    +
-           <Plan-Width>N</Plan-Width>                                  +
-           <Actual-Startup-Time>N.N</Actual-Startup-Time>              +
-           <Actual-Total-Time>N.N</Actual-Total-Time>                  +
-           <Actual-Rows>N</Actual-Rows>                                +
-           <Actual-Loops>N</Actual-Loops>                              +
-           <Executor-Memory>N</Executor-Memory>                        +
-           <Executor-Memory-Segments>N</Executor-Memory-Segments>      +
-           <Executor-Max-Memory>N</Executor-Max-Memory>                +
-           <Executor-Max-Memory-Segment>N</Executor-Max-Memory-Segment>+
-           <Shared-Hit-Blocks>N</Shared-Hit-Blocks>                    +
-           <Shared-Read-Blocks>N</Shared-Read-Blocks>                  +
-           <Shared-Dirtied-Blocks>N</Shared-Dirtied-Blocks>            +
-           <Shared-Written-Blocks>N</Shared-Written-Blocks>            +
-           <Local-Hit-Blocks>N</Local-Hit-Blocks>                      +
-           <Local-Read-Blocks>N</Local-Read-Blocks>                    +
-           <Local-Dirtied-Blocks>N</Local-Dirtied-Blocks>              +
-           <Local-Written-Blocks>N</Local-Written-Blocks>              +
-           <Temp-Read-Blocks>N</Temp-Read-Blocks>                      +
-           <Temp-Written-Blocks>N</Temp-Written-Blocks>                +
-         </Plan>                                                       +
-       </Plans>                                                        +
-     </Plan>                                                           +
-     <Settings>                                                        +
-       <Optimizer>Postgres query optimizer</Optimizer>                 +
-     </Settings>                                                       +
-     <Planning>                                                        +
-       <Shared-Hit-Blocks>N</Shared-Hit-Blocks>                        +
-       <Shared-Read-Blocks>N</Shared-Read-Blocks>                      +
-       <Shared-Dirtied-Blocks>N</Shared-Dirtied-Blocks>                +
-       <Shared-Written-Blocks>N</Shared-Written-Blocks>                +
-       <Local-Hit-Blocks>N</Local-Hit-Blocks>                          +
-       <Local-Read-Blocks>N</Local-Read-Blocks>                        +
-       <Local-Dirtied-Blocks>N</Local-Dirtied-Blocks>                  +
-       <Local-Written-Blocks>N</Local-Written-Blocks>                  +
-       <Temp-Read-Blocks>N</Temp-Read-Blocks>                          +
-       <Temp-Written-Blocks>N</Temp-Written-Blocks>                    +
-     </Planning>                                                       +
-     <Planning-Time>N.N</Planning-Time>                                +
-     <Triggers>                                                        +
-     </Triggers>                                                       +
-     <Slice-statistics>                                                +
-       <Slice>                                                         +
-         <Slice>N</Slice>                                              +
-         <Executor-Memory>N</Executor-Memory>                          +
-       </Slice>                                                        +
-       <Slice>                                                         +
-         <Slice>N</Slice>                                              +
-         <Executor-Memory>                                             +
-           <Average>N</Average>                                        +
-           <Workers>N</Workers>                                        +
-           <Maximum-Memory-Used>N</Maximum-Memory-Used>                +
-         </Executor-Memory>                                            +
-       </Slice>                                                        +
-     </Slice-statistics>                                               +
-     <Statement-statistics>                                            +
-       <Memory-used>N</Memory-used>                                    +
-     </Statement-statistics>                                           +
-     <Execution-Time>N.N</Execution-Time>                              +
-   </Query>                                                            +
+                       explain_filter                       
+------------------------------------------------------------
+ <explain xmlns="http://www.postgresql.org/N/explain">     +
+   <Query>                                                 +
+     <Plan>                                                +
+       <Node-Type>Vec Gather Motion</Node-Type>            +
+       <Senders>N</Senders>                                +
+       <Receivers>N</Receivers>                            +
+       <Slice>N</Slice>                                    +
+       <Segments>N</Segments>                              +
+       <Gang-Type>primary reader</Gang-Type>               +
+       <Parallel-Aware>false</Parallel-Aware>              +
+       <Async-Capable>false</Async-Capable>                +
+       <Startup-Cost>N.N</Startup-Cost>                    +
+       <Total-Cost>N.N</Total-Cost>                        +
+       <Plan-Rows>N</Plan-Rows>                            +
+       <Plan-Width>N</Plan-Width>                          +
+       <Actual-Startup-Time>N.N</Actual-Startup-Time>      +
+       <Actual-Total-Time>N.N</Actual-Total-Time>          +
+       <Actual-Rows>N</Actual-Rows>                        +
+       <Actual-Loops>N</Actual-Loops>                      +
+       <Shared-Hit-Blocks>N</Shared-Hit-Blocks>            +
+       <Shared-Read-Blocks>N</Shared-Read-Blocks>          +
+       <Shared-Dirtied-Blocks>N</Shared-Dirtied-Blocks>    +
+       <Shared-Written-Blocks>N</Shared-Written-Blocks>    +
+       <Local-Hit-Blocks>N</Local-Hit-Blocks>              +
+       <Local-Read-Blocks>N</Local-Read-Blocks>            +
+       <Local-Dirtied-Blocks>N</Local-Dirtied-Blocks>      +
+       <Local-Written-Blocks>N</Local-Written-Blocks>      +
+       <Temp-Read-Blocks>N</Temp-Read-Blocks>              +
+       <Temp-Written-Blocks>N</Temp-Written-Blocks>        +
+       <Plans>                                             +
+         <Plan>                                            +
+           <Node-Type>Vec Seq Scan</Node-Type>             +
+           <Parent-Relationship>Outer</Parent-Relationship>+
+           <Slice>N</Slice>                                +
+           <Segments>N</Segments>                          +
+           <Gang-Type>primary reader</Gang-Type>           +
+           <Parallel-Aware>false</Parallel-Aware>          +
+           <Async-Capable>false</Async-Capable>            +
+           <Relation-Name>int8_tbl</Relation-Name>         +
+           <Alias>i8</Alias>                               +
+           <Startup-Cost>N.N</Startup-Cost>                +
+           <Total-Cost>N.N</Total-Cost>                    +
+           <Plan-Rows>N</Plan-Rows>                        +
+           <Plan-Width>N</Plan-Width>                      +
+           <Actual-Startup-Time>N.N</Actual-Startup-Time>  +
+           <Actual-Total-Time>N.N</Actual-Total-Time>      +
+           <Actual-Rows>N</Actual-Rows>                    +
+           <Actual-Loops>N</Actual-Loops>                  +
+           <Shared-Hit-Blocks>N</Shared-Hit-Blocks>        +
+           <Shared-Read-Blocks>N</Shared-Read-Blocks>      +
+           <Shared-Dirtied-Blocks>N</Shared-Dirtied-Blocks>+
+           <Shared-Written-Blocks>N</Shared-Written-Blocks>+
+           <Local-Hit-Blocks>N</Local-Hit-Blocks>          +
+           <Local-Read-Blocks>N</Local-Read-Blocks>        +
+           <Local-Dirtied-Blocks>N</Local-Dirtied-Blocks>  +
+           <Local-Written-Blocks>N</Local-Written-Blocks>  +
+           <Temp-Read-Blocks>N</Temp-Read-Blocks>          +
+           <Temp-Written-Blocks>N</Temp-Written-Blocks>    +
+         </Plan>                                           +
+       </Plans>                                            +
+     </Plan>                                               +
+     <Settings>                                            +
+       <Optimizer>Postgres query optimizer</Optimizer>     +
+     </Settings>                                           +
+     <Planning>                                            +
+       <Shared-Hit-Blocks>N</Shared-Hit-Blocks>            +
+       <Shared-Read-Blocks>N</Shared-Read-Blocks>          +
+       <Shared-Dirtied-Blocks>N</Shared-Dirtied-Blocks>    +
+       <Shared-Written-Blocks>N</Shared-Written-Blocks>    +
+       <Local-Hit-Blocks>N</Local-Hit-Blocks>              +
+       <Local-Read-Blocks>N</Local-Read-Blocks>            +
+       <Local-Dirtied-Blocks>N</Local-Dirtied-Blocks>      +
+       <Local-Written-Blocks>N</Local-Written-Blocks>      +
+       <Temp-Read-Blocks>N</Temp-Read-Blocks>              +
+       <Temp-Written-Blocks>N</Temp-Written-Blocks>        +
+     </Planning>                                           +
+     <Planning-Time>N.N</Planning-Time>                    +
+     <Triggers>                                            +
+     </Triggers>                                           +
+     <Slice-statistics>                                    +
+       <Slice>                                             +
+         <Slice>N</Slice>                                  +
+         <Executor-Memory>N</Executor-Memory>              +
+       </Slice>                                            +
+       <Slice>                                             +
+         <Slice>N</Slice>                                  +
+         <Executor-Memory>                                 +
+           <Average>N</Average>                            +
+           <Workers>N</Workers>                            +
+           <Maximum-Memory-Used>N</Maximum-Memory-Used>    +
+         </Executor-Memory>                                +
+       </Slice>                                            +
+     </Slice-statistics>                                   +
+     <Statement-statistics>                                +
+       <Memory-used>N</Memory-used>                        +
+     </Statement-statistics>                               +
+     <Execution-Time>N.N</Execution-Time>                  +
+   </Query>                                                +
  </explain>
 (1 row)
 
@@ -352,10 +330,6 @@ select explain_filter('explain (analyze, buffers, format yaml) select * from int
      Actual Total Time: N.N               +
      Actual Rows: N                       +
      Actual Loops: N                      +
-     Executor Memory: N                   +
-     Executor Memory Segments: N          +
-     Executor Max Memory: N               +
-     Executor Max Memory Segment: N       +
      Shared Hit Blocks: N                 +
      Shared Read Blocks: N                +
      Shared Dirtied Blocks: N             +
@@ -384,10 +358,6 @@ select explain_filter('explain (analyze, buffers, format yaml) select * from int
          Actual Total Time: N.N           +
          Actual Rows: N                   +
          Actual Loops: N                  +
-         Executor Memory: N               +
-         Executor Memory Segments: N      +
-         Executor Max Memory: N           +
-         Executor Max Memory Segment: N   +
          Shared Hit Blocks: N             +
          Shared Read Blocks: N            +
          Shared Dirtied Blocks: N         +

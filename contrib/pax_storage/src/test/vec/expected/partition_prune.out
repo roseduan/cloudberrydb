@@ -2331,12 +2331,10 @@ explain (analyze, costs off, summary off, timing off) select * from list_part wh
                               QUERY PLAN                              
 ----------------------------------------------------------------------
  Vec Gather Motion 1:1  (slice1; segments: 1) (actual rows=1 loops=1)
-   Executor Memory: 1kB  Segments: 1  Max: 1kB (segment -1)
    ->  Vec Seq Scan on list_part1 list_part (actual rows=1 loops=1)
          Filter: (a = 1)
-         Executor Memory: 1kB  Segments: 1  Max: 1kB (segment 1)
  Optimizer: Postgres query optimizer
-(6 rows)
+(4 rows)
 
 -- Ensure pruning does not take place when the function has a Var parameter
 explain (analyze, costs off, summary off, timing off) select * from list_part where a = list_part_fn(a);
@@ -2360,23 +2358,17 @@ explain (analyze, costs off, summary off, timing off) select * from list_part wh
                                  QUERY PLAN                                 
 ----------------------------------------------------------------------------
  Vec Gather Motion 3:1  (slice1; segments: 3) (actual rows=0 loops=1)
-   Executor Memory: 1kB  Segments: 1  Max: 1kB (segment -1)
    ->  Vec Append (actual rows=0 loops=1)
-         Executor Memory: 1kB  Segments: 3  Max: 1kB (segment 0)
          ->  Vec Seq Scan on list_part1 list_part_1 (actual rows=0 loops=1)
                Filter: (a = (1 + a))
-               Executor Memory: 1kB  Segments: 3  Max: 1kB (segment 0)
          ->  Vec Seq Scan on list_part2 list_part_2 (actual rows=0 loops=1)
                Filter: (a = (1 + a))
-               Executor Memory: 1kB  Segments: 3  Max: 1kB (segment 0)
          ->  Vec Seq Scan on list_part3 list_part_3 (actual rows=0 loops=1)
                Filter: (a = (1 + a))
-               Executor Memory: 1kB  Segments: 3  Max: 1kB (segment 0)
          ->  Vec Seq Scan on list_part4 list_part_4 (actual rows=0 loops=1)
                Filter: (a = (1 + a))
-               Executor Memory: 1kB  Segments: 3  Max: 1kB (segment 0)
  Optimizer: Postgres query optimizer
-(17 rows)
+(11 rows)
 
 rollback;
 drop table list_part;
@@ -2489,33 +2481,24 @@ select explain_parallel_append('execute ab_q5 (33, 44, 55)');
 
 -- Test Parallel Append with PARAM_EXEC Params
 select explain_parallel_append('select count(*) from ab where (a = (select 1) or a = (select 3)) and b = 2');
-                              explain_parallel_append                              
------------------------------------------------------------------------------------
+                            explain_parallel_append                            
+-------------------------------------------------------------------------------
  Vec Finalize Vec Aggregate (actual rows=N loops=N)
-   Executor Memory: 1kB  Segments: 1  Max: 1kB (segment -1)
    InitPlan 1 (returns $0)  (slice2)
      ->  Vec Result (actual rows=N loops=N)
-           Executor Memory: 1kB  Segments: 1  Max: 1kB (segment -1)
    InitPlan 2 (returns $1)  (slice3)
      ->  Vec Result (actual rows=N loops=N)
-           Executor Memory: 1kB  Segments: 1  Max: 1kB (segment -1)
    ->  Vec Gather Motion 3:1  (slice1; segments: 3) (actual rows=N loops=N)
-         Executor Memory: 1kB  Segments: 1  Max: 1kB (segment -1)
          ->  Vec Partial Vec Aggregate (actual rows=N loops=N)
-               Executor Memory: 1kB  Segments: 3  Max: 1kB (segment 0)
                ->  Vec Append (actual rows=N loops=N)
-                     Executor Memory: 1kB  Segments: 3  Max: 1kB (segment 0)
                      ->  Vec Seq Scan on ab_a1_b2 ab_1 (actual rows=N loops=N)
                            Filter: ((b = 2) AND ((a = $0) OR (a = $1)))
-                           Executor Memory: 1kB  Segments: 3  Max: 1kB (segment 0)
                      ->  Vec Seq Scan on ab_a2_b2 ab_2 (actual rows=N loops=N)
                            Filter: ((b = 2) AND ((a = $0) OR (a = $1)))
-                           Executor Memory: 1kB  Segments: 3  Max: 1kB (segment 0)
                      ->  Vec Seq Scan on ab_a3_b2 ab_3 (actual rows=N loops=N)
                            Filter: ((b = 2) AND ((a = $0) OR (a = $1)))
-                           Executor Memory: 1kB  Segments: 3  Max: 1kB (segment 0)
  Optimizer: Postgres query optimizer
-(24 rows)
+(15 rows)
 
 -- Test pruning during parallel nested loop query
 create table lprt_a (a int not null);
@@ -3503,20 +3486,15 @@ select * from listp where a = (select null::int);
                               QUERY PLAN                               
 -----------------------------------------------------------------------
  Vec Gather Motion 3:1  (slice1; segments: 3) (actual rows=0 loops=1)
-   Executor Memory: 1kB  Segments: 1  Max: 1kB (segment -1)
    InitPlan 1 (returns $0)  (slice2)
      ->  Vec Result (actual rows=1 loops=1)
-           Executor Memory: 1kB  Segments: 1  Max: 1kB (segment -1)
    ->  Vec Append (actual rows=0 loops=1)
-         Executor Memory: 1kB  Segments: 3  Max: 1kB (segment 0)
          ->  Vec Seq Scan on listp_1_1 listp_1 (actual rows=0 loops=1)
                Filter: (a = $0)
-               Executor Memory: 1kB  Segments: 3  Max: 1kB (segment 0)
          ->  Vec Seq Scan on listp_2_1 listp_2 (actual rows=0 loops=1)
                Filter: (a = $0)
-               Executor Memory: 1kB  Segments: 3  Max: 1kB (segment 0)
  Optimizer: Postgres query optimizer
-(14 rows)
+(9 rows)
 
 drop table listp;
 --
@@ -3659,23 +3637,18 @@ NOTICE:  table has parent, setting distribution columns to match parent table
 insert into mc3p values (0, 1, 1), (1, 1, 1), (2, 1, 1);
 explain (analyze, costs off, summary off, timing off)
 select * from mc3p where a < 3 and abs(b) = 1;
-                              QUERY PLAN                               
------------------------------------------------------------------------
+                              QUERY PLAN                              
+----------------------------------------------------------------------
  Vec Gather Motion 3:1  (slice1; segments: 3) (actual rows=3 loops=1)
-   Executor Memory: 1kB  Segments: 1  Max: 1kB (segment -1)
    ->  Vec Append (actual rows=2 loops=1)
-         Executor Memory: 1kB  Segments: 3  Max: 1kB (segment 0)
          ->  Vec Seq Scan on mc3p0 mc3p_1 (actual rows=1 loops=1)
                Filter: ((a < 3) AND (abs(b) = 1))
-               Executor Memory: 1kB  Segments: 3  Max: 1kB (segment 0)
          ->  Vec Seq Scan on mc3p1 mc3p_2 (actual rows=1 loops=1)
                Filter: ((a < 3) AND (abs(b) = 1))
-               Executor Memory: 1kB  Segments: 3  Max: 1kB (segment 0)
          ->  Vec Seq Scan on mc3p2 mc3p_3 (actual rows=1 loops=1)
                Filter: ((a < 3) AND (abs(b) = 1))
-               Executor Memory: 1kB  Segments: 3  Max: 1kB (segment 0)
  Optimizer: Postgres query optimizer
-(14 rows)
+(9 rows)
 
 --
 -- Check that pruning with composite range partitioning works correctly when
@@ -3736,48 +3709,36 @@ select * from boolp where a = (select value from boolvalues where value);
                                   QUERY PLAN                                  
 ------------------------------------------------------------------------------
  Vec Gather Motion 3:1  (slice1; segments: 3) (actual rows=0 loops=1)
-   Executor Memory: 1kB  Segments: 1  Max: 1kB (segment -1)
    InitPlan 1 (returns $0)  (slice2)
      ->  Vec Gather Motion 3:1  (slice3; segments: 3) (actual rows=1 loops=1)
-           Executor Memory: 1kB  Segments: 1  Max: 1kB (segment -1)
            ->  Vec Seq Scan on boolvalues (actual rows=1 loops=1)
                  Filter: value
                  Rows Removed by Filter: 1
-                 Executor Memory: 1kB  Segments: 3  Max: 1kB (segment 0)
    ->  Vec Append (actual rows=0 loops=1)
-         Executor Memory: 1kB  Segments: 3  Max: 1kB (segment 0)
          ->  Vec Seq Scan on boolp_f boolp_1 (actual rows=0 loops=1)
                Filter: (a = $0)
-               Executor Memory: 1kB  Segments: 3  Max: 1kB (segment 0)
          ->  Vec Seq Scan on boolp_t boolp_2 (actual rows=0 loops=1)
                Filter: (a = $0)
-               Executor Memory: 1kB  Segments: 3  Max: 1kB (segment 0)
  Optimizer: Postgres query optimizer
-(18 rows)
+(12 rows)
 
 explain (analyze, costs off, summary off, timing off)
 select * from boolp where a = (select value from boolvalues where not value);
                                   QUERY PLAN                                  
 ------------------------------------------------------------------------------
  Vec Gather Motion 3:1  (slice1; segments: 3) (actual rows=0 loops=1)
-   Executor Memory: 1kB  Segments: 1  Max: 1kB (segment -1)
    InitPlan 1 (returns $0)  (slice2)
      ->  Vec Gather Motion 3:1  (slice3; segments: 3) (actual rows=1 loops=1)
-           Executor Memory: 1kB  Segments: 1  Max: 1kB (segment -1)
            ->  Vec Seq Scan on boolvalues (actual rows=1 loops=1)
                  Filter: (NOT value)
                  Rows Removed by Filter: 1
-                 Executor Memory: 1kB  Segments: 3  Max: 1kB (segment 0)
    ->  Vec Append (actual rows=0 loops=1)
-         Executor Memory: 1kB  Segments: 3  Max: 1kB (segment 0)
          ->  Vec Seq Scan on boolp_f boolp_1 (actual rows=0 loops=1)
                Filter: (a = $0)
-               Executor Memory: 1kB  Segments: 3  Max: 1kB (segment 0)
          ->  Vec Seq Scan on boolp_t boolp_2 (actual rows=0 loops=1)
                Filter: (a = $0)
-               Executor Memory: 1kB  Segments: 3  Max: 1kB (segment 0)
  Optimizer: Postgres query optimizer
-(18 rows)
+(12 rows)
 
 drop table boolp;
 --
@@ -4460,15 +4421,12 @@ select * from listp where a = (select 2) and b <> 10;
                               QUERY PLAN                              
 ----------------------------------------------------------------------
  Vec Gather Motion 3:1  (slice1; segments: 3) (actual rows=0 loops=1)
-   Executor Memory: 1kB  Segments: 1  Max: 1kB (segment -1)
    InitPlan 1 (returns $0)  (slice2)
      ->  Vec Result (actual rows=1 loops=1)
-           Executor Memory: 1kB  Segments: 1  Max: 1kB (segment -1)
    ->  Vec Seq Scan on listp1 listp (actual rows=0 loops=1)
          Filter: ((b <> 10) AND (a = $0))
-         Executor Memory: 1kB  Segments: 3  Max: 1kB (segment 0)
  Optimizer: Postgres query optimizer
-(9 rows)
+(6 rows)
 
 --
 -- check that a partition directly accessed in a query is excluded with
@@ -4542,20 +4500,15 @@ select explain_parallel_append('select * from listp where a = (select 1);');
                         explain_parallel_append                         
 ------------------------------------------------------------------------
  Vec Gather Motion 3:1  (slice1; segments: 3) (actual rows=N loops=N)
-   Executor Memory: 1kB  Segments: 1  Max: 1kB (segment -1)
    InitPlan 1 (returns $0)  (slice2)
      ->  Vec Result (actual rows=N loops=N)
-           Executor Memory: 1kB  Segments: 1  Max: 1kB (segment -1)
    ->  Vec Append (actual rows=N loops=N)
-         Executor Memory: 1kB  Segments: 3  Max: 1kB (segment 0)
          ->  Vec Seq Scan on listp_12_1 listp_1 (actual rows=N loops=N)
                Filter: (a = $0)
-               Executor Memory: 1kB  Segments: 3  Max: 1kB (segment 0)
          ->  Vec Seq Scan on listp_12_2 listp_2 (actual rows=N loops=N)
                Filter: (a = $0)
-               Executor Memory: 1kB  Segments: 3  Max: 1kB (segment 0)
  Optimizer: Postgres query optimizer
-(14 rows)
+(9 rows)
 
 -- Like the above but throw some more complexity at the planner by adding
 -- a UNION ALL.  We expect both sides of the union not to scan the
@@ -4567,31 +4520,23 @@ select * from listp where a = (select 2);');
                            explain_parallel_append                            
 ------------------------------------------------------------------------------
  Vec Gather Motion 3:1  (slice1; segments: 3) (actual rows=N loops=N)
-   Executor Memory: 1kB  Segments: 1  Max: 1kB (segment -1)
    ->  Vec Append (actual rows=N loops=N)
-         Executor Memory: 1kB  Segments: 3  Max: 1kB (segment 0)
          ->  Vec Append (actual rows=N loops=N)
-               Executor Memory: 1kB  Segments: 3  Max: 1kB (segment 0)
                InitPlan 1 (returns $0)  (slice2)
                  ->  Vec Result (actual rows=N loops=N)
                ->  Vec Seq Scan on listp_12_1 listp_1 (actual rows=N loops=N)
                      Filter: (a = $0)
-                     Executor Memory: 1kB  Segments: 3  Max: 1kB (segment 0)
                ->  Vec Seq Scan on listp_12_2 listp_2 (actual rows=N loops=N)
                      Filter: (a = $0)
-                     Executor Memory: 1kB  Segments: 3  Max: 1kB (segment 0)
          ->  Vec Append (actual rows=N loops=N)
-               Executor Memory: 1kB  Segments: 3  Max: 1kB (segment 0)
                InitPlan 2 (returns $1)  (slice3)
                  ->  Vec Result (actual rows=N loops=N)
                ->  Vec Seq Scan on listp_12_1 listp_4 (actual rows=N loops=N)
                      Filter: (a = $1)
-                     Executor Memory: 1kB  Segments: 3  Max: 1kB (segment 0)
                ->  Vec Seq Scan on listp_12_2 listp_5 (actual rows=N loops=N)
                      Filter: (a = $1)
-                     Executor Memory: 1kB  Segments: 3  Max: 1kB (segment 0)
  Optimizer: Postgres query optimizer
-(25 rows)
+(17 rows)
 
 drop table listp;
 reset parallel_tuple_cost;

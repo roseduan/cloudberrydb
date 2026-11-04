@@ -50,6 +50,7 @@ test: result/simple_expr
 test: sort/sort
 test: sort/arrow_merge_sort
 test: sort/topk
+test: window/window_frame
 test: explain/exec_explain
 test: plan_merge/plan_merge
 test: combos/combo_1

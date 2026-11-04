@@ -45,8 +45,7 @@
 #include "utils/guc_vec.h"
 #include "storage/fd.h"
 #include "storage/ipc.h"
-
-#define VEC_SPILL_FILE_PREFIX "vec_spill"
+#include "vecexecutor/vec_spill_stats.h"
 #include "miscadmin.h"
 #include "pgstat.h"
 #include "libpq/libpq-be.h"
@@ -729,6 +728,94 @@ plan_has_any_share_walker(Plan *plan)
 
 	return plan_has_any_share_walker(plan->lefttree) ||
 		plan_has_any_share_walker(plan->righttree);
+}
+
+/*
+ * Is `target` a subplan of some Sequence other than its last one?
+ *
+ * Sequence runs every subplan but the last only for its side effects and
+ * throws their rows away, which is where a CTE producer sits.  Same
+ * traversal as plan_has_any_share_walker.
+ */
+static bool
+plan_output_discarded_walker(Plan *plan, Plan *target)
+{
+	ListCell   *lc;
+
+	if (plan == NULL)
+		return false;
+
+	if (IsA(plan, Sequence))
+	{
+		List	   *subplans = ((Sequence *) plan)->subplans;
+
+		foreach(lc, subplans)
+		{
+			Plan	   *sub = (Plan *) lfirst(lc);
+
+			if (sub == target && lnext(subplans, lc) != NULL)
+				return true;
+			if (plan_output_discarded_walker(sub, target))
+				return true;
+		}
+	}
+
+	if (IsA(plan, Append))
+	{
+		foreach(lc, ((Append *) plan)->appendplans)
+		{
+			if (plan_output_discarded_walker((Plan *) lfirst(lc), target))
+				return true;
+		}
+	}
+
+	if (IsA(plan, MergeAppend))
+	{
+		foreach(lc, ((MergeAppend *) plan)->mergeplans)
+		{
+			if (plan_output_discarded_walker((Plan *) lfirst(lc), target))
+				return true;
+		}
+	}
+
+	if (IsA(plan, SubqueryScan))
+	{
+		if (plan_output_discarded_walker(((SubqueryScan *) plan)->subplan,
+										 target))
+			return true;
+	}
+
+	return plan_output_discarded_walker(plan->lefttree, target) ||
+		plan_output_discarded_walker(plan->righttree, target);
+}
+
+/*
+ * True when nothing reads the rows this plan node returns.
+ */
+static bool
+PlanOutputDiscarded(PlanState *planstate)
+{
+	PlannedStmt	   *stmt;
+	ListCell	   *lc;
+
+	if (planstate == NULL || planstate->state == NULL)
+		return false;
+
+	stmt = planstate->state->es_plannedstmt;
+	if (stmt == NULL)
+		return false;
+
+	if (plan_output_discarded_walker(stmt->planTree, planstate->plan))
+		return true;
+
+	foreach(lc, stmt->subplans)
+	{
+		if (plan_output_discarded_walker((Plan *) lfirst(lc),
+										 planstate->plan))
+			return true;
+	}
+
+	return false;
 }
 
 /*
@@ -2534,6 +2621,7 @@ BuildShareScanPlan(PlanBuildContext *pcontext, VecExecuteState *estate)
 	g_autoptr(GArrowSourceShareNodeOptions)	share_source_node_options = NULL;
 	g_autoptr(GArrowExecuteNode) share_exec_node = NULL;
 	g_autoptr(GError) error = NULL;
+	bool		cross_slice = ((ShareInputScan *) pcontext->planstate->plan)->cross_slice;
 
 	if (pcontext->is_producer)
 	{
@@ -2547,6 +2635,19 @@ BuildShareScanPlan(PlanBuildContext *pcontext, VecExecuteState *estate)
 													&error);
 		if (error)
 			elog(ERROR, "build share producter node option fail caused by %s", error->message);
+
+		/*
+		 * A CTE producer sits under Sequence, which throws its rows away.
+		 * Forwarding them would only park a full second copy of the shared
+		 * data in this plan's sink (batch mode: the whole plan runs before
+		 * the sink is read), 2.4GB per segment on TPC-DS q67.  Limited to
+		 * cross-slice producers, which are never spliced into the parent's
+		 * Arrow plan, so this plan's sink is the only thing that would
+		 * have received them.
+		 */
+		if (cross_slice && PlanOutputDiscarded(pcontext->planstate))
+			garrow_shareinputscan_node_options_set_discard_output(share_node_options,
+																  TRUE);
 
 		share_exec_node = garrow_execute_plan_build_shareinputscan_node(pcontext->plan,
 												source_node,
@@ -5115,7 +5216,8 @@ build_windowagg_project_options(List *targetList, List *aggInfos, PlanBuildConte
 			orderby_keys = garrow_list_append_ptr(orderby_keys, key);
 		}
 
-		pcontext->orderby_sortoption =  vec_sort_options_new(orderby_keys, partition_top_k, take_thread_num, two_phase_take);
+		pcontext->orderby_sortoption =  vec_sort_options_new(orderby_keys, partition_top_k, take_thread_num, two_phase_take,
+													 pcontext->planstate->plan->plan_node_id);
 		garrow_list_free_ptr(&orderby_keys);
 		pfree(sortKey.orders);
 		pfree(sortKey.nulls_first);
@@ -5284,7 +5386,8 @@ build_windowhashagg_project_options(List *targetList, List *aggInfos, PlanBuildC
 			orderby_keys = garrow_list_append_ptr(orderby_keys, key);
 		}
 
-		pcontext->orderby_sortoption =  vec_sort_options_new(orderby_keys, partition_top_k, take_thread_num, two_phase_take);
+		pcontext->orderby_sortoption =  vec_sort_options_new(orderby_keys, partition_top_k, take_thread_num, two_phase_take,
+													 pcontext->planstate->plan->plan_node_id);
 		garrow_list_free_ptr(&orderby_keys);
 	}
 
@@ -5761,14 +5864,15 @@ build_orderby_node(PlanState *planstate, GArrowExecutePlan *plan,  GArrowExecute
 	 * sort option
 	 *
 	 * Use vec_sort_options_new (rather than the bare garrow_sort_options_new)
-	 * so the external-sort GUCs are honoured. A standalone Sort feeding a
-	 * sorted GroupAggregate (e.g. TPC-DS q67's ROLLUP under
-	 * optimizer_enable_hashagg=off) can otherwise accumulate the whole input
-	 * in memory here; enabling external merge-sort keeps it bounded and lets
-	 * large rollups spill to disk instead of ballooning RSS.
+	 * so the sort spill GUCs reach the orderby node. A standalone Sort
+	 * feeding a sorted GroupAggregate (e.g. TPC-DS q67's ROLLUP under
+	 * optimizer_enable_hashagg=off) otherwise accumulates the whole input in
+	 * memory here; vector.sort_spill_memory_mb bounds it: past that budget
+	 * the orderby node writes sorted runs and merges them while emitting.
 	 */
 	sort_keys = build_sort_keys(planstate, schema);
-	sortoption = vec_sort_options_new(sort_keys, partition_top_k, take_thread_num, two_phase_take);
+	sortoption = vec_sort_options_new(sort_keys, partition_top_k, take_thread_num, two_phase_take,
+									planstate->plan->plan_node_id);
 	orderby_options = garrow_orderby_node_options_new(sortoption);
 	orderby_node = garrow_execute_plan_build_orderby_node(plan, input, orderby_options, &error);
 	if (error)
@@ -6612,37 +6716,15 @@ build_aggregatation_options(GList *aggregations, PlanBuildContext *pcontext,
 		}
 		else
 		{
-			char spill_dir[MAXPGPATH];
 			char spill_file_base[MAXPGPATH];
 
 			/*
-			 * Build absolute path for SpillableBatchStore / Path B merge-sort.
-			 * Files land in $DataDir/base/pgsql_tmp/ with prefix
-			 * pgsql_tmp_vec_spill_{PID}_{plan_node_id}_ so on_proc_exit's
-			 * CleanupArrowSpillFiles (and GP's post-crash RemovePgTempFiles
-			 * sweep) pick them up. We deliberately do NOT wire any file_ops
-			 * here: arrow substitutes its own POSIX-backed
-			 * DefaultExternalSortFileOps() when the callback set is empty,
-			 * matching the SortOptions pattern.
-			 *
-			 * pgsql_tmp is created lazily by OpenTemporaryFile, so on a fresh
-			 * cluster (no prior temp file activity) the directory may not
-			 * exist yet. Arrow's file_ops has a best-effort mkdir fallback,
-			 * but do it explicitly here so permission / disk-full issues
-			 * surface with a proper PG error message instead of a generic
-			 * ENOENT from open().
+			 * No file_ops are wired here: arrow substitutes its own
+			 * POSIX-backed DefaultExternalSortFileOps() when the callback set
+			 * is empty, matching the SortOptions pattern.
 			 */
-			snprintf(spill_dir, sizeof(spill_dir), "%s/base/%s",
-					 DataDir, PG_TEMP_FILES_DIR);
-			if (MakePGDirectory(spill_dir) < 0 && errno != EEXIST)
-				ereport(ERROR,
-						(errcode_for_file_access(),
-						 errmsg("could not create temporary file directory \"%s\": %m",
-								spill_dir)));
-			snprintf(spill_file_base, sizeof(spill_file_base),
-					 "%s/%s_%s_%d_%d", spill_dir,
-					 PG_TEMP_FILE_PREFIX, VEC_SPILL_FILE_PREFIX,
-					 MyProcPid, pcontext->planstate->plan->plan_node_id);
+			VecSpillFileBase(spill_file_base, sizeof(spill_file_base),
+							 pcontext->planstate->plan->plan_node_id);
 
 			options =
 				garrow_general_aggregate_node_options_new_with_spill(
@@ -6702,10 +6784,19 @@ build_aggregatation_options(GList *aggregations, PlanBuildContext *pcontext,
 		 * pre-bucketed by target segment. No hint → pass NULL, default
 		 * per-partition emit behavior is preserved.
 		 */
+		char spill_file_base[MAXPGPATH];
 		int mode = garrow_aggregate_get_sonic_mode();
 		g_autoptr(GArrowSonicMotionDirectSendOptions) ds_options = NULL;
 		const VecMotionDirectSendHint *hint =
 			vec_motion_direct_send_lookup(pcontext->planstate->plan);
+
+		/*
+		 * Before any GObject is created: this can ERROR, and the
+		 * siglongjmp would skip the g_autoptr cleanup and leak them.
+		 */
+		if (sonicagg_spill_memory_mb > 0)
+			VecSpillFileBase(spill_file_base, sizeof(spill_file_base),
+							 pcontext->planstate->plan->plan_node_id);
 		if (hint != NULL)
 		{
 			gint32 *idx = (gint32 *) palloc(sizeof(gint32) * hint->numHashCols);
@@ -6746,9 +6837,9 @@ build_aggregatation_options(GList *aggregations, PlanBuildContext *pcontext,
 		 * Wire spill onto the Sonic aggregate when enabled. We must NOT use
 		 * garrow_general_aggregate_node_options_new_with_spill here because it
 		 * drops ds_options; instead set the spill fields on the options just
-		 * built. Files mirror the window path ($DataDir/base/pgsql_tmp/ with
-		 * the shared VEC_SPILL_FILE_PREFIX, reclaimed by CleanupArrowSpillFiles
-		 * and the post-crash RemovePgTempFiles sweep); file_ops are left unset
+		 * built. Files go where the window path puts them (VecSpillFileBase,
+		 * reclaimed by CleanupArrowSpillFiles and the post-crash
+		 * RemovePgTempFiles sweep); file_ops are left unset
 		 * so arrow falls back to its POSIX temp-file implementation, same as
 		 * the window path above. Routing through real PG temp-file callbacks
 		 * (ResourceOwner-visible instead of relying on the exit/restart sweep)
@@ -6759,30 +6850,6 @@ build_aggregatation_options(GList *aggregations, PlanBuildContext *pcontext,
 		 */
 		if (options != NULL && sonicagg_spill_memory_mb > 0)
 		{
-			char spill_dir[MAXPGPATH];
-			char spill_file_base[MAXPGPATH];
-
-			snprintf(spill_dir, sizeof(spill_dir), "%s/base/%s",
-					 DataDir, PG_TEMP_FILES_DIR);
-			if (MakePGDirectory(spill_dir) < 0 && errno != EEXIST)
-			{
-				/*
-				 * options is a g_autoptr, but ereport(ERROR) below does a
-				 * siglongjmp that skips the compiler-inserted cleanup code,
-				 * so the GObject would otherwise leak. Unlike the "if
-				 * (error)" case below, options is already non-NULL here
-				 * (built above), so it must be unreffed explicitly.
-				 */
-				g_object_unref(options);
-				ereport(ERROR,
-						(errcode_for_file_access(),
-						 errmsg("could not create temporary file directory \"%s\": %m",
-								spill_dir)));
-			}
-			snprintf(spill_file_base, sizeof(spill_file_base),
-					 "%s/%s_%s_%d_%d", spill_dir,
-					 PG_TEMP_FILE_PREFIX, VEC_SPILL_FILE_PREFIX,
-					 MyProcPid, pcontext->planstate->plan->plan_node_id);
 			garrow_general_aggregate_node_options_set_spill(
 				GARROW_EXECUTE_NODE_OPTIONS(options),
 				spill_file_base,
@@ -7151,9 +7218,17 @@ BuildHashjoin(PlanBuildContext *pcontext, GArrowExecuteNode *left, GArrowExecute
 	g_autoptr(GArrowHashJoinNodeOptions) hashjoin_options = NULL;
 	g_autoptr(GArrowExpression) filter_expr = NULL;
 	GList *keycmps = NULL;
+	char spill_dir[MAXPGPATH];
+	char spill_file_prefix[MAXPGPATH];
 
 	node = (HashJoinState *) pcontext->planstate;
 	vnode = (VecHashJoinState *) node;
+
+	/* Before any GObject is created: this can ERROR, which would leak them. */
+	VecSpillFileDir(spill_dir, sizeof(spill_dir));
+	VecSpillFilePrefix(spill_file_prefix, sizeof(spill_file_prefix),
+					   node->js.ps.plan->plan_node_id);
+
 	type = to_arrow_jointype(node->js.jointype, node->js.ps.plan->targetlist, joinqual);
 
 	/*
@@ -7181,13 +7256,6 @@ BuildHashjoin(PlanBuildContext *pcontext, GArrowExecuteNode *left, GArrowExecute
 		}
 	}
 	{
-		char spill_dir[MAXPGPATH];
-		char spill_file_prefix[MAXPGPATH];
-
-		snprintf(spill_dir, MAXPGPATH, "%s/base/%s", DataDir, PG_TEMP_FILES_DIR);
-		snprintf(spill_file_prefix, sizeof(spill_file_prefix),
-				 "%s_%s_%d_%d", PG_TEMP_FILE_PREFIX, VEC_SPILL_FILE_PREFIX, MyProcPid, node->js.ps.plan->plan_node_id);
-
 		hashjoin_options =
 			/*
 			 * Disable Arrow Acero's internal Bloom filter. In the vectorized MPP Hash

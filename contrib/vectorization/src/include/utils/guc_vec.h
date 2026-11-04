@@ -39,10 +39,9 @@ extern int hashjoin_spill_memory_mb;
 extern int winagg_spill_memory_mb;
 /* memory budget (MB) for sonic hash-aggregate spill; 0 means disabled */
 extern int sonicagg_spill_memory_mb;
-extern bool sort_use_external_sort;
-extern int sort_external_batch_size;
+/* memory budget (MB) for the input a vectorized Sort holds; 0 means no spill */
+extern int sort_spill_memory_mb;
 extern int sort_external_num_threads;
-extern int sort_external_max_rows;
 extern char *sort_external_temp_file_base;
 /* topk bound threshold: max K value for TopKNode, larger K falls back to OrderByNode */
 extern int topk_bound_threshold;

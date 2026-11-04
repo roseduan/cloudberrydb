@@ -150,25 +150,9 @@ _PG_init(void)
                              PGC_USERSET,
                              GUC_GPDB_NEED_SYNC,
                              NULL, NULL, NULL);
-    DefineCustomBoolVariable("vector.sort_use_external_sort",
-                             "Enable Arrow file-based external sort in vectorized sort paths",
-                             NULL,
-                             &sort_use_external_sort,
-                             false,
-                             PGC_USERSET,
-                             GUC_GPDB_NEED_SYNC,
-                             NULL, NULL, NULL);
-    DefineCustomIntVariable("vector.sort_external_batch_size",
-                            "Rows per run when vectorized external sort is enabled",
-                            NULL,
-                            &sort_external_batch_size,
-                            65536,
-                            1, 100000000,
-                            PGC_USERSET,
-                            GUC_GPDB_NEED_SYNC,
-                            NULL, NULL, NULL);
     DefineCustomIntVariable("vector.sort_external_num_threads",
-                            "Worker count for vectorized external sort, 0 follows Arrow defaults",
+                            "Threads sorting each run a spilling vectorized Sort writes "
+                            "(see vector.sort_spill_memory_mb), 0 follows Arrow defaults",
                             NULL,
                             &sort_external_num_threads,
                             0,
@@ -176,17 +160,9 @@ _PG_init(void)
                             PGC_USERSET,
                             GUC_GPDB_NEED_SYNC,
                             NULL, NULL, NULL);
-    DefineCustomIntVariable("vector.sort_external_max_rows",
-                            "Maximum in-memory rows before vectorized external sort spills to files",
-                            NULL,
-                            &sort_external_max_rows,
-                            65536,
-                            1, 100000000,
-                            PGC_USERSET,
-                            GUC_GPDB_NEED_SYNC,
-                            NULL, NULL, NULL);
     DefineCustomStringVariable("vector.sort_external_temp_file_base",
-                               "Optional base path for vectorized external sort spill files",
+                               "Optional base path for the run files of a spilling vectorized Sort; "
+                               "empty puts them in pgsql_tmp",
                                NULL,
                                &sort_external_temp_file_base,
                                "",
@@ -220,6 +196,18 @@ _PG_init(void)
 							 PGC_USERSET,
 							 GUC_GPDB_NO_SYNC,
 							 NULL, NULL, NULL);
+
+    DefineCustomIntVariable("vector.sort_spill_memory_mb",
+                            "Memory budget in MB for the input a vectorized Sort holds. "
+                            "Past it the Sort writes sorted runs to disk and merges them "
+                            "while emitting. 0 means disabled (no spill).",
+                            NULL,
+                            &sort_spill_memory_mb,
+                            4096,
+                            0, INT_MAX,
+                            PGC_USERSET,
+                            GUC_GPDB_NEED_SYNC,
+                            NULL, NULL, NULL);
 
     DefineCustomIntVariable("vector.hashjoin_spill_memory_mb",
                             "Memory budget in MB for hash join build side. "

@@ -215,6 +215,8 @@ typedef struct CdbExplain_StatInst
 	double		nloops;			/* # of run cycles for this node */
 	double		nfiltered1;
 	double		nfiltered2;
+	bool		prf_work;
+	double		nfilteredPRF;
 	double		execmemused;	/* executor memory used (bytes) */
 	double		workmemused;	/* work_mem actually used (bytes) */
 	double		workmemwanted;	/* work_mem to avoid workfile i/o (bytes) */
@@ -240,6 +242,7 @@ typedef struct CdbExplain_SliceWorker
 {
 	double		peakmemused;	/* bytes alloc in per-query mem context tree */
 	double		vmem_reserved;	/* vmem reserved by a QE */
+	int 		nworkers_launched; /* Number of workers launched for this slice */
 } CdbExplain_SliceWorker;
 
 /* Dispatch status summarized over workers in a slice */
@@ -260,11 +263,12 @@ typedef struct CdbExplain_NodeSummary
 	/* Summary over all the node's workers */
 	CdbExplain_Agg ntuples;
 	CdbExplain_Agg runtime_tupleAgg;
+	CdbExplain_Agg nloops;
 	CdbExplain_Agg execmemused;
 	CdbExplain_Agg workmemused;
 	CdbExplain_Agg workmemwanted;
 	CdbExplain_Agg totalWorkfileCreated;
-	/* Used for DynamicSeqScan, DynamicIndexScan and DynamicBitmapHeapScan */
+	/* Used for DynamicSeqScan, DynamicIndexScan, DynamicBitmapHeapScan, and DynamicForeignScan */
 	CdbExplain_Agg totalPartTableScanned;
 	/* Summary of space used by sort */
 	CdbExplain_Agg sortSpaceUsed[NUM_SORT_SPACE_TYPE][NUM_SORT_METHOD];
@@ -272,6 +276,13 @@ typedef struct CdbExplain_NodeSummary
 	/* insts array info */
 	int			segindex0;		/* segment id of insts[0] */
 	int			ninst;			/* num of StatInst entries in inst array */
+
+	/* Per-worker raw stats, see the definition in explain_gp.c */
+	int			nworkerinst;	/* num of entries in the worker arrays */
+	CdbExplain_StatInst *workerinsts;	/* [0..nworkerinst-1] raw per-QE stat */
+	int		   *workerinst_segindex;	/* segindex of each worker entry */
+	int		   *workerinst_workidx;		/* worker index within its segment */
+	double	   *workerinst_peakmem;		/* worker QE's peak memory (bytes) */
 
 	/* Array [0..ninst-1] of StatInst entries is appended starting here */
 	CdbExplain_StatInst insts[1];	/* variable size - must be last */

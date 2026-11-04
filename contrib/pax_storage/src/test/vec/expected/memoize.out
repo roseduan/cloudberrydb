@@ -172,18 +172,13 @@ SELECT * FROM flt f1 INNER JOIN flt f2 ON f1.f >= f2.f;', false);
                                    explain_memoize                                   
 -------------------------------------------------------------------------------------
  Vec Gather Motion 3:1  (slice1; segments: 3) (actual rows=4 loops=N)
-   Executor Memory: NkB  Segments: 1  Max: 1kB (segment -1)
    ->  Vec Nested Loop (actual rows=4 loops=N)
          Join Filter: (f1.f >= f2.f)
-         Executor Memory: NkB  Segments: 3  Max: 1kB (segment 0)
          ->  Vec Seq Scan on flt f1 (actual rows=2 loops=N)
-               Executor Memory: NkB  Segments: 3  Max: 1kB (segment 0)
          ->  Vec Broadcast Motion 3:3  (slice2; segments: 3) (actual rows=2 loops=N)
-               Executor Memory: NkB  Segments: 3  Max: 1kB (segment 0)
                ->  Vec Seq Scan on flt f2 (actual rows=2 loops=N)
-                     Executor Memory: NkB  Segments: 3  Max: 1kB (segment 0)
  Optimizer: Postgres query optimizer
-(12 rows)
+(7 rows)
 
 DROP TABLE flt;
 -- Exercise Memoize in binary mode with a large fixed width type and a

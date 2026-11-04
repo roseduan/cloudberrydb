@@ -54,6 +54,7 @@
 #include "vecexecutor/nodeSubqueryscan.h"
 #include "vecexecutor/nodeWindowAgg.h"
 #include "vecexecutor/nodeWindowHashAgg.h"
+#include "vecexecutor/vec_spill_stats.h"
 #include "vecnodes/nodes.h"
 
 /* In the future this hook will be cleaned up. */
@@ -527,6 +528,8 @@ VecExecutorStart(QueryDesc *queryDesc, int eflags)
 	/* GPDB hook for collecting query info */
 	if (query_info_collect_hook)
 		(*query_info_collect_hook)(METRICS_QUERY_START, queryDesc);
+
+	VecSpillStatsReset(queryDesc);
 
 	/**
 	 * Distribute memory to operators.
@@ -1739,6 +1742,9 @@ VecExecutorFinish(QueryDesc *queryDesc)
 
 	if (exec_identity != GP_IGNORE && planstate != NULL)
 		ExecVecSquelchNode(planstate);
+
+	/* The Arrow plans are done: account their spill (in es_query_cxt). */
+	VecSpillStatsReport(queryDesc);
 
 	MemoryContextSwitchTo(oldcontext);
 

@@ -212,7 +212,7 @@ explain (costs off) select * from (select * from t order by a) s order by a, b l
                      Vec Sort Method:  TopK  K: 32
                      ->  Vec Seq Scan on t
  Optimizer: GPORCA
-(8 rows)
+(9 rows)
 
 select * from (select * from t order by a) s order by a, b limit 32;
  a | b  
@@ -263,7 +263,7 @@ explain (costs off) select * from (select * from t order by a) s order by a, b l
                      Vec Sort Method:  TopK  K: 33
                      ->  Vec Seq Scan on t
  Optimizer: GPORCA
-(8 rows)
+(9 rows)
 
 select * from (select * from t order by a) s order by a, b limit 33;
  a | b  
@@ -315,7 +315,7 @@ explain (costs off) select * from (select * from t order by a) s order by a, b l
                      Vec Sort Method:  TopK  K: 65
                      ->  Vec Seq Scan on t
  Optimizer: GPORCA
-(8 rows)
+(9 rows)
 
 select * from (select * from t order by a) s order by a, b limit 65;
  a | b  
@@ -399,7 +399,7 @@ explain (costs off) select * from (select * from t order by a) s order by a, b l
                      Vec Sort Method:  TopK  K: 66
                      ->  Vec Seq Scan on t
  Optimizer: GPORCA
-(8 rows)
+(9 rows)
 
 select * from (select * from t order by a) s order by a, b limit 66;
  a | b  
@@ -488,7 +488,7 @@ explain (costs off) select * from (select * from t order by a) s order by a, b l
                      Vec Sort Method:  TopK  K: 55
                      ->  Vec Seq Scan on t
  Optimizer: GPORCA
-(8 rows)
+(9 rows)
 
 select * from (select * from t order by a) s order by a, b limit 55;
  a | b  
@@ -553,15 +553,15 @@ select * from (select * from t order by a) s order by a, b limit 55;
 -- Test EXPLAIN ANALYZE with only a fullsort group.
 set max_parallel_workers_per_gather = 0;
 select explain_analyze_without_memory('select * from (select * from t order by a) s order by a, b limit 55');
-                           explain_analyze_without_memory                            
--------------------------------------------------------------------------------------
+                        explain_analyze_without_memory                        
+------------------------------------------------------------------------------
  Vec Limit (actual rows=55 loops=1)
    ->  Vec Gather Motion 3:1  (slice1; segments: 3) (actual rows=165 loops=1)
          Merge Key: a, b
          ->  Vec Limit (actual rows=55 loops=1)
                ->  Vec Sort (actual rows=55 loops=1)
                      Sort Key: a, b
-                     Sort Method:  top-N heapsort  Memory: NNkB
+                     Vec Sort Method:  TopK  K: 55
                      ->  Vec Seq Scan on t (actual rows=400 loops=1)
  Optimizer: GPORCA
 (9 rows)
@@ -596,7 +596,7 @@ explain (costs off) select * from (select * from t order by a) s order by a, b l
                      Vec Sort Method:  TopK  K: 70
                      ->  Vec Seq Scan on t
  Optimizer: GPORCA
-(8 rows)
+(9 rows)
 
 select * from (select * from t order by a) s order by a, b limit 70;
  a | b  
@@ -689,7 +689,7 @@ explain (costs off) select * from (select * from t order by a) s order by a, b l
                      Vec Sort Method:  TopK  K: 5
                      ->  Vec Seq Scan on t
  Optimizer: GPORCA
-(8 rows)
+(9 rows)
 
 select * from (select * from t order by a) s order by a, b limit 5;
  a | b 
@@ -737,15 +737,15 @@ rollback;
 -- Test EXPLAIN ANALYZE with both fullsort and presorted groups.
 set max_parallel_workers_per_gather = 0;
 select explain_analyze_without_memory('select * from (select * from t order by a) s order by a, b limit 70');
-                           explain_analyze_without_memory                            
--------------------------------------------------------------------------------------
+                       explain_analyze_without_memory                        
+-----------------------------------------------------------------------------
  Vec Limit (actual rows=70 loops=1)
    ->  Vec Gather Motion 3:1  (slice1; segments: 3) (actual rows=74 loops=1)
          Merge Key: a, b
          ->  Vec Limit (actual rows=70 loops=1)
                ->  Vec Sort (actual rows=70 loops=1)
                      Sort Key: a, b
-                     Sort Method:  top-N heapsort  Memory: NNkB
+                     Vec Sort Method:  TopK  K: 70
                      ->  Vec Seq Scan on t (actual rows=996 loops=1)
  Optimizer: GPORCA
 (9 rows)
@@ -780,7 +780,7 @@ explain (costs off) select * from (select * from t order by a) s order by a, b l
                      Vec Sort Method:  TopK  K: 31
                      ->  Vec Seq Scan on t
  Optimizer: GPORCA
-(8 rows)
+(9 rows)
 
 select * from (select * from t order by a) s order by a, b limit 31;
  a | b  
@@ -830,7 +830,7 @@ explain (costs off) select * from (select * from t order by a) s order by a, b l
                      Vec Sort Method:  TopK  K: 32
                      ->  Vec Seq Scan on t
  Optimizer: GPORCA
-(8 rows)
+(9 rows)
 
 select * from (select * from t order by a) s order by a, b limit 32;
  a | b  
@@ -881,7 +881,7 @@ explain (costs off) select * from (select * from t order by a) s order by a, b l
                      Vec Sort Method:  TopK  K: 33
                      ->  Vec Seq Scan on t
  Optimizer: GPORCA
-(8 rows)
+(9 rows)
 
 select * from (select * from t order by a) s order by a, b limit 33;
  a | b  
@@ -933,7 +933,7 @@ explain (costs off) select * from (select * from t order by a) s order by a, b l
                      Vec Sort Method:  TopK  K: 65
                      ->  Vec Seq Scan on t
  Optimizer: GPORCA
-(8 rows)
+(9 rows)
 
 select * from (select * from t order by a) s order by a, b limit 65;
  a | b  
@@ -1017,7 +1017,7 @@ explain (costs off) select * from (select * from t order by a) s order by a, b l
                      Vec Sort Method:  TopK  K: 66
                      ->  Vec Seq Scan on t
  Optimizer: GPORCA
-(8 rows)
+(9 rows)
 
 select * from (select * from t order by a) s order by a, b limit 66;
  a | b  
@@ -1106,7 +1106,7 @@ explain (costs off) select * from (select * from t order by a) s order by a, b l
                      Vec Sort Method:  TopK  K: 31
                      ->  Vec Seq Scan on t
  Optimizer: GPORCA
-(8 rows)
+(9 rows)
 
 select * from (select * from t order by a) s order by a, b limit 31;
  a  | b  
@@ -1156,7 +1156,7 @@ explain (costs off) select * from (select * from t order by a) s order by a, b l
                      Vec Sort Method:  TopK  K: 32
                      ->  Vec Seq Scan on t
  Optimizer: GPORCA
-(8 rows)
+(9 rows)
 
 select * from (select * from t order by a) s order by a, b limit 32;
  a  | b  
@@ -1207,7 +1207,7 @@ explain (costs off) select * from (select * from t order by a) s order by a, b l
                      Vec Sort Method:  TopK  K: 33
                      ->  Vec Seq Scan on t
  Optimizer: GPORCA
-(8 rows)
+(9 rows)
 
 select * from (select * from t order by a) s order by a, b limit 33;
  a  | b  
@@ -1259,7 +1259,7 @@ explain (costs off) select * from (select * from t order by a) s order by a, b l
                      Vec Sort Method:  TopK  K: 65
                      ->  Vec Seq Scan on t
  Optimizer: GPORCA
-(8 rows)
+(9 rows)
 
 select * from (select * from t order by a) s order by a, b limit 65;
  a  | b  
@@ -1343,7 +1343,7 @@ explain (costs off) select * from (select * from t order by a) s order by a, b l
                      Vec Sort Method:  TopK  K: 66
                      ->  Vec Seq Scan on t
  Optimizer: GPORCA
-(8 rows)
+(9 rows)
 
 select * from (select * from t order by a) s order by a, b limit 66;
  a  | b  
@@ -1460,7 +1460,7 @@ explain (costs off) select a,b,sum(c) from t group by 1,2 order by 1,2,3 limit 1
                            Group Key: a, b
                            ->  Vec Seq Scan on t
  Optimizer: GPORCA
-(10 rows)
+(11 rows)
 
 -- Incremental sort vs. set operations with varno 0
 set enable_hashagg to off;
@@ -1556,7 +1556,7 @@ from tenk1, lateral (select tenk1.unique1 from generate_series(1, 1000)) as sub;
                            ->  Bitmap Heap Scan on tenk1
                                  ->  Bitmap Index Scan on tenk1_unique1
  Optimizer: Postgres query optimizer
-(10 rows)
+(12 rows)
 
 explain (costs off) select sub.unique1, md5(stringu1)
 from tenk1, lateral (select tenk1.unique1 from generate_series(1, 1000)) as sub
@@ -1687,7 +1687,7 @@ order by 1, 2;
                      ->  Bitmap Heap Scan on tenk1
                            ->  Bitmap Index Scan on tenk1_unique1
  Optimizer: Postgres query optimizer
-(8 rows)
+(10 rows)
 
 -- Disallow pushing down sort when pathkey is an SRF.
 explain (costs off) select unique1 from tenk1 order by unnest('{1,2}'::int[]);

@@ -218,8 +218,8 @@ explain (costs off) select * from rlp where a < 1;
 (4 rows)
 
 explain (costs off) select * from rlp where 1 > a;	/* commuted */
-                QUERY PLAN                
-------------------------------------------
+                  QUERY PLAN                  
+----------------------------------------------
  Vec Gather Motion 3:1  (slice1; segments: 3)
    ->  Vec Seq Scan on rlp1 rlp
          Filter: (1 > a)
@@ -227,8 +227,8 @@ explain (costs off) select * from rlp where 1 > a;	/* commuted */
 (4 rows)
 
 explain (costs off) select * from rlp where a <= 1;
-                QUERY PLAN                
-------------------------------------------
+                  QUERY PLAN                  
+----------------------------------------------
  Vec Gather Motion 3:1  (slice1; segments: 3)
    ->  Vec Append
          ->  Vec Seq Scan on rlp1 rlp_1
@@ -239,8 +239,8 @@ explain (costs off) select * from rlp where a <= 1;
 (7 rows)
 
 explain (costs off) select * from rlp where a = 1;
-                QUERY PLAN                
-------------------------------------------
+                  QUERY PLAN                  
+----------------------------------------------
  Vec Gather Motion 1:1  (slice1; segments: 1)
    ->  Vec Seq Scan on rlp2 rlp
          Filter: (a = 1)
@@ -248,8 +248,8 @@ explain (costs off) select * from rlp where a = 1;
 (4 rows)
 
 explain (costs off) select * from rlp where a = 1::bigint;		/* same as above */
-                QUERY PLAN                
-------------------------------------------
+                  QUERY PLAN                  
+----------------------------------------------
  Vec Gather Motion 1:1  (slice1; segments: 1)
    ->  Vec Seq Scan on rlp2 rlp
          Filter: (a = '1'::bigint)
@@ -257,8 +257,8 @@ explain (costs off) select * from rlp where a = 1::bigint;		/* same as above */
 (4 rows)
 
 explain (costs off) select * from rlp where a = 1::numeric;		/* no pruning */
-                     QUERY PLAN                      
------------------------------------------------------
+                       QUERY PLAN                       
+--------------------------------------------------------
  Vec Gather Motion 3:1  (slice1; segments: 3)
    ->  Vec Append
          ->  Vec Seq Scan on rlp1 rlp_1
@@ -295,8 +295,8 @@ explain (costs off) select * from rlp where a = 1::numeric;		/* no pruning */
 (33 rows)
 
 explain (costs off) select * from rlp where a <= 10;
-                    QUERY PLAN                     
----------------------------------------------------
+                      QUERY PLAN                       
+-------------------------------------------------------
  Vec Gather Motion 3:1  (slice1; segments: 3)
    ->  Vec Append
          ->  Vec Seq Scan on rlp1 rlp_1
@@ -311,8 +311,8 @@ explain (costs off) select * from rlp where a <= 10;
 (11 rows)
 
 explain (costs off) select * from rlp where a > 10;
-                     QUERY PLAN                     
-----------------------------------------------------
+                       QUERY PLAN                       
+--------------------------------------------------------
  Vec Gather Motion 3:1  (slice1; segments: 3)
    ->  Vec Append
          ->  Vec Seq Scan on rlp3abcd rlp_1
@@ -341,8 +341,8 @@ explain (costs off) select * from rlp where a > 10;
 (25 rows)
 
 explain (costs off) select * from rlp where a < 15;
-                    QUERY PLAN                     
----------------------------------------------------
+                      QUERY PLAN                       
+-------------------------------------------------------
  Vec Gather Motion 3:1  (slice1; segments: 3)
    ->  Vec Append
          ->  Vec Seq Scan on rlp1 rlp_1
@@ -357,8 +357,8 @@ explain (costs off) select * from rlp where a < 15;
 (11 rows)
 
 explain (costs off) select * from rlp where a <= 15;
-                    QUERY PLAN                     
----------------------------------------------------
+                      QUERY PLAN                       
+-------------------------------------------------------
  Vec Gather Motion 3:1  (slice1; segments: 3)
    ->  Vec Append
          ->  Vec Seq Scan on rlp1 rlp_1
@@ -405,8 +405,8 @@ explain (costs off) select * from rlp where a > 15 and b = 'ab';
 (19 rows)
 
 explain (costs off) select * from rlp where a = 16;
-                 QUERY PLAN                 
---------------------------------------------
+                   QUERY PLAN                   
+------------------------------------------------
  Vec Gather Motion 1:1  (slice1; segments: 1)
    ->  Vec Append
          ->  Vec Seq Scan on rlp3abcd rlp_1
@@ -451,8 +451,8 @@ explain (costs off) select * from rlp where a = 16 and b <= 'ab';
 (7 rows)
 
 explain (costs off) select * from rlp where a = 16 and b is null;
-                 QUERY PLAN                 
---------------------------------------------
+                  QUERY PLAN                  
+----------------------------------------------
  Vec Gather Motion 1:1  (slice1; segments: 1)
    ->  Vec Seq Scan on rlp3nullxy rlp
          Filter: ((b IS NULL) AND (a = 16))
@@ -476,8 +476,8 @@ explain (costs off) select * from rlp where a = 16 and b is not null;
 (11 rows)
 
 explain (costs off) select * from rlp where a is null;
-                QUERY PLAN                
-------------------------------------------
+                  QUERY PLAN                  
+----------------------------------------------
  Vec Gather Motion 1:1  (slice1; segments: 1)
    ->  Vec Seq Scan on rlp_default_null rlp
          Filter: (a IS NULL)
@@ -485,8 +485,8 @@ explain (costs off) select * from rlp where a is null;
 (4 rows)
 
 explain (costs off) select * from rlp where a is not null;
-                     QUERY PLAN                     
-----------------------------------------------------
+                       QUERY PLAN                       
+--------------------------------------------------------
  Vec Gather Motion 3:1  (slice1; segments: 3)
    ->  Vec Append
          ->  Vec Seq Scan on rlp1 rlp_1
@@ -521,8 +521,8 @@ explain (costs off) select * from rlp where a is not null;
 (31 rows)
 
 explain (costs off) select * from rlp where a > 30;
-                    QUERY PLAN                     
----------------------------------------------------
+                      QUERY PLAN                       
+-------------------------------------------------------
  Vec Gather Motion 3:1  (slice1; segments: 3)
    ->  Vec Append
          ->  Vec Seq Scan on rlp5_1 rlp_1
@@ -535,8 +535,8 @@ explain (costs off) select * from rlp where a > 30;
 (9 rows)
 
 explain (costs off) select * from rlp where a = 30;	/* only default is scanned */
-                QUERY PLAN                
-------------------------------------------
+                  QUERY PLAN                  
+----------------------------------------------
  Vec Gather Motion 1:1  (slice1; segments: 1)
    ->  Vec Seq Scan on rlp_default_30 rlp
          Filter: (a = 30)
@@ -544,8 +544,8 @@ explain (costs off) select * from rlp where a = 30;	/* only default is scanned *
 (4 rows)
 
 explain (costs off) select * from rlp where a <= 31;
-                     QUERY PLAN                     
-----------------------------------------------------
+                       QUERY PLAN                       
+--------------------------------------------------------
  Vec Gather Motion 3:1  (slice1; segments: 3)
    ->  Vec Append
          ->  Vec Seq Scan on rlp1 rlp_1
@@ -578,8 +578,8 @@ explain (costs off) select * from rlp where a <= 31;
 (29 rows)
 
 explain (costs off) select * from rlp where a = 1 or a = 7;
-                QUERY PLAN                
-------------------------------------------
+                  QUERY PLAN                  
+----------------------------------------------
  Vec Gather Motion 2:1  (slice1; segments: 2)
    ->  Vec Seq Scan on rlp2 rlp
          Filter: ((a = 1) OR (a = 7))
@@ -631,8 +631,8 @@ explain (costs off) select * from rlp where a > 20 and a < 27;
 (7 rows)
 
 explain (costs off) select * from rlp where a = 29;
-                QUERY PLAN                
-------------------------------------------
+                  QUERY PLAN                  
+----------------------------------------------
  Vec Gather Motion 1:1  (slice1; segments: 1)
    ->  Vec Seq Scan on rlp4_default rlp
          Filter: (a = 29)
@@ -640,8 +640,8 @@ explain (costs off) select * from rlp where a = 29;
 (4 rows)
 
 explain (costs off) select * from rlp where a >= 29;
-                    QUERY PLAN                     
----------------------------------------------------
+                      QUERY PLAN                       
+-------------------------------------------------------
  Vec Gather Motion 3:1  (slice1; segments: 3)
    ->  Vec Append
          ->  Vec Seq Scan on rlp4_default rlp_1
@@ -671,8 +671,8 @@ explain (costs off) select * from rlp where a < 1 or (a > 20 and a < 25);
 
 -- where clause contradicts sub-partition's constraint
 explain (costs off) select * from rlp where a = 20 or a = 40;
-                  QUERY PLAN                  
-----------------------------------------------
+                   QUERY PLAN                   
+------------------------------------------------
  Vec Gather Motion 1:1  (slice1; segments: 1)
    ->  Vec Append
          ->  Vec Seq Scan on rlp4_1 rlp_1
@@ -683,8 +683,8 @@ explain (costs off) select * from rlp where a = 20 or a = 40;
 (7 rows)
 
 explain (costs off) select * from rlp3 where a = 20;   /* empty */
-              QUERY PLAN               
----------------------------------------
+        QUERY PLAN        
+--------------------------
  Result
    One-Time Filter: false
  Optimizer: GPORCA
@@ -692,8 +692,8 @@ explain (costs off) select * from rlp3 where a = 20;   /* empty */
 
 -- redundant clauses are eliminated
 explain (costs off) select * from rlp where a > 1 and a = 10;	/* only default */
-                QUERY PLAN                
-------------------------------------------
+                  QUERY PLAN                  
+----------------------------------------------
  Vec Gather Motion 1:1  (slice1; segments: 1)
    ->  Vec Seq Scan on rlp_default_10 rlp
          Filter: ((a > 1) AND (a = 10))
@@ -701,8 +701,8 @@ explain (costs off) select * from rlp where a > 1 and a = 10;	/* only default */
 (4 rows)
 
 explain (costs off) select * from rlp where a > 1 and a >=15;	/* rlp3 onwards, including default */
-                     QUERY PLAN                     
-----------------------------------------------------
+                       QUERY PLAN                       
+--------------------------------------------------------
  Vec Gather Motion 3:1  (slice1; segments: 3)
    ->  Vec Append
          ->  Vec Seq Scan on rlp3abcd rlp_1
@@ -838,8 +838,8 @@ explain (costs off) select * from mc3p where a = 10 and abs(b) between 5 and 35;
 (13 rows)
 
 explain (costs off) select * from mc3p where a > 10;
-                 QUERY PLAN                  
----------------------------------------------
+                   QUERY PLAN                    
+-------------------------------------------------
  Vec Gather Motion 3:1  (slice1; segments: 3)
    ->  Vec Append
          ->  Vec Seq Scan on mc3p5 mc3p_1
@@ -854,8 +854,8 @@ explain (costs off) select * from mc3p where a > 10;
 (11 rows)
 
 explain (costs off) select * from mc3p where a >= 10;
-                 QUERY PLAN                  
----------------------------------------------
+                   QUERY PLAN                    
+-------------------------------------------------
  Vec Gather Motion 3:1  (slice1; segments: 3)
    ->  Vec Append
          ->  Vec Seq Scan on mc3p1 mc3p_1
@@ -878,8 +878,8 @@ explain (costs off) select * from mc3p where a >= 10;
 (19 rows)
 
 explain (costs off) select * from mc3p where a < 10;
-                 QUERY PLAN                  
----------------------------------------------
+                   QUERY PLAN                    
+-------------------------------------------------
  Vec Gather Motion 3:1  (slice1; segments: 3)
    ->  Vec Append
          ->  Vec Seq Scan on mc3p0 mc3p_1
@@ -908,8 +908,8 @@ explain (costs off) select * from mc3p where a <= 10 and abs(b) < 10;
 (11 rows)
 
 explain (costs off) select * from mc3p where a = 11 and abs(b) = 0;
-                 QUERY PLAN                  
----------------------------------------------
+                  QUERY PLAN                  
+----------------------------------------------
  Vec Gather Motion 1:1  (slice1; segments: 1)
    ->  Vec Seq Scan on mc3p_default mc3p
          Filter: ((a = 11) AND (abs(b) = 0))
@@ -926,8 +926,8 @@ explain (costs off) select * from mc3p where a = 20 and abs(b) = 10 and c = 100;
 (4 rows)
 
 explain (costs off) select * from mc3p where a > 20;
-                 QUERY PLAN                  
----------------------------------------------
+                   QUERY PLAN                    
+-------------------------------------------------
  Vec Gather Motion 3:1  (slice1; segments: 3)
    ->  Vec Append
          ->  Vec Seq Scan on mc3p7 mc3p_1
@@ -938,8 +938,8 @@ explain (costs off) select * from mc3p where a > 20;
 (7 rows)
 
 explain (costs off) select * from mc3p where a >= 20;
-                 QUERY PLAN                  
----------------------------------------------
+                   QUERY PLAN                    
+-------------------------------------------------
  Vec Gather Motion 3:1  (slice1; segments: 3)
    ->  Vec Append
          ->  Vec Seq Scan on mc3p5 mc3p_1
@@ -1461,8 +1461,8 @@ EXPLAIN (VERBOSE, COSTS OFF) SELECT * FROM part p(x) ORDER BY x;
 --
 -- pruning won't work for mc3p, because some keys are Params
 explain (costs off) select * from mc2p t1, lateral (select count(*) from mc3p t2 where t2.a = t1.b and abs(t2.b) = 1 and t2.c = 1) s where t1.a = 1;
-                                   QUERY PLAN                                   
---------------------------------------------------------------------------------
+                                QUERY PLAN                                
+--------------------------------------------------------------------------
  Vec Nested Loop
    ->  Vec Gather Motion 1:1  (slice1; segments: 1)
          ->  Vec Append
@@ -1502,8 +1502,8 @@ explain (costs off) select * from mc2p t1, lateral (select count(*) from mc3p t2
 -- pruning should work fine, because values for a prefix of keys (a, b) are
 -- available
 explain (costs off) select * from mc2p t1, lateral (select count(*) from mc3p t2 where t2.c = t1.b and abs(t2.b) = 1 and t2.a = 1) s where t1.a = 1;
-                                   QUERY PLAN                                   
---------------------------------------------------------------------------------
+                                QUERY PLAN                                
+--------------------------------------------------------------------------
  Vec Nested Loop
    ->  Vec Gather Motion 1:1  (slice1; segments: 1)
          ->  Vec Append
@@ -1526,7 +1526,7 @@ explain (costs off) select * from mc2p t1, lateral (select count(*) from mc3p t2
                                  ->  Vec Seq Scan on mc3p_default t2_3
                                        Filter: ((a = 1) AND (abs(b) = 1))
  Optimizer: Postgres query optimizer
-(23 rows)
+(22 rows)
 
 -- also here, because values for all keys are provided
 explain (costs off) select * from mc2p t1, lateral (select count(*) from mc3p t2 where t2.a = 1 and abs(t2.b) = 1 and t2.c = 1) s where t1.a = 1;
@@ -1591,8 +1591,8 @@ explain (costs off) select * from lp where a <> 'a';
 
 -- ensure we detect contradictions in clauses; a can't be NULL and NOT NULL.
 explain (costs off) select * from lp where a <> 'a' and a is null;
-              QUERY PLAN               
----------------------------------------
+        QUERY PLAN        
+--------------------------
  Result
    One-Time Filter: false
  Optimizer: GPORCA
@@ -1647,8 +1647,8 @@ explain (costs off) select * from coll_pruning_multi where substr(a, 1) = 'e' co
 
 -- pruning, with a value provided for the leading key
 explain (costs off) select * from coll_pruning_multi where substr(a, 1) = 'a' collate "POSIX";
-                            QUERY PLAN                            
-------------------------------------------------------------------
+                              QUERY PLAN                              
+----------------------------------------------------------------------
  Vec Gather Motion 3:1  (slice1; segments: 3)
    ->  Vec Append
          ->  Vec Seq Scan on coll_pruning_multi1 coll_pruning_multi_1
@@ -1755,8 +1755,8 @@ select tableoid::regclass, * from hp order by c;
 
 -- partial keys won't prune, nor would non-equality conditions
 explain (costs off) select * from hp where a = 1;
-                QUERY PLAN                
-------------------------------------------
+                  QUERY PLAN                  
+----------------------------------------------
  Vec Gather Motion 1:1  (slice1; segments: 1)
    ->  Vec Append
          ->  Vec Seq Scan on hp0 hp_1
@@ -1771,8 +1771,8 @@ explain (costs off) select * from hp where a = 1;
 (11 rows)
 
 explain (costs off) select * from hp where b = 'xxx';
-                QUERY PLAN                
-------------------------------------------
+                  QUERY PLAN                  
+----------------------------------------------
  Vec Gather Motion 3:1  (slice1; segments: 3)
    ->  Vec Append
          ->  Vec Seq Scan on hp0 hp_1
@@ -1787,8 +1787,8 @@ explain (costs off) select * from hp where b = 'xxx';
 (11 rows)
 
 explain (costs off) select * from hp where a is null;
-                QUERY PLAN                
-------------------------------------------
+                  QUERY PLAN                  
+----------------------------------------------
  Vec Gather Motion 1:1  (slice1; segments: 1)
    ->  Vec Append
          ->  Vec Seq Scan on hp0 hp_1
@@ -1803,8 +1803,8 @@ explain (costs off) select * from hp where a is null;
 (11 rows)
 
 explain (costs off) select * from hp where b is null;
-                QUERY PLAN                
-------------------------------------------
+                  QUERY PLAN                  
+----------------------------------------------
  Vec Gather Motion 3:1  (slice1; segments: 3)
    ->  Vec Append
          ->  Vec Seq Scan on hp0 hp_1
@@ -2268,8 +2268,8 @@ select explain_parallel_append('execute ab_q5 (33, 44, 55)');
 
 -- Test Parallel Append with PARAM_EXEC Params
 select explain_parallel_append('select count(*) from ab where (a = (select 1) or a = (select 3)) and b = 2');
-                              explain_parallel_append                              
------------------------------------------------------------------------------------
+                            explain_parallel_append                            
+-------------------------------------------------------------------------------
  Vec Finalize Vec Aggregate (actual rows=N loops=N)
    InitPlan 1 (returns $0)  (slice2)
      ->  Vec Result (actual rows=N loops=N)
@@ -2584,8 +2584,8 @@ select * from ab where a = (select max(a) from lprt_a) and b = (select max(a)-1 
 -- Test run-time partition pruning with UNION ALL parents
 explain (analyze, costs off, summary off, timing off)
 select * from (select * from ab where a = 1 union all select * from ab) ab where b = (select 1);
-                                  QUERY PLAN                                  
-------------------------------------------------------------------------------
+                                     QUERY PLAN                                      
+-------------------------------------------------------------------------------------
  Gather Motion 3:1  (slice1; segments: 3) (actual rows=0 loops=1)
    InitPlan 1 (returns $0)  (slice2)
      ->  Result (actual rows=1 loops=1)
@@ -3066,8 +3066,8 @@ select * from listp where b = 1;
 -- which match the given parameter.
 prepare q1 (int,int) as select * from listp where b in ($1,$2);
 explain (analyze, costs off, summary off, timing off)  execute q1 (1,1);
-                            QUERY PLAN                            
-------------------------------------------------------------------
+                            QUERY PLAN                             
+-------------------------------------------------------------------
  Gather Motion 3:1  (slice1; segments: 3) (actual rows=0 loops=1)
    ->  Append (actual rows=0 loops=1)
          Subplans Removed: 1
@@ -3077,8 +3077,8 @@ explain (analyze, costs off, summary off, timing off)  execute q1 (1,1);
 (6 rows)
 
 explain (analyze, costs off, summary off, timing off)  execute q1 (2,2);
-                            QUERY PLAN                            
-------------------------------------------------------------------
+                            QUERY PLAN                             
+-------------------------------------------------------------------
  Gather Motion 3:1  (slice1; segments: 3) (actual rows=0 loops=1)
    ->  Append (actual rows=0 loops=1)
          Subplans Removed: 1
@@ -3125,8 +3125,8 @@ explain (analyze, costs off, summary off, timing off)  execute q1 (1,2,2,1);
 -- Ensure Params that evaluate to NULL properly prune away all partitions
 explain (analyze, costs off, summary off, timing off)
 select * from listp where a = (select null::int);
-                            QUERY PLAN                            
-------------------------------------------------------------------
+                              QUERY PLAN                               
+-----------------------------------------------------------------------
  Vec Gather Motion 3:1  (slice1; segments: 3) (actual rows=0 loops=1)
    InitPlan 1 (returns $0)  (slice2)
      ->  Vec Result (actual rows=1 loops=1)
@@ -3181,8 +3181,8 @@ select * from stable_qual_pruning where a < '2000-02-01'::timestamptz;
 explain (analyze, costs off, summary off, timing off)
 select * from stable_qual_pruning
   where a = any(array['2010-02-01', '2020-01-01']::timestamp[]);
-              QUERY PLAN               
----------------------------------------
+           QUERY PLAN           
+--------------------------------
  Result (actual rows=0 loops=1)
    One-Time Filter: false
  Optimizer: GPORCA
@@ -3217,8 +3217,8 @@ select * from stable_qual_pruning
 explain (analyze, costs off, summary off, timing off)
 select * from stable_qual_pruning
   where a = any(array['2010-02-01', '2020-01-01']::timestamptz[]);
-              QUERY PLAN               
----------------------------------------
+           QUERY PLAN           
+--------------------------------
  Result (actual rows=0 loops=1)
    One-Time Filter: false
  Optimizer: GPORCA
@@ -3426,7 +3426,7 @@ explain (analyze, costs off, summary off, timing off) execute mt_q1(25);
                      Filter: ((a >= $1) AND ((a % 10) = 5))
                      Partitions scanned:  Avg 3.0 x 3 workers.  Max 3 parts (seg0).
  Optimizer: GPORCA
-(12 rows)
+(11 rows)
 
 execute mt_q1(25);
  a  
@@ -3449,7 +3449,7 @@ explain (analyze, costs off, summary off, timing off) execute mt_q1(35);
                      Filter: ((a >= $1) AND ((a % 10) = 5))
                      Partitions scanned:  Avg 3.0 x 3 workers.  Max 3 parts (seg0).
  Optimizer: GPORCA
-(12 rows)
+(11 rows)
 
 execute mt_q1(35);
  a 
@@ -3486,8 +3486,8 @@ explain (analyze, verbose, costs off, summary off, timing off) execute mt_q2 (35
 deallocate mt_q2;
 -- ensure initplan params properly prune partitions
 explain (analyze, costs off, summary off, timing off) select * from ma_test where a >= (select min(b) from ma_test_p2) order by b;
-                                           QUERY PLAN                                           
-------------------------------------------------------------------------------------------------
+                                                          QUERY PLAN                                                          
+------------------------------------------------------------------------------------------------------------------------------
  Gather Motion 3:1  (slice1; segments: 3) (actual rows=20 loops=1)
    Merge Key: ma_test.b
    ->  Sort (actual rows=8 loops=1)
@@ -3534,8 +3534,8 @@ explain (costs off) select * from pp_arrpart where a = '{1}';
 (5 rows)
 
 explain (costs off) select * from pp_arrpart where a = '{1, 2}';
-             QUERY PLAN              
--------------------------------------
+        QUERY PLAN        
+--------------------------
  Result
    One-Time Filter: false
  Optimizer: GPORCA
@@ -3634,8 +3634,8 @@ explain (costs off) select * from pp_enumpart where a = 'blue';
 (5 rows)
 
 explain (costs off) select * from pp_enumpart where a = 'black';
-              QUERY PLAN               
----------------------------------------
+        QUERY PLAN        
+--------------------------
  Result
    One-Time Filter: false
  Optimizer: GPORCA
@@ -3659,8 +3659,8 @@ explain (costs off) select * from pp_recpart where a = '(1,1)'::pp_rectype;
 (5 rows)
 
 explain (costs off) select * from pp_recpart where a = '(1,2)'::pp_rectype;
-              QUERY PLAN               
----------------------------------------
+        QUERY PLAN        
+--------------------------
  Result
    One-Time Filter: false
  Optimizer: GPORCA
@@ -3740,8 +3740,8 @@ explain (costs off) select * from pp_lp where a = 1;
 (5 rows)
 
 explain (costs off) update pp_lp set value = 10 where a = 1;
-             QUERY PLAN              
--------------------------------------
+               QUERY PLAN               
+----------------------------------------
  Update on pp_lp
    Update on pp_lp1 pp_lp_1
    Update on pp_lp2 pp_lp_2
@@ -3754,8 +3754,8 @@ explain (costs off) update pp_lp set value = 10 where a = 1;
 (9 rows)
 
 explain (costs off) delete from pp_lp where a = 1;
-             QUERY PLAN              
--------------------------------------
+               QUERY PLAN               
+----------------------------------------
  Delete on pp_lp
    Delete on pp_lp1 pp_lp_1
    Delete on pp_lp2 pp_lp_2
@@ -3779,8 +3779,8 @@ explain (costs off) select * from pp_lp where a = 1;
 (5 rows)
 
 explain (costs off) update pp_lp set value = 10 where a = 1;
-             QUERY PLAN              
--------------------------------------
+               QUERY PLAN               
+----------------------------------------
  Update on pp_lp
    Update on pp_lp1 pp_lp_1
    Update on pp_lp2 pp_lp_2
@@ -3793,8 +3793,8 @@ explain (costs off) update pp_lp set value = 10 where a = 1;
 (9 rows)
 
 explain (costs off) delete from pp_lp where a = 1;
-             QUERY PLAN              
--------------------------------------
+               QUERY PLAN               
+----------------------------------------
  Delete on pp_lp
    Delete on pp_lp1 pp_lp_1
    Delete on pp_lp2 pp_lp_2
@@ -3830,8 +3830,8 @@ explain (costs off) select * from inh_lp where a = 1;
 (7 rows)
 
 explain (costs off) update inh_lp set value = 10 where a = 1;
-             QUERY PLAN              
--------------------------------------
+                   QUERY PLAN                   
+------------------------------------------------
  Update on inh_lp
    Update on inh_lp inh_lp_1
    Update on inh_lp1 inh_lp_2
@@ -3845,8 +3845,8 @@ explain (costs off) update inh_lp set value = 10 where a = 1;
 (10 rows)
 
 explain (costs off) delete from inh_lp where a = 1;
-             QUERY PLAN              
--------------------------------------
+                QUERY PLAN                
+------------------------------------------
  Delete on inh_lp
    Delete on inh_lp inh_lp_1
    Delete on inh_lp1 inh_lp_2
@@ -3856,7 +3856,7 @@ explain (costs off) delete from inh_lp where a = 1;
          ->  Seq Scan on inh_lp1 inh_lp_2
                Filter: (a = 1)
  Optimizer: Postgres query optimizer
-(8 rows)
+(9 rows)
 
 -- Ensure we don't exclude normal relations when we only expect to exclude
 -- inheritance children
@@ -4022,8 +4022,8 @@ set enable_partition_pruning to off;
 -- setting constraint_exclusion to 'partition' disables exclusion
 set constraint_exclusion to 'partition';
 explain (costs off) select * from listp1 where a = 2;
-                QUERY PLAN                
-------------------------------------------
+                  QUERY PLAN                  
+----------------------------------------------
  Vec Gather Motion 1:1  (slice1; segments: 1)
    ->  Vec Seq Scan on listp1
          Filter: (a = 2)
@@ -4048,8 +4048,8 @@ explain (costs off) update listp1 set a = 1 where a = 2;
 -- constraint exclusion enabled
 set constraint_exclusion to 'on';
 explain (costs off) select * from listp1 where a = 2;
-                QUERY PLAN                
-------------------------------------------
+                  QUERY PLAN                  
+----------------------------------------------
  Vec Gather Motion 1:1  (slice1; segments: 1)
    ->  Vec Seq Scan on listp1
          Filter: (a = 2)
@@ -4127,7 +4127,7 @@ select * from listp where a = (select 2);');
                ->  Vec Seq Scan on listp_12_2 listp_5 (actual rows=N loops=N)
                      Filter: (a = $1)
  Optimizer: Postgres query optimizer
-(25 rows)
+(17 rows)
 
 drop table listp;
 reset parallel_tuple_cost;

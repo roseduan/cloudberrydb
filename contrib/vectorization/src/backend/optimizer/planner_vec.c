@@ -84,6 +84,7 @@ static bool fallback_distinct_junk(Plan *plan);
 static void demote_right_semi_anti_to_left(Plan *plan);
 static bool joinclauses_type_different(Expr *node, void *context);
 static bool uses_nondeterministic_collation(Node *node, void *context);
+static bool has_aggregate_window_func(Node *node, void *context);
 typedef struct PreNodeContext
 {
 	Node *plannedStmt;
@@ -979,6 +980,20 @@ is_plan_vectorable(Plan* plan, List *rtable)
 				WindowAgg *wagg = (WindowAgg *)plan;
 
 				int frameOptions = wagg->frameOptions;
+
+				/*
+				 * The frame mode is not passed to Arrow, which always
+				 * aggregates up to the last peer of the current row, as RANGE
+				 * does.  A ROWS frame is fine for rank() and row_number(),
+				 * which ignore the frame, but not for an aggregate.
+				 */
+				if ((frameOptions & FRAMEOPTION_ROWS) &&
+				    has_aggregate_window_func((Node *) plan->targetlist, NULL))
+				{
+					FALLBACK_LOG("aggregate over a ROWS frame not supported");
+					return false;
+				}
+
 				if (wagg->startOffset || wagg->endOffset ||
 				    (frameOptions != FRAMEOPTION_DEFAULTS &&
 				     frameOptions != (FRAMEOPTION_DEFAULTS | FRAMEOPTION_NONDEFAULT) &&
@@ -1065,6 +1080,20 @@ is_plan_vectorable(Plan* plan, List *rtable)
 				WindowHashAgg *wagg = castNode(WindowHashAgg, plan);
 
 				int frameOptions = wagg->frameOptions;
+
+				/*
+				 * The frame mode is not passed to Arrow, which always
+				 * aggregates up to the last peer of the current row, as RANGE
+				 * does.  A ROWS frame is fine for rank() and row_number(),
+				 * which ignore the frame, but not for an aggregate.
+				 */
+				if ((frameOptions & FRAMEOPTION_ROWS) &&
+				    has_aggregate_window_func((Node *) plan->targetlist, NULL))
+				{
+					FALLBACK_LOG("aggregate over a ROWS frame not supported");
+					return false;
+				}
+
 				if (wagg->startOffset || wagg->endOffset ||
 				    (frameOptions != FRAMEOPTION_DEFAULTS &&
 				     frameOptions != (FRAMEOPTION_DEFAULTS | FRAMEOPTION_NONDEFAULT) &&
@@ -1948,6 +1977,21 @@ uses_nondeterministic_collation(Node *node, void *context)
 
 	return expression_tree_walker(node, uses_nondeterministic_collation,
 								  context);
+}
+
+/*
+ * Whether the expression evaluates an aggregate used as a window function.
+ */
+static bool
+has_aggregate_window_func(Node *node, void *context)
+{
+	if (node == NULL)
+		return false;
+
+	if (IsA(node, WindowFunc) && ((WindowFunc *) node)->winagg)
+		return true;
+
+	return expression_tree_walker(node, has_aggregate_window_func, context);
 }
 
 /*
