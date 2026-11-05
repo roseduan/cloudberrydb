@@ -385,41 +385,108 @@ parquetReadRecordBatch::openDecimalReadersForRg(int selRgPos)
 std::vector<std::shared_ptr<::parquet_arrow::Array>>
 parquetReadRecordBatch::readDecimalBatch(int64_t nrows)
 {
-	if (decimalRowsInRg >= selNumRows[decimalRgCursor])
-		openDecimalReadersForRg(decimalRgCursor + 1);
-
+	/*
+	 * An Arrow batch is not bounded by a row group: the reader fills it to its
+	 * batch size across however many row groups that takes, so a batch of
+	 * 10000 rows over row groups of 1000 arrives as one batch spanning ten of
+	 * them.  The low-level FLBA readers, in contrast, are per row group.  Read
+	 * the batch in one segment per row group and let each column's builder
+	 * accumulate across the segments; the rows arrive in row group order on
+	 * both sides, so the two stay in lockstep.
+	 */
 	std::vector<std::shared_ptr<::parquet_arrow::Array>> arrs(decimalCols.size());
 	std::vector<::parquet::FixedLenByteArray> vals((size_t) nrows);
 	std::vector<int16_t> defs((size_t) nrows);
+	std::vector<std::unique_ptr<::parquet_arrow::FixedSizeBinaryBuilder>> builders;
+
+	/*
+	 * PARQUET_VEC_CHECK raises with elog(ERROR), which longjmps without
+	 * unwinding C++ frames and would leave the builders constructed so far
+	 * holding their Arrow buffers.  Release them first.
+	 */
+	auto checkOrRelease = [&builders](const ::parquet_arrow::Status &st, const char *what)
+	{
+		if (st.ok())
+			return;
+
+		std::string msg = st.ToString();
+
+		builders.clear();
+		elog(ERROR, "datalake parquet vectorized read: %s failed: %s", what, msg.c_str());
+	};
+
 	for (size_t j = 0; j < decimalCols.size(); j++)
 	{
-		auto *tr = static_cast<::parquet::FixedLenByteArrayReader *>(decimalReaders[j].get());
-		int16_t maxDef = tr->descr()->max_definition_level();
-		int16_t *defsPtr = (maxDef > 0) ? defs.data() : nullptr;
-		/* Decode each ReadBatch chunk before the next one: the FLBA ptrs point
-		 * into the reader's current data page, freed when it advances (see
-		 * appendNumeric128FromFLBA). */
-		::parquet_arrow::FixedSizeBinaryBuilder b(::parquet_arrow::fixed_size_binary(16), pool);
-		PARQUET_VEC_CHECK(b.Reserve(nrows), "numeric flba reserve");
-		int64_t rowsGot = 0;
-		while (rowsGot < nrows)
-		{
-			int64_t vr = 0;
-			int64_t lv = tr->ReadBatch(nrows - rowsGot, defsPtr, nullptr,
-									   vals.data(), &vr);
-			if (lv <= 0)
-				break;
-			appendNumeric128FromFLBA(b, vals.data(), defsPtr, maxDef, lv,
-									 decimalCols[j].typeLength,
-									 decimalCols[j].precision, decimalCols[j].scale);
-			rowsGot += lv;
-		}
-		if (rowsGot != nrows)
-			elog(ERROR, "datalake parquet vectorized read: decimal FLBA read %ld of %ld "
-				 "rows (row-group misalignment)", (long) rowsGot, (long) nrows);
-		PARQUET_VEC_CHECK(b.Finish(&arrs[j]), "numeric flba finish");
+		builders.push_back(std::make_unique<::parquet_arrow::FixedSizeBinaryBuilder>(
+							   ::parquet_arrow::fixed_size_binary(16), pool));
+		checkOrRelease(builders[j]->Reserve(nrows), "numeric flba reserve");
 	}
-	decimalRowsInRg += nrows;
+
+	for (int64_t remaining = nrows; remaining > 0;)
+	{
+		/* Move to the next selected row group once this one is drained. */
+		while (decimalRgCursor < (int) selRowGroups.size() &&
+			   decimalRowsInRg >= selNumRows[decimalRgCursor])
+			openDecimalReadersForRg(decimalRgCursor + 1);
+		if (decimalRgCursor >= (int) selRowGroups.size())
+		{
+			/* elog(ERROR) longjmps without unwinding C++ frames. */
+			builders.clear();
+			elog(ERROR, "datalake parquet vectorized read: decimal FLBA is short by "
+				 "%ld of %ld rows: no selected row group left",
+				 (long) remaining, (long) nrows);
+		}
+
+		int64_t		rgLeft = selNumRows[decimalRgCursor] - decimalRowsInRg;
+		int64_t		take = (remaining < rgLeft) ? remaining : rgLeft;
+
+		for (size_t j = 0; j < decimalCols.size(); j++)
+		{
+			auto *tr = static_cast<::parquet::FixedLenByteArrayReader *>(decimalReaders[j].get());
+			int16_t maxDef = tr->descr()->max_definition_level();
+			int16_t *defsPtr = (maxDef > 0) ? defs.data() : nullptr;
+			/*
+			 * ReadBatch stops at a data-page boundary and may return fewer rows
+			 * than requested, so loop until this segment is read.  Each chunk
+			 * MUST be decoded before the next ReadBatch: a FixedLenByteArray's
+			 * ptr points into the reader's current data page buffer, which is
+			 * freed once the reader advances, so collecting the FLBAs and
+			 * decoding them at the end reads freed memory.
+			 */
+			int64_t		rowsGot = 0;
+
+			while (rowsGot < take)
+			{
+				int64_t		vr = 0;
+				int64_t		lv = tr->ReadBatch(take - rowsGot, defsPtr, nullptr,
+											   vals.data(), &vr);
+
+				if (lv <= 0)
+					break;
+				appendNumeric128FromFLBA(*builders[j], vals.data(), defsPtr, maxDef, lv,
+										 decimalCols[j].typeLength,
+										 decimalCols[j].precision, decimalCols[j].scale);
+				rowsGot += lv;
+			}
+			if (rowsGot != take)
+			{
+				int			rg = selRowGroups[decimalRgCursor];
+
+			/*
+			 * elog(ERROR) longjmps without unwinding C++ frames, so release
+			 * the builders' Arrow buffers before raising.
+			 */
+				builders.clear();
+				elog(ERROR, "datalake parquet vectorized read: decimal FLBA read %ld of "
+					 "%ld rows of row group %d", (long) rowsGot, (long) take, rg);
+			}
+		}
+		decimalRowsInRg += take;
+		remaining -= take;
+	}
+
+	for (size_t j = 0; j < decimalCols.size(); j++)
+		checkOrRelease(builders[j]->Finish(&arrs[j]), "numeric flba finish");
 	return arrs;
 }
 
