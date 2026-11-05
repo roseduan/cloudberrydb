@@ -401,6 +401,10 @@ test: vec_regexp_replace_fallback
 # vectorized REPLACE()/EXTRACT() shapes the builders cannot express must fall back (#124)
 test: vec_replace_extract_fallback
 
+# a tiny vector.max_batch_size must not waste a variable-width column's
+# starting buffer, and must still give the right answers (#20)
+test: vec_small_batch
+
 # vectorized Sonic hash join routing (EXPLAIN visibility + correctness)
 
 # vectorized Sonic hash agg spill-to-disk (correctness + concurrent eviction)

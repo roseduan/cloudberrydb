@@ -1,0 +1,151 @@
+-- Regression test for lightning issue #20: vector.max_batch_size has to scale
+-- the buffers a batch allocates, and a tiny batch still has to give the right
+-- answers.
+--
+-- A variable-width column's value buffer used to start at a flat 2 MB
+-- (BASIC_COL_DATA_BUFF_SIZE) no matter what vector.max_batch_size was, while
+-- every other buffer ResetColDesc() allocates -- fixed-width values, the
+-- boolean bitmap, the null bitmap, the offsets, the position array -- is sized
+-- from the batch's row count.  So `set vector.max_batch_size = 2` still paid
+-- 2 MB per variable-width column, i.e. 1 MB of buffer for every row actually
+-- held, and the report's query ran the segments out of memory:
+--     ERROR:  Can't new value buffer from arrow:[buffer][new-defult-mem]:
+--             Out of memory: malloc of size 2097152 failed (transfuncs.c:398)
+-- 2097152 is exactly that 2 MB constant.
+--
+-- The starting size is now budgeted per row and clamped to the same 2 MB
+-- ceiling, so the default batch size allocates precisely what it did before.
+-- Because the buffer is smaller for small batches, the growth path in
+-- datumstreamblock.c now runs where it never used to: this test therefore
+-- mixes values far wider than the starting buffer with narrow ones, and checks
+-- the answers against the default batch size.
+--
+-- The per-row md5 is summed rather than concatenated on purpose.  Addition
+-- commutes, so the figure does not depend on the order rows arrive in --
+-- string_agg(... ORDER BY id) does: under ORCA the aggregate runs in two
+-- phases and the partial results are concatenated in whatever order the
+-- segments finish, so the same data hashes differently on a 3-segment
+-- cluster than on a 32-segment one, and differently again per batch size.
+-- That would make this test report an ordering difference as a data
+-- difference, which is the one thing it must not do.
+--
+-- Coverage:
+--   contrib/vectorization/src/include/utils/arrow.h (BASIC_COL_DATA_BUFF_SIZE_FOR)
+--   contrib/vectorization/src/backend/utils/arrow/transfuncs.c (ResetColDesc)
+--   contrib/vectorization/src/backend/access/vecaocs/datumstreamblock.c (grow path)
+create schema vec_batch20;
+set search_path = vec_batch20, public;
+set vector.enable_vectorization = on;
+create table t (id int, s text, w text, b varchar(32), c char(8))
+  using ao_column distributed by (id);
+-- s/b/c stay narrow; w is 9000 bytes every 50th row, far past the starting
+-- buffer at the small batch sizes below, so the grow path has to run.
+insert into t
+select g,
+       repeat('a', 1 + (g % 7)),
+       repeat('w', case when g % 50 = 0 then 9000 else 10 end),
+       repeat('b', 1 + (g % 11)),
+       'c' || (g % 9)
+from generate_series(1, 2000) g;
+analyze t;
+create function is_vectorized(q text) returns boolean as $$
+declare
+  line text;
+begin
+  for line in execute 'explain (costs off) ' || q loop
+    if line like '%Vec %' then
+      return true;
+    end if;
+  end loop;
+  return false;
+end;
+$$ language plpgsql;
+-- The scan must really be vectorized, otherwise this test proves nothing.
+select is_vectorized($$select count(*) from t$$) as scan_is_vectorized;
+ scan_is_vectorized 
+--------------------
+ t
+(1 row)
+
+-- Baseline: the default batch size.
+set vector.max_batch_size = 16384;
+show vector.max_batch_size;
+ vector.max_batch_size 
+-----------------------
+ 16384
+(1 row)
+
+select count(*), sum(length(s)), sum(length(w)), sum(length(b)), sum(length(c)),
+       sum(('x' || substr(md5(s || '|' || w || '|' || b || '|' || c), 1, 8))::bit(32)::bigint) as checksum
+  from t;
+ count | sum  |  sum   |  sum  | sum  |   checksum    
+-------+------+--------+-------+------+---------------
+  2000 | 8000 | 379600 | 12000 | 4000 | 4388657494331
+(1 row)
+
+-- The batch sizes that used to allocate 2 MB per variable-width column.
+set vector.max_batch_size = 1;
+show vector.max_batch_size;
+ vector.max_batch_size 
+-----------------------
+ 1
+(1 row)
+
+select count(*), sum(length(s)), sum(length(w)), sum(length(b)), sum(length(c)),
+       sum(('x' || substr(md5(s || '|' || w || '|' || b || '|' || c), 1, 8))::bit(32)::bigint) as checksum
+  from t;
+ count | sum  |  sum   |  sum  | sum  |   checksum    
+-------+------+--------+-------+------+---------------
+  2000 | 8000 | 379600 | 12000 | 4000 | 4388657494331
+(1 row)
+
+set vector.max_batch_size = 2;
+show vector.max_batch_size;
+ vector.max_batch_size 
+-----------------------
+ 2
+(1 row)
+
+select count(*), sum(length(s)), sum(length(w)), sum(length(b)), sum(length(c)),
+       sum(('x' || substr(md5(s || '|' || w || '|' || b || '|' || c), 1, 8))::bit(32)::bigint) as checksum
+  from t;
+ count | sum  |  sum   |  sum  | sum  |   checksum    
+-------+------+--------+-------+------+---------------
+  2000 | 8000 | 379600 | 12000 | 4000 | 4388657494331
+(1 row)
+
+set vector.max_batch_size = 37;
+show vector.max_batch_size;
+ vector.max_batch_size 
+-----------------------
+ 37
+(1 row)
+
+select count(*), sum(length(s)), sum(length(w)), sum(length(b)), sum(length(c)),
+       sum(('x' || substr(md5(s || '|' || w || '|' || b || '|' || c), 1, 8))::bit(32)::bigint) as checksum
+  from t;
+ count | sum  |  sum   |  sum  | sum  |   checksum    
+-------+------+--------+-------+------+---------------
+  2000 | 8000 | 379600 | 12000 | 4000 | 4388657494331
+(1 row)
+
+-- A width that lands between the floor and the ceiling.
+set vector.max_batch_size = 4096;
+show vector.max_batch_size;
+ vector.max_batch_size 
+-----------------------
+ 4096
+(1 row)
+
+select count(*), sum(length(s)), sum(length(w)), sum(length(b)), sum(length(c)),
+       sum(('x' || substr(md5(s || '|' || w || '|' || b || '|' || c), 1, 8))::bit(32)::bigint) as checksum
+  from t;
+ count | sum  |  sum   |  sum  | sum  |   checksum    
+-------+------+--------+-------+------+---------------
+  2000 | 8000 | 379600 | 12000 | 4000 | 4388657494331
+(1 row)
+
+reset vector.max_batch_size;
+-- the cascade notice lists objects in an order that is not worth pinning
+set client_min_messages = warning;
+drop schema vec_batch20 cascade;

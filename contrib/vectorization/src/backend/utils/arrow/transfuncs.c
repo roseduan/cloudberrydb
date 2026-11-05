@@ -386,7 +386,7 @@ ResetColDesc(ColDesc *coldesc)
 	else
 	{
 
-		valuebuffer = garrow_buffer_new_default_mem(BASIC_COL_DATA_BUFF_SIZE, &error);
+		valuebuffer = garrow_buffer_new_default_mem(BASIC_COL_DATA_BUFF_SIZE_FOR(rowToRead), &error);
 
 		if ((valuebuffer == NULL) && (error != NULL))
 		{

@@ -193,7 +193,32 @@ extern Datum GBytesToDatum(GBytes *bytes);
  * Some vector related structs
  */
 
-#define BASIC_COL_DATA_BUFF_SIZE (1024 * 1024 * 2)
+/*
+ * Starting size of the value buffer of a variable-width column.
+ *
+ * This is a starting size, not a limit: datumstreamblock.c grows the buffer
+ * -- doubling it, or jumping straight to what the value needs -- whenever a
+ * value does not fit, so a buffer that starts too small costs copies, never
+ * correctness.
+ *
+ * It used to be a flat 2 MB that ignored vector.max_batch_size, while every
+ * other buffer ResetColDesc() allocates is sized from the batch's row count.
+ * A small batch therefore still paid 2 MB per variable-width column: at
+ * vector.max_batch_size = 2 that is 1 MB of buffer for each row actually held,
+ * which is what ran the segments out of memory in lightning#20.
+ *
+ * Budget BASIC_COL_BYTES_PER_ROW bytes per row instead and clamp to the same
+ * 2 MB ceiling.  At the default vector.max_batch_size (16384) the product is
+ * exactly 2 MB, so the default configuration allocates precisely what it
+ * allocated before; only the small batch sizes change.
+ */
+#define BASIC_COL_BYTES_PER_ROW		128
+#define BASIC_COL_DATA_BUFF_MAX		(1024 * 1024 * 2)
+#define BASIC_COL_DATA_BUFF_MIN		4096
+#define BASIC_COL_DATA_BUFF_SIZE_FOR(rows) \
+	((gint64) Min(BASIC_COL_DATA_BUFF_MAX, \
+				  Max(BASIC_COL_DATA_BUFF_MIN, \
+					  (int64) (rows) * BASIC_COL_BYTES_PER_ROW)))
 #define BASIC_COL_OFFSET_BUFF_SIZE ((max_batch_size + 1) * sizeof(uint32))
 
 typedef struct ColDesc
