@@ -1,0 +1,118 @@
+-- Regression test for lightning issue #36: when the parser cannot determine
+-- which collation a comparison runs under, the vectorized executor has to fall
+-- back instead of answering the query.
+--
+-- `x COLLATE "C" < y COLLATE "POSIX"` is a collation conflict.  PostgreSQL does
+-- not reject it at parse time; it records InvalidOid as the operator's input
+-- collation and leaves the conflict for run time, where it raises
+--     ERROR:  could not determine which collation to use for string comparison
+--     HINT:  Use the COLLATE clause to set the collation explicitly.
+-- (SQLSTATE 42P22).  Arrow has no such notion and compared the values
+-- regardless, so the vectorized plan silently answered a query the row
+-- executor refuses -- the two executors disagreed on whether the query is even
+-- legal.
+--
+-- An expression with no collatable input has InvalidOid as its input collation
+-- as well (`a < 2` does), and that is not a conflict, so the fallback looks at
+-- the argument types too and leaves those alone.  Both directions are pinned
+-- below.
+--
+-- The error is reported through SQLSTATE rather than its message because the
+-- message carries the segment and pid that raised it.
+--
+-- The same conflict reaches the vectorizer through more than an operator or a
+-- function call.  NULLIF and IS DISTINCT FROM were vectorized unconditionally,
+-- so they answered the query too; both are checked below.
+--
+-- Coverage:
+--   contrib/vectorization/src/backend/optimizer/planner_vec.c
+--     (has_indeterminate_collation, is_expr_vectorable T_OpExpr / T_FuncExpr /
+--      T_NullIfExpr / T_DistinctExpr / T_ScalarArrayOpExpr)
+
+create schema vec_collate36;
+set search_path = vec_collate36, public;
+set vector.enable_vectorization = on;
+
+create table c (a int, x text collate "C", y text collate "POSIX", z text)
+  using ao_column distributed by (a);
+insert into c values (1, 'hij', 'hij', 'hij'), (2, 'HIJ', 'HIJ', 'HIJ');
+analyze c;
+
+create function is_vectorized(q text) returns boolean as $$
+declare
+  line text;
+begin
+  for line in execute 'explain (costs off) ' || q loop
+    if line like '%Vec %' then
+      return true;
+    end if;
+  end loop;
+  return false;
+end;
+$$ language plpgsql;
+
+create function sqlstate_of(q text) returns text as $$
+begin
+  execute q;
+  return 'no error';
+exception when others then
+  return sqlstate;
+end;
+$$ language plpgsql;
+
+-- The conflict, through an operator: must not vectorize, must raise 42P22.
+select is_vectorized($$select x < y from c$$) as conflict_vectorized;
+select sqlstate_of($$select x < y from c$$) as conflict_sqlstate;
+
+-- The same conflict reached through a function rather than an operator.
+select is_vectorized($$select strpos(x, y) from c$$) as func_conflict_vectorized;
+select sqlstate_of($$select strpos(x, y) from c$$) as func_conflict_sqlstate;
+
+-- Resolved by an explicit COLLATE: legal, and still vectorized.
+select is_vectorized($$select x < y collate "C" from c$$) as resolved_vectorized;
+select a, x < y collate "C" as lt from c order by a;
+
+-- No collatable input: the input collation is InvalidOid here too, but there
+-- is no conflict, so this must keep vectorizing.
+select is_vectorized($$select a < 2 from c$$) as noncollatable_vectorized;
+select a, a < 2 as lt from c order by a;
+
+-- One collatable column against a constant: no conflict.
+select is_vectorized($$select x < 'zzz' from c$$) as single_collation_vectorized;
+select a, x < 'zzz' as lt from c order by a;
+
+-- Two columns that share a collation: no conflict.
+select is_vectorized($$select x < x from c$$) as same_collation_vectorized;
+select a, x < x as lt from c order by a;
+
+-- The conflict through NULLIF.  Before this change NULLIF was vectorized
+-- unconditionally, so it answered where the row executor raises 42P22.
+select is_vectorized($$select nullif(x, y) from c$$) as nullif_conflict_vectorized;
+select sqlstate_of($$select nullif(x, y) from c$$) as nullif_conflict_sqlstate;
+
+-- And through IS DISTINCT FROM, which was unconditional in the same way.
+select is_vectorized($$select x is distinct from y from c$$) as distinct_conflict_vectorized;
+select sqlstate_of($$select x is distinct from y from c$$) as distinct_conflict_sqlstate;
+
+-- Controls for those two.  One collation is not a conflict: still vectorized,
+-- same answers.
+select is_vectorized($$select nullif(x, x) from c$$) as nullif_same_collation_vectorized;
+select a, nullif(x, x) as n from c order by a;
+select is_vectorized($$select x is distinct from x from c$$) as distinct_same_collation_vectorized;
+select a, x is distinct from x as d from c order by a;
+
+-- No collatable input: InvalidOid input collation again, no conflict, left
+-- alone.
+select is_vectorized($$select nullif(a, 2) from c$$) as nullif_noncollatable_vectorized;
+select a, nullif(a, 2) as n from c order by a;
+select is_vectorized($$select a is distinct from 2 from c$$) as distinct_noncollatable_vectorized;
+select a, a is distinct from 2 as d from c order by a;
+
+-- IN against a constant list resolves to the column's collation: no conflict,
+-- still vectorized.
+select is_vectorized($$select x in ('hij','HIJ') from c$$) as in_single_collation_vectorized;
+select a, x in ('hij','HIJ') as inlist from c order by a;
+
+-- the cascade notice lists objects in an order that is not worth pinning
+set client_min_messages = warning;
+drop schema vec_collate36 cascade;

@@ -85,6 +85,7 @@ static void demote_right_semi_anti_to_left(Plan *plan);
 static bool joinclauses_type_different(Expr *node, void *context);
 static bool uses_nondeterministic_collation(Node *node, void *context);
 static bool has_aggregate_window_func(Node *node, void *context);
+static bool has_indeterminate_collation(Node *node);
 typedef struct PreNodeContext
 {
 	Node *plannedStmt;
@@ -718,6 +719,11 @@ is_expr_vectorable(Expr* expr, void *context)
 		case T_OpExpr:
 			{
 				OpExpr	  *opexpr = (OpExpr *)expr;
+				if (has_indeterminate_collation((Node *) opexpr))
+				{
+					FALLBACK_LOG("operator with an indeterminate input collation.");
+					return false;
+				}
 				if (!is_func_vectorable(opexpr->opfuncid, opexpr->args) ||
 						list_length(opexpr->args) == 1 ||
 						!is_expr_vectorable((Expr*)opexpr->args, context) ||
@@ -728,6 +734,11 @@ is_expr_vectorable(Expr* expr, void *context)
 		case T_FuncExpr:
 			{
 				FuncExpr *func_expr = (FuncExpr *)expr;
+				if (has_indeterminate_collation((Node *) func_expr))
+				{
+					FALLBACK_LOG("function with an indeterminate input collation.");
+					return false;
+				}
 				if (!is_func_vectorable(func_expr->funcid, func_expr->args) ||
 						!is_expr_vectorable((Expr*)func_expr->args, context) ||
 						!is_type_vectorable(func_expr->funcresulttype))
@@ -835,6 +846,12 @@ is_expr_vectorable(Expr* expr, void *context)
 					FALLBACK_LOG("IN/NOT IN under a nondeterministic collation.");
 					return false;
 				}
+
+				if (has_indeterminate_collation((Node *) arrayexpr))
+				{
+					FALLBACK_LOG("IN/NOT IN with an indeterminate input collation.");
+					return false;
+				}
 			}
 			break;
 		case T_CaseExpr:
@@ -856,6 +873,27 @@ is_expr_vectorable(Expr* expr, void *context)
 				break;
 			}
 		case T_NullIfExpr:
+			{
+				NullIfExpr *nullifexpr = (NullIfExpr *) expr;
+
+				if (has_indeterminate_collation((Node *) nullifexpr))
+				{
+					FALLBACK_LOG("NULLIF with an indeterminate input collation.");
+					return false;
+				}
+			}
+			break;
+		case T_DistinctExpr:
+			{
+				DistinctExpr *distinctexpr = (DistinctExpr *) expr;
+
+				if (has_indeterminate_collation((Node *) distinctexpr))
+				{
+					FALLBACK_LOG("IS DISTINCT FROM with an indeterminate input collation.");
+					return false;
+				}
+			}
+			break;
 		/* Expressions fully vectorable */
 		case T_CaseTestExpr:
 		case T_NullTest:
@@ -864,7 +902,6 @@ is_expr_vectorable(Expr* expr, void *context)
 		case T_SortGroupClause:
 		case T_TargetEntry:
 		case T_CoalesceExpr:
-		case T_DistinctExpr:
 			break;
 		/* All other expression fallback */
 		default:
@@ -1957,6 +1994,73 @@ fallback_distinct_junk(Plan *plan)
 		}
 	}
 	return grpkey > 0 && !has_aggref && has_junk_column;
+}
+
+/*
+ * true when this node's inputs are collatable but the parser could not settle
+ * on one collation for them, so exprInputCollation() is InvalidOid.
+ *
+ * `x COLLATE "C" < y COLLATE "POSIX"` is the plain case.  PostgreSQL does not
+ * reject it at parse time; it leaves the conflict for run time and raises
+ *
+ *     ERROR:  could not determine which collation to use for string comparison
+ *     HINT:  Use the COLLATE clause to set the collation explicitly.
+ *
+ * when the comparison executes.  Arrow has no such notion and compares the
+ * values regardless, so a vectorized plan silently answers a query the row
+ * executor refuses -- the two executors disagree on whether the query is even
+ * legal (lightning#36).  Fall back and let the row executor raise its error.
+ *
+ * An expression with no collatable input has InvalidOid here too (`int < int`),
+ * which is not a conflict, so the inputs are checked as well.
+ *
+ * Every node tag below is a node tag is_expr_vectorable() calls this from.
+ * T_ScalarArrayOpExpr is the one arm with no reachable case known: `x IN
+ * (y, z)` over columns is built as a chain of T_OpExpr, and the array side of
+ * a real T_ScalarArrayOpExpr is a Const, whose collation either defaults (and
+ * yields to the other side) or is explicit (and then two explicit collations
+ * are rejected at parse time with 42P21, before this runs).  It is guarded
+ * anyway, so the arm is not left as the one unprotected way in.
+ */
+static bool
+has_indeterminate_collation(Node *node)
+{
+	List	   *args = NIL;
+	ListCell   *lc;
+
+	if (node == NULL || OidIsValid(exprInputCollation(node)))
+		return false;
+
+	switch (nodeTag(node))
+	{
+		case T_OpExpr:
+			args = ((OpExpr *) node)->args;
+			break;
+		case T_DistinctExpr:
+			args = ((DistinctExpr *) node)->args;
+			break;
+		case T_NullIfExpr:
+			args = ((NullIfExpr *) node)->args;
+			break;
+		case T_ScalarArrayOpExpr:
+			args = ((ScalarArrayOpExpr *) node)->args;
+			break;
+		case T_FuncExpr:
+			args = ((FuncExpr *) node)->args;
+			break;
+		default:
+			return false;
+	}
+
+	foreach(lc, args)
+	{
+		Node   *arg = (Node *) lfirst(lc);
+
+		if (type_is_collatable(exprType(arg)))
+			return true;
+	}
+
+	return false;
 }
 
 /*

@@ -406,6 +406,9 @@ test: vec_replace_extract_fallback
 # a tiny vector.max_batch_size must not waste a variable-width column's
 # starting buffer, and must still give the right answers (#20)
 test: vec_small_batch
+# a comparison whose input collation the parser could not determine must
+# fall back instead of answering a query the row executor refuses (#36)
+test: vec_collate_conflict
 
 # vectorized Sonic hash join routing (EXPLAIN visibility + correctness)
 
