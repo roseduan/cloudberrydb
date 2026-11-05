@@ -295,6 +295,7 @@ run_diff_cover() {
         cd /workspace/database &&
         diff-cover /workspace/build/coverage/cobertura.xml \
             --compare-branch='${COMPARE_REF}' \
+            --ignore-staged --ignore-unstaged \
             --html-report /workspace/build/coverage/diff-cover.html \
             --fail-under=80
     " || exit_code=$?

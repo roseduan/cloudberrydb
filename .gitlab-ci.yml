@@ -439,6 +439,71 @@ test_parallel_orca:
   artifacts:
     <<: *artifacts
 
+coverage_report:
+  stage: coverage
+  variables:
+    ARCH: x86_64
+  tags:
+    - docker
+    - x86_64
+    - 8c32g
+  <<: *cache-only-pull
+  needs:
+    - job: test_database
+      optional: true
+      artifacts: true
+    - job: test_database-src
+      optional: true
+      artifacts: true
+    - job: test_pax
+      optional: true
+      artifacts: true
+    - job: test_vectorization
+      optional: true
+      artifacts: true
+    - job: test_database_orca
+      optional: true
+      artifacts: true
+    - job: test_database-src_orca
+      optional: true
+      artifacts: true
+    - job: test_pax_orca
+      optional: true
+      artifacts: true
+    - job: test_parallel
+      optional: true
+      artifacts: true
+    - job: test_parallel_orca
+      optional: true
+      artifacts: true
+  script: |
+    set -euxo pipefail
+
+    git config --global url."https://gitlab-ci-token:${CI_JOB_TOKEN}@code.hashdata.xyz".insteadOf "https://code.hashdata.xyz"
+
+    # Fix stale remote URL in cached repo so git fetch can authenticate
+    if [ -d database ]; then
+      cd database
+      git remote set-url origin "https://code.hashdata.xyz/${CI_PROJECT_PATH}.git"
+      cd ..
+    fi
+
+    IMAGE=${DEVEL_IMAGE} database/coverage.sh report "${CI_MERGE_REQUEST_TARGET_BRANCH_NAME:-main}"
+  coverage: '/lines\.*:\s*(\d+\.?\d+)%/'
+  artifacts:
+    paths:
+      - ${CI_PROJECT_DIR}/build/coverage/report/
+      - ${CI_PROJECT_DIR}/build/coverage/diff-cover.html
+      - ${CI_PROJECT_DIR}/build/coverage/cobertura.xml
+    reports:
+      coverage_report:
+        coverage_format: cobertura
+        path: ${CI_PROJECT_DIR}/build/coverage/cobertura.xml
+    when: always
+    expire_in: 1 week
+  rules:
+    - !reference [ .build-rules ]
+
 test_datalake_smoke:
   stage: test
   extends: .common
