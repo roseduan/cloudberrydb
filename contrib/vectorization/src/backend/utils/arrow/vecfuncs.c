@@ -95,7 +95,7 @@ ArrowArrayNew(Oid type, int64 length, uint8 *data, uint8 *null_bitmap)
 
 		arrowtype = garrow_time64_data_type_new(GARROW_TIME_UNIT_MICRO, &error);
 		if (error)
-			elog(ERROR, "Failed to make GArrowDataType for TIMEOID, cause: %s", error->message);
+			elog(ERROR, "Failed to make GArrowDataType for TIMEOID, cause: %s", garrow_take_error(&error));
 
 		return (void *)garrow_time64_array_new(arrowtype, length, data_buffer,
 				bitmap_buffer, n_nulls);
@@ -119,13 +119,13 @@ ArrowArrayNew(Oid type, int64 length, uint8 *data, uint8 *null_bitmap)
 				garrow_string_array_builder_append_string(builder, strs[i], &error);
 			}
 			if (error)
-				elog(ERROR, "make string array error: %s", error->message);
+				elog(ERROR, "make string array error: %s", garrow_take_error(&error));
 		}
 
 		error = NULL;
 		g_autoptr(GArrowArray) rs = garrow_array_builder_finish((GArrowArrayBuilder *)builder, &error);
 		if (error)
-			elog(ERROR, "finish string builer error: %s", error->message);
+			elog(ERROR, "finish string builer error: %s", garrow_take_error(&error));
 		return garrow_move_ptr(rs);
 		break;
 	}
@@ -146,13 +146,13 @@ ArrowArrayNew(Oid type, int64 length, uint8 *data, uint8 *null_bitmap)
 				garrow_binary_array_builder_append_value(builder, (const guint8*)vals[i], VARSIZE_ANY(vals[i]), &error);
 			}
 			if (error)
-				elog(ERROR, "make string array error: %s", error->message);
+				elog(ERROR, "make string array error: %s", garrow_take_error(&error));
 		}
 
 		error = NULL;
 		g_autoptr(GArrowArray) rs = garrow_array_builder_finish((GArrowArrayBuilder *)builder, &error);
 		if (error)
-			elog(ERROR, "finish string builer error: %s", error->message);
+			elog(ERROR, "finish string builer error: %s", garrow_take_error(&error));
 		return garrow_move_ptr(rs);
 		break;
 	}
@@ -361,13 +361,13 @@ ArrowScalarNew(GArrowType type, Datum datum, bool is_null, Oid pg_type, int32 ty
 																   DatumGetInt8(value), &error);
 						if (error)
 							elog(ERROR, "failed to build a constant list array: %s",
-								 error->message);
+								 garrow_take_error(&error));
 					}
 					array = garrow_array_builder_finish(
 						GARROW_ARRAY_BUILDER(builder), &error);
 					if (error)
 						elog(ERROR, "failed to build a constant list array: %s",
-							 error->message);
+							 garrow_take_error(&error));
 					break;
 				}
 				case GARROW_TYPE_INT16:
@@ -384,13 +384,13 @@ ArrowScalarNew(GArrowType type, Datum datum, bool is_null, Oid pg_type, int32 ty
 																	DatumGetInt16(value), &error);
 						if (error)
 							elog(ERROR, "failed to build a constant list array: %s",
-								 error->message);
+								 garrow_take_error(&error));
 					}
 					array = garrow_array_builder_finish(
 						GARROW_ARRAY_BUILDER(builder), &error);
 					if (error)
 						elog(ERROR, "failed to build a constant list array: %s",
-							 error->message);
+							 garrow_take_error(&error));
 					break;
 				}
 				case GARROW_TYPE_INT32:
@@ -407,13 +407,13 @@ ArrowScalarNew(GArrowType type, Datum datum, bool is_null, Oid pg_type, int32 ty
 																	DatumGetInt32(value), &error);
 						if (error)
 							elog(ERROR, "failed to build a constant list array: %s",
-								 error->message);
+								 garrow_take_error(&error));
 					}
 					array = garrow_array_builder_finish(
 						GARROW_ARRAY_BUILDER(builder), &error);
 					if (error)
 						elog(ERROR, "failed to build a constant list array: %s",
-							 error->message);
+							 garrow_take_error(&error));
 					break;
 				}
 				case GARROW_TYPE_INT64:
@@ -430,13 +430,13 @@ ArrowScalarNew(GArrowType type, Datum datum, bool is_null, Oid pg_type, int32 ty
 																	DatumGetInt64(value), &error);
 						if (error)
 							elog(ERROR, "failed to build a constant list array: %s",
-								 error->message);
+								 garrow_take_error(&error));
 					}
 					array = garrow_array_builder_finish(
 						GARROW_ARRAY_BUILDER(builder), &error);
 					if (error)
 						elog(ERROR, "failed to build a constant list array: %s",
-							 error->message);
+							 garrow_take_error(&error));
 					break;
 				}
 				case GARROW_TYPE_FLOAT:
@@ -453,13 +453,13 @@ ArrowScalarNew(GArrowType type, Datum datum, bool is_null, Oid pg_type, int32 ty
 																	DatumGetFloat4(value), &error);
 						if (error)
 							elog(ERROR, "failed to build a constant list array: %s",
-								 error->message);
+								 garrow_take_error(&error));
 					}
 					array = garrow_array_builder_finish(
 						GARROW_ARRAY_BUILDER(builder), &error);
 					if (error)
 						elog(ERROR, "failed to build a constant list array: %s",
-							 error->message);
+							 garrow_take_error(&error));
 					break;
 				}
 				case GARROW_TYPE_DOUBLE:
@@ -476,13 +476,13 @@ ArrowScalarNew(GArrowType type, Datum datum, bool is_null, Oid pg_type, int32 ty
 																	 DatumGetFloat8(value), &error);
 						if (error)
 							elog(ERROR, "failed to build a constant list array: %s",
-								 error->message);
+								 garrow_take_error(&error));
 					}
 					array = garrow_array_builder_finish(
 						GARROW_ARRAY_BUILDER(builder), &error);
 					if (error)
 						elog(ERROR, "failed to build a constant list array: %s",
-							 error->message);
+							 garrow_take_error(&error));
 					break;
 				}
 				case GARROW_TYPE_STRING:
@@ -502,13 +502,13 @@ ArrowScalarNew(GArrowType type, Datum datum, bool is_null, Oid pg_type, int32 ty
 						}
 						if (error)
 							elog(ERROR, "failed to build a constant list array: %s",
-								 error->message);
+								 garrow_take_error(&error));
 					}
 					array = garrow_array_builder_finish(
 						GARROW_ARRAY_BUILDER(builder), &error);
 					if (error)
 						elog(ERROR, "failed to build a constant list array: %s",
-							 error->message);
+							 garrow_take_error(&error));
 					break;
 				}
 				case GARROW_TYPE_DATE32:
@@ -524,13 +524,13 @@ ArrowScalarNew(GArrowType type, Datum datum, bool is_null, Oid pg_type, int32 ty
 																	 DatumGetInt32(value), &error);
 						if (error)
 							elog(ERROR, "failed to build a constant list array: %s",
-								 error->message);
+								 garrow_take_error(&error));
 					}
 					array = garrow_array_builder_finish(
 						GARROW_ARRAY_BUILDER(builder), &error);
 					if (error)
 						elog(ERROR, "failed to build a constant list array: %s",
-							 error->message);
+							 garrow_take_error(&error));
 					break;
 				}
 				default:
@@ -898,23 +898,23 @@ void* SerializeRecordBatch(void *record_batch)
 
 	buffer = garrow_resizable_buffer_new(0, &error);
 	if (error)
-		elog(ERROR, "Cann't new resizable buffer: %s", error->message);
+		elog(ERROR, "Cann't new resizable buffer: %s", garrow_take_error(&error));
 	stream = (GArrowOutputStream *)garrow_buffer_output_stream_new(buffer);
 
 	schema = garrow_record_batch_get_schema(batch);
 	writer = (GArrowRecordBatchWriter *)garrow_record_batch_stream_writer_new(
 			stream, schema, &error);
 	if (error)
-		elog(ERROR, "Cann't write batch: %s", error->message);
+		elog(ERROR, "Cann't write batch: %s", garrow_take_error(&error));
 	garrow_record_batch_writer_write_record_batch(writer, batch, &error);
 	if (error)
 		elog(ERROR, "Cann't serialize a record batch to buffer: %s",
-				error->message);
+				garrow_take_error(&error));
 
 	garrow_record_batch_writer_close(writer, &error);
 	if (error)
 		elog(ERROR, "Cann't close record batch writer for serialization: %s",
-				error->message);
+				garrow_take_error(&error));
 
 	g_object_unref(&writer->parent_instance);
 

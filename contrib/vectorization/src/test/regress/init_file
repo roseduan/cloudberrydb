@@ -157,4 +157,14 @@ s/\s*pg_aovisimap_\d+\s*/Table "pg_aovisimap_#####/
 
 m/pg_aocsseg_\d+/
 s/\s*pg_aocsseg_\d+\s*/Table "pg_aocsseg_#####/
+
+# vec memory ceiling error: held/requested/limit byte counts, segment number, IP,
+# pid and line number differ on every run
+m/vectorized execution would exceed vector\.query_memory_limit_mb: holding \d+ bytes, asked for \d+ more, limit is \d+ bytes\./
+s/vectorized execution would exceed vector\.query_memory_limit_mb: holding \d+ bytes, asked for \d+ more, limit is \d+ bytes\./vectorized execution would exceed vector.query_memory_limit_mb: holding ## bytes, asked for ## more, limit is ## bytes./
+m/\(seg\d+ slice\d+ [0-9.]+:\d+ pid=\d+\)/
+s/\(seg\d+ slice\d+ [0-9.]+:\d+ pid=\d+\)/(segN sliceN IP:PORT pid=PID)/
+m/\(execMain\.c:\d+\)/
+s/\(execMain\.c:\d+\)/(execMain.c:LINE)/
+
 -- end_matchsubs

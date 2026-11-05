@@ -69,6 +69,8 @@ extern bool enable_sonic_hashjoin;
 /* backpressure for vectorized execution (push_pipeline / yield / SinkNode) */
 extern bool enable_vec_pipeline;
 extern int backpressure_memory_mb;
+extern int query_memory_limit_mb;
+extern bool report_memory_to_vmem;
 /*
  * Allow ORCA to consider WindowHashAgg for vector plans.  Only window queries
  * that are not forced into Partition Top-K can get one: those with a window

@@ -287,6 +287,21 @@ ExecEndVecSeqScan(VecSeqScanState *node)
 	
 	FreeDummySchema();
 	FreeVecExecuteState(&node->vestate);
+
+	/*
+	 * BuildScanNode() parked a reference to the options in this node, and
+	 * nothing ever dropped it.  The object owns the C++ ScanNodeOptions, and
+	 * through its filter expression everything the scan qual was built from
+	 * -- including the array a constant IN list is turned into, which is as
+	 * wide as the list.  garrow_release_scan_node_options() above only
+	 * releases the dataset, so one filter expression was left behind per
+	 * execution.
+	 *
+	 * Release it after the plan, never before: the scan node inside the plan
+	 * reads from these options, and FreeVecExecuteState() above is what tears
+	 * that plan down.
+	 */
+	ARROW_FREE(GArrowScanNodeOptions, &node->scan_node_options);
 }
 
 /* ----------------------------------------------------------------

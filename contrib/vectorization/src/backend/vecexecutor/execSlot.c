@@ -93,7 +93,7 @@ ExecMaterializeSlotVec(TupleTableSlot *slot)
 									nrows, columns, &error);
 	if (error)
 		elog(ERROR, "Error when forming recored batch from vector slot: %s",
-				error->message);
+				garrow_take_error(&error));
 
 	slot->tts_nvalid = ncolumns;
 	garrow_store_ptr(VECSLOT(slot)->tts_recordbatch, batch);
@@ -191,11 +191,11 @@ GenerateVecValue(VecDesc vecdesc, TupleTableSlot *out)
 	batch = garrow_record_batch_new(vecdesc->schema, length, arrays, &error);
 	garrow_list_free_ptr(&arrays);
 	if (error)
-		elog(ERROR, "Record batch new for GenerateVecValue failed: %s", error->message);
+		elog(ERROR, "Record batch new for GenerateVecValue failed: %s", garrow_take_error(&error));
 	vslot->data = (char *)&vecdesc->abi_batch;
 	ret = garrow_abi_record_batch_export(batch, (void**) &vslot->data, &error);
 	if (ret == false || error)
-		elog(ERROR, "Record batch export for GenerateVecValue failed: %s", error->message);
+		elog(ERROR, "Record batch export for GenerateVecValue failed: %s", garrow_take_error(&error));
 	/* Mark slot as valid.*/
 	TTS_CLEAR_EMPTY(out);
 	TTS_CLEAR_DIRTY(out);
@@ -371,7 +371,7 @@ StoreEmptyTuples(TupleTableSlot *slot, int numtuples)
 	garrow_list_free_ptr(&columns);
 	if (error)
 		elog(ERROR, "Error when store empty batch from vector slot: %s",
-				error->message);
+				garrow_take_error(&error));
 	garrow_store_ptr(vslot->tts_recordbatch, batch);
 
 	TTS_CLEAR_EMPTY(slot);
@@ -414,9 +414,19 @@ DeserializeRecordBatch(GArrowBuffer *buffer, int64 buf_len, bool need_copy)
 		if (error)
 		{
 			elog(ERROR, "Cann't get buffer length caused by : %s",
-					error->message);
+					garrow_take_error(&error));
 		}
 		copy_buffer = garrow_buffer_new_default_mem(buf_len, &error);
+		/*
+		 * This allocation goes through the query's memory pool, so it can be
+		 * refused once vector.query_memory_limit_mb is reached.  Check it:
+		 * garrow_buffer_get_data() on a NULL buffer is a segfault, and the
+		 * motion path has no way to carry on without the copy.
+		 */
+		if (copy_buffer == NULL)
+			elog(ERROR, "Cann't allocate %ld bytes to copy a record batch: %s",
+				 (long) buf_len,
+				 error != NULL ? garrow_take_error(&error) : "out of memory");
 		old_gbytes = garrow_buffer_get_data(buffer);
 		old_data = (void *) g_bytes_get_data(old_gbytes, &data_size);
 		new_gbytes = garrow_buffer_get_data(copy_buffer);
@@ -433,14 +443,14 @@ DeserializeRecordBatch(GArrowBuffer *buffer, int64 buf_len, bool need_copy)
 	if (error)
 	{
 		elog(ERROR, "Cann't get reader from buffer stream: %s",
-				error->message);
+				garrow_take_error(&error));
 	}
 
 	batch = garrow_record_batch_reader_read_next(reader, &error);
 	if (error)
 	{
 		elog(ERROR, "Cann't read record batch from minimal tuple: %s",
-				error->message);
+				garrow_take_error(&error));
 	}	
 	return (void*)garrow_move_ptr(batch);
 }
@@ -464,6 +474,6 @@ ExecImportABISlot(TupleTableSlot *virtualslot, TupleTableSlot *vecslot)
 		elog(ERROR, "Got empty data from non-null slot!");
 	batch = garrow_abi_record_batch_import(abibatch, &error);
 	if (error)
-		elog(ERROR, "Import abi batch failed: %s", error->message);
+		elog(ERROR, "Import abi batch failed: %s", garrow_take_error(&error));
 	return ExecStoreBatch(vecslot, batch);
 }

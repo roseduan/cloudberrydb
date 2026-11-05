@@ -367,7 +367,7 @@ ResetColDesc(ColDesc *coldesc)
 	{
 		valuebuffer = garrow_buffer_new_default_mem(coldesc->datalen * rowToRead, &error);
 		if (!valuebuffer)
-			elog(ERROR, "Can't new value buffer from arrow:%s ", error->message);
+			elog(ERROR, "Can't new value buffer from arrow:%s ", garrow_take_error(&error));
 		valuebytes = garrow_buffer_get_data(valuebuffer);
 		coldesc->values = (void *)g_bytes_get_data(valuebytes, &size);
 		garrow_store_ptr(coldesc->value_buffer, valuebuffer);
@@ -377,7 +377,7 @@ ResetColDesc(ColDesc *coldesc)
 	{
 		valuebuffer = garrow_buffer_new_default_mem((rowToRead + 7) / 8, &error);
 		if (!valuebuffer)
-			elog(ERROR, "Can't new value buffer from arrow:%s ", error->message);
+			elog(ERROR, "Can't new value buffer from arrow:%s ", garrow_take_error(&error));
 		valuebytes = garrow_buffer_get_data(valuebuffer);
 		coldesc->values = (void *)g_bytes_get_data(valuebytes, &size);
 		memset(coldesc->values, 0, (rowToRead + 7) / 8);
@@ -390,7 +390,7 @@ ResetColDesc(ColDesc *coldesc)
 
 		if ((valuebuffer == NULL) && (error != NULL))
 		{
-			elog(ERROR, "Can't new value buffer from arrow:%s ", error->message);
+			elog(ERROR, "Can't new value buffer from arrow:%s ", garrow_take_error(&error));
 		}
 
 		valuebytes = garrow_buffer_get_data(valuebuffer);
@@ -401,7 +401,7 @@ ResetColDesc(ColDesc *coldesc)
 		offsetbuffer = garrow_buffer_new_default_mem(BASIC_COL_OFFSET_BUFF_SIZE, &error);
 
 		if ((offsetbuffer == NULL) && (error != NULL))
-			elog(ERROR, "Can't new value buffer from arrow:%s ", error->message);
+			elog(ERROR, "Can't new value buffer from arrow:%s ", garrow_take_error(&error));
 
 		offsetbytes = garrow_buffer_get_data(offsetbuffer);
 		coldesc->offsets = (void *)g_bytes_get_data(offsetbytes, &size);
@@ -413,7 +413,7 @@ ResetColDesc(ColDesc *coldesc)
 	bitmapbuffer = garrow_buffer_new_default_mem((rowToRead + 7) / 8, &error);
 
 	if ((bitmapbuffer == NULL) && (error != NULL))
-		elog(ERROR, "Can't new bitmap buffer from arrow:%s ", error->message);
+		elog(ERROR, "Can't new bitmap buffer from arrow:%s ", garrow_take_error(&error));
 
 	bitmapbytes = garrow_buffer_get_data(bitmapbuffer);
 	coldesc->bitmap = (uint8 *)g_bytes_get_data(bitmapbytes, &size);
@@ -425,7 +425,7 @@ ResetColDesc(ColDesc *coldesc)
 	{
 		posbuffer = garrow_buffer_new_default_mem(sizeof(int64) * rowToRead, &error);
 		if (!posbuffer)
-			elog(ERROR, "Can't new position buffer from arrow:%s ", error->message);
+			elog(ERROR, "Can't new position buffer from arrow:%s ", garrow_take_error(&error));
 		posbytes = garrow_buffer_get_data(posbuffer);
 		coldesc->pos_values = (void *)g_bytes_get_data(posbytes, &size);
 		garrow_store_ptr(coldesc->pos_value_buffer, posbuffer);
@@ -508,7 +508,7 @@ FinishColDesc(ColDesc *coldesc)
 
 		arrowtype = garrow_time64_data_type_new(GARROW_TIME_UNIT_MICRO, &error);
 		if (!rs)
-			elog(ERROR, "Failed to make GArrowDataType for TIMEOID, cause: %s", error->message);
+			elog(ERROR, "Failed to make GArrowDataType for TIMEOID, cause: %s", garrow_take_error(&error));
 
 		rs = (void *)garrow_time64_array_new(arrowtype, coldesc->currows,
 				coldesc->value_buffer, coldesc->bitmap_buffer, n_nulls);
@@ -540,7 +540,7 @@ FinishColDesc(ColDesc *coldesc)
 
 		rs = (void *)garrow_array_builder_finish((GArrowArrayBuilder *)builder, &error);
 		if (!rs)
-			elog(ERROR, "finish string builer error: %s", error->message);
+			elog(ERROR, "finish string builer error: %s", garrow_take_error(&error));
 		break;
 	}
 	case GARROW_TYPE_TIMESTAMP:
@@ -1643,7 +1643,7 @@ TextlikeToGandiva(Expr *expr, GArrowSchema *schema, GArrowDataType **rettype)
 	node      = GGANDIVA_NODE(ggandiva_if_node_new(funcnode, then_node,
 	                                               else_node, lrettype, &error));
 	if (error)
-		elog(ERROR, "Failed to make gandiva node for NOT, msg: %s", error->message);
+		elog(ERROR, "Failed to make gandiva node for NOT, msg: %s", garrow_take_error(&error));
 
 	garrow_store_ptr(*rettype, lrettype);
 
@@ -1844,7 +1844,7 @@ rewrite_numeric_hash_keys_schema(GArrowSchema *schema, List *hash_keys)
 		dec_field = garrow_field_new(garrow_field_get_name(field), dec_type);
 		garrow_store_func(result, garrow_schema_replace_field(result, key, dec_field, &error));
 		if (error)
-			elog(ERROR, "failed to retype numeric hash key column %d: %s", key, error->message);
+			elog(ERROR, "failed to retype numeric hash key column %d: %s", key, garrow_take_error(&error));
 	}
 	return result;
 }

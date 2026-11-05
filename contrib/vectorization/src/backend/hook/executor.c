@@ -10,6 +10,7 @@
 #include "access/xact.h"
 #include "executor/execUtils.h"
 #include "utils/snapmgr.h"
+#include "utils/vmem_tracker.h"
 #include "cdb/memquota.h"
 #include "cdb/cdbvars.h"
 #include "nodes/print.h"
@@ -235,6 +236,194 @@ CollectTime(VecExecuteState* estate, int plan_id)
 }
 
 
+/*
+ * Arrow's memory, as far as the vmem tracker is concerned.
+ *
+ * The pool cannot report as it allocates: VmemTracker_ReserveVmem asserts it
+ * is on the owner thread (vmem_tracker.c:214), and with vector.pool_threads
+ * above zero the pool is called from arrow's workers.  This is the same wall
+ * the interconnect receive thread runs into.
+ *
+ * So the pool only counts, and the backend reconciles: the difference between
+ * what arrow now holds and what has been reported is handed to the tracker,
+ * from a thread that is allowed to do it.
+ *
+ * Two places do that.  The first is after each node has produced a batch.  On
+ * its own that is not enough: a blocking node -- a hash aggregate or hash join
+ * building its table, a sort collecting its input -- consumes the whole input
+ * inside a single ExecProcNode call, so arrow can take gigabytes before the
+ * call returns and the tracker would see none of it until it did.  "At most
+ * one node's worth of allocation" is a small number for a filter and the
+ * entire build side for a hash join.
+ *
+ * The second is VecHostCancelTick(), which arrow already polls from inside
+ * those long loops.  It runs on whichever thread is executing the plan, so it
+ * reconciles only when that is the owner thread -- with vector.pool_threads at
+ * its default of 0 there is no other -- and it never raises: a refused
+ * reservation leaves vec_vmem_reported where it is and the next reconcile on
+ * the driver thread reports it.  Raising from there would longjmp out through
+ * arrow's C++ frames, which is the one thing this whole path may not do.
+ */
+#define VEC_VMEM_GRANULARITY ((int64) 1024 * 1024)
+
+static int64 vec_vmem_reported = 0;
+
+/*
+ * The high-water mark of what was handed to the tracker, kept so the
+ * end-of-query line can say how much of arrow's memory the tracker actually
+ * saw.  Without it the only evidence that reporting happened at all would be
+ * an error that never fires when the limits are generous.
+ */
+static int64 vec_vmem_peak_reported = 0;
+
+/*
+ * The numbers from a refused reservation, kept so the raising caller can
+ * report what the non-raising one saw.
+ */
+static int64 vec_vmem_refused_delta = 0;
+static int64 vec_vmem_refused_live = 0;
+
+/*
+ * Reconcile without raising.  Returns false when the tracker refused the
+ * reservation; nothing is taken in that case and vec_vmem_reported does not
+ * move, so a later call can try again.
+ *
+ * Safe to call from a thread that is not the owner: it does nothing there.
+ */
+static bool VecReconcileVmemTo(int64 live);
+
+bool
+VecReconcileVmemNoRaise(void)
+{
+	return VecReconcileVmemTo((int64) garrow_vec_memory_pool_bytes_allocated());
+}
+
+/*
+ * The same reconciliation, against a figure the caller already has.
+ *
+ * The pool calls this from inside Allocate() with what it is *about to*
+ * hold, which is the whole difference between a budget that stops an
+ * allocation and one that notices it afterwards.  Everything else -- the
+ * owner-thread gate, the granularity, the refusal bookkeeping -- is shared
+ * with the after-the-fact path, so the two can never disagree about how
+ * much has been handed to the tracker.
+ */
+static bool
+VecReconcileVmemTo(int64 live)
+{
+	int64		delta;
+
+	if (!report_memory_to_vmem || !VmemTrackerIsActivated())
+		return true;
+
+	/*
+	 * VmemTracker_ReserveVmem asserts it is on the owner thread
+	 * (vmem_tracker.c:214).  Arrow polls the host callback from its own
+	 * workers when vector.pool_threads is above zero, and this is reached
+	 * through that callback, so the thread has to be checked here rather
+	 * than assumed.
+	 */
+	if (!MemoryProtection_IsOwnerThread())
+		return true;
+
+	delta = live - vec_vmem_reported;
+
+	/*
+	 * The tracker counts in chunks, so a small delta would round to nothing
+	 * anyway; skipping it keeps this off the per-batch path in the common
+	 * case where arrow's footprint is steady.
+	 */
+	if (delta < VEC_VMEM_GRANULARITY && delta > -VEC_VMEM_GRANULARITY)
+		return true;
+
+	if (delta > 0)
+	{
+		MemoryAllocationStatus st = VmemTracker_ReserveVmem(delta);
+
+		if (st != MemoryAllocation_Success)
+		{
+			/*
+			 * The reservation rolls itself back on failure, so nothing was
+			 * taken and vec_vmem_reported must not move -- otherwise the
+			 * release at the end of the query would hand back memory that
+			 * was never reserved.
+			 */
+			vec_vmem_refused_delta = delta;
+			vec_vmem_refused_live = live;
+			return false;
+		}
+		vec_vmem_reported = live;
+		if (live > vec_vmem_peak_reported)
+			vec_vmem_peak_reported = live;
+	}
+	else
+	{
+		VmemTracker_ReleaseVmem(-delta);
+		vec_vmem_reported = live;
+	}
+
+	return true;
+}
+
+/*
+ * Reconcile, and raise if the tracker refused.  Only for the driver thread:
+ * this is where the query learns it is over its vmem budget.
+ */
+static void
+VecReconcileVmem(void)
+{
+	if (VecReconcileVmemNoRaise())
+		return;
+
+	ereport(ERROR,
+			(errcode(ERRCODE_OUT_OF_MEMORY),
+			 errmsg("vectorized execution could not reserve "
+					INT64_FORMAT " more bytes of vmem",
+					vec_vmem_refused_delta),
+			 errdetail("Arrow holds " INT64_FORMAT " bytes in this "
+					   "backend, of which " INT64_FORMAT " is already "
+					   "accounted for.",
+					   vec_vmem_refused_live, vec_vmem_reported)));
+}
+
+/*
+ * The pool's veto, called from inside arrow's Allocate() before the memory
+ * is taken.
+ *
+ * This is the piece that makes one threshold cover both engines: the bytes
+ * arrow is about to hold are charged against the same vmem quota that
+ * gp_vmem_protect_limit and the resource groups already enforce for
+ * everything PostgreSQL allocates, and a refusal stops the allocation
+ * rather than being discovered after the fact.
+ *
+ * Returning true is always safe: it means "not accounted here", and the
+ * reconcile on the driver thread catches up.  That is what happens on an
+ * arrow worker thread, where the tracker may not be touched at all.
+ *
+ * It must not raise.  The caller is inside arrow's C++ frames and a longjmp
+ * from here would unwind them without running destructors.  The refusal
+ * travels back as an arrow Status, and the backend turns it into an error
+ * where that is safe -- VecReconcileVmem() at the next node boundary.
+ */
+static gboolean
+VecHostVmemSync(gint64 prospective_bytes, gpointer user_data pg_attribute_unused())
+{
+	return VecReconcileVmemTo((int64) prospective_bytes) ? TRUE : FALSE;
+}
+
+/*
+ * Hand back everything reported so far.  Called at both ends of a query: at
+ * the start because a query that failed before its end may have left a
+ * reservation behind, and at the end to settle up.
+ */
+static void
+VecReleaseVmemAll(void)
+{
+	if (vec_vmem_reported > 0)
+		VmemTracker_ReleaseVmem(vec_vmem_reported);
+	vec_vmem_reported = 0;
+}
+
 static TupleTableSlot *
 VecExecProcNodeGPDB(PlanState *node)
 {
@@ -283,6 +472,9 @@ VecExecProcNodeGPDB(PlanState *node)
 		oldcxt = MemoryContextSwitchTo(node->node_context);
 
 	result = node->ExecProcNodeReal(node);
+
+	/* On the owner thread, with this node's allocations done. */
+	VecReconcileVmem();
 
 	if (node->instrument && TupIsNull(result) && estate)
 	{
@@ -371,6 +563,48 @@ ExecutorStartWrapper(QueryDesc *queryDesc, int eflags)
 	if (vec_type)
 	{
 		init_vector_types();
+
+		/*
+		 * Open a fresh accounting period for arrow's memory.  The pool lives
+		 * for the life of the backend, so without this the high-water mark
+		 * reported below would be the largest query this backend has ever
+		 * run rather than this one.
+		 */
+		/*
+		 * Hand the ceiling down before anything is allocated.  It is read
+		 * per query rather than once, so a session can raise or drop it
+		 * between statements.
+		 */
+		garrow_vec_memory_pool_set_limit((gint64) query_memory_limit_mb * 1024 * 1024);
+
+		/*
+		 * Give the pool the host's veto, once per backend.  With it in
+		 * place a single threshold -- gp_vmem_protect_limit, or a resource
+		 * group's -- bounds arrow as well as PostgreSQL, and it does so at
+		 * the allocation rather than at the next node boundary.
+		 */
+		{
+			static bool host_vmem_installed = false;
+
+			if (!host_vmem_installed)
+			{
+				garrow_set_host_vmem_callback(VecHostVmemSync, NULL);
+				host_vmem_installed = true;
+			}
+		}
+
+		/* A query that failed before its end may have left a reservation. */
+		VecReleaseVmemAll();
+		vec_vmem_peak_reported = 0;
+
+		{
+			int64		carried = (int64) garrow_vec_memory_pool_reset_peak();
+
+			if (carried != 0)
+				elog(DEBUG1, "VEC-MEM: carried_in=" INT64_FORMAT " bytes from "
+					 "earlier queries in this backend", carried);
+		}
+
 		/* Set vector executor flag, start vector executation. */
 		eflags |= EXEC_FLAG_VECTOR;
 		if (vec_exec_start_prev)
@@ -496,6 +730,24 @@ ExecutorEndWrapper(QueryDesc *queryDesc)
 		if (vec_exec_end_prev)
 			(*vec_exec_end_prev)(queryDesc);
 		VecExecutorEnd(queryDesc);
+
+		VecReleaseVmemAll();
+
+		/*
+		 * Report what arrow used.  Read after VecExecutorEnd so the plans
+		 * have been torn down: the live figure then shows what arrow is
+		 * still holding once the query is over, which is a different and
+		 * equally interesting number from the peak.
+		 */
+		elog(DEBUG1, "VEC-MEM: peak=" INT64_FORMAT " live_after_end="
+			 INT64_FORMAT " arrow_total_live=" INT64_FORMAT
+			 " arrow_total_peak=" INT64_FORMAT " vmem_peak_reported="
+			 INT64_FORMAT " bytes",
+			 (int64) garrow_vec_memory_pool_max_memory(),
+			 (int64) garrow_vec_memory_pool_bytes_allocated(),
+			 (int64) garrow_arrow_total_bytes_allocated(),
+			 (int64) garrow_arrow_total_max_memory(),
+			 vec_vmem_peak_reported);
 		return;
 	}
 

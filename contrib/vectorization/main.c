@@ -21,6 +21,8 @@
 #include "postmaster/postmaster.h"
 #include "storage/pmsignal.h"
 #include "storage/proc.h"
+#include "funcapi.h"
+#include "utils/builtins.h"
 #include "utils/guc.h"
 
 #include "hook/hook.h"
@@ -47,6 +49,45 @@ clearfile(PG_FUNCTION_ARGS)
 {
 	bool flag = PG_GETARG_BOOL(0);
 	PG_RETURN_BOOL(CleanupWorker(flag));
+}
+
+PG_FUNCTION_INFO_V1(vector_memory_stats);
+
+/*
+ * What arrow held for the last vectorized query this backend ran.
+ *
+ * The figures live in the backend and are reset when a vectorized query
+ * starts, so reading them reports the most recent one.  This function is not
+ * itself vectorized, which is what makes the reading possible: it does not
+ * reset what it is about to report.
+ *
+ * On the coordinator it describes the coordinator alone.  For the segments,
+ * wrap it:
+ *
+ *     SELECT * FROM gp_dist_random('vector_memory_stats');
+ *
+ * EXPLAIN ANALYZE would be the more natural home, and was tried first; see
+ * the commit message for why the figure cannot be carried there.
+ */
+Datum
+vector_memory_stats(PG_FUNCTION_ARGS)
+{
+	TupleDesc	tupdesc;
+	Datum		values[4];
+	bool		nulls[4] = {false, false, false, false};
+	HeapTuple	tuple;
+
+	if (get_call_result_type(fcinfo, NULL, &tupdesc) != TYPEFUNC_COMPOSITE)
+		elog(ERROR, "return type must be a row type");
+	tupdesc = BlessTupleDesc(tupdesc);
+
+	values[0] = Int32GetDatum(GpIdentity.segindex);
+	values[1] = Int64GetDatum((int64) garrow_vec_memory_pool_max_memory());
+	values[2] = Int64GetDatum((int64) garrow_vec_memory_pool_bytes_allocated());
+	values[3] = Int64GetDatum((int64) garrow_arrow_total_max_memory());
+
+	tuple = heap_form_tuple(tupdesc, values, nulls);
+	PG_RETURN_DATUM(HeapTupleGetDatum(tuple));
 }
 
 void
@@ -250,6 +291,33 @@ _PG_init(void)
                             &backpressure_memory_mb,
                             256,
                             0, 8192,
+                            PGC_USERSET,
+                            GUC_GPDB_NEED_SYNC,
+                            NULL, NULL, NULL);
+
+    DefineCustomBoolVariable("vector.report_memory_to_vmem",
+                             "Report the memory arrow holds to the vmem tracker, so that "
+                             "gp_vmem_protect_limit, the runaway detector and the resource "
+                             "groups account for it.  Off by default: they have never seen "
+                             "this memory, and a query that runs today could start failing "
+                             "against a limit that now covers more than it used to.",
+                             NULL,
+                             &report_memory_to_vmem,
+                             false,
+                             PGC_USERSET,
+                             GUC_GPDB_NEED_SYNC,
+                             NULL, NULL, NULL);
+
+    DefineCustomIntVariable("vector.query_memory_limit_mb",
+                            "Ceiling in MB on the memory arrow may hold for one query "
+                            "in this backend.  An allocation that would cross it fails "
+                            "the query with an out-of-memory error rather than being "
+                            "served.  0, the default, leaves allocation unconstrained, "
+                            "which is how it behaved before the limit existed.",
+                            NULL,
+                            &query_memory_limit_mb,
+                            0,
+                            0, INT_MAX / 2,
                             PGC_USERSET,
                             GUC_GPDB_NEED_SYNC,
                             NULL, NULL, NULL);

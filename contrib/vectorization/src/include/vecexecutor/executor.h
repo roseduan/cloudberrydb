@@ -96,6 +96,8 @@ extern TupleTableSlot *ExecuteVecPlan(VecExecuteState *estate);
 extern void FreeVecExecuteState(VecExecuteState *estate);
 extern void VecPlanTeardownBegin(void);
 extern void VecPlanTeardownEnd(void);
+extern bool VecPlanTeardownInProgress(void);
+extern bool VecReconcileVmemNoRaise(void);
 
 
 extern ExplainOneQuery_hook_type   vec_explain_prev;

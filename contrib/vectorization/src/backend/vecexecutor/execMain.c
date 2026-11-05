@@ -1398,7 +1398,7 @@ build_floor_temporal_expr(List *args, PlanBuildContext *pcontext, const char* fu
 	{
 		garrow_list_free_ptr(&arguments);
 		elog(ERROR, "Failed to set RoundTemporalOptions: %s",
-			 error ? error->message : "unknown");
+			 garrow_take_error(&error));
 	}
 
 	/* Create the floor_temporal call expression with options */
@@ -2329,7 +2329,7 @@ expr_to_arrow_expression(Expr *node, PlanBuildContext *pcontext)
 				expr = GARROW_EXPRESSION(garrow_field_expression_new(attname, &error));
 				if (error)
 					elog(ERROR, "convert PG Var(name: %s) to arrow expression failed: %s",
-							attname, error->message);
+							attname, garrow_take_error(&error));
 				break;
 			}
 		case T_Const:
@@ -2382,7 +2382,7 @@ expr_to_arrow_expression(Expr *node, PlanBuildContext *pcontext)
 						agginfo->outname, &error));
 				if (error)
 					elog(ERROR, "convert PG winfunc(name: %s) to arrow expression failed: %s",
-							agginfo->outname, error->message);
+							agginfo->outname, garrow_take_error(&error));
 
 				break;
 			}
@@ -2414,7 +2414,7 @@ expr_to_arrow_expression(Expr *node, PlanBuildContext *pcontext)
 						agginfo->outname, &error));
 				if (error)
 					elog(ERROR, "convert PG Aggref(name: %s) to arrow expression failed: %s",
-							agginfo->outname, error->message);
+							agginfo->outname, garrow_take_error(&error));
 				break;
 			}
 		case T_List:
@@ -2597,7 +2597,7 @@ BuildMaterializePlan(PlanBuildContext *pcontext, VecExecuteState *estate)
 			garrow_materialize_node_options_new(pcontext->store_file, type, pcontext->chunk_size, pcontext->cdb_strict, &error);
 
 	if (error)
-		elog(ERROR, "build materialize node option fail caused by %s", error->message);
+		elog(ERROR, "build materialize node option fail caused by %s", garrow_take_error(&error));
 
 	materialize_exec_node =
 			garrow_execute_plan_build_materialize_node(pcontext->plan,
@@ -2606,7 +2606,7 @@ BuildMaterializePlan(PlanBuildContext *pcontext, VecExecuteState *estate)
 										&error);
 
 	if (error)
-		elog(ERROR, "build materialize node fail caused by %s", error->message);
+		elog(ERROR, "build materialize node fail caused by %s", garrow_take_error(&error));
 
 	BuildSink(materialize_exec_node, estate, pcontext);
 
@@ -2634,7 +2634,7 @@ BuildShareScanPlan(PlanBuildContext *pcontext, VecExecuteState *estate)
 													pcontext->ready,
 													&error);
 		if (error)
-			elog(ERROR, "build share producter node option fail caused by %s", error->message);
+			elog(ERROR, "build share producter node option fail caused by %s", garrow_take_error(&error));
 
 		/*
 		 * A CTE producer sits under Sequence, which throws its rows away.
@@ -2654,7 +2654,7 @@ BuildShareScanPlan(PlanBuildContext *pcontext, VecExecuteState *estate)
 												share_node_options,
 												&error);
 		if (error)
-			elog(ERROR, "build share producter node fail caused by %s", error->message);
+			elog(ERROR, "build share producter node fail caused by %s", garrow_take_error(&error));
 
 		BuildSink(share_exec_node, estate, pcontext);
 	}
@@ -2669,13 +2669,13 @@ BuildShareScanPlan(PlanBuildContext *pcontext, VecExecuteState *estate)
 													pcontext->ready,
 													&error);
 		if (error)
-			elog(ERROR, "build share consumer node option fail caused by %s", error->message);
+			elog(ERROR, "build share consumer node option fail caused by %s", garrow_take_error(&error));
 
 		share_exec_node = garrow_execute_plan_build_sourceshare_node(pcontext->plan,
 												share_source_node_options,
 												&error);
 		if (error)
-			elog(ERROR, "build share consumer node fail caused by %s", error->message);
+			elog(ERROR, "build share consumer node fail caused by %s", garrow_take_error(&error));
 
 		/*
 		 * SharedSourceNode's RunConsumeLoop relies on the yield protocol
@@ -2744,7 +2744,7 @@ BuildAppendPlan(PlanBuildContext *pcontext, VecExecuteState *estate)
 									    append_option,
 									    &error);
 	if (error)
-		elog(ERROR, "Failed to create append node: %s.", error->message);
+		elog(ERROR, "Failed to create append node: %s.", garrow_take_error(&error));
 	garrow_list_free_ptr(&nodes);
 
 	return garrow_move_ptr(append_node);
@@ -2801,6 +2801,13 @@ BuildVecPlan(PlanState *planstate, VecExecuteState *estate)
 	pcontext.agginfos = NULL;
 	pcontext.keys = NULL;
 	pcontext.nkey = 0;
+	/*
+	 * Only the SeqScan branch below fills this in, and the context is a stack
+	 * local that nothing memsets -- so every other node type would leave it
+	 * holding stack garbage.  It has to start NULL, because the release at the
+	 * end of this function tests it.
+	 */
+	pcontext.relation_schema = NULL;
 	/*
 	 * Default for non-Agg nodes; the T_AggState case below overwrites it with
 	 * the real strategy. Must be initialized: BuildAggregatation gates sonic
@@ -3240,7 +3247,7 @@ BuildVecPlan(PlanState *planstate, VecExecuteState *estate)
 	}
 
 	if(!garrow_execute_plan_validate(pcontext.plan, &error))
-		elog(ERROR, "Built invalid arrow plan: %s", error->message);
+		elog(ERROR, "Built invalid arrow plan: %s", garrow_take_error(&error));
 	
 	garrow_execute_plan_set_plan_id(pcontext.plan, plan_num++);
 	/* set plan execute state */
@@ -3269,6 +3276,16 @@ BuildVecPlan(PlanState *planstate, VecExecuteState *estate)
 			spill_cleanup_registered = true;
 		}
 	}
+
+	/*
+	 * TupDescToSchema() above handed back a new reference and this context is
+	 * a local, so the reference dies with the frame unless it is released.
+	 * BuildScanNode() normally drops it as soon as it has handed the schema to
+	 * garrow_scan_node_options_new(), which leaves this a no-op; it stays as
+	 * the backstop for the paths that never reach BuildScanNode().
+	 */
+	if (pcontext.relation_schema != NULL)
+		ARROW_FREE(GArrowSchema, &pcontext.relation_schema);
 }
 
 static void 
@@ -3482,7 +3499,7 @@ BuildSequencePlan(PlanBuildContext *pcontext, VecExecuteState *estate)
 															options,
 															&error);
 	if (error)
-		elog(ERROR, "Failed to create the sequence node, cause: %s", error->message);
+		elog(ERROR, "Failed to create the sequence node, cause: %s", garrow_take_error(&error));
 
 	BuildSink(sequence_node, estate, pcontext);
 
@@ -3534,6 +3551,21 @@ FreeVecExecuteState(VecExecuteState *estate)
 		glib_autoptr_cleanup_GArrowExecutePlan(&estate->plan);
 		estate->plan = NULL;
 	}
+
+	/*
+	 * Release the execute context after the plan, never before: ExecPlan
+	 * holds a bare pointer to the arrow::compute::ExecContext that lives
+	 * inside this GObject, and so do the nodes -- after a MergeChildren a
+	 * node can still be pointing at the context of the plan it came from.
+	 * The teardown order PostgreSQL uses makes that safe, because a parent
+	 * node frees its own VecExecuteState before ending its children.
+	 *
+	 * Nothing released this before.  garrow_execute_context_new() is called
+	 * once per plan whenever vector.pool_threads is above zero, so every
+	 * such query leaked the context object and the ExecContext in it.
+	 */
+	if (estate->exectx)
+		ARROW_FREE(GArrowExecuteContext, &estate->exectx);
 
 	if (estate->reader)
 	{
@@ -3709,6 +3741,21 @@ VecPlanTeardownEnd(void)
 }
 
 /*
+ * Is the plan tree being torn down after an error?
+ *
+ * Code that runs in a node's End function and would otherwise wait for
+ * something another slice has to do needs this: on the teardown path the other
+ * slices are aborting too, so the thing being waited for may never happen, and
+ * ExecutorRunWrapper() holds interrupts off around the teardown, so the wait
+ * cannot be broken by a cancel either.
+ */
+bool
+VecPlanTeardownInProgress(void)
+{
+	return vec_plan_teardown_depth > 0;
+}
+
+/*
  * VecHostCancelTick
  *
  * Installed into Arrow as its host-cancel callback (HostCancelCheck()).  Arrow
@@ -3725,8 +3772,24 @@ VecPlanTeardownEnd(void)
  * after an error (see vec_plan_teardown_depth).
  *
  * This runs on whichever thread is executing the plan, Arrow thread-pool
- * workers included, so it must not do anything but read flags and poll the
- * client socket.
+ * workers included, so it must not do anything but read flags, poll the
+ * client socket, and -- on the owner thread only -- hand arrow's memory
+ * figure to the vmem tracker.
+ *
+ * That last one is here because this is the only place the backend gets
+ * control while a blocking node is running.  A hash join building its table
+ * consumes its whole build side inside one ExecProcNode call, and the
+ * reconcile that follows that call would otherwise be the first the tracker
+ * heard of however many gigabytes went into it.  Arrow polls this callback
+ * inside those loops, so the figure now moves while they run.
+ *
+ * It must not raise: a longjmp from here would unwind through arrow's C++
+ * frames and skip every destructor.  So a refused reservation is not reported
+ * here -- VecReconcileVmemNoRaise() leaves the accounting untouched and
+ * returns false, and the reconcile after the enclosing ExecProcNode raises it
+ * properly on the driver thread.  Returning FALSE instead would cancel the
+ * plan, but with no interrupt pending the query would stop without a reason
+ * to show for it.
  */
 static gboolean
 VecHostCancelTick(gpointer user_data pg_attribute_unused())
@@ -3734,6 +3797,9 @@ VecHostCancelTick(gpointer user_data pg_attribute_unused())
 	if (vec_plan_teardown_depth > 0 || VecHostCancelPending() ||
 		VecClientConnectionGone())
 		return FALSE;
+
+	(void) VecReconcileVmemNoRaise();
+
 	return TRUE;
 }
 
@@ -3910,14 +3976,14 @@ ExecuteVecPlan(VecExecuteState *estate)
 			isok = garrow_execute_plan_start(estate->plan, &error);
 			if (!isok || error)
 				VEC_PLAN_ERROR("Start push-pipeline plan error: %s.",
-				               error ? error->message : "unknown");
+				               garrow_take_error(&error));
 			estate->started = true;
 		}
 
 		VecCheckForInterrupts(estate);
 		batch = garrow_record_batch_reader_read_next(estate->reader, &error);
 		if (error)
-			VEC_PLAN_ERROR("Push-pipeline read error: %s.", error->message);
+			VEC_PLAN_ERROR("Push-pipeline read error: %s.", garrow_take_error(&error));
 
 		return VecStorePlanBatch(estate->slot, batch);
 	}
@@ -3959,7 +4025,7 @@ ExecuteVecPlan(VecExecuteState *estate)
 			isok = garrow_execute_plan_start(estate->plan, &error);
 			if (!isok || error)
 				VEC_PLAN_ERROR("Start plan error: %s.",
-				               error ? error->message : "unknown");
+				               garrow_take_error(&error));
 			estate->started = true;
 			estate->yield_remaining =
 				garrow_execute_plan_get_yielded_batch_count(estate->plan);
@@ -3987,7 +4053,7 @@ ExecuteVecPlan(VecExecuteState *estate)
 			batch = garrow_record_batch_reader_read_next(estate->reader,
 														 &error);
 			if (error)
-				VEC_PLAN_ERROR("Read error: %s.", error->message);
+				VEC_PLAN_ERROR("Read error: %s.", garrow_take_error(&error));
 			estate->yield_remaining--;
 			return VecStorePlanBatch(estate->slot, batch);
 		}
@@ -3999,7 +4065,7 @@ ExecuteVecPlan(VecExecuteState *estate)
 						estate->plan, &error);
 			if (!isok || error)
 				VEC_PLAN_ERROR("Continue yielded error: %s.",
-				               error ? error->message : "unknown");
+				               garrow_take_error(&error));
 			estate->yield_remaining =
 				garrow_execute_plan_get_yielded_batch_count(estate->plan);
 			if (estate->yield_remaining > 0)
@@ -4008,7 +4074,7 @@ ExecuteVecPlan(VecExecuteState *estate)
 				batch = garrow_record_batch_reader_read_next(
 							estate->reader, &error);
 				if (error)
-					VEC_PLAN_ERROR("Read error: %s.", error->message);
+					VEC_PLAN_ERROR("Read error: %s.", garrow_take_error(&error));
 				estate->yield_remaining--;
 				return VecStorePlanBatch(estate->slot, batch);
 			}
@@ -4025,7 +4091,7 @@ ExecuteVecPlan(VecExecuteState *estate)
 		batch = garrow_record_batch_reader_read_next(estate->reader,
 													 &error);
 		if (error)
-			VEC_PLAN_ERROR("Read error: %s.", error->message);
+			VEC_PLAN_ERROR("Read error: %s.", garrow_take_error(&error));
 		return VecStorePlanBatch(estate->slot, batch);
 	}
 	else
@@ -4046,7 +4112,7 @@ ExecuteVecPlan(VecExecuteState *estate)
 			isok = garrow_execute_plan_start(estate->plan, &error);
 			if (!isok || error)
 				VEC_PLAN_ERROR("Start plan for vector plan error: %s.",
-				               error ? error->message : "unknown");
+				               garrow_take_error(&error));
 
 			/*
 			 * VEC-CANCEL-FIX: wait in slices so the query stays cancellable.
@@ -4075,14 +4141,14 @@ ExecuteVecPlan(VecExecuteState *estate)
 			}
 			if (error)
 				VEC_PLAN_ERROR("Execute plan for vector plan error: %s.",
-				               error->message);
+				               garrow_take_error(&error));
 		}
 
 		VecCheckForInterrupts(estate);
 		batch = garrow_record_batch_reader_read_next(estate->reader,
 													 &error);
 		if (error)
-			VEC_PLAN_ERROR("Read error: %s.", error->message);
+			VEC_PLAN_ERROR("Read error: %s.", garrow_take_error(&error));
 		return VecStorePlanBatch(estate->slot, batch);
 	}
 	pg_unreachable();
@@ -4208,7 +4274,7 @@ BuildSink(GArrowExecuteNode *input, VecExecuteState *estate, PlanBuildContext *p
 	garrow_store_ptr(pcontext->reader, sinkreader);
 
 	if (error)
-		elog(ERROR, "Failed to create sink node, cause: %s", error->message);
+		elog(ERROR, "Failed to create sink node, cause: %s", garrow_take_error(&error));
 }
 
 // is not distinct equals to  (a == b) or (a is null and b is null)
@@ -4496,14 +4562,14 @@ BuildSource(PlanBuildContext *pcontext)
 		&error);
 
 	if (error)
-		elog(ERROR, "Failed to create callback reader for source node, cause: %s.", error->message);
+		elog(ERROR, "Failed to create callback reader for source node, cause: %s.", garrow_take_error(&error));
 
 	options = garrow_source_node_options_new_record_batch_reader(reader);
 	source = garrow_execute_plan_build_source_node(pcontext->plan,
 												   options,
 												   &error);
 	if (error)
-		elog(ERROR, "Failed to create source node, cause: %s.", error->message);
+		elog(ERROR, "Failed to create source node, cause: %s.", garrow_take_error(&error));
 
 	/*
 	 * This source pulls batches from PG's ExecProcNode on the calling
@@ -4535,14 +4601,25 @@ BuildScanNode(PlanBuildContext *pcontext)
 													 pcontext->inputschema,
 													 qual_expr,
 													 &error);
+	/*
+	 * garrow_scan_node_options_new() only reads the C++ schema out of the
+	 * wrapper and keeps a shared_ptr of its own, so the wrapper is ours to
+	 * drop the moment that call returns.  Drop it here rather than at the end
+	 * of BuildScanPlan: the elog(ERROR)s below longjmp out of this frame, and
+	 * a GObject allocated outside any PostgreSQL memory context is not
+	 * reclaimed by the error machinery.
+	 */
+	if (pcontext->relation_schema != NULL)
+		ARROW_FREE(GArrowSchema, &pcontext->relation_schema);
+
 	if (error)
-		elog(ERROR, "Failed to create scan node, cause: %s.", error->message);
+		elog(ERROR, "Failed to create scan node, cause: %s.", garrow_take_error(&error));
 	scan_node = garrow_execute_plan_build_scan_node(pcontext->plan,
 													scan_node_options,
 													&error);
 	garrow_store_ptr(state->scan_node_options, scan_node_options);
 	if (error)
-		elog(ERROR, "Failed to create scan node, cause: %s.", error->message);
+		elog(ERROR, "Failed to create scan node, cause: %s.", garrow_take_error(&error));
 	return garrow_move_ptr(scan_node);
 }
 
@@ -4569,7 +4646,7 @@ BuildAggProject(List *targetList, List *aggInfos, GArrowExecuteNode *input, Plan
 													 project_options,
 													 &error);
 	if (error)
-		elog(ERROR, "Failed to create Arrow project node: %s.", error->message);
+		elog(ERROR, "Failed to create Arrow project node: %s.", garrow_take_error(&error));
 	return garrow_move_ptr(project);
 }
 
@@ -4676,7 +4753,7 @@ BuildProject(List *targetList, List *qualList, GArrowExecuteNode *input, PlanBui
 		options = garrow_limit_node_options_new(ls->offset, ls->count, ls->noCount);
 		limit = garrow_execute_plan_build_limit_node(pcontext->plan, current, options, &error);
 		if (error)
-			elog(ERROR, "Failed to create limit node, cause: %s", error->message);
+			elog(ERROR, "Failed to create limit node, cause: %s", garrow_take_error(&error));
 
 		garrow_store_ptr(current, limit);
 	}
@@ -4686,14 +4763,14 @@ BuildProject(List *targetList, List *qualList, GArrowExecuteNode *input, PlanBui
 	{
 		assertop_node = garrow_execute_plan_build_assertop_node(pcontext->plan, current, assertop_options, &error);
 		if (error)
-			elog(ERROR, "Failed to create assertop node, %s.", error->message);
+			elog(ERROR, "Failed to create assertop node, %s.", garrow_take_error(&error));
 		garrow_store_ptr(current, assertop_node);
 	}
 	else if (qualList)
 	{
 		filter_node = garrow_execute_plan_build_filter_node(pcontext->plan, current, filter_options, &error);
 		if (error)
-			elog(ERROR, "Failed to create filter node, %s.", error->message);
+			elog(ERROR, "Failed to create filter node, %s.", garrow_take_error(&error));
 		garrow_store_ptr(current, filter_node);
 	}
 
@@ -4705,7 +4782,7 @@ BuildProject(List *targetList, List *qualList, GArrowExecuteNode *input, PlanBui
 														 project_options,
 														 &error);
 		if (error)
-			elog(ERROR, "Failed to create Arrow project node: %s.", error->message);
+			elog(ERROR, "Failed to create Arrow project node: %s.", garrow_take_error(&error));
 		garrow_store_ptr(current, project);
 	}
 
@@ -4775,7 +4852,7 @@ build_join_project_options(List *hashkeys, GArrowExecuteNode *input, PlanBuildCo
 		arrow_expr = GARROW_EXPRESSION(garrow_field_expression_new(name, &error));
 		if (error)
 			elog(ERROR, "convert field to arrow expression failed: %s",
-				 error->message);
+				 garrow_take_error(&error));
 		expressions = garrow_list_append_ptr(expressions, arrow_expr);
 		names[j] = GetHashJoinProjectName(pcontext, name);
 	}
@@ -4921,7 +4998,7 @@ BuildJoinProject(List *hashkeys, GArrowExecuteNode *input, PlanBuildContext *pco
 													 project_options,
 													 &error);
 	if (error)
-		elog(ERROR, "Failed to create Arrow project node: %s.", error->message);
+		elog(ERROR, "Failed to create Arrow project node: %s.", garrow_take_error(&error));
 	return garrow_move_ptr(project);
 }
 
@@ -5028,7 +5105,7 @@ build_agg_project_options(List *targetList, List *aggInfos, PlanBuildContext *pc
 				garrow_field_expression_new(names[i], &error));
 		if (error)
 			elog(ERROR, "New arrow expression from column: %s error: %s",
-					names[i], error->message);
+					names[i], garrow_take_error(&error));
 		expressions = garrow_list_append_ptr(expressions, arrow_expr);
 	}
 	if (nkey > 0)
@@ -5059,7 +5136,7 @@ build_agg_project_options(List *targetList, List *aggInfos, PlanBuildContext *pc
 					garrow_field_expression_new(names[k], &error));
 			if (error)
 				elog(ERROR, "New arrow expression from column: %s error: %s",
-					 names[k], error->message);
+					 names[k], garrow_take_error(&error));
 			canon_expr = fix_numeric_key(field_expr, NUMERIC_KEY_TRIM);
 			expressions = garrow_list_append_ptr(expressions, canon_expr);
 			canon_name = psprintf(NUMERIC_CANON_KEY_PREFIX "%d", k);
@@ -5256,7 +5333,7 @@ build_windowagg_project_options(List *targetList, List *aggInfos, PlanBuildConte
 		arrow_expr = GARROW_EXPRESSION(garrow_field_expression_new(names[col], &error));
 		if (error)
 			elog(ERROR, "New arrow expression from column: %s error: %s",
-					names[i], error->message);
+					names[i], garrow_take_error(&error));
 		expressions = garrow_list_append_ptr(expressions, arrow_expr);
 		++col;
 	}
@@ -5424,7 +5501,7 @@ build_windowhashagg_project_options(List *targetList, List *aggInfos, PlanBuildC
 		arrow_expr = GARROW_EXPRESSION(garrow_field_expression_new(names[col], &error));
 		if (error)
 			elog(ERROR, "New arrow expression from column: %s error: %s",
-					names[i], error->message);
+					names[i], garrow_take_error(&error));
 		expressions = garrow_list_append_ptr(expressions, arrow_expr);
 		++col;
 	}
@@ -5453,7 +5530,7 @@ build_windowhashagg_project_options(List *targetList, List *aggInfos, PlanBuildC
 				garrow_field_expression_new(partcol_names[i], &error));
 		if (error)
 			elog(ERROR, "New arrow expression from column: %s error: %s",
-				 partcol_names[i], error->message);
+				 partcol_names[i], garrow_take_error(&error));
 		canon_expr = fix_numeric_key(field_expr, NUMERIC_KEY_TRIM);
 		expressions = garrow_list_append_ptr(expressions, canon_expr);
 		names[col] = psprintf(NUMERIC_CANON_KEY_PREFIX "%d", i);
@@ -5684,7 +5761,7 @@ build_project_options(List *targetList, PlanBuildContext *pcontext)
 			elog(ERROR,
 				 "sonic motion direct-send: build target_segment_col_name "
 				 "field_ref failed: %s",
-				 seg_err->message);
+				 garrow_take_error(&seg_err));
 
 		const gchar **names_extended =
 			palloc((length + 1) * sizeof(gchar *));
@@ -5876,7 +5953,7 @@ build_orderby_node(PlanState *planstate, GArrowExecutePlan *plan,  GArrowExecute
 	orderby_options = garrow_orderby_node_options_new(sortoption);
 	orderby_node = garrow_execute_plan_build_orderby_node(plan, input, orderby_options, &error);
 	if (error)
-		elog(ERROR, "Failed to create orderby node, cause: %s", error->message);
+		elog(ERROR, "Failed to create orderby node, cause: %s", garrow_take_error(&error));
 	garrow_list_free_ptr(&sort_keys);
 	return orderby_node;
 }
@@ -6011,7 +6088,7 @@ skip_topk_rf:
 	if (error)
 	{
 		garrow_list_free_ptr(&sort_keys);
-		elog(ERROR, "Failed to create topk node, cause: %s", error->message);
+		elog(ERROR, "Failed to create topk node, cause: %s", garrow_take_error(&error));
 	}
 
 	/*
@@ -6087,7 +6164,7 @@ build_partition_topk_node(PlanState *planstate, GArrowExecutePlan *plan,
 	{
 		garrow_list_free_ptr(&sort_keys);
 		elog(ERROR, "Failed to create partition_topk node, cause: %s",
-			 error->message);
+			 garrow_take_error(&error));
 	}
 
 	garrow_list_free_ptr(&sort_keys);
@@ -6511,7 +6588,7 @@ BuildAggregatation(List *aggInfos, GArrowExecuteNode *input, PlanBuildContext *p
 														options,
 														&error);
 	if (error)
-		elog(ERROR, "Failed to create agg node, cause: %s", error->message);
+		elog(ERROR, "Failed to create agg node, cause: %s", garrow_take_error(&error));
 
 	/* release agginfos to prevent building aggregations repeatedly*/
 	garrow_list_free_ptr(&aggregations);
@@ -6860,7 +6937,7 @@ build_aggregatation_options(GList *aggregations, PlanBuildContext *pcontext,
 			((VecAggState *) pcontext->planstate)->method = VEC_AGG_METHOD_SONIC;
 	}
 	if (error)
-		elog(ERROR, "Failed to create agg node options, cause: %s", error->message);
+		elog(ERROR, "Failed to create agg node options, cause: %s", garrow_take_error(&error));
 
 	if (pcontext->keys)
 		pfree(pcontext->keys);
@@ -7270,7 +7347,7 @@ BuildHashjoin(PlanBuildContext *pcontext, GArrowExecuteNode *left, GArrowExecute
 											  &error);
 	}
 	if (error)
-		elog(ERROR, "Failed to create the hashjoin node, cause: %s", error->message);
+		elog(ERROR, "Failed to create the hashjoin node, cause: %s", garrow_take_error(&error));
 
 	if (enable_sonic_hashjoin &&
 		is_sonic_join_compatible(type, node->hj_nonequijoin, joinqual,
@@ -7291,11 +7368,25 @@ BuildHashjoin(PlanBuildContext *pcontext, GArrowExecuteNode *left, GArrowExecute
 													 hashjoin_options, &error);
 		vnode->method = VEC_HJ_METHOD_NORMAL;
 	}
-	if (error)
-		elog(ERROR, "Failed to create the hashjoin node, cause: %s", error->message);
-
+	/*
+	 * The node build has returned, so the key lists have served their purpose
+	 * whether it succeeded or not.  Free them before the error check: the
+	 * elog(ERROR) below longjmps, and these GList nodes are plain malloc'd
+	 * links that PostgreSQL's error machinery knows nothing about.
+	 */
 	garrow_list_free_ptr(&pcontext->left_hashkeys);
 	garrow_list_free_ptr(&pcontext->right_hashkeys);
+	/*
+	 * keycmps carries GArrowJoinCmp enum values cast to gpointer, not objects,
+	 * so garrow_list_free_ptr() must not touch it -- that would unref an
+	 * integer.  Drop the link nodes and leave the data alone.
+	 */
+	while (keycmps != NULL)
+		keycmps = g_list_delete_link(keycmps, keycmps);
+
+	if (error)
+		elog(ERROR, "Failed to create the hashjoin node, cause: %s", garrow_take_error(&error));
+
 	return hashjoin_node;
 }
 
@@ -7557,13 +7648,13 @@ BuildNestLoopjoin(PlanBuildContext *pcontext, GArrowExecuteNode *left, GArrowExe
 	nest_loop_options =
 		garrow_nested_loop_join_node_options_new(type, filter_expr, "", "", &error);
 	if (error)
-		elog(ERROR, "Failed to create the nestedloopjoin node, cause: %s", error->message);
+		elog(ERROR, "Failed to create the nestedloopjoin node, cause: %s", garrow_take_error(&error));
 	nestedloopjoin_node =
 		garrow_execute_plan_build_nested_loop_join_node(pcontext->plan, left, right,
 														nest_loop_options, &error);
 
 	if (error)
-		elog(ERROR, "Failed to create the nestedloopjoin node, cause: %s", error->message);
+		elog(ERROR, "Failed to create the nestedloopjoin node, cause: %s", garrow_take_error(&error));
 	return nestedloopjoin_node;
 }
 
@@ -7598,86 +7689,113 @@ dummy_schema_xact_cb(XactEvent event, void *arg)
 	FreeDummySchema();
 }
 
+/*
+ * Hand the merged plan to the node's VecExecuteState.
+ *
+ * Takes ownership: garrow_execute_plan_merge_children() returns a new
+ * reference and this is the only place it is stored.  The slot is not empty
+ * either -- BuildVecPlan() put the pre-merge plan there -- so the store has
+ * to release what was in it.  This used to be a bare assignment, which left
+ * one GArrowExecutePlan behind per merge boundary (nine of them on a TPC-DS
+ * q8 execution), and dropped the merged plan outright on the two exits that
+ * take no node.
+ *
+ * Releasing the old plan is safe: ExecPlan::MergeChildren() pops every node
+ * out of the target and calls SetPlan(new_plan) on each one before adding it
+ * to the merged plan, so nothing points at the old plan once it returns.
+ * The ExecContext the nodes share lives in estate->exectx, not here, and is
+ * released separately by FreeVecExecuteState().
+ */
 static void
 SetArrowPlan(PlanState *ps, GArrowExecutePlan *plan)
 {
 	Assert(plan);
 
+	/*
+	 * Nobody takes the plan on these two exits, so it has to go back here --
+	 * garrow_execute_plan_merge_children() is (transfer full).
+	 */
 	if (ps == NULL)
+	{
+		ARROW_FREE(GArrowExecutePlan, &plan);
 		return;
+	}
 
 	if (IsA(ps, ResultState))
 	{
 		VecResultState *vrs = (VecResultState *)ps;
-		vrs->estate.plan = plan;
+		garrow_store_ptr(vrs->estate.plan, plan);
 	}
 	else if (IsA(ps, SubqueryScanState))
 	{
 		VecSubqueryScanState *vsss = (VecSubqueryScanState *)ps;
-		vsss->estate.plan = plan;
+		garrow_store_ptr(vsss->estate.plan, plan);
 	}
 	else if (IsA(ps, SortState))
 	{
 		VecSortState *vss = (VecSortState *)ps;
-		vss->estate.plan = plan;
+		garrow_store_ptr(vss->estate.plan, plan);
 	}
 	else if (IsA(ps, AggState))
 	{
 		VecAggState *vas = (VecAggState *)ps;
-		vas->estate.plan = plan;
+		garrow_store_ptr(vas->estate.plan, plan);
 	}
 	else if (IsA(ps, NestLoopState))
 	{
 		VecNestLoopState *vnls = (VecNestLoopState *)ps;
-		vnls->estate.plan = plan;
+		garrow_store_ptr(vnls->estate.plan, plan);
 	}
 	else if (IsA(ps, WindowAggState))
 	{
 		VecWindowAggState *vwas = (VecWindowAggState *)ps;
-		vwas->estate.plan = plan;
+		garrow_store_ptr(vwas->estate.plan, plan);
 	}
 	else if (IsA(ps, WindowHashAggState))
 	{
 		VecWindowHashAggState *vwhas = (VecWindowHashAggState *)ps;
-		vwhas->estate.plan = plan;
+		garrow_store_ptr(vwhas->estate.plan, plan);
 	}
 	else if (IsA(ps, HashJoinState))
 	{
 		VecHashJoinState *vhjs = (VecHashJoinState *)ps;
-		vhjs->estate.plan = plan;
+		garrow_store_ptr(vhjs->estate.plan, plan);
 	}
 	else if (IsA(ps, AssertOpState))
 	{
 		VecAssertOpState *vaos = (VecAssertOpState *)ps;
-		vaos->estate.plan = plan;
+		garrow_store_ptr(vaos->estate.plan, plan);
 	}
 	else if (IsA(ps, LimitState))
 	{
 		VecLimitState *vlimit = (VecLimitState *)ps;
-		vlimit->estate.plan = plan;
+		garrow_store_ptr(vlimit->estate.plan, plan);
 	}
 	else if (IsA(ps, SequenceState))
 	{
 		VecSequenceState *vseq = (VecSequenceState *)ps;
-		vseq->estate.plan = plan;
+		garrow_store_ptr(vseq->estate.plan, plan);
 	}
 	else if (IsA(ps, AppendState))
 	{
 		VecAppendState *vappend = (VecAppendState *)ps;
-		vappend->estate.plan = plan;
+		garrow_store_ptr(vappend->estate.plan, plan);
 	}
 	else if (IsA(ps, MaterialState))
 	{
 		VecMaterialState *vmat = (VecMaterialState *)ps;
-		vmat->estate.plan = plan;
+		garrow_store_ptr(vmat->estate.plan, plan);
 	}
 	else if (IsA(ps, ShareInputScanState))
 	{
 		VecShareInputScanState *vsis = (VecShareInputScanState *)ps;
-		vsis->estate.plan = plan;
+		garrow_store_ptr(vsis->estate.plan, plan);
 	}
 	else
+	{
+		ARROW_FREE(GArrowExecutePlan, &plan);
 		return;
+	}
 }
 
 VecExecuteState *
@@ -7832,7 +7950,7 @@ ExecVecSetTupleBound(int64 tuples_needed, PlanState *child_node, PlanState *limi
 			garrow_execute_plan_make_topk_node(sort_plan, GARROW_SELECTK_SINK_NODE_OPTIONS(node_options), &error);
 			if (error)
 			{
-				elog(DEBUG1, "Failed to set topk sort plan, cause: %s", error->message);
+				elog(DEBUG1, "Failed to set topk sort plan, cause: %s", garrow_take_error(&error));
 				return;
 			}
 			garrow_list_free_ptr(&keys);
@@ -8284,7 +8402,7 @@ PostBuildVecPlan(PlanState *ps, VecExecuteState *estate)
 	garrow_list_free_ptr(&child_plans);
 	if (error)
 	{
-		elog(LOG, "Failed to merge child plans, cause: %s", error->message);
+		elog(LOG, "Failed to merge child plans, cause: %s", garrow_take_error(&error));
 		list_free(child_estates);
 		list_free(child_pstates);
 		return;

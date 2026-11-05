@@ -310,7 +310,7 @@ RebuildRuntimeSchema(TupleTableSlot *slot)
 		if (!garrow_record_batch_is_null(batch))
 		{
 			if(!garrow_record_batch_rebuild_schema(batch, &error))
-				elog(ERROR, "Rebuild schema Error: %s", error->message);
+				elog(ERROR, "Rebuild schema Error: %s", garrow_take_error(&error));
 		}
 		schema = garrow_record_batch_get_schema(batch);
 	}

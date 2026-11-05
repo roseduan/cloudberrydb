@@ -174,3 +174,7 @@ test: hash_part_aocs partition_aggregate_aocs tuplesort_aocs explain_aocs memoiz
 # run stats by itself because its delay may be insufficient under heavy load
 #test: stats_aocs
 
+
+# contract and accounting semantics for arrow memory routed into PG
+test: vec_memory_pool
+test: vec_memory_accounting

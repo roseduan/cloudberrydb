@@ -176,7 +176,7 @@ CopyVarlena(uint8 *datump, ColDesc *coldesc)
 		valuesbuffer = garrow_buffer_new_default_mem(to_size, &error);
 
 		if (error)
-			elog(ERROR, "create new array buffer fail caused by %s", error->message);
+			elog(ERROR, "create new array buffer fail caused by %s", garrow_take_error(&error));
 
 		valuebytes = garrow_buffer_get_data(valuesbuffer);
 		ptmp = (void *)g_bytes_get_data(valuebytes, &size);

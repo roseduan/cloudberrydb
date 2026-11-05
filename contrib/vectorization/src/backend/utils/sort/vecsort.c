@@ -323,7 +323,7 @@ vecsort_performsort(VecTuplesortstate *state)
 		case TSS_INITIAL:
 			rs = garrow_execute_plan_start(GARROW_EXECUTE_PLAN(state->plan), &error);
 			if (!rs || error)
-				elog(ERROR, "Start plan for vector sort error: %s.", error->message);
+				elog(ERROR, "Start plan for vector sort error: %s.", garrow_take_error(&error));
 			/*
 			 * Do NOT wait for plan completion here.  The sort sink pushes
 			 * its entire output during finalize; with the bounded sink
@@ -353,7 +353,7 @@ vecsort_gettupleslot(VecTuplesortstate *state, bool forward, TupleTableSlot *slo
 
 	batch = garrow_record_batch_reader_read_next(state->sinkreader, &error);
 	if (error)
-		elog(ERROR, "vector sort read_next error: %s.", error->message);
+		elog(ERROR, "vector sort read_next error: %s.", garrow_take_error(&error));
 
 	slot = ExecStoreBatch(slot, batch);
 	if (batch)
@@ -365,7 +365,7 @@ vecsort_gettupleslot(VecTuplesortstate *state, bool forward, TupleTableSlot *slo
 		/* EOF: reap plan completion status (see vecsort_performsort). */
 		if (!garrow_execute_plan_wait(state->plan, &error) || error)
 			elog(ERROR, "Execute plan for vector plan error: %s.",
-				 error ? error->message : "unknown error");
+				 error ? garrow_take_error(&error) : "unknown error");
 		return false;
 	}
 }

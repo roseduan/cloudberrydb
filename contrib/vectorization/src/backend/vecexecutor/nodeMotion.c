@@ -50,7 +50,7 @@ get_segment_recordbatch_take(void *org_recordbatch, Datum filter)
 	if (error != NULL)
 	{
 		elog(ERROR, "%s take recordbatch fail caused by %s",
-				 __FUNCTION__, error->message);
+				 __FUNCTION__, garrow_take_error(&error));
 	}
 
 	 return (void*)garrow_move_ptr(rrb);
@@ -154,7 +154,7 @@ init_hash_projector(MotionState *node, GArrowSchema *schema)
 		g_autoptr(GGandivaProjector) projector = ggandiva_projector_new(schema, exprs, &error);
 
 		if (error)
-			elog(ERROR, "Failed to initialize hash projector, cause: %s", error->message);
+			elog(ERROR, "Failed to initialize hash projector, cause: %s", garrow_take_error(&error));
 
 		garrow_store_ptr(vnode->hash_projector, projector);
 
@@ -188,7 +188,7 @@ motion_rewrite_numeric_type_schema(MotionState *node, TupleTableSlot *outerTuple
 					garrow_store_func(schema, garrow_schema_replace_field(schema, variable->varattno - 1, field, &error));
 					if (error)
 						elog(ERROR, "failed to rewrite motion schema field %d: %s",
-							 variable->varattno, error->message);
+							 variable->varattno, garrow_take_error(&error));
 				}
 				else if(variable->vartype == TIMESTAMPOID ||
 						variable->vartype == TIMESTAMPTZOID ||
@@ -200,7 +200,7 @@ motion_rewrite_numeric_type_schema(MotionState *node, TupleTableSlot *outerTuple
 					garrow_store_func(schema, garrow_schema_replace_field(schema, variable->varattno - 1, field, &error));
 					if (error)
 						elog(ERROR, "failed to rewrite motion schema field %d: %s",
-							 variable->varattno, error->message);
+							 variable->varattno, garrow_take_error(&error));
 				}
 				break;
 			}
@@ -364,7 +364,7 @@ hashAndSendVec_vechash(Motion *motion, MotionState *node, TupleTableSlot *outerT
 			if (rm_err != NULL)
 				elog(ERROR,
 					 "sonic motion direct-send: remove_column failed: %s",
-					 rm_err->message);
+					 garrow_take_error(&rm_err));
 			if (target_seg < 0 || target_seg >= cdbhash->base.numsegs)
 				elog(ERROR,
 					 "sonic motion direct-send: target_segment %d out of range [0, %d)",
@@ -485,7 +485,7 @@ init_random_const_template(uint32 segnums, int rows, MotionState *node)
 			{
 				garrow_array_builder_reset(GARROW_ARRAY_BUILDER(uint32_array_builder));
 				elog(ERROR, "%s append value for random const template array fail caused by %s",
-						__FUNCTION__, error->message);
+						__FUNCTION__, garrow_take_error(&error));
 			}
 		}
 
@@ -497,7 +497,7 @@ init_random_const_template(uint32 segnums, int rows, MotionState *node)
 		{
 			garrow_array_builder_reset(GARROW_ARRAY_BUILDER(uint32_array_builder));
 			elog(ERROR, "%s finish value for random const template array fail caused by %s",
-					__FUNCTION__, error->message);
+					__FUNCTION__, garrow_take_error(&error));
 		}
 	}
 
@@ -1408,6 +1408,13 @@ ExecEndVecMotion(MotionState *node)
 		ARROW_FREE(GArrowTable, &vnode->unsorted_table);
 	if (vnode->sort_options)
 		ARROW_FREE(GArrowSortOptions, &vnode->sort_options);
+	/*
+	 * The sorted receiver builds this reader over sorted_table and keeps it
+	 * for the rest of the execution.  The table beside it is released here;
+	 * the reader never was.
+	 */
+	if (vnode->reader)
+		ARROW_FREE(GArrowTableBatchReader, &vnode->reader);
 
 	/*
 	 * shut down the subplan
@@ -1915,16 +1922,16 @@ execVecMotionSortedReceiver(MotionState *node)
 
 		vnode->unsorted_table = garrow_table_new_record_batches_list(vnode->schema, vnode->unsorted_batches, &error);
 		if (error)
-			elog(ERROR, "can not form table from batches for merge sort : %s", error->message);
+			elog(ERROR, "can not form table from batches for merge sort : %s", garrow_take_error(&error));
 		vnode->sorted_table = garrow_table_merge_sort(vnode->unsorted_table, vnode->sort_options, &error);
 		if (error)
-			elog(ERROR, "can not execute merge sort : %s", error->message);
+			elog(ERROR, "can not execute merge sort : %s", garrow_take_error(&error));
 		vnode->reader = garrow_table_batch_reader_new(vnode->sorted_table);
 	}  
 
 	batch = garrow_record_batch_reader_read_next(GARROW_RECORD_BATCH_READER(vnode->reader), &error);
 	if (error)
-		elog(ERROR, "table read next error for merge sort: %s", error->message);
+		elog(ERROR, "table read next error for merge sort: %s", garrow_take_error(&error));
 	node->numTuplesToParent++;
 	if (!batch) {
 		return NULL;

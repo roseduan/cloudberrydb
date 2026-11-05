@@ -50,5 +50,11 @@ bool enable_sonic_hashjoin = false;
 bool enable_vec_pipeline = false;
 int backpressure_memory_mb = 256;
 
+/* Ceiling on arrow memory per query; 0 leaves it unconstrained. */
+int query_memory_limit_mb = 0;
+
+/* Whether arrow's memory is reported to the GPDB vmem tracker. */
+bool report_memory_to_vmem = false;
+
 bool enable_window_hash_agg = true;
 bool enable_partition_topk = true;

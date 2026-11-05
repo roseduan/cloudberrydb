@@ -1051,7 +1051,7 @@ readtup_batch(Tuplestorestate *state, unsigned int len)
 	buffer = garrow_buffer_new_default_mem(tupbodylen, &error);
 	if (error)
 		elog(ERROR, "Allocate deserialize buffer from defualt pool failed: %s",
-				error->message);
+				garrow_take_error(&error));
 
 	gbytes = garrow_buffer_get_data(buffer);
 	data = (void *) g_bytes_get_data(gbytes, &data_szie);

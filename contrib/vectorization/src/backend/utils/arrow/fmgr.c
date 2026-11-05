@@ -609,7 +609,7 @@ FunctionCall1Args(const char *fname, void *arg1)
 
 	if (error != NULL)
 		ereport(ERROR, (errcode(ERRCODE_INTERNAL_ERROR),
-				 errmsg("%s: %s", __FUNCTION__, error->message)));
+				 errmsg("%s: %s", __FUNCTION__, garrow_take_error(&error))));
 
 	garrow_list_free_ptr(&args);
 
@@ -638,7 +638,7 @@ FunctionCall2Args(const char *fname, void *arg1, void *arg2)
 
 	if (error != NULL)
 		ereport(ERROR, (errcode(ERRCODE_INTERNAL_ERROR),
-				 errmsg("%s: %s", __FUNCTION__, error->message)));
+				 errmsg("%s: %s", __FUNCTION__, garrow_take_error(&error))));
 
 	garrow_list_free_ptr(&args);
 
@@ -670,7 +670,7 @@ FunctionCall3Args(const char *fname, void *arg1, void *arg2, void* arg3)
 
 	if (error != NULL)
 		ereport(ERROR, (errcode(ERRCODE_INTERNAL_ERROR),
-				 errmsg("%s: %s", __FUNCTION__, error->message)));
+				 errmsg("%s: %s", __FUNCTION__, garrow_take_error(&error))));
 
 	garrow_list_free_ptr(&args);
 
@@ -718,7 +718,7 @@ Datum DirectCallVecFunc2ArgsAndU32ArrayRes(const char *fname, void *arg1, void *
                 uint32_cast_array = GARROW_UINT32_ARRAY(
                                 garrow_array_cast(array, GARROW_DATA_TYPE(uint32_cast_type), option, &error));
                 if (error)
-                        elog(ERROR, "Fail to cast hash to uint32 array, cause: %s", error->message);
+                        elog(ERROR, "Fail to cast hash to uint32 array, cause: %s", garrow_take_error(&error));
                 garrow_store_func(result, garrow_array_datum_new(GARROW_ARRAY(uint32_cast_array)));
         }
 
@@ -751,7 +751,7 @@ Datum DirectCallVecFunc3ArgsAndU32ArrayRes(const char *fname,
                 uint32_cast_array = GARROW_UINT32_ARRAY(
                                 garrow_array_cast(array, GARROW_DATA_TYPE(uint32_cast_type), option, &error));
                 if (error)
-                        elog(ERROR, "Fail to cast hash to uint32 array, cause: %s", error->message);
+                        elog(ERROR, "Fail to cast hash to uint32 array, cause: %s", garrow_take_error(&error));
                 garrow_store_func(result, garrow_array_datum_new(GARROW_ARRAY(uint32_cast_array)));
         }
 

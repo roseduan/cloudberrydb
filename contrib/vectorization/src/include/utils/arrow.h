@@ -125,6 +125,41 @@ do { \
 #define ARROW_FREE_BATCH(P) ARROW_FREE(GArrowRecordBatch, P)
 
 /*
+ * Take the message out of a GError, and free the GError.
+ *
+ * glib allocates a GError with g_malloc, outside every PostgreSQL
+ * MemoryContext, so the usual
+ *
+ *     if (error)
+ *         elog(ERROR, "...: %s", error->message);
+ *
+ * leaks it: elog(ERROR) longjmps out, and the abort that follows resets the
+ * memory contexts -- which this object was never in.  g_autoptr does not help
+ * either, because a longjmp skips the scope cleanup it relies on.
+ *
+ * The message is copied into the current context before the GError is freed,
+ * so the caller can still print it; that copy is reclaimed by the same abort.
+ *
+ * Returns "unknown" when there is no error, which is the word the callers
+ * that wrote `error ? error->message : "unknown"` already used.
+ */
+static inline char *
+garrow_take_error(GError **error)
+{
+	char	   *message;
+
+	if (error == NULL || *error == NULL)
+		return pstrdup("unknown");
+
+	message = pstrdup((*error)->message);
+	g_error_free(*error);
+	*error = NULL;
+
+	return message;
+}
+
+
+/*
  * get GArrowXxx pointer form struct member P.
  *
  * Return value must be g_autoptr(GArrowXxx) type.
@@ -267,7 +302,7 @@ AppendDatumToColDesc(ColDesc *coldesc, void *datump)
 		{
 			if (!garrow_string_array_builder_append_string((GArrowStringArrayBuilder *)coldesc->values,
 					(gchar*)datump, &error))
-				elog(ERROR, "append %s as string failed: %s", (gchar*)datump, error->message);
+				elog(ERROR, "append %s as string failed: %s", (gchar*)datump, garrow_take_error(&error));
 		}
 		else
 			elog(ERROR, "invalid type to append: %d", coldesc->type);

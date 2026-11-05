@@ -67,6 +67,7 @@
 #include "vecexecutor/execAmi.h"
 #include "vecexecutor/execslot.h"
 #include "utils/fmgr_vec.h"
+#include "utils/wrapper.h"
 
 /* ----------------------------------------------------------------
  *		ExecResult(node)
@@ -162,15 +163,23 @@ ExecVecResult(PlanState *pstate)
 		 */
 		if (node->hashFilter && !TupIsNull(candidateOutputSlot))
 		{
-			GError *error = NULL;
+			g_autoptr(GError) error = NULL;
 			g_autoptr(GArrowArrayDatum) filter_datum = NULL;
 			g_autoptr(GArrowBooleanArray) filter_array = NULL;
 			g_autoptr(GArrowRecordBatch)  filter_batch = NULL;
+			/*
+			 * evalHashKeyVec() hands over a reference, and get_segment_filter()
+			 * only borrows what it is given, so without an owner here the
+			 * segment array stays allocated for the life of the backend.  It is
+			 * held the same way hval_reduce is held by filter_datum below.
+			 */
+			g_autoptr(GArrowDatum) hval_datum = NULL;
 			Datum hval = (Datum)0;
 			Datum hval_reduce = (Datum)0;
 			g_autoptr(GArrowRecordBatch) result_batch = garrow_copy_ptr(GetBatch(candidateOutputSlot));
 			g_autoptr(GArrowRecordBatch) hash_batch = garrow_record_batch_copy_with_schema(result_batch, vnode->hash_schema);
 			hval = evalHashKeyVec(vnode->hash_projector, hash_batch, (VecCdbHash *) node->hashFilter, GetNumRows(candidateOutputSlot));
+			hval_datum = GARROW_DATUM(DatumGetPointer(hval));
 			hval_reduce =  get_segment_filter(GpIdentity.segindex, hval);
 			filter_datum = GARROW_ARRAY_DATUM(DatumGetPointer(hval_reduce));
 			filter_array = GARROW_BOOLEAN_ARRAY(garrow_datum_get_array(filter_datum));
@@ -178,7 +187,7 @@ ExecVecResult(PlanState *pstate)
 			/* A NULL batch would read as the end of the data. */
 			if (error)
 				elog(ERROR, "failed to filter the result batch by segment: %s",
-					 error->message);
+					 garrow_take_error(&error));
 			ExecStoreBatch(candidateOutputSlot, filter_batch);
 		}
 		return candidateOutputSlot;
@@ -246,7 +255,7 @@ ExecInitHashFilter(ResultState *node)
 		GList *exprs = garrow_list_append_ptr(NULL, expr);
 		g_autoptr(GGandivaProjector) projector = ggandiva_projector_new(hash_schema, exprs, &error);
 		if (error)
-			elog(ERROR, "Failed to initialize hash projector, cause: %s", error->message);
+			elog(ERROR, "Failed to initialize hash projector, cause: %s", garrow_take_error(&error));
 		VecResultState *vnode = (VecResultState *) node;
 		garrow_store_ptr(vnode->hash_projector, projector);
 		garrow_store_ptr(vnode->hash_schema, hash_schema);
@@ -359,6 +368,44 @@ ExecEndVecResult(ResultState *node)
 	FreeVecExecuteState(&vnode->estate);
 	if (vnode->hash_schema != NULL)
 		g_clear_object((GObject **) &vnode->hash_schema);
+
+	/*
+	 * The hash filter's Gandiva projector is built once per node and carries a
+	 * compiled LLVM module with it.  ExecEndVecMotion releases its own the same
+	 * way; this one was never released, so every execution left the module
+	 * behind.
+	 */
+	if (vnode->hash_projector != NULL)
+	{
+		free_prj_project(&vnode->hash_projector);
+		vnode->hash_projector = NULL;
+	}
+
+	/*
+	 * evalHashKeyVec() parks one of the projector's output arrays in the
+	 * hash's hasharray and keeps it there.  ExecEndVecMotion releases its
+	 * own the same way; without this the array -- which is as wide as the
+	 * batch -- is left behind once per execution.
+	 */
+	if (node->hashFilter != NULL)
+	{
+		VecCdbHash *vechash = (VecCdbHash *) node->hashFilter;
+
+		ARROW_FREE(GArrowArray, &vechash->hasharray);
+
+		/*
+		 * makeVecCdbHash() builds one GArrowScalarDatum per segment up front
+		 * and parks the array in segmapping_scalar.  ExecEndVecMotion walks
+		 * that array and releases each one; this node never did, so a filter
+		 * with as many segments as the slice left that many objects behind on
+		 * every execution.  numsegs is the count makeVecCdbHash was given.
+		 */
+		if (vechash->segmapping_scalar != NULL)
+		{
+			for (int i = 0; i < node->hashFilter->numsegs; i++)
+				ARROW_FREE(GArrowScalar, &vechash->segmapping_scalar[i]);
+		}
+	}
 
 	/*
 	 * shut down subplans

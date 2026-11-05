@@ -113,7 +113,7 @@ vec_fast_mode(void *hash, int32 num_segments)
 	dt = GARROW_DATA_TYPE(garrow_uint32_data_type_new());
 	uint32_array = garrow_array_cast(GARROW_ARRAY(hash), dt, cast_options, &error);
 	if (error)
-		elog(ERROR, "Fail to cast hash to uint32 array, cause: %s", error->message);	
+		elog(ERROR, "Fail to cast hash to uint32 array, cause: %s", garrow_take_error(&error));	
 
 	/* cast to double array */
 	double_cast_type = GARROW_DOUBLE_DATA_TYPE(garrow_double_data_type_new());
@@ -139,7 +139,7 @@ vec_fast_mode(void *hash, int32 num_segments)
 			 DatumGetPointer(garrow_function_execute(func, args, NULL, NULL, &error)));
 
 	if (error)
-		elog(ERROR, "vec_fast_mode arrow function error: %s", error->message);
+		elog(ERROR, "vec_fast_mode arrow function error: %s", garrow_take_error(&error));
      
 	garrow_list_free_ptr(&args);
 	PG_VEC_RETURN_POINTER(result_array_datum);
@@ -169,7 +169,7 @@ vec_lazy_mode(void *hash, int32 num_segments)
 	dt = GARROW_DATA_TYPE(garrow_uint32_data_type_new());
 	uint32_array = garrow_array_cast(GARROW_ARRAY(hash), dt, cast_options, &error);
 	if (error)
-		elog(ERROR, "Fail to cast hash to uint32 array, cause: %s", error->message);	
+		elog(ERROR, "Fail to cast hash to uint32 array, cause: %s", garrow_take_error(&error));	
 
 	/* cast to double array */
 	double_cast_type = GARROW_DOUBLE_DATA_TYPE(garrow_double_data_type_new());
@@ -195,7 +195,7 @@ vec_lazy_mode(void *hash, int32 num_segments)
 			 DatumGetPointer(garrow_function_execute(func, args, NULL, NULL, &error)));
 
 	if (error)
-		elog(ERROR, "vec_fast_mode arrow function error: %s", error->message);
+		elog(ERROR, "vec_fast_mode arrow function error: %s", garrow_take_error(&error));
      
 	garrow_list_free_ptr(&args);
 	PG_VEC_RETURN_POINTER(result_array_datum);   
@@ -222,7 +222,7 @@ vec_arrow_jump_consistent_hash(void *hash, int32 num_segments)
         dt = GARROW_DATA_TYPE(garrow_uint32_data_type_new());
         uint32_array = garrow_array_cast(GARROW_ARRAY(hash), dt, cast_options, &error);
         if (error)
-                elog(ERROR, "Fail to cast hash to uint32 array, cause: %s", error->message);
+                elog(ERROR, "Fail to cast hash to uint32 array, cause: %s", garrow_take_error(&error));
 
 
         hash_array_datum = GARROW_ARRAY_DATUM(garrow_array_datum_new(GARROW_ARRAY(uint32_array)));
@@ -242,7 +242,7 @@ vec_arrow_jump_consistent_hash(void *hash, int32 num_segments)
                                                 DatumGetPointer(garrow_function_execute(func, args, NULL, NULL, &error)));
 
         if (error)
-                elog(ERROR, "vec_arrow_jump_consistent_hash arrow function error: %s", error->message);
+                elog(ERROR, "vec_arrow_jump_consistent_hash arrow function error: %s", garrow_take_error(&error));
 
 	garrow_list_free_ptr(&args);
         PG_VEC_RETURN_POINTER(result_array_datum);
@@ -319,7 +319,7 @@ evalHashKeyVec(void *projector, void *recordbatch, VecCdbHash *h, int rows)
 
 	rs = ggandiva_projector_evaluate(projector, recordbatch, &error);
 	if (error)
-		elog(ERROR, "Failed to evaluate hash32 projector, cause: %s", error->message);
+		elog(ERROR, "Failed to evaluate hash32 projector, cause: %s", garrow_take_error(&error));
 
 	array = garrow_list_nth_data(rs, 0);
 
@@ -345,7 +345,7 @@ evalHashKeyVec(void *projector, void *recordbatch, VecCdbHash *h, int rows)
 		if (error)
 		{
 			elog(ERROR, "%s copy data buffer fail caused by %s",
-					__FUNCTION__, error->message);
+					__FUNCTION__, garrow_take_error(&error));
 		}
 
 		reconstructed_array = garrow_uint32_array_new(size,

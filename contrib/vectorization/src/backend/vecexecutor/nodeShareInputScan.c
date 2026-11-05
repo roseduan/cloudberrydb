@@ -742,6 +742,22 @@ ExecEndVecShareInputScan(ShareInputScanState *node)
 	}
 
 	/*
+	 * Release this node's own Arrow plan.  It is built in
+	 * ExecInitVecShareInputScan and run by ExecVecShareInputScan to fill the
+	 * tuplestore above, and it is finished with once that store is gone --
+	 * the sharing between slices goes through the store, not through the
+	 * plan, so no other scanner can still be reading from it here.
+	 *
+	 * Every other vectorized node frees its VecExecuteState in its End
+	 * function; this one did not, so each ShareInputScan kept its whole
+	 * Arrow plan -- hash join row tables, result materialization buffers and
+	 * all -- alive for the rest of the backend's life.  A session running
+	 * TPC-DS queries with CTEs grew by tens of megabytes per statement
+	 * because of it.
+	 */
+	FreeVecExecuteState(&((VecShareInputScanState *) node)->estate);
+
+	/*
 	 * shutdown subplan.  First scanner of underlying share input will
 	 * do the shutdown, all other scanners are no-op because outerPlanState
 	 * is NULL
@@ -1163,17 +1179,39 @@ shareinput_reader_notifydone_vec(shareinput_Xslice_reference *ref, int nconsumer
 }
 
 /*
+ * How long the producer keeps waiting for the consumer slices once the query
+ * is already being torn down after an error, and how finely that wait is cut
+ * up.
+ *
+ * On the teardown path the consumers are aborting as well, so most of them
+ * will never report done.  The wait is kept only so that a consumer which is a
+ * few instructions short of reporting can finish normally, rather than having
+ * the share's files removed underneath it by the cleanup that follows this
+ * barrier.  Waiting any longer than that cannot help: ExecutorRunWrapper()
+ * holds interrupts off around the teardown, so CHECK_FOR_INTERRUPTS() inside
+ * the sleep is a no-op and nothing else can ever end the wait.  The backend
+ * then hangs for good -- the QD stays in cdbdisp_checkDispatchResult(), the
+ * gang stays pinned, and neither pg_cancel_backend() nor pg_terminate_backend()
+ * reaches it.
+ */
+#define SHAREINPUT_WAITDONE_ABORT_MS	1000
+#define SHAREINPUT_WAITDONE_SLICE_MS	100
+
+/*
  * shareinput_writer_waitdone_vec
  *
  *  Called by the writer (producer) to wait for the "done" notification from
  *  all readers (consumers).
  *
- *  This is a blocking operation.
+ *  This is a blocking operation, except while the plan is being torn down
+ *  after an error, where it is bounded (see above).
  */
 static void
 shareinput_writer_waitdone_vec(shareinput_Xslice_reference *ref, int nconsumers)
 {
 	shareinput_Xslice_state *state = ref->xslice_state;
+	bool		aborting = VecPlanTeardownInProgress();
+	int			waited_ms = 0;
 
 	int ready = pg_atomic_read_u32(&state->ready);
 	if (!ready)
@@ -1192,7 +1230,26 @@ shareinput_writer_waitdone_vec(shareinput_Xslice_reference *ref, int nconsumers)
 			elog(DEBUG1, "SISC WRITER (shareid=%d, slice=%d): waiting for DONE message from %d / %d readers",
 				 ref->share_id, currentSliceId, nconsumers - ndone, nconsumers);
 
-			ConditionVariableSleep(&state->ready_done_cv, WAIT_EVENT_SHAREINPUT_SCAN);
+			if (aborting)
+			{
+				if (waited_ms >= SHAREINPUT_WAITDONE_ABORT_MS)
+				{
+					ConditionVariableCancelSleep();
+					ereport(WARNING,
+							(errmsg("ShareInputScan producer stopped waiting for %d of %d consumer slices",
+									nconsumers - ndone, nconsumers),
+							 errdetail("The query is being torn down after an error, so those slices are "
+									   "aborting and will not report that they are done.")));
+					return;
+				}
+
+				(void) ConditionVariableTimedSleep(&state->ready_done_cv,
+												   SHAREINPUT_WAITDONE_SLICE_MS,
+												   WAIT_EVENT_SHAREINPUT_SCAN);
+				waited_ms += SHAREINPUT_WAITDONE_SLICE_MS;
+			}
+			else
+				ConditionVariableSleep(&state->ready_done_cv, WAIT_EVENT_SHAREINPUT_SCAN);
 
 			continue;
 		}
