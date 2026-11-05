@@ -148,13 +148,17 @@ doubleRangeExcluded(int strat, double mn, double mx, double c)
 {
 	if (std::isnan(c))			/* NaN comparisons: keep (don't prune) */
 		return false;
+	/*
+	 * > and >= keep: PG sorts NaN above every number, so NaN rows satisfy
+	 * them, but Parquet (and ORC) min/max leave NaN out.  A row group holding
+	 * {0.5, NaN} has max 0.5, and "f > 1" used to skip it.  NaN never
+	 * satisfies <, <= or = against a number, so those stay prunable.
+	 */
 	switch (strat)
 	{
 		case BTLessStrategyNumber:			return mn >= c;
 		case BTLessEqualStrategyNumber:		return mn >  c;
 		case BTEqualStrategyNumber:			return c < mn || c > mx;
-		case BTGreaterEqualStrategyNumber:	return mx <  c;
-		case BTGreaterStrategyNumber:		return mx <= c;
 		default:							return false;
 	}
 }

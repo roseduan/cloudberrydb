@@ -34,9 +34,32 @@ public abstract class BaseTreePruner implements TreeVisitor {
 
     protected final Logger LOG = LoggerFactory.getLogger(this.getClass());
 
+    /**
+     * Drops a NOT whose subtree would lose any operator.  Pruning keeps the
+     * filter no stricter than the query only outside a NOT: dropping an AND
+     * operand widens the AND, but NOT (A AND X) reduced to NOT (A) is
+     * narrower, and data skipped by it is never read.
+     */
     @Override
     public Node before(Node node, int level) {
+        if (node instanceof OperatorNode
+                && ((OperatorNode) node).getOperator() == NOT
+                && !keepsAll(node)) {
+            LOG.debug("NOT {} will be pruned because part of it is not supported", node);
+            return null;
+        }
         return node;
+    }
+
+    /* Whether visit() keeps every operator in this subtree unchanged. */
+    private boolean keepsAll(Node node) {
+        if (node == null) {
+            return true;
+        }
+        if (node instanceof OperatorNode && visit(node, 0) != node) {
+            return false;
+        }
+        return keepsAll(node.getLeft()) && keepsAll(node.getRight());
     }
 
     @Override

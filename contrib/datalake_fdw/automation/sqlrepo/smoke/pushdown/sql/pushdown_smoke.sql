@@ -157,6 +157,88 @@ SELECT id, name FROM pushdown_test WHERE category = 'electronics' ORDER BY id;
 SET datalake.disable_filter_pushdown = off;
 
 -- ============================================================
+-- Test 12: an OR or NOT with a branch the filter cannot express
+-- ============================================================
+-- The agent skips data files the pushed filter rules out, so the filter
+-- must never be stricter than the WHERE clause.  An unsupported branch
+-- (IS DISTINCT FROM, IS TRUE) used to be dropped from inside its OR/NOT,
+-- leaving "id = 1" alone (NOT is rewritten to OR first); the file holding
+-- the other row was then skipped.  Two INSERTs give each row its own
+-- data file.
+CREATE ICEBERG TABLE pushdown_or_test (id int, b int);
+INSERT INTO pushdown_or_test VALUES (1, 0);
+INSERT INTO pushdown_or_test VALUES (100, 5);
+
+SELECT * FROM pushdown_or_test WHERE id = 1 OR b IS DISTINCT FROM 0 ORDER BY id;
+SELECT * FROM pushdown_or_test WHERE id = 1 OR (b = 5) IS TRUE ORDER BY id;
+SELECT * FROM pushdown_or_test WHERE NOT (id <> 1 AND b IS DISTINCT FROM 5) ORDER BY id;
+-- Under AND the supported part is still pushed: same rows either way.
+SELECT * FROM pushdown_or_test WHERE (id = 1 AND b IS DISTINCT FROM 7) OR b = 5 ORDER BY id;
+
+DROP TABLE pushdown_or_test;
+
+-- ============================================================
+-- Test 13: comparisons file bounds cannot decide the way PG does
+-- ============================================================
+-- Each of these skipped a file holding a matching row, or raised an error:
+--   1    char(n) ignores trailing spaces, file bounds compare bytes
+--   2-3  text bounds are in byte order, a non-C collation is not
+--        ('a' < 'B' under en_US)
+--   4-5  the agent rounds a float8 constant to the float4 column
+--   6    bool ordering raised "unsupported data type"
+--   7    an IN list holding a NULL raised an error
+--   8    extra_float_digits = 0 sent 0.30000000000000004 as 0.3
+--   9-10 bounds leave NaN out, but NaN satisfies "> 1" in PG
+-- Rows differ by collation, so compare against pushdown off -- both the
+-- agent's file pruning and the reader's row group pruning -- instead of
+-- listing them.  Rows 1 and 2 get a data file each.
+CREATE ICEBERG TABLE pushdown_type_test (id int, c3 char(3), tx text, f4 float4,
+                                         bo boolean, f8 float8);
+INSERT INTO pushdown_type_test VALUES (1, 'a', 'B', 0.1, true, 0.3);
+INSERT INTO pushdown_type_test VALUES (2, 'b', 'a', 2.5, false, 5);
+-- Lake tables are distributed randomly, so put 30 of each in: every
+-- segment's data file then holds both 0.5 and NaN.
+INSERT INTO pushdown_type_test
+    SELECT 3, 'c', 'c', 3, false, CASE WHEN g % 2 = 0 THEN 0.5 ELSE 'NaN'::float8 END
+    FROM generate_series(1, 60) g;
+
+SET extra_float_digits = 0;
+CREATE TEMP VIEW pushdown_type_q AS
+    SELECT 1 AS q, array_agg(id ORDER BY id) AS ids FROM pushdown_type_test WHERE c3 = 'a  '
+    UNION ALL SELECT 2, array_agg(id ORDER BY id) FROM pushdown_type_test WHERE tx > 'a'
+    UNION ALL SELECT 3, array_agg(id ORDER BY id) FROM pushdown_type_test WHERE tx < 'B'
+    UNION ALL SELECT 4, array_agg(id ORDER BY id) FROM pushdown_type_test WHERE f4 > 0.1::float8
+    UNION ALL SELECT 5, array_agg(id ORDER BY id) FROM pushdown_type_test WHERE f4 < 2.5000001::float8
+    UNION ALL SELECT 6, array_agg(id ORDER BY id) FROM pushdown_type_test WHERE bo < true
+    UNION ALL SELECT 7, array_agg(id ORDER BY id) FROM pushdown_type_test WHERE id IN (1, NULL)
+    UNION ALL SELECT 8, array_agg(id ORDER BY id) FROM pushdown_type_test WHERE f8 < 0.30000000000000004
+    UNION ALL SELECT 9, array_agg(id ORDER BY id) FROM pushdown_type_test WHERE f8 > 1
+    UNION ALL SELECT 10, array_agg(id ORDER BY id) FROM pushdown_type_test WHERE 1 < f8;
+
+SET datalake.iceberg_enable_predicate_pushdown = off;
+SET gp_external_enable_filter_pushdown = off;
+CREATE TEMP TABLE pushdown_type_expected AS SELECT * FROM pushdown_type_q
+    DISTRIBUTED RANDOMLY;
+RESET datalake.iceberg_enable_predicate_pushdown;
+RESET gp_external_enable_filter_pushdown;
+
+SELECT e.q, a.ids IS NOT DISTINCT FROM e.ids AS same_as_without_pushdown
+FROM pushdown_type_expected e JOIN pushdown_type_q a USING (q)
+ORDER BY e.q;
+RESET extra_float_digits;
+
+DROP TABLE pushdown_type_expected;
+DROP VIEW pushdown_type_q;
+DROP TABLE pushdown_type_test;
+
+-- 'a' = ANY(arr) tests whether the array column holds 'a', not an IN list
+-- over a column; it used to raise "unsupported data type (25)" while the
+-- filter was built, so an empty table is enough.
+CREATE ICEBERG TABLE pushdown_any_test (id int, arr text[]);
+SELECT count(*) FROM pushdown_any_test WHERE 'a' = ANY(arr);
+DROP TABLE pushdown_any_test;
+
+-- ============================================================
 -- Cleanup
 -- ============================================================
 DROP TABLE IF EXISTS pushdown_test;

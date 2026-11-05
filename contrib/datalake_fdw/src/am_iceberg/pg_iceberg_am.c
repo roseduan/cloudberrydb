@@ -744,9 +744,10 @@ pg_iceberg_build_scan_am_private(Relation rel, struct PlanState *ps, int random_
 	 * Predicate pushdown: serialize the scan node's restriction quals into the
 	 * dlproxy filter wire format so the agent can prune whole Iceberg data
 	 * files via manifest column bounds at planning time.  serializeDlProxyFilterQuals
-	 * is all-or-nothing -- it returns NULL if any qual is unsupported -- so a
-	 * non-NULL result encodes the full AND of the scan restriction and can
-	 * never drop a matching file.  The executor still re-applies plan->qual.
+	 * sends only what the quals imply -- an unsupported AND argument is left
+	 * out, an OR or NOT with any unsupported part is left out whole -- so the
+	 * filter may keep files the quals reject but never drops a matching one.
+	 * The executor still re-applies plan->qual.
 	 */
 	if (pg_iceberg_enable_predicate_pushdown &&
 		ps != NULL && ps->plan != NULL && ps->plan->qual != NIL &&

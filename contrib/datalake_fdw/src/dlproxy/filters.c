@@ -25,19 +25,32 @@
 #include "filters.h"
 
 #include "catalog/pg_operator.h"
+#include "common/shortest_dec.h"
+#include "mb/pg_wchar.h"
+#include "miscadmin.h"
+#include "nodes/makefuncs.h"
 #include "optimizer/clauses.h"
 #include "parser/parse_expr.h"
+#include "utils/array.h"
 #include "utils/builtins.h"
 #include "utils/guc.h"
 #include "utils/lsyscache.h"
+#include "utils/pg_locale.h"
 
 static List *make_expression_items_list(List *quals, Node *parent);
+static List *pushable_quals(List *quals);
+static Node *pushable_qual(Node *node, bool exact);
+static bool pushable_leaf(Node *node);
 static void free_filter(FilterDesc * filter);
 static char *serialize_filter_list(List *filters);
 static bool opexpr_to_dlproxyfilter(OpExpr *expr, FilterDesc * filter);
 static bool scalar_array_op_expr_to_dlproxyfilter(ScalarArrayOpExpr *expr, FilterDesc * filter);
 static bool var_to_dlproxyfilter(Var *var, FilterDesc * filter);
 static bool supported_filter_type(Oid type);
+static bool supported_collation(Oid inputcollid, OperatorCode op);
+static bool const_array_has_nulls(Const *constval);
+static bool float_ordering_supported(Node *leftop, Node *rightop,
+									 OperatorCode op);
 static bool supported_operator_type_op_expr(Oid type, FilterDesc * filter);
 static bool supported_operator_type_scalar_array_op_expr(Oid type, FilterDesc * filter, bool useOr);
 static void scalar_const_to_str(Const *constval, StringInfo buf);
@@ -85,7 +98,11 @@ dbop_dlproxyop_map supported_opr_op_expr[] =
 	{665 /* text_le */ , OP_LE},
 	{667 /* text_ge */ , OP_GE},
 	{531 /* textlt	*/ , OP_NE},
-	{1209 /* textlike  */ , OP_LIKE},
+
+	/*
+	 * No textlike: no agent plugin prunes on LIKE (Iceberg and Hudi both
+	 * leave it out), so sending it only cost the agent a pruning step.
+	 */
 
 	/* int2 to int4 */
 	{Int24EqualOperator /* int24eq */ , OP_EQ},
@@ -135,21 +152,12 @@ dbop_dlproxyop_map supported_opr_op_expr[] =
 	{1873 /* int82ge */ , OP_GE},
 	{1869 /* int82ne */ , OP_NE},
 
-	/* date */
-	{DateEqualOperator /* date_eq */ , OP_EQ},
-	{1095 /* date_lt */ , OP_LT},
-	{1097 /* date_gt */ , OP_GT},
-	{1096 /* date_le */ , OP_LE},
-	{1098 /* date_ge */ , OP_GE},
-	{1094 /* date_ne */ , OP_NE},
-
-	/* timestamp */
-	{TimestampEqualOperator /* timestamp_eq */ , OP_EQ},
-	{2062 /* timestamp_lt */ , OP_LT},
-	{2064 /* timestamp_gt */ , OP_GT},
-	{2063 /* timestamp_le */ , OP_LE},
-	{2065 /* timestamp_ge */ , OP_GE},
-	{2061 /* timestamp_ne */ , OP_NE},
+	/*
+	 * No date or timestamp.  The agent turns these constants into
+	 * java.sql.Date/Timestamp, which Iceberg cannot make a literal from, so
+	 * it dropped the whole filter: "i8 = 1 AND ts > ..." pruned nothing.
+	 * Leaving them out keeps the rest of an AND pushed.
+	 */
 
 	/* float8 */
 	{Float8EqualOperator /* float8eq */ , OP_EQ},
@@ -159,29 +167,30 @@ dbop_dlproxyop_map supported_opr_op_expr[] =
 	{675 /* float8ge */ , OP_GE},
 	{671 /* float8ne */ , OP_NE},
 
-	/* float48 */
+	/*
+	 * float48: = only.  The agent rounds the float8 constant to the float4
+	 * column type, while PG widens the column to float8, so an ordering can
+	 * flip: 0.1::float4 > 0.1::float8 holds in PG, yet the rounded constant
+	 * equals the file's max and the file was skipped.  An equal pair survives
+	 * the rounding, since the constant is then exactly a float4.  <> is
+	 * left out, see float_ordering_supported().
+	 */
 	{1120 /* float48eq */ , OP_EQ},
-	{1122 /* float48lt */ , OP_LT},
-	{1123 /* float48gt */ , OP_GT},
-	{1124 /* float48le */ , OP_LE},
-	{1125 /* float48ge */ , OP_GE},
-	{1121 /* float48ne */ , OP_NE},
 
-	/* boolean */
-	{BooleanEqualOperator /* booleq */ , OP_EQ},
-	{58 /* boollt */ , OP_LT},
-	{59 /* boolgt */ , OP_GT},
-	{1694 /* boolle */ , OP_LE},
-	{1695 /* boolge */ , OP_GE},
-	{85 /* boolne */ , OP_NE},
+	/*
+	 * No boolean operators.  scalar_const_to_str() has no bool case, so
+	 * "b < true" raised an internal error, and the agent would read the
+	 * constant's text 't' as false anyway.  The planner already folds
+	 * "b = true" into a bare Var, which var_to_dlproxyfilter() pushes.
+	 */
 
-	/* bpchar */
-	{BpcharEqualOperator /* bpchareq */ , OP_EQ},
-	{1058 /* bpcharlt */ , OP_LT},
-	{1060 /* bpchargt */ , OP_GT},
-	{1059 /* bpcharle */ , OP_LE},
-	{1061 /* bpcharge */ , OP_GE},
-	{1057 /* bpcharne */ , OP_NE},
+	/*
+	 * No bpchar.  PG ignores trailing spaces when comparing char(n), so
+	 * c = 'a  ' matches a stored 'a'; the agent compares the constant with
+	 * file bounds byte for byte and skipped that file.  Trimming the constant
+	 * would not do either: other engines (Spark among them) store char(n)
+	 * padded, and then a trimmed constant misses instead.
+	 */
 };
 
 dbop_dlproxyop_array_map supported_opr_scalar_array_op_expr[] =
@@ -216,11 +225,7 @@ dbop_dlproxyop_array_map supported_opr_scalar_array_op_expr[] =
 	/* int8 to int2 */
 	{Int82EqualOperator /* int82eq */ , OP_IN, true},
 
-	/* date */
-	{DateEqualOperator /* date_eq */ , OP_IN, true},
-
-	/* timestamp */
-	{TimestampEqualOperator /* timestamp_eq */ , OP_IN, true},
+	/* No date or timestamp, see supported_opr_op_expr. */
 
 	/* float8 */
 	{Float8EqualOperator /* float8eq */ , OP_IN, true},
@@ -228,8 +233,7 @@ dbop_dlproxyop_array_map supported_opr_scalar_array_op_expr[] =
 	/* float48 */
 	{1120 /* float48eq */ , OP_IN, true},
 
-	/* bpchar */
-	{BpcharEqualOperator /* bpchareq */ , OP_IN, true},
+	/* No bpchar, for the reason given in supported_opr_op_expr. */
 };
 
 
@@ -278,6 +282,163 @@ free_expression_items_list(List *expressionItems)
 			expressionItems = list_delete_ptr(expressionItems, expressionItem);
 		}
 	}
+}
+
+/*
+ * pushable_quals
+ *
+ * Return the part of a scan's quals (an implicit AND) that can be serialized,
+ * such that every row the quals accept is also accepted by the result.  The
+ * agent drops whole files that cannot match the filter it is sent, so a
+ * filter stricter than the quals loses rows: the executor re-applies the
+ * quals, but only to the files it was given.
+ *
+ * make_expression_items_list() used to skip an unsupported node wherever it
+ * stood.  Under an AND that only weakens the filter, which is safe; under an
+ * OR it turned "a = 1 OR b IS DISTINCT FROM 0" into "a = 1", and the files
+ * holding only rows for the other branch were never read.
+ */
+static List *
+pushable_quals(List *quals)
+{
+	List	   *result = NIL;
+	ListCell   *lc;
+
+	foreach(lc, quals)
+	{
+		Node	   *pushable = pushable_qual((Node *) lfirst(lc), false);
+
+		if (pushable != NULL)
+			result = lappend(result, pushable);
+	}
+
+	return result;
+}
+
+/*
+ * pushable_qual
+ *
+ * The serializable part of one qual, or NULL when none of it can be sent.
+ *
+ * With exact false, the result may accept more rows than node does, never
+ * fewer: an AND keeps the arguments it can serialize, and an OR survives only
+ * if each of its arguments does.  Under a NOT the direction flips -- a weaker
+ * argument makes the NOT stricter -- so its argument must be serialized
+ * exactly (exact true), which no dropped argument anywhere below allows.
+ */
+static Node *
+pushable_qual(Node *node, bool exact)
+{
+	BoolExpr   *expr;
+	List	   *args = NIL;
+	ListCell   *lc;
+
+	if (node == NULL)
+		return NULL;
+
+	check_stack_depth();
+
+	if (!IsA(node, BoolExpr))
+		return pushable_leaf(node) ? node : NULL;
+
+	expr = (BoolExpr *) node;
+	switch (expr->boolop)
+	{
+		case AND_EXPR:
+			foreach(lc, expr->args)
+			{
+				Node	   *arg = pushable_qual((Node *) lfirst(lc), exact);
+
+				if (arg != NULL)
+					args = lappend(args, arg);
+				else if (exact)
+					return NULL;
+			}
+			if (args == NIL)
+				return NULL;
+			if (list_length(args) == 1)
+				return (Node *) linitial(args);
+			break;
+
+		case OR_EXPR:
+			foreach(lc, expr->args)
+			{
+				Node	   *arg = pushable_qual((Node *) lfirst(lc), exact);
+
+				if (arg == NULL)
+					return NULL;
+				args = lappend(args, arg);
+			}
+
+			/*
+			 * make_expression_items_list() emits n-1 operators for n
+			 * arguments, so a one-argument AND or OR would leave its argument
+			 * without an operator to join it to its parent.
+			 */
+			if (list_length(args) == 1)
+				return (Node *) linitial(args);
+			break;
+
+		case NOT_EXPR:
+			{
+				Node	   *arg;
+
+				arg = pushable_qual((Node *) linitial(expr->args), true);
+				if (arg == NULL)
+					return NULL;
+				args = list_make1(arg);
+			}
+			break;
+
+		default:
+			return NULL;
+	}
+
+	return (Node *) makeBoolExpr(expr->boolop, args, expr->location);
+}
+
+/*
+ * pushable_leaf
+ *
+ * Whether serialize_filter_list() can serialize this non-boolean node: the
+ * same checks it applies, run on a scratch FilterDesc.
+ */
+static bool
+pushable_leaf(Node *node)
+{
+	FilterDesc *filter;
+	bool		ok;
+
+	switch (nodeTag(node))
+	{
+		case T_Var:
+		case T_OpExpr:
+		case T_ScalarArrayOpExpr:
+			break;
+		case T_NullTest:
+			{
+				NullTest   *test = (NullTest *) node;
+				Var		   *var = (Var *) test->arg;
+
+				return test->arg != NULL && IsA(test->arg, Var) &&
+					var->varattno > InvalidAttrNumber &&
+					supported_filter_type(var->vartype);
+			}
+		default:
+			return false;
+	}
+
+	filter = (FilterDesc *) palloc0(sizeof(FilterDesc));
+	if (IsA(node, Var))
+		ok = var_to_dlproxyfilter((Var *) node, filter);
+	else if (IsA(node, OpExpr))
+		ok = opexpr_to_dlproxyfilter((OpExpr *) node, filter);
+	else
+		ok = scalar_array_op_expr_to_dlproxyfilter((ScalarArrayOpExpr *) node,
+												   filter);
+	free_filter(filter);
+
+	return ok;
 }
 
 /*
@@ -738,6 +899,9 @@ opexpr_to_dlproxyfilter(OpExpr *expr, FilterDesc * filter)
 	if (!supported_operator_type_op_expr(expr->opno, filter))
 		return false;
 
+	if (!supported_collation(expr->inputcollid, filter->op))
+		return false;
+
 	if (IsA(leftop, RelabelType))
 	{
 		/*
@@ -765,6 +929,9 @@ opexpr_to_dlproxyfilter(OpExpr *expr, FilterDesc * filter)
 			rightop = (Node *)exprNode;
 		}
 	}
+
+	if (!float_ordering_supported(leftop, rightop, filter->op))
+		return false;
 
 	/* arguments must be VAR and CONST */
 	if (IsA(leftop, Var) && IsA(rightop, Const))
@@ -828,6 +995,17 @@ scalar_array_op_expr_to_dlproxyfilter(ScalarArrayOpExpr *expr, FilterDesc * filt
 	if (!supported_operator_type_scalar_array_op_expr(expr->opno, filter, expr->useOr))
 		return false;
 
+	if (!supported_collation(expr->inputcollid, filter->op))
+		return false;
+
+	/*
+	 * list_const_to_str() deconstructs the array without a nulls array, which
+	 * raises an error for "x IN (1, NULL)".  The array is always the second
+	 * argument of a ScalarArrayOpExpr.
+	 */
+	if (IsA(rightop, Const) && const_array_has_nulls((Const *) rightop))
+		return false;
+
 	if (IsA(leftop, Var) &&IsA(rightop, Const))
 	{
 		filter->l.opcode = ATTR_CODE;
@@ -841,20 +1019,6 @@ scalar_array_op_expr_to_dlproxyfilter(ScalarArrayOpExpr *expr, FilterDesc * filt
 		filter->r.conststr = makeStringInfo();
 		list_const_to_str((Const *) rightop, filter->r.conststr);
 		filter->r.consttype = ((Const *) rightop)->consttype;
-	}
-	else if (IsA(leftop, Const) &&IsA(rightop, Var))
-	{
-		filter->l.opcode = LIST_CONST_CODE;
-		filter->l.attnum = InvalidAttrNumber;
-		filter->l.conststr = makeStringInfo();
-		list_const_to_str((Const *) leftop, filter->l.conststr);
-		filter->l.consttype = ((Const *) leftop)->consttype;
-
-		filter->r.opcode = ATTR_CODE;
-		filter->r.attnum = ((Var *) rightop)->varattno;
-		filter->r.consttype = InvalidOid;
-		if (filter->r.attnum <= InvalidAttrNumber)
-			return false;		/* system attr not supported */
 	}
 	else
 	{
@@ -1073,6 +1237,95 @@ supported_filter_type(Oid type)
 	return false;
 }
 
+/*
+ * supported_collation
+ *
+ * Whether a string comparison under this collation can be pushed.
+ *
+ * The filter travels to the agent inside a JSON request, which must be
+ * UTF-8: in a LATIN1 database "t = 'é'" made the agent reject the request
+ * and the query failed.  Converting the constant would not help, since this
+ * database writes strings to its files without conversion.  So no string
+ * comparison is pushed unless the server encoding is UTF-8.
+ *
+ * The agent prunes by comparing the constant with file bounds, and those
+ * order strings by their bytes.  Under en_US.UTF-8 'a' < 'B', the bytes say
+ * otherwise, and "t > 'a'" skipped a file holding only 'B'.  So an ordering
+ * is pushed only under a C collation, and equality (=, <>, IN) only under a
+ * deterministic one, where equal means byte-equal.  A comparison of
+ * non-string types has no collation.
+ */
+static bool
+supported_collation(Oid inputcollid, OperatorCode op)
+{
+	if (!OidIsValid(inputcollid))
+		return true;
+
+	if (GetDatabaseEncoding() != PG_UTF8)
+		return false;
+
+	switch (op)
+	{
+		case OP_LT:
+		case OP_GT:
+		case OP_LE:
+		case OP_GE:
+			return lc_collate_is_c(inputcollid);
+		default:
+			return get_collation_isdeterministic(inputcollid);
+	}
+}
+
+/*
+ * float_ordering_supported
+ *
+ * Whether a comparison of a float column can be pushed.  PG sorts NaN above
+ * every number, so NaN rows satisfy "f > c" and "f >= c", but file bounds
+ * leave NaN out: a file holding {0.5, NaN} has upper bound 0.5, and "f > 1"
+ * skipped it.  The same goes for <>, which Hudi prunes when a file's min and
+ * max both equal the constant, NaN rows aside; Iceberg never prunes on <>,
+ * so it buys nothing anyway.  NaN never satisfies <, <= or = against a
+ * number, so only those are pushed.  A constant on the left reverses the
+ * direction.
+ */
+static bool
+float_ordering_supported(Node *leftop, Node *rightop, OperatorCode op)
+{
+	Node	   *var = IsA(leftop, Var) ? leftop : rightop;
+	Oid			vartype = exprType(var);
+
+	if (vartype != FLOAT4OID && vartype != FLOAT8OID)
+		return true;
+
+	if (!IsA(leftop, Var))
+	{
+		if (op == OP_GT)
+			op = OP_LT;
+		else if (op == OP_GE)
+			op = OP_LE;
+		else if (op == OP_LT)
+			op = OP_GT;
+		else if (op == OP_LE)
+			op = OP_GE;
+	}
+
+	return op == OP_LT || op == OP_LE || op == OP_EQ;
+}
+
+/*
+ * const_array_has_nulls
+ *
+ * Whether an array constant is NULL or holds a NULL element.
+ */
+static bool
+const_array_has_nulls(Const *constval)
+{
+	if (constval->constisnull)
+		return true;
+
+	return array_contains_nulls(DatumGetArrayTypeP(constval->constvalue));
+}
+
 static bool
 supported_operator_type_op_expr(Oid type, FilterDesc * filter)
 {
@@ -1145,6 +1398,31 @@ scalar_const_to_str(Const *constval, StringInfo buf)
 	getTypeOutputInfo(constval->consttype,
 					  &typoutput, &typIsVarlena);
 
+	/*
+	 * Floats are printed in their shortest exact form.  float4out/float8out
+	 * follow extra_float_digits, and below 1 they round: at 0,
+	 * "f < 0.30000000000000004" went out as "f < 0.3" and skipped a file
+	 * whose only row was 0.3.
+	 */
+	if (constval->consttype == FLOAT8OID)
+	{
+		char		fbuf[DOUBLE_SHORTEST_DECIMAL_LEN];
+
+		double_to_shortest_decimal_buf(DatumGetFloat8(constval->constvalue),
+									   fbuf);
+		appendStringInfoString(buf, fbuf);
+		return;
+	}
+	if (constval->consttype == FLOAT4OID)
+	{
+		char		fbuf[FLOAT_SHORTEST_DECIMAL_LEN];
+
+		float_to_shortest_decimal_buf(DatumGetFloat4(constval->constvalue),
+									  fbuf);
+		appendStringInfoString(buf, fbuf);
+		return;
+	}
+
 	extval = OidOutputFunctionCall(typoutput, constval->constvalue);
 
 	switch (constval->consttype)
@@ -1152,8 +1430,6 @@ scalar_const_to_str(Const *constval, StringInfo buf)
 		case INT2OID:
 		case INT4OID:
 		case INT8OID:
-		case FLOAT4OID:
-		case FLOAT8OID:
 		case NUMERICOID:
 		case TEXTOID:
 		case VARCHAROID:
@@ -1313,6 +1589,14 @@ serializeDlProxyFilterQuals(List *quals)
 	char *result = NULL;
 	List *expressionItems;
 
+	if (quals == NIL)
+		return result;
+
+	/*
+	 * Keep only what can be sent without making the filter stricter than the
+	 * quals; see pushable_quals().
+	 */
+	quals = pushable_quals(quals);
 	if (quals == NIL)
 		return result;
 
