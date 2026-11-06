@@ -449,6 +449,132 @@ initAgentCliHandle(IcebergCatalogFdwState *fdwState, IcebergCatalogState *catalo
 }
 
 /*
+ * Does this member name look like it holds a secret?
+ *
+ * Matched on the name rather than the path, because the request carries
+ * credentials under several nodes and gains new ones over time: the volume,
+ * the catalog (Polaris client_secret, REST sigv4 and oauth2), and whatever
+ * the user put in fileIOConfig, which arrives as its own JSON and uses
+ * Iceberg's property names ("s3.secret-access-key") rather than ours
+ * ("secret_access_key").  A list of paths misses a node every time one is
+ * added; that is how catalog and fileIO came to be logged in the clear.
+ *
+ * '-' is folded to '_' so one marker covers both spellings, and the match is
+ * a substring so a prefixed property ("s3.access-key-id") is caught too.
+ */
+static bool
+isSecretFieldName(const char *name)
+{
+    /*
+     * Spelled without separators, because the separator is what varies.  The
+     * same credential reaches this document as access_key_id from our own
+     * builders, as s3.access-key-id from an Iceberg property map, as
+     * fs.s3a.access.key from a Hadoop one and as accessKeyId from the OSS
+     * connector; stripping everything that is not a letter or a digit makes
+     * those one string.
+     */
+    static const char *const markers[] = {
+        "secret", "password", "passwd", "token", "credential",
+        "accesskey", "accountkey", "privatekey", "sessionkey", "apikey",
+    };
+    char       *norm;
+    size_t      n = 0;
+    bool        found = false;
+
+    if (name == NULL)
+        return false;
+
+    /*
+     * No fixed buffer: a truncated name stops matching a marker that sits
+     * past the cut, and nothing bounds a JSON member name from user DDL.
+     */
+    norm = (char *) palloc(strlen(name) + 1);
+    for (const char *p = name; *p != '\0'; p++)
+        if (isalnum((unsigned char) *p))
+            norm[n++] = pg_tolower((unsigned char) *p);
+    norm[n] = '\0';
+
+    for (size_t i = 0; i < lengthof(markers); i++)
+        if (strstr(norm, markers[i]) != NULL)
+        {
+            found = true;
+            break;
+        }
+
+    pfree(norm);
+    return found;
+}
+
+/*
+ * Replace every string whose member name looks like a secret, anywhere in the
+ * document.  Only strings are replaced: a flag such as vended_credentials is
+ * a boolean and says nothing on its own, and keeping it readable is worth
+ * more in a log than hiding it.
+ *
+ * The depth cap is for the user-supplied fileIOConfig, the one part of this
+ * document that is not built here.
+ */
+#define DATALAKEFDW_MASK_MAX_DEPTH 64
+
+static void
+maskSecretsInPlace(agentcli_cJSON *node, int depth)
+{
+    agentcli_cJSON *child;
+
+    if (node == NULL || depth > DATALAKEFDW_MASK_MAX_DEPTH)
+        return;
+
+    for (child = node->child; child != NULL; child = child->next)
+    {
+        /*
+         * A name that matches is replaced whatever its value is.  Descending
+         * into it would look at the names inside -- which do not match, and
+         * which an array does not even have -- and print the secret anyway:
+         *   "credentials": {"id": "AKIA...", "key": "..."}
+         *   "tokens": ["eyJ..."]
+         *
+         * A container too deep to walk is replaced for the same reason: the
+         * alternative is printing a subtree nobody looked at.
+         */
+        if (isSecretFieldName(child->string) ||
+            ((agentcli_cJSON_IsObject(child) || agentcli_cJSON_IsArray(child)) &&
+             depth + 1 > DATALAKEFDW_MASK_MAX_DEPTH))
+        {
+            agentcli_cJSON *holder = agentcli_cJSON_CreateObject();
+            agentcli_cJSON *redacted = agentcli_cJSON_CreateString("**");
+
+            /*
+             * The replacement has to carry the member name, and
+             * ReplaceItemViaPointer does not set one -- it is meant for
+             * arrays, and an object member replaced through it comes out
+             * named "".  Naming it by adding it to a throwaway object lets
+             * cJSON copy the name with its own allocator; going through
+             * ReplaceItemInObject instead would look the name up again and
+             * hit the first member of that name, which is not necessarily
+             * this one.
+             */
+            if (holder == NULL || redacted == NULL)
+            {
+                agentcli_cJSON_Delete(holder);
+                agentcli_cJSON_Delete(redacted);
+                continue;
+            }
+
+            agentcli_cJSON_AddItemToObject(holder, child->string, redacted);
+            agentcli_cJSON_DetachItemViaPointer(holder, redacted);
+            agentcli_cJSON_Delete(holder);
+
+            agentcli_cJSON_ReplaceItemViaPointer(node, child, redacted);
+            child = redacted;
+            continue;
+        }
+
+        if (agentcli_cJSON_IsObject(child) || agentcli_cJSON_IsArray(child))
+            maskSecretsInPlace(child, depth + 1);
+    }
+}
+
+/*
  * Mask sensitive data in JSON string for logging
  */
 static char *
@@ -459,21 +585,17 @@ maskSensitiveDataInJson(const char *jsonString)
 
     agentcli_cJSON *parsed = agentcli_cJSON_Parse(jsonString);
     if (!parsed)
-        return pstrdup(jsonString);
-
-    agentcli_cJSON *icebergConfig = agentcli_cJSON_GetObjectItem(parsed, DATALAKEFDW_ICEBERG_KEY_ICEBERGCONFIG);
-    if (icebergConfig)
     {
-        agentcli_cJSON *volumeConfig = agentcli_cJSON_GetObjectItem(icebergConfig, DATALAKEFDW_ICEBERG_KEY_ICEBERG_VOLUME_CONFIG);
-        if (volumeConfig)
-        {
-            if (agentcli_cJSON_GetObjectItem(volumeConfig, DATALAKEFDW_ICEBERG_KEY_ACCESS_KEY_ID))
-                agentcli_cJSON_ReplaceItemInObject(volumeConfig, DATALAKEFDW_ICEBERG_KEY_ACCESS_KEY_ID, agentcli_cJSON_CreateString("**"));
-
-            if (agentcli_cJSON_GetObjectItem(volumeConfig, DATALAKEFDW_ICEBERG_KEY_SECRET_ACCESS_KEY))
-                agentcli_cJSON_ReplaceItemInObject(volumeConfig, DATALAKEFDW_ICEBERG_KEY_SECRET_ACCESS_KEY, agentcli_cJSON_CreateString("**"));
-        }
+        /*
+         * Handed back as it stands.  Both callers pass a document this file
+         * built, so reaching this means the caller is not passing a request
+         * at all; a caller that might pass something holding a credential
+         * would need this to fail closed instead.
+         */
+        return pstrdup(jsonString);
     }
+
+    maskSecretsInPlace(parsed, 0);
 
     char *masked_json = agentcli_cJSON_PrintUnformatted(parsed);
     char *result = pstrdup(masked_json);
@@ -2524,7 +2646,18 @@ iceberg_catalog_create_catalog(CreateForeignCatalogStmt *createCatalogStmt)
 
 	char *catalog_json = build_create_catalog_json(options, volumeOpt);
 
-	elog(DEBUG1, "iceberg_catalog_create_catalog: JSON request:\n%s", catalog_json);
+	if (log_min_messages <= DEBUG1 || client_min_messages <= DEBUG1)
+	{
+		/*
+		 * build_create_catalog_json() runs the same catalog builder as the
+		 * scan and modify paths, so this document carries the Polaris
+		 * client_secret and the REST credentials too (#481).
+		 */
+		char	   *masked_json = maskSensitiveDataInJson(catalog_json);
+
+		elog(DEBUG1, "iceberg_catalog_create_catalog: JSON request:\n%s", masked_json);
+		pfree(masked_json);
+	}
 
 	PG_TRY();
 	{

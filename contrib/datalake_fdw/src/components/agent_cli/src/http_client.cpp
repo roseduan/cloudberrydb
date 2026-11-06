@@ -254,11 +254,16 @@ HttpResponse HttpClient::perform_single_request(const HttpRequest& request) {
         LOG_DEBUG("URL: " + request.url);
         LOG_DEBUG("Method: " + request.method);
         if (!request.body.empty()) {
-            if (request.body.size() > 1024) {
-                LOG_DEBUG("Body: " + request.body.substr(0, 1024) + "... (truncated)");
-            } else {
-                LOG_DEBUG("Body: " + request.body);
-            }
+            /*
+             * Not the body itself.  It is the request document the caller
+             * built, credentials and all -- the catalog's client_secret, the
+             * volume's access keys, whatever the user put in fileIOConfig --
+             * and the database masks it before its own log but cannot reach
+             * this one (#481).  The Authorization header a few lines down is
+             * redacted for the same reason; the size is what is actually
+             * useful here.
+             */
+            LOG_DEBUG("Body: ***REDACTED*** (" + std::to_string(request.body.size()) + " bytes)");
         }
     }
 
@@ -276,9 +281,7 @@ HttpResponse HttpClient::perform_single_request(const HttpRequest& request) {
         if (!request.body.empty()) {
             curl_easy_setopt(curl_handle_, CURLOPT_POSTFIELDS, request.body.c_str());
             curl_easy_setopt(curl_handle_, CURLOPT_POSTFIELDSIZE, request.body.length());
-            if (Logger::instance().is_debug_enabled()) {
-                LOG_DEBUG(request.body);
-            }
+            /* redacted above, and not length-capped here either (#481) */
         }
     } else if (request.method == "GET") {
         curl_easy_setopt(curl_handle_, CURLOPT_HTTPGET, 1L);
