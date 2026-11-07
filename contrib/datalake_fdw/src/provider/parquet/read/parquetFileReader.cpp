@@ -3,6 +3,7 @@
 #include "parquetFileReader.h"
 #include "parquetInputStream.h"
 #include "src/provider/common/datalake_numeric.h"
+#include "src/provider/common/common.h"
 #include "src/provider/common/parquet_scanner_guard.h"
 
 
@@ -525,18 +526,45 @@ Datum parquetFileReader::read(Oid typeOid, int column_index, bool &isNull, int &
                     {
                         return 0;
                     }
-                    if (values.len > BUFFER_LENGTH)
+                    /*
+                     * A Parquet string is UTF-8 by the format's definition and
+                     * a PG text datum must be valid in the database encoding,
+                     * so validate (and convert where the two differ) instead of
+                     * copying the bytes as they lie.  bytea is exempt: it is
+                     * bytes, not text.
+                     */
+                    const char *bytes = (const char *) values.ptr;
+                    int         nbytes = (int) values.len;
+                    char       *conv = NULL;
+
+                    if (typeOid != BYTEAOID)
                     {
-                        bytea *result = (bytea*)palloc(values.len + VARHDRSZ);
-                        memcpy(VARDATA(result), values.ptr, values.len);
-                        SET_VARSIZE(result, values.len + VARHDRSZ);
+                        conv = gpdbAnyToServer(bytes, nbytes, PG_UTF8, &nbytes);
+                        bytes = conv;
+                    }
+
+                    /*
+                     * The shared column buffer is BUFFER_LENGTH bytes and
+                     * the else leg writes VARHDRSZ + nbytes into it, so the
+                     * header has to be part of the test: at nbytes exactly
+                     * BUFFER_LENGTH the old form overran it by VARHDRSZ.
+                     */
+                    if (nbytes + (int) VARHDRSZ > BUFFER_LENGTH)
+                    {
+                        bytea *result = (bytea*)palloc(nbytes + VARHDRSZ);
+                        memcpy(VARDATA(result), bytes, nbytes);
+                        SET_VARSIZE(result, nbytes + VARHDRSZ);
+                        if (conv != NULL && conv != (const char *) values.ptr)
+                            pfree(conv);
                         return PointerGetDatum(result);
                     }
                     else
                     {
                         dataBuffer* ptr = options.buffer.getDataBuffer(column_index);
-                        memcpy(VARDATA(ptr->buffer), values.ptr, values.len);
-                        SET_VARSIZE(ptr->buffer, values.len + VARHDRSZ);
+                        memcpy(VARDATA(ptr->buffer), bytes, nbytes);
+                        SET_VARSIZE(ptr->buffer, nbytes + VARHDRSZ);
+                        if (conv != NULL && conv != (const char *) values.ptr)
+                            pfree(conv);
                         return PointerGetDatum(ptr->buffer);
                     }
                 }

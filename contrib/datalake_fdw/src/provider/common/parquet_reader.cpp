@@ -582,20 +582,43 @@ ParquetReader::readPrimitive(const TypeInfo &typInfo, bool &isNull)
 			if (isNull)
 				PG_RETURN_DATUM(0);
 
+			/*
+			 * A Parquet string is UTF-8 by the format's definition, while a PG
+			 * text datum has to be valid in the database encoding -- every
+			 * other path into text checks that.  Copying the bytes unchecked
+			 * puts text into the database that is not text: a LATIN1 database
+			 * takes UTF-8 bytes without a word, and an invalid sequence breaks
+			 * comparisons, output and indexes much later and far away.  bytea
+			 * is exempt, being bytes rather than text.
+			 */
+			const char *bytes = (const char *) value.ptr;
+			int			nbytes = (int) value.len;
+			char	   *conv = NULL;
+
+			if (typInfo.pgTypeId_ != BYTEAOID)
+			{
+				conv = gpdbAnyToServer(bytes, nbytes, PG_UTF8, &nbytes);
+				bytes = conv;
+			}
+
 			if (!buffer_)
 			{
-				bytea *result = (bytea *) gpdbPalloc(value.len + VARHDRSZ);
-				SET_VARSIZE(result, value.len + VARHDRSZ);
-				memcpy(VARDATA(result), value.ptr, value.len);
+				bytea *result = (bytea *) gpdbPalloc(nbytes + VARHDRSZ);
+				SET_VARSIZE(result, nbytes + VARHDRSZ);
+				memcpy(VARDATA(result), bytes, nbytes);
+				if (conv != NULL && conv != (const char *) value.ptr)
+					pfree(conv);
 				return PointerGetDatum(result);
 			}
-			if (value.len + VARHDRSZ > static_cast<uint32>(buffer_->getDataBuffer(typInfo.columnIndex_)->length))
+			if ((uint32) nbytes + VARHDRSZ > static_cast<uint32>(buffer_->getDataBuffer(typInfo.columnIndex_)->length))
 			{
-				buffer_->resizeDataBuffer(typInfo.columnIndex_, value.len + VARHDRSZ);
+				buffer_->resizeDataBuffer(typInfo.columnIndex_, nbytes + VARHDRSZ);
 			}
 			dataBuff *colBuffer = buffer_->getDataBuffer(typInfo.columnIndex_);
-			SET_VARSIZE(colBuffer->buffer, value.len + VARHDRSZ);
-			memcpy(VARDATA(colBuffer->buffer), value.ptr, value.len);
+			SET_VARSIZE(colBuffer->buffer, nbytes + VARHDRSZ);
+			memcpy(VARDATA(colBuffer->buffer), bytes, nbytes);
+			if (conv != NULL && conv != (const char *) value.ptr)
+				pfree(conv);
 			return PointerGetDatum(colBuffer->buffer);
 		}
 		case BPCHAROID:
@@ -635,15 +658,29 @@ ParquetReader::readPrimitive(const TypeInfo &typInfo, bool &isNull)
 				if (charlen < maxlen)
 					pad = maxlen - charlen;					/* blanks are single-byte */
 			}
-			uint32 totalLen = value.len + pad;
+			/*
+			 * Same encoding contract as the TEXT branch above.  The blank count
+			 * is taken from the UTF-8 bytes on purpose and stays correct here:
+			 * an encoding conversion maps characters one for one, so it cannot
+			 * change how many there are -- only how many bytes they take.
+			 */
+			const char *bytes = (const char *) value.ptr;
+			int			nbytes = (int) value.len;
+			char	   *conv = gpdbAnyToServer(bytes, nbytes, PG_UTF8, &nbytes);
+
+			bytes = conv;
+
+			uint32 totalLen = (uint32) nbytes + pad;
 
 			if (!buffer_)
 			{
 				bytea *result = (bytea *) gpdbPalloc(totalLen + VARHDRSZ);
 				SET_VARSIZE(result, totalLen + VARHDRSZ);
-				memcpy(VARDATA(result), value.ptr, value.len);
+				memcpy(VARDATA(result), bytes, nbytes);
 				if (pad > 0)
-					memset(VARDATA(result) + value.len, ' ', pad);
+					memset(VARDATA(result) + nbytes, ' ', pad);
+				if (conv != (const char *) value.ptr)
+					pfree(conv);
 				return PointerGetDatum(result);
 			}
 			if (totalLen + VARHDRSZ > static_cast<uint32>(buffer_->getDataBuffer(typInfo.columnIndex_)->length))
@@ -652,9 +689,11 @@ ParquetReader::readPrimitive(const TypeInfo &typInfo, bool &isNull)
 			}
 			dataBuff *colBuffer = buffer_->getDataBuffer(typInfo.columnIndex_);
 			SET_VARSIZE(colBuffer->buffer, totalLen + VARHDRSZ);
-			memcpy(VARDATA(colBuffer->buffer), value.ptr, value.len);
+			memcpy(VARDATA(colBuffer->buffer), bytes, nbytes);
 			if (pad > 0)
-				memset(VARDATA(colBuffer->buffer) + value.len, ' ', pad);
+				memset(VARDATA(colBuffer->buffer) + nbytes, ' ', pad);
+			if (conv != (const char *) value.ptr)
+				pfree(conv);
 			return PointerGetDatum(colBuffer->buffer);
 		}
 		case UUIDOID:
@@ -814,8 +853,9 @@ void ParquetReader::decodeRecord() {}
  * Per-type direct read functions.  Called via function pointer from
  * populateRecord(), bypassing virtual dispatch and the type switch.
  * Each covers the hot path for one physical Parquet type; complex types
- * (TEXT, BPCHAR, UUID, TIMESTAMP, NUMERIC) still go through readPrimitive
- * because they need buffer management or multi-step conversion.
+ * (UUID, TIMESTAMP, NUMERIC) go through readPrimitive because they need
+ * buffer management or multi-step conversion.  TEXT, VARCHAR and BPCHAR
+ * are read a whole column at a time instead, see resolveFillKind().
  */
 
 Datum
@@ -1379,13 +1419,27 @@ ParquetReader::refillColumnBatch(int idx)
 					continue;
 				}
 				const parquet::ByteArray &v = vals[vi++];
+
+				const char *bytes = (const char *) v.ptr;
+				int			nbytes = (int) v.len;
+				char	   *conv = NULL;
+
+				/* text in the database encoding, see readPrimitive()'s leg */
+				if (ti.pgTypeId_ != BYTEAOID)
+				{
+					conv = gpdbAnyToServer(bytes, nbytes, PG_UTF8, &nbytes);
+					bytes = conv;
+				}
+
 				size_t off = arenaAppend(b.slab, b.slabUsed, nullptr, 0,
-										   v.len + VARHDRSZ);
+										   nbytes + VARHDRSZ);
 				char *dst = b.slab.data() + off;
 
-				SET_VARSIZE(dst, v.len + VARHDRSZ);
-				if (v.len > 0)
-					memcpy(VARDATA(dst), v.ptr, v.len);
+				SET_VARSIZE(dst, nbytes + VARHDRSZ);
+				if (nbytes > 0)
+					memcpy(VARDATA(dst), bytes, nbytes);
+				if (conv != NULL && conv != (const char *) v.ptr)
+					pfree(conv);
 				b.isnull[i] = 0;
 				b.offsets[i] = off;
 			}
@@ -1430,16 +1484,29 @@ ParquetReader::refillColumnBatch(int idx)
 					if (charlen < maxlen)
 						pad = maxlen - charlen;
 				}
-				uint32_t totalLen = v.len + pad;
+				const char *bytes = (const char *) v.ptr;
+				int			nbytes = (int) v.len;
+				char	   *conv = NULL;
+
+				/* text in the database encoding, see readPrimitive()'s leg */
+				if (ti.pgTypeId_ != BYTEAOID)
+				{
+					conv = gpdbAnyToServer(bytes, nbytes, PG_UTF8, &nbytes);
+					bytes = conv;
+				}
+
+				uint32_t totalLen = (uint32_t) nbytes + pad;
 				size_t off = arenaAppend(b.slab, b.slabUsed, nullptr, 0,
 										   totalLen + VARHDRSZ);
 				char *dst = b.slab.data() + off;
 
 				SET_VARSIZE(dst, totalLen + VARHDRSZ);
-				if (v.len > 0)
-					memcpy(VARDATA(dst), v.ptr, v.len);
+				if (nbytes > 0)
+					memcpy(VARDATA(dst), bytes, nbytes);
 				if (pad > 0)
-					memset(VARDATA(dst) + v.len, ' ', pad);
+					memset(VARDATA(dst) + nbytes, ' ', pad);
+				if (conv != NULL && conv != (const char *) v.ptr)
+					pfree(conv);
 				b.isnull[i] = 0;
 				b.offsets[i] = off;
 			}
@@ -1578,16 +1645,29 @@ ParquetReader::convertDict(ColumnBatch &b, const TypeInfo &ti,
 						pad = maxlen - charlen;
 				}
 
-				uint32_t totalLen = v.len + pad;
+				const char *bytes = (const char *) v.ptr;
+				int			nbytes = (int) v.len;
+				char	   *conv = NULL;
+
+				/* text in the database encoding, see readPrimitive()'s leg */
+				if (ti.pgTypeId_ != BYTEAOID)
+				{
+					conv = gpdbAnyToServer(bytes, nbytes, PG_UTF8, &nbytes);
+					bytes = conv;
+				}
+
+				uint32_t totalLen = (uint32_t) nbytes + pad;
 				size_t off = arenaAppend(b.dictSlab, used, nullptr, 0,
 										   totalLen + VARHDRSZ);
 				char *dst = b.dictSlab.data() + off;
 
 				SET_VARSIZE(dst, totalLen + VARHDRSZ);
-				if (v.len > 0)
-					memcpy(VARDATA(dst), v.ptr, v.len);
+				if (nbytes > 0)
+					memcpy(VARDATA(dst), bytes, nbytes);
 				if (pad > 0)
-					memset(VARDATA(dst) + v.len, ' ', pad);
+					memset(VARDATA(dst) + nbytes, ' ', pad);
+				if (conv != NULL && conv != (const char *) v.ptr)
+					pfree(conv);
 				offs[k] = off;
 			}
 			/* Fix up pointers only after the arena stopped growing. */

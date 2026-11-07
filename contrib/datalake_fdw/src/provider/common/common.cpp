@@ -24,6 +24,53 @@ gpdbPalloc(Size size)
 	return result;
 }
 
+char *
+gpdbAnyToServer(const char *src, int len, int encoding, int *outLen)
+{
+	char	   *result = NULL;
+	char		errStr[ERROR_STR_LEN];
+	bool		error = false;
+	MemoryContext mcxt = CurrentMemoryContext;
+
+	/*
+	 * SQL_ASCII is the database saying it has no encoding semantics: PG
+	 * itself stores and returns the bytes unexamined.  pg_any_to_server
+	 * would still validate them against `encoding` and then hand back the
+	 * very same bytes, so it could only ever reject data that used to
+	 * read, without changing what lands in the datum.  Leave it alone.
+	 */
+	if (GetDatabaseEncoding() == PG_SQL_ASCII)
+	{
+		*outLen = len;
+		return const_cast<char *>(src);
+	}
+
+	PG_TRY();
+	{
+		result = pg_any_to_server(src, len, encoding);
+	}
+	PG_CATCH();
+	{
+		ErrorData  *errdata;
+
+		error = true;
+
+		MemoryContextSwitchTo(mcxt);
+		errdata = CopyErrorData();
+		FlushErrorState();
+		strncpy(errStr, errdata->message, ERROR_STR_LEN - 1);
+		errStr[ERROR_STR_LEN - 1] = '\0';
+		FreeErrorData(errdata);
+	}
+	PG_END_TRY();
+
+	if (error)
+		throw std::runtime_error(errStr);
+
+	*outLen = (result == src) ? len : (int) strlen(result);
+	return result;
+}
+
 Datum
 gpdbDirectFunctionCall2(PGFunction func, Datum arg1, Datum arg2)
 {
