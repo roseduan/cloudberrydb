@@ -1420,6 +1420,32 @@ createListNamespacesRequestJson(IcebergCatalogFdwState* fdwState, IcebergCatalog
 {
     agentcli_cJSON *request = agentcli_cJSON_CreateObject();
 
+    /*
+     * The agent reads the catalog to list from a top-level "catalogName" and
+     * answers 400 without it; the name inside IcebergConfig is not where it
+     * looks.
+     *
+     * OPTIONS (catalog_name '...') is optional on CREATE FOREIGN CATALOG, so
+     * prefer it when it carries something and otherwise fall back to the SQL
+     * name of the catalog being listed, which this path always has.  Sending
+     * the request without the key would reproduce the very 400 this fixes, so
+     * say which option is missing instead.  #489
+     */
+    {
+        const char *catalogName = option->foreign_catalog.catalog_name;
+
+        if (catalogName == NULL || strlen(catalogName) == 0)
+            catalogName = fdwState->catalogInfo.catalog_name;
+
+        if (catalogName == NULL || strlen(catalogName) == 0)
+            ereport(ERROR,
+                    (errcode(ERRCODE_FDW_OPTION_NAME_NOT_FOUND),
+                     errmsg("cannot list namespaces: the catalog has no name"),
+                     errhint("Set OPTIONS (catalog_name '...') on the foreign catalog.")));
+
+        agentcli_cJSON_AddStringToObject(request, "catalogName", catalogName);
+    }
+
     // Add IcebergConfig
     agentcli_cJSON *icebergConfig = createIcebergConfig(option, volumeOpt);
     agentcli_cJSON_AddItemToObject(request, DATALAKEFDW_ICEBERG_KEY_ICEBERGCONFIG, icebergConfig);
@@ -2454,6 +2480,77 @@ parseIcebergCatalogOptionsFromStmt(CreateForeignCatalogStmt *createCatalogStmt)
 /*
  * Build storageConfigInfo from volume options
  */
+/*
+ * A volume's Polaris storage class, or NULL for a server type Polaris has no
+ * class for.  The caller decides whether that is an error.
+ */
+static const char *
+polarisStorageType(const char *serverType)
+{
+	if (serverType == NULL)
+		return NULL;
+
+	if (pg_strcasecmp(serverType, "s3") == 0 ||
+		pg_strcasecmp(serverType, "s3v2") == 0)
+		return "S3";
+	if (pg_strcasecmp(serverType, "gcs") == 0 ||
+		pg_strcasecmp(serverType, "gs") == 0)
+		return "GCS";
+	if (pg_strcasecmp(serverType, "azure") == 0 ||
+		pg_strcasecmp(serverType, "abfs") == 0 ||
+		pg_strcasecmp(serverType, "abfss") == 0)
+		return "AZURE";
+	if (pg_strcasecmp(serverType, "file") == 0)
+		return "FILE";
+
+	return NULL;
+}
+
+/*
+ * The URI scheme the locations of such a volume must carry, or NULL when we
+ * cannot build a location Polaris would accept.
+ *
+ * Polaris checks a catalog's allowedLocations and default-base-location
+ * against the storage type it was given and refuses a location of another
+ * scheme, so the scheme is derived from polarisStorageType rather than
+ * classified a second time: the two answers cannot then disagree.  That is
+ * the defect this replaces -- two independent derivations that between them
+ * only ever said "s3", so a GCS volume was announced as GCS with s3://
+ * locations.
+ *
+ * S3 and GCS are the two we can build.  AZURE is deliberately absent: a
+ * Polaris Azure location is abfss://<container>@<account>.dfs.core.windows.net/...,
+ * and the account host is part of the URI, so bucket_name alone cannot
+ * produce one -- any scheme we picked would just move the rejection.  FILE is
+ * absent for want of evidence of what Polaris expects.  The caller turns NULL
+ * into an explicit "not supported yet", which is more use than a location
+ * Polaris will refuse.  #489
+ */
+static const char *
+polarisLocationScheme(const char *serverType)
+{
+	const char *storageType = polarisStorageType(serverType);
+
+	if (storageType == NULL)
+	{
+		/*
+		 * Not a Polaris storage class.  hdfs is the one such type a catalog
+		 * is built for today (build_create_catalog_json names it), so keep
+		 * its scheme; anything else falls back as before.
+		 */
+		if (serverType != NULL && pg_strcasecmp(serverType, "hdfs") == 0)
+			return "hdfs";
+		return "s3";
+	}
+
+	if (strcmp(storageType, "S3") == 0)
+		return "s3";
+	if (strcmp(storageType, "GCS") == 0)
+		return "gs";
+
+	return NULL;
+}
+
 static agentcli_cJSON*
 build_storage_config_info(IcebergVolumeOptions *volumeOpt)
 {
@@ -2465,26 +2562,15 @@ build_storage_config_info(IcebergVolumeOptions *volumeOpt)
 	/* Map and validate storageType according to Polaris spec: S3, GCS, AZURE, FILE */
 	if (volumeOpt->volume_server.server_type)
 	{
-		const char *storageType = NULL;
-		
-		if (pg_strcasecmp(volumeOpt->volume_server.server_type, "s3") == 0 ||
-			pg_strcasecmp(volumeOpt->volume_server.server_type, "s3v2") == 0)
-			storageType = "S3";
-		else if (pg_strcasecmp(volumeOpt->volume_server.server_type, "gcs") == 0 ||
-				 pg_strcasecmp(volumeOpt->volume_server.server_type, "gs") == 0)
-			storageType = "GCS";
-		else if (pg_strcasecmp(volumeOpt->volume_server.server_type, "azure") == 0 ||
-				 pg_strcasecmp(volumeOpt->volume_server.server_type, "abfs") == 0 ||
-				 pg_strcasecmp(volumeOpt->volume_server.server_type, "abfss") == 0)
-			storageType = "AZURE";
-		else if (pg_strcasecmp(volumeOpt->volume_server.server_type, "file") == 0)
-			storageType = "FILE";
-		else
+		const char *storageType =
+			polarisStorageType(volumeOpt->volume_server.server_type);
+
+		if (storageType == NULL)
 			ereport(ERROR,
 					(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
 					 errmsg("unsupported storage type: %s", volumeOpt->volume_server.server_type),
 					 errhint("Supported types: S3, GCS, AZURE, FILE")));
-		
+
 		agentcli_cJSON_AddStringToObject(storageInfo, "storageType", storageType);
 	}
 
@@ -2492,15 +2578,17 @@ build_storage_config_info(IcebergVolumeOptions *volumeOpt)
 	if (volumeOpt->volume_server.bucket_name)
 	{
 		char allowedLocation[512];
-		const char *protocol = "s3";
+		const char *protocol =
+			polarisLocationScheme(volumeOpt->volume_server.server_type);
 
-		/* Determine protocol from server_type if available */
-		if (volumeOpt->volume_server.server_type)
-		{
-			if (pg_strcasecmp(volumeOpt->volume_server.server_type, "s3") == 0 ||
-				pg_strcasecmp(volumeOpt->volume_server.server_type, "s3v2") == 0)
-				protocol = "s3";
-		}
+		if (protocol == NULL)
+			ereport(ERROR,
+					(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+					 errmsg("volume server type \"%s\" is not supported for Polaris catalogs yet",
+							volumeOpt->volume_server.server_type),
+					 errdetail("A location for this storage type needs more than the bucket name, "
+							   "so none can be built from the volume's options."),
+					 errhint("Supported types: s3, s3v2, gcs, gs.")));
 
 		snprintf(allowedLocation, sizeof(allowedLocation), "%s://%s/",
 				 protocol, volumeOpt->volume_server.bucket_name);
@@ -2561,19 +2649,24 @@ build_create_catalog_json(IcebergCatalogOptions *options, IcebergVolumeOptions *
 
 		/* Build default-base-location as protocol://bucket/path */
 		char baseLocation[1024];
-		const char *protocol;
-
 		/*
-		 * Build Polaris default-base-location URI. Align with the
-		 * allowedLocations protocol above (s3 for object storage,
-		 * hdfs for HDFS). iceberg-aws S3FileIO understands both
-		 * s3:// and s3a://, and Polaris itself stores plain s3://.
+		 * Polaris refuses a default-base-location whose scheme disagrees with
+		 * the storage type it was given, so both come from one mapping
+		 * (polarisLocationScheme) rather than a second copy of the rules.
+		 * iceberg-aws S3FileIO understands both s3:// and s3a://, and Polaris
+		 * itself stores plain s3://.  #489
 		 */
-		if (volumeOpt->volume_server.server_type &&
-			(strcasecmp(volumeOpt->volume_server.server_type, "hdfs") == 0))
-			protocol = "hdfs";
-		else
-			protocol = "s3";
+		const char *protocol =
+			polarisLocationScheme(volumeOpt->volume_server.server_type);
+
+		if (protocol == NULL)
+			ereport(ERROR,
+					(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+					 errmsg("volume server type \"%s\" is not supported for Polaris catalogs yet",
+							volumeOpt->volume_server.server_type),
+					 errdetail("A location for this storage type needs more than the bucket name, "
+							   "so none can be built from the volume's options."),
+					 errhint("Supported types: s3, s3v2, gcs, gs.")));
 
 		snprintf(baseLocation, sizeof(baseLocation), "%s://%s/",
 					 protocol, volumeOpt->volume_server.bucket_name);

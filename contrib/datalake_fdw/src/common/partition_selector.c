@@ -290,36 +290,47 @@ excludePartitions(List *quals, List *constraints)
 	return false;
 }
 
+/*
+ * Drop value[0] and close the gap, so "/,b" becomes ",b".
+ *
+ * The terminator belongs at len - 1, the slot the last character vacated.
+ * Writing it at len - 2 -- as this did -- ate the character after the escape
+ * as well, so every escaped delimiter cost two characters instead of one:
+ * splitting "a//b,c" gave "a/" and "db.my/.table" gave "my.tabl".  #489
+ */
 static void
 moveArrayElem(char *value)
 {
-	int i;
 	int len = strlen(value);
 
 	if (len < 2)
 		return;
 
-	for (i = 1; i < len; i++)
-		value[i - 1] = value[i];
-
-	value[len - 2] = '\0';
+	memmove(value, value + 1, len - 1);
+	value[len - 1] = '\0';
 }
 
+/*
+ * Turn "\<deli>" and "\<escape>" back into the character they stood for.
+ *
+ * Walks the live string rather than the length it came in with: each removal
+ * shortens it, and the old loop kept reading past the new terminator into the
+ * bytes the shift left behind.  After a removal result[i] holds the character
+ * that was escaped, and the loop's i++ steps over it, so "//" collapses once
+ * rather than twice.  #489
+ */
 static char *
 unEscapeString(const char *value, int len, char deli, char escape)
 {
 	int   i;
 	char *result = pnstrdup(value, len);
 
-	for (i = 0; i < len; i++)
+	for (i = 0; result[i] != '\0'; i++)
 	{
-		char curChar = result[i];
-		char nextChar = result[i + 1];
-
-		if (curChar != escape)
+		if (result[i] != escape)
 			continue;
 
-		if (nextChar == deli || nextChar == escape)
+		if (result[i + 1] == deli || result[i + 1] == escape)
 			moveArrayElem(result + i);
 	}
 
@@ -332,27 +343,38 @@ datalakeSplitString2(const char *value, char deli, char escape)
 	int    i;
 	int    pos = 0;
 	int    len = strlen(value);
-	bool   isEscape;
 	List  *result = NIL;
+
+	if (len == 0)
+		return NIL;
 
 	for (i = 0; i < len; i++)
 	{
-		isEscape = false;
 		if (value[i] == escape)
 		{
-			isEscape = true;
+			/*
+			 * Whatever follows is literal.  A trailing escape has nothing to
+			 * escape and stands for itself; i then steps past the end and the
+			 * loop simply finishes.
+			 */
 			i++;
+			continue;
 		}
 
-		if (!isEscape && value[i] == deli)
+		if (value[i] == deli)
 		{
 			result = lappend(result, unEscapeString(value + pos, i - pos, deli, escape));
 			pos = i + 1;
 		}
-
-		if (i == len - 1)
-			result = lappend(result, unEscapeString(value + pos, len - pos, deli, escape));
 	}
+
+	/*
+	 * Everything after the last delimiter, emitted once and unconditionally.
+	 * Keying this off "did the loop reach len - 1" -- as it did -- lost the
+	 * last field whenever the value ended in an escape, because that i++ had
+	 * already stepped past len - 1: "a,b/" split to just ["a"].  #489
+	 */
+	result = lappend(result, unEscapeString(value + pos, len - pos, deli, escape));
 
 	return result;
 }
