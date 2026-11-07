@@ -747,6 +747,36 @@ ParquetReader::readPrimitive(const TypeInfo &typInfo, bool &isNull)
 			static const int64 UNIX_TO_PG_EPOCH_USECS =
 				((int64)(POSTGRES_EPOCH_JDATE - UNIX_EPOCH_JDATE)) * SECS_PER_DAY * USECS_PER_SEC;
 
+			/*
+			 * Two physical forms reach this leg.  INT96 is the legacy
+			 * (nanoseconds within the day, Julian day) pair that Spark and
+			 * Hive still write: twelve bytes carrying no timestamp
+			 * LogicalType, so timeUnit_ says nothing about it and the Int64
+			 * leg below cannot decode it at all.  It gets its own cast and
+			 * its own arithmetic.  #488
+			 *
+			 * mapParquetDataType() sends physical INT96 to NUMERICOID and
+			 * INT64 to INT8OID, so fileTypeId_ tells the two apart without
+			 * the per-value virtual descr() a physical_type() test would
+			 * cost.  resolveFillKind() splits the same two the same way.
+			 */
+			if (typInfo.fileTypeId_ == NUMERICOID)
+			{
+				parquet::Int96 int96Value;
+
+				dlCheckedScanner<parquet::Int96Type>(scanner, typInfo.pgTypeId_, filePath_.c_str())->NextValue(&int96Value, &isNull);
+				if (isNull)
+					PG_RETURN_DATUM(0);
+
+				/*
+				 * Int96GetMicroSeconds() folds the (Julian day, nanoseconds)
+				 * pair into microseconds since the Unix epoch, which leaves
+				 * only the epoch shift to PG's.
+				 */
+				return TimestampGetDatum(parquet::Int96GetMicroSeconds(int96Value) -
+										 UNIX_TO_PG_EPOCH_USECS);
+			}
+
 			dlCheckedScanner<parquet::Int64Type>(scanner, typInfo.pgTypeId_, filePath_.c_str())->NextValue(&d.int64Value, &isNull);
 			if (isNull)
 				PG_RETURN_DATUM(0);
@@ -765,9 +795,10 @@ ParquetReader::readPrimitive(const TypeInfo &typInfo, bool &isNull)
 					break;
 				default:
 					/*
-					 * Fallback for files without explicit timestamp LogicalType
-					 * (e.g., legacy INT96 or INT64 without annotation).
-					 * Default to microseconds — the Iceberg standard.
+					 * Fallback for an INT64 column carrying no timestamp
+					 * LogicalType.  Default to microseconds — the Iceberg
+					 * standard.  INT96 never reaches here; it is decoded
+					 * above, on its own terms.  #488
 					 */
 					pgTimestamp = d.int64Value - UNIX_TO_PG_EPOCH_USECS;
 					break;
@@ -1000,7 +1031,10 @@ ParquetReader::resolveFillKind(const TypeInfo &typInfo)
 			return FILL_DATE;
 		case TIMESTAMPOID:
 		case TIMESTAMPTZOID:
-			/* INT96 timestamps are not read via the Int64 leg; keep old path */
+			/*
+			 * Only the INT64 form has a whole-column fill; INT96 stays on
+			 * the per-value path, which decodes it.  #488
+			 */
 			return typInfo.fileTypeId_ == INT8OID ? FILL_TIMESTAMP : FILL_NONE;
 		case NUMERICOID:
 			switch (typInfo.fileTypeId_)
