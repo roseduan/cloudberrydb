@@ -72,7 +72,7 @@ private:
 	bool getRecordBatch();
 	void buildColumnIndices(std::vector<int> &colIndices);
 	void normalizeBatch(const std::shared_ptr<::parquet_arrow::RecordBatch> &raw);
-	void normalizeColumn(Oid typeOid,
+	void normalizeColumn(Oid typeOid, int32 typeMod,
 						 const std::shared_ptr<::parquet_arrow::Array> &in,
 						 std::shared_ptr<::parquet_arrow::Array> &out_arr,
 						 std::shared_ptr<::parquet_arrow::DataType> &out_type);

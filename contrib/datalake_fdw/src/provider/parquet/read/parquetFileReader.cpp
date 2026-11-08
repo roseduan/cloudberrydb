@@ -182,7 +182,7 @@ void parquetFileReader::resetScanners() {
 }
 
 
-Datum parquetFileReader::read(Oid typeOid, int column_index, bool &isNull, int &state)
+Datum parquetFileReader::read(Oid typeOid, int32 typeMod, int column_index, bool &isNull, int &state)
 {
     const parquet::ColumnDescriptor* des = columnDescriptors[column_index];
 
@@ -505,9 +505,97 @@ Datum parquetFileReader::read(Oid typeOid, int column_index, bool &isNull, int &
             memcpy(result, values.ptr, values.len);
             return CharGetDatum(result[0]);
         }
+        case BPCHAROID:
+        {
+            /*
+             * CHAR(N) keeps its blanks.  Parquet stores the value with
+             * trailing spaces stripped, so a heap table's 'ab      ' comes
+             * back as 'ab' unless it is re-padded here -- the Iceberg reader
+             * has done this since #321 (provider/common/parquet_reader.cpp),
+             * and MR !1400 fixed the write side, leaving this path the odd
+             * one out.
+             *
+             * N comes from atttypmod (typeMod == N + VARHDRSZ); below that is
+             * an unbounded `char`, which is never padded.  Characters are
+             * counted as UTF-8 code points rather than with
+             * pg_mbstrlen_with_len(), because the bytes on disk are UTF-8
+             * whatever the database encoding is.
+             */
+            const uint8_t *bytes;
+            uint32 len;
+            parquet::ByteArray values;
+            parquet::FixedLenByteArray flba;
+            bool hasRow;
+
+            /*
+             * Both physical forms the string types accept, as the leg below
+             * takes them: a CHAR(n) column may be stored either way, and this
+             * one used to share that leg.
+             */
+            if (des->physical_type() == ::parquet::Type::FIXED_LEN_BYTE_ARRAY)
+            {
+                auto *scanner_ = dlCheckedScanner<parquet::FLBAType>(scanner, des, typeOid, name.c_str());
+
+                hasRow = scanner_->NextValue(&flba, &isNull);
+                bytes = flba.ptr;
+                len = (uint32) des->type_length();
+            }
+            else
+            {
+                auto *scanner_ = dlCheckedScanner<parquet::ByteArrayType>(scanner, des, typeOid, name.c_str());
+
+                hasRow = scanner_->NextValue(&values, &isNull);
+                bytes = values.ptr;
+                len = values.len;
+            }
+
+            if (!hasRow)
+            {
+                state = -1;
+                return 0;
+            }
+            if (isNull)
+                return 0;
+
+            int pad = 0;
+            if (typeMod >= (int) VARHDRSZ)
+            {
+                int maxlen = typeMod - VARHDRSZ;
+                int charlen = 0;
+
+                for (uint32 k = 0; k < len; k++)
+                    if (((unsigned char) bytes[k] & 0xC0) != 0x80)
+                        charlen++;
+                if (charlen < maxlen)
+                    pad = maxlen - charlen;		/* blanks are single-byte */
+            }
+
+            {
+                uint32 totalLen = len + pad;
+                bytea *result;
+
+                /*
+                 * The shared buffer is exactly BUFFER_LENGTH bytes and the
+                 * varlena header goes in it too, so the header has to be on
+                 * this side of the comparison.  Padding makes the length
+                 * deterministic -- a char(32768) column would reach it on
+                 * every row, not just on a value that happens to be that
+                 * long.
+                 */
+                if (totalLen + VARHDRSZ > (uint32) BUFFER_LENGTH)
+                    result = (bytea *) palloc(totalLen + VARHDRSZ);
+                else
+                    result = (bytea *) options.buffer.getDataBuffer(column_index)->buffer;
+
+                memcpy(VARDATA(result), bytes, len);
+                if (pad > 0)
+                    memset(VARDATA(result) + len, ' ', pad);
+                SET_VARSIZE(result, totalLen + VARHDRSZ);
+                return PointerGetDatum(result);
+            }
+        }
         case BYTEAOID:
         case TEXTOID:
-        case BPCHAROID:
         case VARCHAROID:
         {
             switch(des->physical_type())

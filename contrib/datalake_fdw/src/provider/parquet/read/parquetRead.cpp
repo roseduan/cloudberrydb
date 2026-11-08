@@ -342,7 +342,8 @@ bool parquetRead::convertToDatum(Datum *values, bool *nulls)
         }
         bool isNull = false;
         int state = 0;
-        Datum value = fileReader.read(tupdesc->attrs[i].atttypid, i, isNull, state);
+        Datum value = fileReader.read(tupdesc->attrs[i].atttypid,
+                                      tupdesc->attrs[i].atttypmod, i, isNull, state);
         if (state == -1)
         {
             /* read has not row, read next */

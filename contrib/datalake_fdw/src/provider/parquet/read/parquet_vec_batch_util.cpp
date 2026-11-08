@@ -41,6 +41,7 @@ namespace Internal {
  */
 void
 normalizeParquetVecColumn(parquet_arrow::MemoryPool *pool, Oid typeOid,
+					int32 typeMod,
 					const std::shared_ptr<::parquet_arrow::Array> &in,
 					std::shared_ptr<::parquet_arrow::Array> &out_arr,
 					std::shared_ptr<::parquet_arrow::DataType> &out_type)
@@ -159,6 +160,61 @@ normalizeParquetVecColumn(parquet_arrow::MemoryPool *pool, Oid typeOid,
 			break;
 		}
 		case BPCHAROID:
+			/*
+			 * CHAR(N) keeps its blanks.  The zero-copy re-tag below hands the
+			 * file's bytes straight to the engine, and Parquet holds a CHAR(N)
+			 * with its trailing spaces stripped, so 'ab' reached the engine
+			 * where a heap table holds 'ab      '.  The row readers have padded
+			 * since #321; this one has to build a new array to do it, which
+			 * costs the re-tag -- but only for CHAR(N) columns, and only when
+			 * the column declares a length (typeMod < VARHDRSZ is an unbounded
+			 * `char`, never padded).
+			 *
+			 * Characters are counted as UTF-8 code points, not bytes, and not
+			 * with pg_mbstrlen_with_len(): the bytes on disk are UTF-8 whatever
+			 * the database encoding is.
+			 */
+			if (typeMod >= (int32) VARHDRSZ &&
+				(in->type_id() == ::parquet_arrow::Type::BINARY ||
+				 in->type_id() == ::parquet_arrow::Type::STRING))
+			{
+				const int maxlen = typeMod - VARHDRSZ;
+				auto bin = std::static_pointer_cast<::parquet_arrow::BinaryArray>(in);
+				::parquet_arrow::StringBuilder b(pool);
+
+				PARQUET_VEC_CHECK(b.Reserve(n), "bpchar reserve");
+				for (int64_t i = 0; i < n; i++)
+				{
+					if (bin->IsNull(i))
+					{
+						PARQUET_VEC_CHECK(b.AppendNull(), "bpchar null");
+						continue;
+					}
+
+					std::string_view v = bin->GetView(i);
+					int charlen = 0;
+
+					for (size_t k = 0; k < v.size(); k++)
+						if (((unsigned char) v[k] & 0xC0) != 0x80)
+							charlen++;
+
+					if (charlen < maxlen)
+					{
+						std::string padded(v.data(), v.size());
+
+						padded.append((size_t) (maxlen - charlen), ' ');
+						PARQUET_VEC_CHECK(b.Append(padded), "bpchar append padded");
+					}
+					else
+						PARQUET_VEC_CHECK(b.Append(v.data(), (int32_t) v.size()),
+										  "bpchar append");
+				}
+				PARQUET_VEC_CHECK(b.Finish(&out_arr), "bpchar finish");
+				out_type = ::parquet_arrow::utf8();
+				break;
+			}
+			/* unbounded char, or a type the text leg refuses below */
+			/* FALLTHROUGH */
 		case TEXTOID:
 		case VARCHAROID:
 		{

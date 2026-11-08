@@ -158,10 +158,18 @@ createConst(TupleDesc tupleDesc, int partKeyAttNum, const char *partKeyValue)
 			conCollId = tupleDesc->attrs[partKeyAttNum].attcollation;
 			break;
 		case BPCHAROID:
+			/*
+			 * Build the constant at the column's own length, the way the
+			 * NUMERIC case above applies the column's typmod.  bpcharin()
+			 * with -1 keeps the directory name as it stands, so a CHAR(4)
+			 * partition "ab" became 'ab' where a heap table holds 'ab  ';
+			 * the value is handed back as the column, so the rows came out
+			 * short (#441 is the same loss on the Iceberg pruning side).
+			 */
 			conVal = DirectFunctionCall3(bpcharin,
 										 CStringGetDatum(partKeyValue),
 										 ObjectIdGetDatum(InvalidOid),
-										 Int32GetDatum(-1));
+										 Int32GetDatum(tupleDesc->attrs[partKeyAttNum].atttypmod));
 			conCollId = tupleDesc->attrs[partKeyAttNum].attcollation;
 			break;
 		default:

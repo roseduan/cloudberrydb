@@ -553,7 +553,8 @@ icebergReadRecordBatch::assembleOut(const std::shared_ptr<::parquet_arrow::Recor
 		{
 			std::shared_ptr<::parquet_arrow::Array> normArr;
 			std::shared_ptr<::parquet_arrow::DataType> normType;
-			normalizeParquetVecColumn(pool, typeOid, raw->column(rawPos), normArr, normType);
+			normalizeParquetVecColumn(pool, typeOid, sd->attrs[attr].atttypmod,
+									  raw->column(rawPos), normArr, normType);
 			parquetVecAddColOrCreate(out, ::parquet_arrow::field(name, normType),
 									 normArr, nrows, batch_index);
 			if (typeOid == NUMERICOID)

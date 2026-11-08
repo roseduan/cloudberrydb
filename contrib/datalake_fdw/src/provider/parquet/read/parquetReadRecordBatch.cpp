@@ -333,7 +333,8 @@ parquetReadRecordBatch::normalizeBatch(const std::shared_ptr<::parquet_arrow::Re
 
 		std::shared_ptr<::parquet_arrow::Array>    normArr;
 		std::shared_ptr<::parquet_arrow::DataType> normType;
-		normalizeColumn(typeOid, raw->column(readRawPos[k]), normArr, normType);
+		normalizeColumn(typeOid, tupdesc->attrs[t].atttypmod,
+						raw->column(readRawPos[k]), normArr, normType);
 
 		if (typeOid == NUMERICOID)
 			numericColIndices.push_back((int) k);
@@ -360,12 +361,12 @@ parquetReadRecordBatch::normalizeBatch(const std::shared_ptr<::parquet_arrow::Re
  * int4/int8/float4/float8 already match (schema compat validated at open time).
  */
 void
-parquetReadRecordBatch::normalizeColumn(Oid typeOid,
+parquetReadRecordBatch::normalizeColumn(Oid typeOid, int32 typeMod,
 					const std::shared_ptr<::parquet_arrow::Array> &in,
 					std::shared_ptr<::parquet_arrow::Array> &out_arr,
 					std::shared_ptr<::parquet_arrow::DataType> &out_type)
 {
-	normalizeParquetVecColumn(pool, typeOid, in, out_arr, out_type);
+	normalizeParquetVecColumn(pool, typeOid, typeMod, in, out_arr, out_type);
 }
 
 void

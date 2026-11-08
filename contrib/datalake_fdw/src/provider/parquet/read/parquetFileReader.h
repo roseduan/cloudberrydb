@@ -37,7 +37,7 @@ public:
     /* reset scanner for next rowgroup to read */
     void resetScanners();
 
-    Datum read(Oid typeOid, int column_index, bool &isNull, int &state);
+    Datum read(Oid typeOid, int32 typeMod, int column_index, bool &isNull, int &state);
 
     void closeParquetReader();
 

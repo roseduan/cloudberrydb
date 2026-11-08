@@ -101,6 +101,7 @@ encodeNumeric128(uint64_t low64, int64_t high64, int32_t scale, uint8_t out[16])
  * clearly on a type mismatch instead of over-reading a bad cast.
  */
 void normalizeParquetVecColumn(parquet_arrow::MemoryPool *pool, Oid typeOid,
+					int32 typeMod,
 			const std::shared_ptr<parquet_arrow::Array> &in,
 			std::shared_ptr<parquet_arrow::Array> &out_arr,
 			std::shared_ptr<parquet_arrow::DataType> &out_type);
