@@ -24,6 +24,7 @@
 #include "executor/nodeHash.h"
 #include "executor/nodeSubplan.h"
 #include "cdb/cdbexplain.h"
+#include "cdb/cdbexplain_stats.h"
 #include "utils/guc_tables.h"
 #include "jit/jit.h"
 #include "storage/bufmgr.h"
@@ -199,43 +200,6 @@ gpexplain_formatSlicesOutput(struct CdbExplain_ShowStatCtx *showstatctx,
 							struct EState *estate,
 							ExplainState *es);
 
-/* EXPLAIN ANALYZE statistics for one plan node of a slice */
-typedef struct CdbExplain_StatInst
-{
-	NodeTag		pstype;			/* PlanState node type */
-
-	/* fields from Instrumentation struct */
-	instr_time	starttime;		/* Start time of current iteration of node */
-	instr_time	counter;		/* Accumulated runtime for this node */
-	double		firsttuple;		/* Time for first tuple of this cycle */
-	double		startup;		/* Total startup time (in seconds) */
-	double		total;			/* Total total time (in seconds) */
-	double		ntuples;		/* Total tuples produced */
-	double		ntuples2;
-	double		nloops;			/* # of run cycles for this node */
-	double		nfiltered1;
-	double		nfiltered2;
-	bool		prf_work;
-	double		nfilteredPRF;
-	double		execmemused;	/* executor memory used (bytes) */
-	double		workmemused;	/* work_mem actually used (bytes) */
-	double		workmemwanted;	/* work_mem to avoid workfile i/o (bytes) */
-	bool		workfileCreated;	/* workfile created in this node */
-	instr_time	firststart;		/* Start time of first iteration of node */
-	int			numPartScanned; /* Number of part tables scanned */
-
-	TuplesortInstrumentation sortstats; /* Sort stats, if this is a Sort node */
-	HashInstrumentation hashstats; /* Hash stats, if this is a Hash node */
-	IncrementalSortGroupInfo fullsortGroupInfo; /* Full sort group info for Incremental Sort node */
-	IncrementalSortGroupInfo prefixsortGroupInfo; /* Prefix sort group info for Incremental Sort node */
-	int			bnotes;			/* Offset to beginning of node's extra text */
-	int			enotes;			/* Offset to end of node's extra text */
-	int			nworkers_launched;	/* Number of workers launched for this node */
-	WalUsage	walusage;		/* add WAL usage */
-	/* fields from Instrumentation struct for one cycle of a node */
-	double tuplecount;
-	QueryMetricsStatus nodeStatus; /*CDB: stauts*/
-} CdbExplain_StatInst;
 
 /* EXPLAIN ANALYZE statistics for one process working on one slice */
 typedef struct CdbExplain_SliceWorker
@@ -257,36 +221,6 @@ typedef struct CdbExplain_DispatchSummary
 } CdbExplain_DispatchSummary;
 
 
-/* One node's EXPLAIN ANALYZE statistics for all the workers of its segworker group */
-typedef struct CdbExplain_NodeSummary
-{
-	/* Summary over all the node's workers */
-	CdbExplain_Agg ntuples;
-	CdbExplain_Agg runtime_tupleAgg;
-	CdbExplain_Agg nloops;
-	CdbExplain_Agg execmemused;
-	CdbExplain_Agg workmemused;
-	CdbExplain_Agg workmemwanted;
-	CdbExplain_Agg totalWorkfileCreated;
-	/* Used for DynamicSeqScan, DynamicIndexScan, DynamicBitmapHeapScan, and DynamicForeignScan */
-	CdbExplain_Agg totalPartTableScanned;
-	/* Summary of space used by sort */
-	CdbExplain_Agg sortSpaceUsed[NUM_SORT_SPACE_TYPE][NUM_SORT_METHOD];
-
-	/* insts array info */
-	int			segindex0;		/* segment id of insts[0] */
-	int			ninst;			/* num of StatInst entries in inst array */
-
-	/* Per-worker raw stats, see the definition in explain_gp.c */
-	int			nworkerinst;	/* num of entries in the worker arrays */
-	CdbExplain_StatInst *workerinsts;	/* [0..nworkerinst-1] raw per-QE stat */
-	int		   *workerinst_segindex;	/* segindex of each worker entry */
-	int		   *workerinst_workidx;		/* worker index within its segment */
-	double	   *workerinst_peakmem;		/* worker QE's peak memory (bytes) */
-
-	/* Array [0..ninst-1] of StatInst entries is appended starting here */
-	CdbExplain_StatInst insts[1];	/* variable size - must be last */
-} CdbExplain_NodeSummary;
 
 /* One slice's statistics for all the workers of its segworker group */
 typedef struct CdbExplain_SliceSummary
