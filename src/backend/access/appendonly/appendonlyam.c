@@ -3509,8 +3509,6 @@ appendonly_parallelscan_next_chunk(AppendOnlyScanDesc scan)
 	ParallelBlockTableScanDesc bpscan;
 	uint64		chunk;
 	int			seg;
-	int			lo;
-	int			hi;
 
 	bpscan = (ParallelBlockTableScanDesc) scan->rs_base.rs_parallel;
 	chunk = pg_atomic_fetch_add_u64(&bpscan->phs_nallocated, 1);
@@ -3522,19 +3520,8 @@ appendonly_parallelscan_next_chunk(AppendOnlyScanDesc scan)
 		return false;
 	}
 
-	/* find the last segment file whose first chunk is not after this one */
-	lo = 0;
-	hi = scan->aos_total_segfiles - 1;
-	while (lo < hi)
-	{
-		int			mid = (lo + hi + 1) / 2;
-
-		if (scan->seg_first_chunk[mid] <= chunk)
-			lo = mid;
-		else
-			hi = mid - 1;
-	}
-	seg = lo;
+	seg = AppendOnlyParallelScan_ChunkSegment(scan->seg_first_chunk,
+											  scan->aos_total_segfiles, chunk);
 
 	if (seg != scan->cur_seg)
 	{

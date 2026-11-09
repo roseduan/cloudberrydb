@@ -3238,17 +3238,19 @@ aocs_segfile_chunks(AOCSFileSegInfo *seginfo, int64 rows_per_chunk)
  *
  * The chunk size depends on the columns the scan reads, which are not known
  * when table_parallelscan_initialize() sets up the shared state, so it leaves
- * phs_nblocks unset.  The process that set it up calls this right after, in
- * the same ExecSeqScanInitializeDSM(), before any other process of the scan
- * starts; it stores the number of chunks.  The other processes run the same
- * plan, so they read the same columns and compute the same layout, and check
- * that they agree.
+ * phs_nblocks unset.  The first process to get here stores the number of
+ * chunks; that is the process that set up the shared state, which calls this
+ * right after, in the same ExecSeqScanInitializeDSM(), before any other
+ * process of the scan starts.  phs_mutex makes the store safe without relying
+ * on that order.  The other processes run the same plan, so they read the
+ * same columns and compute the same layout, and check that they agree.
  */
 static void
 aocs_parallelscan_init(AOCSScanDesc scan)
 {
 	ParallelBlockTableScanDesc bpscan;
 	uint64		total_chunks = 0;
+	BlockNumber nblocks;
 
 	bpscan = (ParallelBlockTableScanDesc) scan->rs_base.rs_parallel;
 	scan->rows_per_chunk = aocs_parallelscan_rows_per_chunk(scan);
@@ -3272,30 +3274,29 @@ aocs_parallelscan_init(AOCSScanDesc scan)
 		elog(ERROR, "too many chunks for parallel scan of relation \"%s\"",
 			 RelationGetRelationName(scan->rs_base.rs_rd));
 
+	SpinLockAcquire(&bpscan->phs_mutex);
 	if (bpscan->phs_nblocks == InvalidBlockNumber)
-	{
-		/* the process that set up the scan: store the number of chunks */
-		bpscan->phs_nblocks = (BlockNumber) total_chunks;
+		bpscan->phs_nblocks = (BlockNumber) total_chunks;	/* the first process */
+	nblocks = bpscan->phs_nblocks;
+	SpinLockRelease(&bpscan->phs_mutex);
 
-		elog(DEBUG1, "parallel scan of AOCS relation \"%s\": %d segment files, "
-			 "%d columns, " INT64_FORMAT " rows per chunk, " UINT64_FORMAT " chunks",
-			 RelationGetRelationName(scan->rs_base.rs_rd), scan->total_seg,
-			 scan->columnScanInfo.proj_atts ? scan->columnScanInfo.num_proj_atts :
-			 RelationGetNumberOfAttributes(scan->rs_base.rs_rd),
-			 scan->rows_per_chunk, total_chunks);
-	}
-	else if (bpscan->phs_nblocks != total_chunks)
-	{
-		/*
-		 * Another process of the scan: it uses the same snapshot and reads
-		 * the same columns, so it must compute the same layout.  Otherwise
-		 * rows would be skipped or returned twice.
-		 */
+	/*
+	 * All processes of the scan use the same snapshot and read the same
+	 * columns, so they must compute the same layout.  Otherwise rows would be
+	 * skipped or returned twice.
+	 */
+	if (nblocks != total_chunks)
 		elog(ERROR, "parallel scan of relation \"%s\" has " UINT64_FORMAT
 			 " chunks in this process, but %u in the shared state",
 			 RelationGetRelationName(scan->rs_base.rs_rd), total_chunks,
-			 bpscan->phs_nblocks);
-	}
+			 nblocks);
+
+	elog(DEBUG1, "parallel scan of AOCS relation \"%s\": %d segment files, "
+		 "%d columns, " INT64_FORMAT " rows per chunk, " UINT64_FORMAT " chunks",
+		 RelationGetRelationName(scan->rs_base.rs_rd), scan->total_seg,
+		 scan->columnScanInfo.proj_atts ? scan->columnScanInfo.num_proj_atts :
+		 RelationGetNumberOfAttributes(scan->rs_base.rs_rd),
+		 scan->rows_per_chunk, total_chunks);
 }
 
 /*
@@ -3426,8 +3427,6 @@ aocs_parallelscan_next_chunk(AOCSScanDesc scan)
 	uint64		chunk;
 	int64		startrow;
 	int			seg;
-	int			lo;
-	int			hi;
 
 	/* building a block directory needs to see every block, in order */
 	Assert(scan->blockDirectory == NULL);
@@ -3440,19 +3439,8 @@ aocs_parallelscan_next_chunk(AOCSScanDesc scan)
 		return -1;
 	}
 
-	/* find the last segment file whose first chunk is not after this one */
-	lo = 0;
-	hi = scan->total_seg - 1;
-	while (lo < hi)
-	{
-		int			mid = (lo + hi + 1) / 2;
-
-		if (scan->seg_first_chunk[mid] <= chunk)
-			lo = mid;
-		else
-			hi = mid - 1;
-	}
-	seg = lo;
+	seg = AppendOnlyParallelScan_ChunkSegment(scan->seg_first_chunk,
+											  scan->total_seg, chunk);
 
 	startrow = (int64) (chunk - scan->seg_first_chunk[seg]) *
 		scan->rows_per_chunk;

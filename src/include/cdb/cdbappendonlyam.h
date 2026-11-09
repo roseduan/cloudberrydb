@@ -593,6 +593,32 @@ AppendOnlyScanDesc_TotalTupCount(AppendOnlyScanDesc scan)
 }
 
 /*
+ * Return the index of the segment file of a chunk of a parallel scan: the last
+ * segment file whose first chunk is not after it.  seg_first_chunk[i] is the
+ * number of the first chunk of segment file i; a segment file without chunks
+ * has the same number as the next one, so it is never returned.
+ */
+static inline int
+AppendOnlyParallelScan_ChunkSegment(const uint64 *seg_first_chunk,
+									int nseg, uint64 chunk)
+{
+	int			start = 0;
+	int			end = nseg - 1;
+
+	while (start < end)
+	{
+		int mid = (start + end + 1) / 2;
+
+		if (seg_first_chunk[mid] <= chunk)
+			start = mid;
+		else
+			end = mid - 1;
+	}
+
+	return start;
+}
+
+/*
  * Return the number of rows in each chunk of a parallel scan, given the number
  * of rows the scan reads and their uncompressed size in bytes.  The last chunk
  * of a segment file may be shorter.
@@ -603,7 +629,10 @@ AppendOnlyParallelScan_RowsPerChunk(int64 total_rows, int64 total_bytes)
 	int64		row_bytes;
 	int64		rows_per_chunk;
 
-	/* no rows to scan, so no chunks */
+	/*
+	 * No rows to scan.  Every segment file has 0 chunks whatever the size;
+	 * return 1, because callers divide by rows_per_chunk.
+	 */
 	if (total_rows == 0)
 		return 1;
 
