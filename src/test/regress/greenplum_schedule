@@ -40,6 +40,9 @@ test: copy_encoding_error
 
 test: dedupset
 
+# dynamic shared memory segments are charged to the vmem budget
+test: dsm_vmem
+
 test: disable_autovacuum
 test: python_processed64bit
 test: enable_autovacuum

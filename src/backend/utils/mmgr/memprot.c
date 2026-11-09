@@ -43,8 +43,6 @@
 #define SHMEM_OOM_TIME "last vmem oom time"
 #define MAX_REQUESTABLE_SIZE 0x7fffffff
 
-static void gp_failed_to_alloc(MemoryAllocationStatus ec, int en, int sz);
-
 /*
  * Last OOM time of a segment. Maintained in shared memory.
  */
@@ -292,7 +290,8 @@ MemoryProtection_IsOwnerThread()
  * 		en: the last seen error number as retrieved by calling __error() or similar function
  * 		sz: the requested allocation size for which we reached OOM
  */
-static void gp_failed_to_alloc(MemoryAllocationStatus ec, int en, int sz)
+void
+gp_failed_to_alloc(MemoryAllocationStatus ec, int en, int64 sz)
 {
 	/*
 	 * A per-query vmem overflow shouldn't trigger a segment-wide
@@ -360,8 +359,8 @@ static void gp_failed_to_alloc(MemoryAllocationStatus ec, int en, int sz)
 		/* Hit MOP limit */
 		ereport(ERROR, (errcode(ERRCODE_GP_MEMPROT_KILL),
 				errmsg("Out of memory"),
-				errdetail("Vmem limit reached, failed to allocate %d bytes from tracker, which has %d MB available",
-						sz, VmemTracker_GetAvailableVmemMB()
+				errdetail("Vmem limit reached, failed to allocate %lld bytes from tracker, which has %d MB available",
+						(long long) sz, VmemTracker_GetAvailableVmemMB()
 				)
 		));
 	}
@@ -370,8 +369,8 @@ static void gp_failed_to_alloc(MemoryAllocationStatus ec, int en, int sz)
 		/* Hit MOP limit */
 		ereport(ERROR, (errcode(ERRCODE_GP_MEMPROT_KILL),
 				errmsg("Out of memory"),
-				errdetail("Per-query memory limit reached: current limit is %d kB, requested %d bytes, has %d MB available for this query",
-						gp_vmem_limit_per_query, sz, VmemTracker_GetAvailableQueryVmemMB()
+				errdetail("Per-query memory limit reached: current limit is %d kB, requested %lld bytes, has %d MB available for this query",
+						gp_vmem_limit_per_query, (long long) sz, VmemTracker_GetAvailableQueryVmemMB()
 				)
 		));
 	}
@@ -379,7 +378,7 @@ static void gp_failed_to_alloc(MemoryAllocationStatus ec, int en, int sz)
 	{
 		ereport(ERROR, (errcode(ERRCODE_GP_MEMPROT_KILL),
 				errmsg("Out of memory"),
-				errdetail("System memory limit reached, failed to allocate %d bytes from system", sz)
+				errdetail("System memory limit reached, failed to allocate %lld bytes from system", (long long) sz)
 		));
 	}
 	else if (ec == MemoryFailure_ResourceGroupMemoryExhausted)

@@ -92,3 +92,25 @@ class ByValStructs(object):
     @classmethod
     def has(cls, argtype):
         return argtype in cls.type_names
+
+
+class NoReturnFuncs(object):
+    """
+    Functions declared pg_attribute_noreturn() in a header the mock cannot
+    see. The generated mock must not fall off the end, so mocker.py appends
+    abort() to these. Tests escape through a siglongjmp side effect installed
+    on the mock, so the abort() is reached only when a test forgot one.
+    """
+    func_names = set([
+            'ExceptionalCondition',
+            'MemoryContextError',
+            'ReThrowError',
+            'add_size_error',
+            'gp_failed_to_alloc',
+            'mul_size_error',
+            'pg_re_throw',
+            ])
+
+    @classmethod
+    def has(cls, funcname):
+        return funcname in cls.func_names

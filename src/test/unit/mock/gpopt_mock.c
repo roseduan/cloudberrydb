@@ -6,6 +6,21 @@
 #include "nodes/plannodes.h"
 #include "optimizer/orcaopt.h"
 
+/*
+ * The real declarations live in C++-only headers (gpopt/CGPOptimizer.h and
+ * gpopt/utils/funcs.h use bare extern "C" blocks), so declare the mocked
+ * entry points here with the same C linkage signatures.
+ */
+extern char *SerializeDXLPlan(Query *pquery);
+extern PlannedStmt *GPOPTOptimizedPlan(Query *pquery,
+									   bool *had_unexpected_failure,
+									   OptimizerOptions *opts);
+extern Datum LibraryVersion(void);
+extern Datum EnableXform(PG_FUNCTION_ARGS);
+extern Datum DisableXform(PG_FUNCTION_ARGS);
+extern void InitGPOPT(void);
+extern void TerminateGPOPT(void);
+
 char *
 SerializeDXLPlan(Query *pquery)
 {
@@ -14,7 +29,7 @@ SerializeDXLPlan(Query *pquery)
 }
 
 PlannedStmt *
-GPOPTOptimizedPlan(Query *pquery, bool pfUnexpectedFailure, OptimizerOptions *opts)
+GPOPTOptimizedPlan(Query *pquery, bool *had_unexpected_failure, OptimizerOptions *opts)
 {
 	elog(ERROR, "mock implementation of GPOPTOptimizedPlan called");
 	return NULL;
@@ -37,18 +52,18 @@ EnableXform(PG_FUNCTION_ARGS)
 Datum
 DisableXform(PG_FUNCTION_ARGS)
 {
-	elog(ERROR, "mock implementation of EnableXform called");
+	elog(ERROR, "mock implementation of DisableXform called");
 	PG_RETURN_VOID();
 }
 
 void
-InitGPOPT ()
+InitGPOPT(void)
 {
 	elog(ERROR, "mock implementation of InitGPOPT called");
 }
 
 void
-TerminateGPOPT ()
+TerminateGPOPT(void)
 {
 	elog(ERROR, "mock implementation of TerminateGPOPT called");
 }

@@ -12,7 +12,6 @@ override CPPFLAGS+= -I$(top_srcdir)/src/backend/libpq \
 					-I$(top_srcdir)/src/backend/postmaster \
 					-I$(top_srcdir)/src/test/unit/mock/ \
 					-I. -I$(top_builddir)/src/port \
-					-DDLSUFFIX=$(DLSUFFIX) \
 					-DUNITTEST \
 					-I$(top_srcdir)/src/backend/utils/stat
 

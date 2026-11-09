@@ -240,6 +240,8 @@ class FuncSignature(object):
     def make_body(self):
         body = special.SpecialFuncs.make_body(self)
         if body:
+            if special.NoReturnFuncs.has(self.funcname):
+                body += '\n\tabort();\t/* noreturn; see special.NoReturnFuncs */'
             return body
 
         subscript = re.compile('\[\d*\]$')
@@ -283,6 +285,8 @@ class FuncSignature(object):
         else:
             ret = '\tmock();'
         buf.append(ret)
+        if special.NoReturnFuncs.has(self.funcname):
+            buf.append('\tabort();\t/* noreturn; see special.NoReturnFuncs */')
         return '\n'.join(buf)
 
     def to_mock(self):
