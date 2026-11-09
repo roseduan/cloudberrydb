@@ -105,7 +105,8 @@ private:
 	 * (see decimalCols).  Aligned via a per-row-group cursor over selRowGroups
 	 * (Arrow batches never cross a row-group boundary).  Same scheme as
 	 * iceberg_read_record_batch. */
-	struct DecimalFlbaCol { int outK; int physColIdx; int precision; int scale; int typeLength; };
+	struct DecimalFlbaCol { int outK; int physColIdx; int precision; int scale;
+							int typeLength; int32 typeMod; };
 	std::vector<DecimalFlbaCol>	decimalCols;
 	std::vector<int>			readRawPos;			/* per output col: raw pos, or -2 decimal */
 	std::vector<int>			selRowGroups;		/* file row-group index of each selected rg */

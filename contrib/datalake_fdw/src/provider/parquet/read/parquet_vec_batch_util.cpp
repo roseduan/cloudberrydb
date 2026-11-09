@@ -27,6 +27,8 @@ extern "C" {
 namespace Datalake {
 namespace Internal {
 
+static void checkVecTypmodRepresentable(int32 typeMod);
+
 /*
  * Copy a narrow fixed-width arrow array into its widened form, nulls kept.
  * Only the widenings Iceberg schema evolution allows use this (int32 -> int64,
@@ -320,6 +322,20 @@ normalizeParquetVecColumn(parquet_arrow::MemoryPool *pool, Oid typeOid,
 				elog(ERROR, "datalake parquet vectorized read: numeric decimal128(%d,%d) "
 					 "outside supported range (precision <= 35, 0 <= scale <= precision); "
 					 "run with vectorization off", precision, scale);
+			/*
+			 * The declared numeric(p,s) is part of the answer, not a hint:
+			 * restate each value in the declared scale and refuse what the
+			 * declared precision cannot hold (#487).
+			 */
+			const bool applyTypmod = numericTypmodApplies(typeMod, precision,
+														  scale);
+			int32_t outScale = scale;
+
+			if (applyTypmod)
+			{
+				checkVecTypmodRepresentable(typeMod);
+				outScale = DL_NUMERIC_TYPMOD_SCALE(typeMod);
+			}
 			auto din = std::static_pointer_cast<::parquet_arrow::Decimal128Array>(in);
 			::parquet_arrow::FixedSizeBinaryBuilder b(::parquet_arrow::fixed_size_binary(16), pool);
 			PARQUET_VEC_CHECK(b.Reserve(n), "numeric reserve");
@@ -348,7 +364,15 @@ normalizeParquetVecColumn(parquet_arrow::MemoryPool *pool, Oid typeOid,
 				memcpy(&low, p, sizeof(low));
 				memcpy(&high, p + sizeof(low), sizeof(high));
 				uint8_t enc[16];
-				encodeNumeric128(low, high, scale, enc);
+				if (applyTypmod)
+				{
+					__int128 v = numericRescaleUnscaled(
+						(((__int128) high) << 64) | low, scale, typeMod);
+
+					low = (uint64_t) v;
+					high = (int64_t) (v >> 64);
+				}
+				encodeNumeric128(low, high, outScale, enc);
 				b.UnsafeAppend(enc);
 			}
 			PARQUET_VEC_CHECK(b.Finish(&out_arr), "numeric finish");
@@ -417,12 +441,44 @@ normalizeParquetVecColumn(parquet_arrow::MemoryPool *pool, Oid typeOid,
 	}
 }
 
+/*
+ * The declared numeric(p,s) has to be one the engine's numeric128 can carry:
+ * its scale sits in the top 8 bits of the high word, leaving 120 signed bits
+ * for the value (see encodeNumeric128).  numericTypmodRescalesInPlace() keeps
+ * every converted value under 10^35 < 2^119, which is exactly that budget --
+ * the same reason the file-precision guards next to the call sites exist.
+ * Anything wider has to be read by the row engine, so say so rather than
+ * encode a value that would silently lose its top bits (#487).
+ */
+static void
+checkVecTypmodRepresentable(int32 typeMod)
+{
+	if (!numericTypmodRescalesInPlace(typeMod))
+		elog(ERROR, "datalake parquet vectorized read: declared numeric(%d,%d) "
+			 "is outside the vectorized reader's range (precision 1..%d, "
+			 "scale 0..%d); run with vectorization off",
+			 DL_NUMERIC_TYPMOD_PRECISION(typeMod),
+			 DL_NUMERIC_TYPMOD_SCALE(typeMod),
+			 DL_NUMERIC_INPLACE_MAX_PRECISION,
+			 DL_NUMERIC_INPLACE_MAX_PRECISION);
+}
+
 void
 appendNumeric128FromFLBA(::parquet_arrow::FixedSizeBinaryBuilder &b,
 					const ::parquet::FixedLenByteArray *vals,
 					const int16_t *defs, int16_t maxDef, int64_t levels,
-					int typeLength, int precision, int scale)
+					int typeLength, int precision, int scale, int32 typeMod)
 {
+	/* Declared numeric(p,s) that the file does not already satisfy (#487). */
+	const bool	applyTypmod = numericTypmodApplies(typeMod, precision, scale);
+	int32_t		outScale = scale;
+
+	if (applyTypmod)
+	{
+		checkVecTypmodRepresentable(typeMod);
+		outScale = DL_NUMERIC_TYPMOD_SCALE(typeMod);
+	}
+
 	/* precision<=18 always fits in int64 even when stored in a wider FLBA, so
 	 * take the cheap single-bswap64 path (mirrors the row reader). */
 	const bool fits64 = (precision > 0 && precision <= 18);
@@ -436,7 +492,7 @@ appendNumeric128FromFLBA(::parquet_arrow::FixedSizeBinaryBuilder &b,
 			continue;
 		}
 		const uint8_t *p = vals[vi++].ptr;	/* big-endian two's-complement */
-		if (fits64)
+		if (fits64 && !applyTypmod)
 		{
 			int64_t v = FLBA_to_int64(p, typeLength);
 			encodeNumeric128((uint64_t) v, (v < 0 ? INT64CONST(-1) : INT64CONST(0)),
@@ -444,8 +500,12 @@ appendNumeric128FromFLBA(::parquet_arrow::FixedSizeBinaryBuilder &b,
 		}
 		else
 		{
-			__int128 v = FLBA_to_int128(p, typeLength);
-			encodeNumeric128((uint64_t) v, (int64_t) (v >> 64), scale, enc);
+			__int128 v = fits64 ? (__int128) FLBA_to_int64(p, typeLength)
+								: FLBA_to_int128(p, typeLength);
+
+			if (applyTypmod)
+				v = numericRescaleUnscaled(v, scale, typeMod);
+			encodeNumeric128((uint64_t) v, (int64_t) (v >> 64), outScale, enc);
 		}
 		b.UnsafeAppend(enc);
 	}

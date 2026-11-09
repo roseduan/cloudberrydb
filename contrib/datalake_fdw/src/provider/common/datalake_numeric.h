@@ -6,8 +6,188 @@
 
 extern "C"
 {
+#include "fmgr.h"
+#include "utils/fmgrprotos.h"
 #include "utils/numeric.h"
 #include "varatt.h"
+}
+
+/*
+ * Declared numeric(p,s) versus the precision and scale the data file carries.
+ *
+ * A Parquet DECIMAL stores its own precision and scale, and decoding with
+ * those alone ignores the numeric(p,s) the foreign table declares: values
+ * come back neither rounded to the declared scale nor rejected when they
+ * need more digits than the declared precision allows (#487).  A declaration
+ * on a foreign table is a statement about the data, not a placeholder, so the
+ * readers convert to it exactly as PostgreSQL would for a local column.
+ *
+ * numeric.c keeps its typmod accessors to itself (static inline, not in
+ * numeric.h), hence the copies here.  Note the scale is an 11-bit SIGNED
+ * field -- this kernel accepts a negative numeric scale -- so unpacking it
+ * needs numeric.c's sign-extending bit hack, not a plain mask.
+ */
+#define DL_NUMERIC_TYPMOD_PRECISION(tm) \
+	((int) ((((uint32) ((tm) - VARHDRSZ)) >> 16) & 0xffff))
+#define DL_NUMERIC_TYPMOD_SCALE(tm) \
+	((int) (((((uint32) ((tm) - VARHDRSZ)) & 0x7ff) ^ 1024) - 1024))
+
+/*
+ * Does reading a DECIMAL(filePrecision, fileScale) as numeric(p,s) change any
+ * value?
+ *
+ * No for a bare numeric (typmod below VARHDRSZ is numeric.c's "no typmod":
+ * the file's own scale is then the right answer), and no when the declared
+ * scale already matches and the declared precision admits every value the
+ * file schema does -- the conversion is the identity there, so the fast
+ * decode paths stay intact.
+ *
+ * Also no when the file column is not a DECIMAL at all: libparquet reports no
+ * meaningful precision/scale for those, so there is nothing to convert from
+ * and feeding those placeholder numbers to a conversion would be worse than
+ * the pre-existing silence.  (That silence -- a plain INT64 read through a
+ * narrow numeric(p,s) -- is a separate gap, not this one.)
+ */
+static inline bool
+numericTypmodApplies(int32 typmod, int filePrecision, int fileScale)
+{
+	if (typmod < (int32) VARHDRSZ)
+		return false;
+	if (filePrecision <= 0 || fileScale < 0)
+		return false;
+
+	return !(DL_NUMERIC_TYPMOD_SCALE(typmod) == fileScale &&
+			 DL_NUMERIC_TYPMOD_PRECISION(typmod) >= filePrecision);
+}
+
+/*
+ * Can the declared typmod be reached by rescaling an unscaled int128 in
+ * place, rather than by building a NUMERIC and handing it to the kernel?
+ *
+ * Only for a non-negative declared scale within a precision an int128 holds
+ * with room to spare.  Every value that survives then satisfies
+ * |v| < 10^precision <= 10^35, which keeps both the rescale itself and the
+ * engine's 120-bit numeric128 encoding (see encodeNumeric128) in range.
+ * Wider or negative-scale declarations are rare and go the allocating way.
+ */
+#define DL_NUMERIC_INPLACE_MAX_PRECISION 35
+
+static inline bool
+numericTypmodRescalesInPlace(int32 typmod)
+{
+	int			prec = DL_NUMERIC_TYPMOD_PRECISION(typmod);
+	int			scale = DL_NUMERIC_TYPMOD_SCALE(typmod);
+
+	return (scale >= 0 && scale <= DL_NUMERIC_INPLACE_MAX_PRECISION &&
+			prec >= 1 && prec <= DL_NUMERIC_INPLACE_MAX_PRECISION);
+}
+
+/* 10^n for 0 <= n <= 38, which is all an int128 holds. */
+static inline __int128
+numericPowerOfTen(int n)
+{
+	__int128	r = 1;
+
+	for (int i = 0; i < n; i++)
+		r *= 10;
+	return r;
+}
+
+/*
+ * Restate an unscaled decimal read at fileScale in the scale the declared
+ * numeric(p,s) asks for: rounds half away from zero, as numeric_round() does,
+ * and raises "numeric field overflow" when the declared precision cannot hold
+ * the result -- the same test apply_typmod() makes, |value| < 10^precision
+ * once the value is expressed at the declared scale.
+ *
+ * Only for typmods numericTypmodRescalesInPlace() accepts, so every bound
+ * below stays inside an int128.
+ */
+static inline __int128
+numericRescaleUnscaled(__int128 v, int fileScale, int32 typmod)
+{
+	int			declScale = DL_NUMERIC_TYPMOD_SCALE(typmod);
+	int			declPrec = DL_NUMERIC_TYPMOD_PRECISION(typmod);
+	__int128	limit = numericPowerOfTen(declPrec);
+
+	if (declScale < fileScale)
+	{
+		int			drop = fileScale - declScale;
+		__int128	div;
+		__int128	q;
+		__int128	r;
+
+		if (drop > 38)
+			return 0;			/* every digit dropped; |v| < 10^38 rounds to 0 */
+
+		div = numericPowerOfTen(drop);
+		q = v / div;
+		r = v % div;
+		if (r < 0)
+			r = -r;
+		if (r >= div - r)		/* |r| * 2 >= div, without overflowing */
+			q += (v < 0) ? -1 : 1;
+		v = q;
+	}
+	else if (declScale > fileScale)
+	{
+		int			pad = declScale - fileScale;
+		__int128	mul;
+		__int128	room;
+
+		/*
+		 * Bound the value before multiplying, not after: anything that would
+		 * not fit the declared precision afterwards cannot fit now either.
+		 */
+		if (pad > declPrec)
+			goto overflow;
+		mul = numericPowerOfTen(pad);
+		room = limit / mul;
+		if (v >= room || v <= -room)
+			goto overflow;
+		v *= mul;
+	}
+
+	if (v >= limit || v <= -limit)
+		goto overflow;
+	return v;
+
+overflow:
+	ereport(ERROR,
+			(errcode(ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE),
+			 errmsg("numeric field overflow"),
+			 errdetail("A field with precision %d, scale %d must round to an "
+					   "absolute value less than %s%d.",
+					   declPrec, declScale,
+					   declPrec > declScale ? "10^" : "",
+					   declPrec > declScale ? declPrec - declScale : 1)));
+	return 0;					/* unreachable */
+}
+
+/*
+ * Apply the declared typmod to an already decoded NUMERIC: rounds to the
+ * declared scale and throws "numeric field overflow" when the value does not
+ * fit the declared precision.  Returns a freshly palloc'd numeric, so callers
+ * serving values out of a reusable buffer must return this datum rather than
+ * their buffer.
+ */
+static inline Datum
+numericApplyTypmod(Datum value, int32 typmod)
+{
+	return DirectFunctionCall2(numeric, value, Int32GetDatum(typmod));
+}
+
+/*
+ * Hand back a NUMERIC decoded into buf, converting it to the declared
+ * numeric(p,s) first when that conversion is not the identity.  The
+ * conversion allocates, so the result then no longer aliases buf.
+ */
+static inline Datum
+numericDecodedResult(void *buf, bool applyTypmod, int32 typmod)
+{
+	Datum		d = NumericGetDatum((Numeric) buf);
+
+	return applyTypmod ? numericApplyTypmod(d, typmod) : d;
 }
 
 template<typename T>

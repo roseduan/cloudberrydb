@@ -382,6 +382,15 @@ Datum parquetFileReader::read(Oid typeOid, int32 typeMod, int column_index, bool
         }
         case NUMERICOID:
         {
+            /*
+             * numeric(p,s) on the foreign table is a statement about the data:
+             * round to the declared scale and refuse what the declared
+             * precision cannot hold, instead of silently handing back the
+             * file's own scale and precision (#487).
+             */
+            bool applyTypmod = numericTypmodApplies(typeMod,
+                                                    des->type_precision(),
+                                                    des->type_scale());
             switch(des->physical_type())
             {
                 case ::parquet::Type::INT32: {
@@ -401,7 +410,7 @@ Datum parquetFileReader::read(Oid typeOid, int32 typeMod, int column_index, bool
                     }
                     dataBuff *res = options.buffer.getDataBuffer(column_index);
                     int_to_numeric_with_scale(values, scale, (Numeric) res->buffer);
-			        return NumericGetDatum((Numeric) res->buffer);
+			        return numericDecodedResult(res->buffer, applyTypmod, typeMod);
                 }
                 case ::parquet::Type::INT64: {
                     parquet::TypedScanner<parquet::Int64Type>* scanner_ = dlCheckedScanner<parquet::Int64Type>(scanner, des, typeOid, name.c_str());
@@ -420,7 +429,7 @@ Datum parquetFileReader::read(Oid typeOid, int32 typeMod, int column_index, bool
                     }
                     dataBuff *res = options.buffer.getDataBuffer(column_index);
                     int_to_numeric_with_scale(values, scale, (Numeric) res->buffer);
-			        return NumericGetDatum((Numeric) res->buffer);
+			        return numericDecodedResult(res->buffer, applyTypmod, typeMod);
                 }
                 case ::parquet::Type::BYTE_ARRAY: {
                     int precision = des->type_precision();
@@ -448,7 +457,7 @@ Datum parquetFileReader::read(Oid typeOid, int32 typeMod, int column_index, bool
                     }
                     dataBuff *res = options.buffer.getDataBuffer(column_index);
                     int_to_numeric_with_scale(FLBA_to_int128(values.ptr, values.len), scale, (Numeric) res->buffer);
-			        return NumericGetDatum((Numeric) res->buffer);
+			        return numericDecodedResult(res->buffer, applyTypmod, typeMod);
                 }
                 case ::parquet::Type::FIXED_LEN_BYTE_ARRAY: {
                     int precision = des->type_precision();
@@ -477,7 +486,7 @@ Datum parquetFileReader::read(Oid typeOid, int32 typeMod, int column_index, bool
                     }
                     dataBuff *res = options.buffer.getDataBuffer(column_index);
                     int_to_numeric_with_scale(FLBA_to_int128(values.ptr, type_len), scale, (Numeric) res->buffer);
-			        return NumericGetDatum((Numeric) res->buffer);
+			        return numericDecodedResult(res->buffer, applyTypmod, typeMod);
                 }
                 default:
                     elog(ERROR, "Datalake foreign table Error, Column index %d Parquet format "

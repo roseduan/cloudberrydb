@@ -262,7 +262,11 @@ OPTIONS (filePath '/warehouse/fdw-test/err/bigdec/', format 'parquet');
 INSERT INTO fdw_err_dec_w VALUES (1, 1234567890123456789012345678.1234567890);
 DROP FOREIGN TABLE fdw_err_dec_w;
 
--- Read back with smaller precision
+-- Read back with smaller precision.  The declared numeric(p,s) is applied
+-- to what the file holds, so a value with 28 integer digits does not fit a
+-- numeric(5,2) and the read fails -- the same answer a heap column would
+-- give.  Before #487 the declared precision was ignored and this said OK,
+-- handing the query a value its own type could not represent.
 CREATE FOREIGN TABLE fdw_err_dec_r (id int, big_dec decimal(5,2))
 SERVER fdw_err_server
 OPTIONS (filePath '/warehouse/fdw-test/err/bigdec/', format 'parquet');

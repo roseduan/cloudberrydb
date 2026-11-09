@@ -98,7 +98,8 @@ encodeNumeric128(uint64_t low64, int64_t high64, int32_t scale, uint8_t out[16])
 /*
  * Normalize one raw parquet_arrow column (whose type comes from the FILE) into
  * the engine's expected Arrow array/type for PG column type `typeOid`.  ERRORs
- * clearly on a type mismatch instead of over-reading a bad cast.
+ * clearly on a type mismatch instead of over-reading a bad cast.  `typeMod` is
+ * the PG column's atttypmod, applied to DECIMAL columns (#487).
  */
 void normalizeParquetVecColumn(parquet_arrow::MemoryPool *pool, Oid typeOid,
 					int32 typeMod,
@@ -123,7 +124,7 @@ void normalizeParquetVecColumn(parquet_arrow::MemoryPool *pool, Oid typeOid,
 void appendNumeric128FromFLBA(parquet_arrow::FixedSizeBinaryBuilder &b,
 			const parquet::FixedLenByteArray *vals,
 			const int16_t *defs, int16_t maxDef, int64_t levels,
-			int typeLength, int precision, int scale);
+			int typeLength, int precision, int scale, int32 typeMod);
 
 /* Append `column` to `out`, creating the RecordBatch on the first column. */
 void parquetVecAddColOrCreate(std::shared_ptr<parquet_arrow::RecordBatch> &out,

@@ -115,7 +115,8 @@ private:
 	 * batches: Arrow batches never cross a row-group boundary, so a per-row-group
 	 * cursor (decimalRgCursor/decimalRowsInRg over selRowGroups) stays aligned.
 	 */
-	struct DecimalFlbaCol { int emitK; int physColIdx; int precision; int scale; int typeLength; };
+	struct DecimalFlbaCol { int emitK; int physColIdx; int precision; int scale;
+							int typeLength; int32 typeMod; };
 	std::vector<DecimalFlbaCol>	decimalCols;
 	std::vector<int>			selRowGroups;		/* file row-group index of each selected rg */
 	std::vector<std::shared_ptr<::parquet::ColumnReader>> decimalReaders; /* for selRowGroups[decimalRgCursor] */

@@ -186,7 +186,8 @@ parquetReadRecordBatch::getNextGroup()
 		 */
 		if (dt.precision() > 35 || dt.scale() < 0 || dt.scale() > dt.precision())
 			continue;
-		decimalCols.push_back({ -1, c, dt.precision(), dt.scale(), cd->type_length() });
+		decimalCols.push_back({ -1, c, dt.precision(), dt.scale(),
+								cd->type_length(), tupdesc->attrs[c].atttypmod });
 		decimalPhys.insert(c);
 	}
 
@@ -466,7 +467,8 @@ parquetReadRecordBatch::readDecimalBatch(int64_t nrows)
 					break;
 				appendNumeric128FromFLBA(*builders[j], vals.data(), defsPtr, maxDef, lv,
 										 decimalCols[j].typeLength,
-										 decimalCols[j].precision, decimalCols[j].scale);
+										 decimalCols[j].precision, decimalCols[j].scale,
+										 decimalCols[j].typeMod);
 				rowsGot += lv;
 			}
 			if (rowsGot != take)

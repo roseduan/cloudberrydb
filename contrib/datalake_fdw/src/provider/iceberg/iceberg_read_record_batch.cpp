@@ -267,7 +267,8 @@ icebergReadRecordBatch::openCurrentTask()
 			if (dt.precision() > 35 || dt.scale() < 0 || dt.scale() > dt.precision())
 				continue;
 			decimalCols.push_back({ (int) k, phys, dt.precision(), dt.scale(),
-									cd->type_length() });
+									cd->type_length(),
+									sd->attrs[emitAttr[k]].atttypmod });
 			decimalPhys.insert(phys);
 		}
 
@@ -498,7 +499,8 @@ icebergReadRecordBatch::readDecimalBatch(int64_t nrows)
 					break;
 				appendNumeric128FromFLBA(*builders[j], vals.data(), defsPtr, maxDef, lv,
 										 decimalCols[j].typeLength,
-										 decimalCols[j].precision, decimalCols[j].scale);
+										 decimalCols[j].precision, decimalCols[j].scale,
+										 decimalCols[j].typeMod);
 				rowsGot += lv;
 			}
 			if (rowsGot != take)

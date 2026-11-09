@@ -455,7 +455,14 @@ ParquetReader::filterRowGroupByOffset(int64_t startOffset, int64_t endOffset)
 Datum
 ParquetReader::readBatchPrimitive(const TypeInfo &typInfo, bool &isNull)
 {
-	if (typInfo.pgTypeId_ != NUMERICOID)
+	/*
+	 * Same reason as in resolveFillKind(): a declared numeric(p,s) that
+	 * differs from the file's own precision and scale needs the per-value
+	 * path, which can return the converted (reallocated) value (#487).
+	 */
+	if (typInfo.pgTypeId_ != NUMERICOID ||
+		numericTypmodApplies(typInfo.typeMod_, typInfo.precision_,
+							 typInfo.scale_))
 		return readPrimitive(typInfo, isNull);
 
 	NumericColumnBatch &b = numBatch_[typInfo.columnIndex_];
@@ -868,6 +875,25 @@ ParquetReader::readPrimitive(const TypeInfo &typInfo, bool &isNull)
 	PG_RETURN_DATUM(0);
 }
 
+/*
+ * Write one decoded decimal into the reader's NUMERIC buffer, restating it at
+ * the declared scale first when the column asks for that (#487).  The rescale
+ * is bounded by numericTypmodRescalesInPlace(), so the result never needs
+ * more digits than the buffer already reserves for an int128.
+ */
+template<typename T>
+static inline void
+storeDecimal(T value, int32 typeMod, bool rescaleHere,
+			 int fileScale, int outScale, char *out_buf)
+{
+	if (rescaleHere)
+		int_to_numeric_with_scale(numericRescaleUnscaled((__int128) value,
+														 fileScale, typeMod),
+								  outScale, (Numeric) out_buf);
+	else
+		int_to_numeric_with_scale(value, fileScale, (Numeric) out_buf);
+}
+
 Datum
 ParquetReader::readDecimal(std::shared_ptr<parquet::Scanner> &scanner, const TypeInfo &typInfo, bool &isNull)
 {
@@ -875,6 +901,24 @@ ParquetReader::readDecimal(std::shared_ptr<parquet::Scanner> &scanner, const Typ
 	parquet::FixedLenByteArray value;
 	int scale = typInfo.scale_;
 	char *out_buf = nullptr;
+	/*
+	 * A declared numeric(p,s) that the file does not already satisfy is
+	 * applied here (#487).  Prefer restating the unscaled integer before it
+	 * is turned into a NUMERIC: writing the result at the declared scale into
+	 * the reusable buffer keeps this path allocation-free, which matters
+	 * because the Iceberg/Hudi scan loop has no per-row context to reset
+	 * (see BaseFileReader::next).  Only the rare declarations
+	 * numericTypmodRescalesInPlace() rejects -- a negative scale, or a
+	 * precision beyond what an int128 holds comfortably -- fall back to the
+	 * kernel's numeric(), which allocates.
+	 */
+	const bool applyTypmod = numericTypmodApplies(typInfo.typeMod_,
+												  typInfo.precision_,
+												  typInfo.scale_);
+	const bool rescaleHere = applyTypmod &&
+		numericTypmodRescalesInPlace(typInfo.typeMod_);
+	const int outScale = rescaleHere
+		? DL_NUMERIC_TYPMOD_SCALE(typInfo.typeMod_) : scale;
 
 	if (!buffer_)
 	{
@@ -894,16 +938,18 @@ ParquetReader::readDecimal(std::shared_ptr<parquet::Scanner> &scanner, const Typ
 			dlCheckedScanner<parquet::Int32Type>(scanner, typInfo.pgTypeId_, filePath_.c_str())->NextValue(&d.int32Value, &isNull);
 			if (isNull)
 				PG_RETURN_DATUM(0);
-			int_to_numeric_with_scale(d.int32Value, scale, (Numeric) out_buf);
-			return NumericGetDatum((Numeric) out_buf);
+			storeDecimal(d.int32Value, typInfo.typeMod_, rescaleHere, scale, outScale, out_buf);
+			return numericDecodedResult(out_buf, applyTypmod && !rescaleHere,
+										typInfo.typeMod_);
 		}
 		case INT8OID:
 		{
 			dlCheckedScanner<parquet::Int64Type>(scanner, typInfo.pgTypeId_, filePath_.c_str())->NextValue(&d.int64Value, &isNull);
 			if (isNull)
 				PG_RETURN_DATUM(0);
-			int_to_numeric_with_scale(d.int64Value, scale, (Numeric) out_buf);
-			return NumericGetDatum((Numeric) out_buf);
+			storeDecimal(d.int64Value, typInfo.typeMod_, rescaleHere, scale, outScale, out_buf);
+			return numericDecodedResult(out_buf, applyTypmod && !rescaleHere,
+										typInfo.typeMod_);
 		}
 		default:
 		{
@@ -915,11 +961,14 @@ ParquetReader::readDecimal(std::shared_ptr<parquet::Scanner> &scanner, const Typ
 			 * Use native 64-bit division instead of __int128 software division,
 			 * which is ~5x faster on aarch64.
 			 */
-			if (typInfo.precision_ > 0 && typInfo.precision_ <= 18)
+			if (typInfo.precision_ > 0 && typInfo.precision_ <= 18 && !rescaleHere)
 				int_to_numeric_with_scale(FLBA_to_int64(value.ptr, typInfo.typeLength_), scale, (Numeric) out_buf);
 			else
-				int_to_numeric_with_scale(FLBA_to_int128(value.ptr, typInfo.typeLength_), scale, (Numeric) out_buf);
-			return NumericGetDatum((Numeric) out_buf);
+				storeDecimal(FLBA_to_int128(value.ptr, typInfo.typeLength_),
+							 typInfo.typeMod_, rescaleHere, scale, outScale,
+							 out_buf);
+			return numericDecodedResult(out_buf, applyTypmod && !rescaleHere,
+										typInfo.typeMod_);
 		}
 	}
 
@@ -1085,6 +1134,17 @@ ParquetReader::resolveFillKind(const TypeInfo &typInfo)
 			 */
 			return typInfo.fileTypeId_ == INT8OID ? FILL_TIMESTAMP : FILL_NONE;
 		case NUMERICOID:
+			/*
+			 * The batch legs serve values straight out of a fixed-stride
+			 * buffer, which leaves nowhere to put the reallocated result of a
+			 * declared-typmod conversion.  A column whose numeric(p,s) does
+			 * not match the file keeps the per-value path, where readDecimal()
+			 * applies it (#487).  Columns that match -- the common case -- are
+			 * unaffected.
+			 */
+			if (numericTypmodApplies(typInfo.typeMod_, typInfo.precision_,
+									 typInfo.scale_))
+				return FILL_NONE;
 			switch (typInfo.fileTypeId_)
 			{
 				case INT4OID:
