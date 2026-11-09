@@ -24,6 +24,9 @@ bool parquetFileHasFieldIds(const parquet::SchemaDescriptor *schema);
 int  matchParquetColumn(const parquet::SchemaDescriptor *schema,
 						const DatalakeFieldDescription *entry,
 						bool fileHasFieldIds);
+bool parquetColumnIsGroupField(const parquet::SchemaDescriptor *schema,
+							   const DatalakeFieldDescription *entry,
+							   bool fileHasFieldIds);
 
 class ParquetReader : public BaseFileReader
 {

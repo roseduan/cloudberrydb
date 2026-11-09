@@ -39,6 +39,22 @@ public class FragmentDescription {
     @JsonInclude(JsonInclude.Include.NON_NULL)
     @JsonProperty("catalog-properties")
     private Map<String, Object> catalogProperties;
+    /*
+     * The read schema's top-level columns as name -> Iceberg field-id.
+     *
+     * The reader matches a data file's columns by field-id, which is what
+     * makes a column readable after a RENAME: the file keeps the old name and
+     * the id, the table keeps the id and the new name, and only the id joins
+     * them.  Without this the segment has nothing but names to go on and a
+     * renamed column reads NULL out of every file written before the rename
+     * (#482).
+     *
+     * Omitted when empty, so a segment that does not know the key behaves as
+     * it did before and an older agent is read by a newer segment.
+     */
+    @JsonInclude(JsonInclude.Include.NON_EMPTY)
+    @JsonProperty("schema-field-ids")
+    private Map<String, Integer> schemaFieldIds;
 
     public FragmentDescription(TableOptions tableOptions, List<CombinedTask> combinedTasks) {
         this.tableOptions = tableOptions;

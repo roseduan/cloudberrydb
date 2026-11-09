@@ -19,6 +19,13 @@ DatalakeRowReader *datalakeCreateRowReader(MemoryContext mcxt,
 bool datalakeRowReaderNext(DatalakeRowReader *reader, DatalakeInternalRecord *record);
 
 /*
+ * This column's Iceberg field-id from the map the agent sent with the plan,
+ * or 0 to match by name (see row_reader.c for the rule).  Not static so that
+ * a unit can pin a rule two review rounds changed.  #482
+ */
+int lookupIcebergFieldId(const ExternalTableMetadata *meta, const char *attname);
+
+/*
  * Deep fast-path inline: call the innermost format reader (e.g. parquet_next)
  * directly, bypassing 3 layers of function-pointer indirection per row:
  *   datalakeRowReaderNext → icebergTaskReaderNext → fileReaderNext

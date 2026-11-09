@@ -25,9 +25,74 @@ static void flatCombinedTasks(List *combinedScanTasks, List **fileScanTasks);
 static bool isCacheEnabled(char *cacheEnabled);
 static void icebergFileIndexMapInitialize(DatalakeRowReader *reader);
 
+/*
+ * This column's Iceberg field-id, from the name -> id map the agent sent with
+ * the scan plan and that rides on the table metadata node (#482).  0 when the
+ * map is absent or has no such name; the caller then leaves the reader
+ * matching by physical name.
+ *
+ * An exact name match wins outright.  Only when there is none do we accept a
+ * case-insensitive one, and only when it is unique: Iceberg column names are
+ * case-sensitive and may differ in case alone, while an unquoted PG
+ * identifier has been folded to lower case, so a blind case-insensitive match
+ * could silently bind the column to a DIFFERENT column's id -- and then read
+ * that column's data and prune on its statistics.  When the fold is ambiguous
+ * we return 0 and let the reader match by name, which is what it did before
+ * field-ids were used at all: no worse than the old behaviour, and in
+ * particular not a confident bind to the wrong column.  Raising here instead
+ * would fail queries that never reference the ambiguous column, since this
+ * runs over every attribute of the scan tupdesc.
+ */
+int
+lookupIcebergFieldId(const ExternalTableMetadata *meta, const char *attname)
+{
+	ListCell   *lcn;
+	ListCell   *lcv;
+	int			foldedId = 0;
+	int			foldedHits = 0;
+
+	if (meta == NULL || attname == NULL ||
+		meta->icebergFieldIdNames == NIL ||
+		list_length(meta->icebergFieldIdNames) !=
+		list_length(meta->icebergFieldIdValues))
+		return 0;
+
+	forboth(lcn, meta->icebergFieldIdNames, lcv, meta->icebergFieldIdValues)
+	{
+		const char *name = strVal(lfirst(lcn));
+		int			id = intVal(lfirst(lcv));
+
+		if (name == NULL)
+			continue;
+		if (strcmp(name, attname) == 0)
+			return id;
+		if (pg_strcasecmp(name, attname) == 0)
+		{
+			foldedId = id;
+			foldedHits++;
+		}
+	}
+
+	if (foldedHits == 1)
+		return foldedId;
+
+	if (foldedHits > 1)
+		ereport(WARNING,
+				(errmsg("column \"%s\" matches more than one Iceberg column "
+						"differing only in letter case", attname),
+				 errdetail("Falling back to matching it by name, which picks "
+						   "the file's first column that folds equal and may "
+						   "not be the one meant."),
+				 errhint("Quote the column name in CREATE FOREIGN TABLE so it "
+						 "keeps the Iceberg column's exact spelling.")));
+
+	return 0;
+}
+
 static List *
 createFieldDescription(TupleDesc tupleDesc, bool isBuiltinIceberg,
-					   const int *snapshotFieldIds, int nSnapshotFieldIds)
+					   const int *snapshotFieldIds, int nSnapshotFieldIds,
+					   const ExternalTableMetadata *tableOptions)
 {
 	int i;
 	List *result = NIL;
@@ -60,12 +125,17 @@ createFieldDescription(TupleDesc tupleDesc, bool isBuiltinIceberg,
 		else
 		{
 			/*
-			 * Only builtin iceberg files carry field-ids stamped as the PG attnum,
-			 * so only then do we let the reader match by field-id.  For external
-			 * iceberg (arbitrary Iceberg field-ids, name-mapped) and non-iceberg
-			 * reads, leave attnum 0 to keep the existing physical-name match.  #401
+			 * Builtin iceberg stamps the PG attnum as the field-id, so the
+			 * attnum is the id.  An external table's ids are the Iceberg
+			 * table's own, which the agent reports with the scan plan: look
+			 * this column's name up there (#482).  Without either -- an older
+			 * agent, a non-iceberg read -- 0 keeps the reader matching by
+			 * physical name, as it did before.  #401
 			 */
-			fieldDesc->attnum = isBuiltinIceberg ? attr->attnum : 0;
+			if (isBuiltinIceberg)
+				fieldDesc->attnum = attr->attnum;
+			else
+				fieldDesc->attnum = lookupIcebergFieldId(tableOptions, attname);
 		}
 
 		result = lappend(result, fieldDesc);
@@ -257,7 +327,8 @@ datalakeCreateRowReader(MemoryContext mcxt,
 
 	reader->datafileDesc = createFieldDescription(tupleDesc, isBuiltinIceberg,
 												  snapshotFieldIds,
-												  nSnapshotFieldIds);
+												  nSnapshotFieldIds,
+												  tableOptions);
 	reader->attrUsed = attrUsed;
 	reader->fileStream = fileStream;
 	reader->mcxt = mcxt;

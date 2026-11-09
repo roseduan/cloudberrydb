@@ -1551,6 +1551,8 @@ _readExternalTableMetadata(void)
 	READ_BOOL_FIELD(extractPartitionValueFromPath);
 	READ_BOOL_FIELD(hiveStylePartitioningEnabled);
 	READ_BOOL_FIELD(isMorTable);
+	READ_NODE_FIELD(icebergFieldIdNames);
+	READ_NODE_FIELD(icebergFieldIdValues);
 
 	READ_DONE();
 }

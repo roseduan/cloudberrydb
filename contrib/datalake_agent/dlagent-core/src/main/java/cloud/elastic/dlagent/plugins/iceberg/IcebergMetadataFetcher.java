@@ -356,6 +356,15 @@ public class IcebergMetadataFetcher extends BasePlugin implements MetadataFetche
                 if (snapshotId == ifSnapshotId) {
                     FragmentDescription description = FragmentDescription.notModified(snapshotId);
                     description.setCatalogProperties(context.getCatalogProperties());
+                    /*
+                     * The segment's cached body is keyed by snapshot id, but
+                     * RENAME COLUMN is a schema commit and creates no
+                     * snapshot: its cached field-id map can be stale even
+                     * though its fragments are not.  Send the current map
+                     * with every answer, this one included, so the segment
+                     * can refresh it without us replanning the scan.  #482
+                     */
+                    description.setSchemaFieldIds(topLevelFieldIds(table.schema()));
                     return description;
                 }
             } catch (NumberFormatException e) {
@@ -1678,7 +1687,41 @@ public class IcebergMetadataFetcher extends BasePlugin implements MetadataFetche
         LOG.info("transformTasks: {} unique delete files, {} combined tasks",
                 allDeleteFiles.size(), tasks.size());
 
-        return new FragmentDescription(null, allDeleteFiles, tasks, snapshotId);
+        FragmentDescription desc =
+                new FragmentDescription(null, allDeleteFiles, tasks, snapshotId);
+
+        /*
+         * The name -> id map is keyed by the names the segment holds, which
+         * come from the foreign table's current definition -- so it is the
+         * CURRENT schema, not the snapshot's.  A snapshot keeps the schema in
+         * force when it was written, so after RENAME COLUMN the snapshot still
+         * says the old name and the segment would find none of its columns.
+         * Field-ids are stable across a rename, so the current schema is right
+         * for a time-travel read too.  (readSchema stays the snapshot's for
+         * equality-delete key resolution above.)  #482
+         */
+        desc.setSchemaFieldIds(topLevelFieldIds(table.schema()));
+        return desc;
+    }
+
+    /*
+     * The table's current top-level columns as name -> field-id, in schema
+     * order, for the segment to match data-file columns by id (#482).
+     *
+     * Top level only: the segment maps one PG column to one Parquet leaf, and
+     * a nested field's leaf is reached through its parent, not by a name of
+     * its own.
+     */
+    private Map<String, Integer> topLevelFieldIds(Schema schema) {
+        Map<String, Integer> ids = new LinkedHashMap<>();
+
+        if (schema == null) {
+            return ids;
+        }
+        for (Types.NestedField f : schema.columns()) {
+            ids.put(f.name(), f.fieldId());
+        }
+        return ids;
     }
 
     /*

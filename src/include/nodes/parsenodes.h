@@ -4989,6 +4989,16 @@ typedef struct ExternalTableMetadata
 	bool		extractPartitionValueFromPath;
 	bool		hiveStylePartitioningEnabled;
 	bool		isMorTable;
+	/*
+	 * External Iceberg only: the table's current top-level columns as
+	 * name -> field-id, which the reader matches data-file columns by
+	 * (issue #482).  icebergFieldIdNames holds String nodes and
+	 * icebergFieldIdValues the matching Integer nodes, same length and
+	 * order.  NIL when the agent did not report them (an older agent, or
+	 * a non-Iceberg read); the reader then matches by name as before.
+	 */
+	List	   *icebergFieldIdNames;
+	List	   *icebergFieldIdValues;
 } ExternalTableMetadata;
 
 

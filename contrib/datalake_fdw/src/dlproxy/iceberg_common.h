@@ -11,4 +11,7 @@
 List *parseIcebergFragmentResponse(char *buffer, size_t buffer_size);
 char *extractCatalogPropertiesEnvelope(const char *buffer, size_t buffer_size);
 
+/* #482: refresh a cached fragment list's field-id map from a live response. */
+void refreshIcebergFieldIds(List *fragments, const char *buffer, size_t buffer_size);
+
 #endif /* ICEBERG_COMMON_H */

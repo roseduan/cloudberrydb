@@ -3472,6 +3472,8 @@ _copyExternalTableMetadata(const ExternalTableMetadata *from)
 	COPY_SCALAR_FIELD(extractPartitionValueFromPath);
 	COPY_SCALAR_FIELD(hiveStylePartitioningEnabled);
 	COPY_SCALAR_FIELD(isMorTable);
+	COPY_NODE_FIELD(icebergFieldIdNames);
+	COPY_NODE_FIELD(icebergFieldIdValues);
 
 	return newnode;
 }

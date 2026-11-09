@@ -105,6 +105,43 @@ parquetFileHasFieldIds(const parquet::SchemaDescriptor *schema)
 }
 
 /*
+ * Does this PG column name (by field-id when the file carries ids, else by
+ * name) a top-level field of the file that is NOT a leaf -- a struct, list or
+ * map?  Both readers decode one PG column from one Parquet leaf, so such a
+ * column cannot be read, and matchParquetColumn returns -1 for it exactly as
+ * it does for a column the file does not have at all.  The two have to be
+ * told apart: an absent column legitimately reads NULL (it was added after
+ * the file was written), an unreadable one must be refused.  #482
+ */
+bool
+parquetColumnIsGroupField(const parquet::SchemaDescriptor *schema,
+						  const DatalakeFieldDescription *entry,
+						  bool fileHasFieldIds)
+{
+	const parquet::schema::GroupNode *root = schema->group_node();
+
+	if (root == nullptr)
+		return false;
+
+	for (int j = 0; j < root->field_count(); j++)
+	{
+		const parquet::schema::NodePtr &f = root->field(j);
+
+		if (!f->is_group())
+			continue;
+
+		if (entry->attnum > 0 && fileHasFieldIds)
+		{
+			if (f->field_id() == entry->attnum)
+				return true;
+		}
+		else if (pg_strcasecmp(entry->name, f->name().c_str()) == 0)
+			return true;
+	}
+	return false;
+}
+
+/*
  * Match one PG column (entry) to a physical parquet column index:
  *  - Builtin iceberg (fileHasFieldIds): match by field-id == PG attnum
  *    authoritatively.  Stable across RENAME COLUMN (name changes, id does not)
@@ -161,6 +198,17 @@ ParquetReader::createMapping(List *columnDesc, bool *attrUsed)
 			continue;
 
 		int matched = matchParquetColumn(schema, entry, fileHasFieldIds);
+
+		/*
+		 * Unmatched because the file holds this column as a struct, list or
+		 * map: say so and name the column.  Letting it read NULL in every row
+		 * would present the loss of a whole column as data.  #482
+		 */
+		if (matched < 0 &&
+			parquetColumnIsGroupField(schema, entry, fileHasFieldIds))
+			elog(ERROR, "column \"%s\" is a struct, list or map in %s, which "
+				 "datalake_fdw cannot read as a single column",
+				 entry->name, filePath_.c_str());
 
 		if (matched >= 0)
 		{

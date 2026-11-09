@@ -157,6 +157,107 @@ extractCatalogPropertiesEnvelope(const char *buffer, size_t buffer_size)
 	return result;
 }
 
+/*
+ * Copy "schema-field-ids" out of a parsed get_fragment response onto the
+ * table metadata node, replacing whatever was there.  No key (an older agent)
+ * leaves the node untouched.  #482
+ */
+static void
+fillIcebergFieldIds(json_t *jroot, ExternalTableMetadata *meta)
+{
+	json_t	   *jFieldIds = json_object_get(jroot, "schema-field-ids");
+	const char *key;
+	json_t	   *jval;
+	List	   *names = NIL;
+	List	   *values = NIL;
+
+	if (jFieldIds == NULL || !json_is_object(jFieldIds))
+		return;
+
+	json_object_foreach(jFieldIds, key, jval)
+	{
+		json_int_t	raw;
+
+		if (!json_is_integer(jval))
+			continue;
+
+		/*
+		 * An Iceberg field-id is a Java int and lookupIcebergFieldId() treats
+		 * 0 as "no id", so anything outside [1, INT32_MAX] is not one.  Narrow
+		 * the json_int_t deliberately rather than letting the cast wrap a
+		 * corrupt value into a plausible id: skipping the entry leaves that
+		 * column matching by name, which is what an agent that never sent the
+		 * map does.
+		 */
+		raw = json_integer_value(jval);
+		if (raw <= 0 || raw > PG_INT32_MAX)
+			continue;
+
+		names = lappend(names, makeString(pstrdup(key)));
+		values = lappend(values, makeInteger((int) raw));
+	}
+
+	/*
+	 * Built aside and published only if it holds something: an empty or
+	 * all-garbage map must leave a good one alone, exactly as a missing key
+	 * does.  Clearing it would put the reader back to matching by name, which
+	 * is the bug this map exists to fix.
+	 */
+	if (names == NIL)
+		return;
+
+	meta->icebergFieldIdNames = names;
+	meta->icebergFieldIdValues = values;
+}
+
+/*
+ * Refresh the field-id map of an already-parsed fragment list from a live
+ * response body.
+ *
+ * A cache hit re-parses the body stored on an earlier request, and an Iceberg
+ * RENAME COLUMN is a schema commit that creates NO snapshot -- so the entry is
+ * still considered valid while its field-id map describes the table as it was
+ * before the rename.  Matching by that map is exactly the bug #482 fixes.  The
+ * agent recomputes the map for every request, the "notModified" one included,
+ * so take it from the live answer.
+ *
+ * This says nothing about whether the cached task list itself is right for
+ * this query; it only replaces the part of the cached body that a schema-only
+ * commit invalidates.  #482
+ */
+void
+refreshIcebergFieldIds(List *fragments, const char *buffer, size_t buffer_size)
+{
+	json_t		   *jroot;
+	json_error_t	jerror;
+
+	if (fragments == NIL)
+		return;
+
+	jroot = json_loadb(buffer, buffer_size, 0, &jerror);
+	if (jroot == NULL)
+	{
+		/*
+		 * Unreachable as callers stand: parseFragmentMetadata() parsed this
+		 * same buffer to build the list being refreshed.  Should that ever
+		 * stop holding, the map keeps its pre-rename contents and the renamed
+		 * column reads NULL from every older file -- #482's symptom exactly --
+		 * so leave something in the log to find it by.
+		 */
+		elog(DEBUG1, "iceberg: field-id map not refreshed, live response did "
+			 "not re-parse (%s)", jerror.text);
+		return;
+	}
+
+	/*
+	 * Element 0 of an Iceberg fragment list is its table metadata; this is
+	 * exported, so check rather than trust a future caller.
+	 */
+	Assert(IsA(linitial(fragments), ExternalTableMetadata));
+	fillIcebergFieldIds(jroot, (ExternalTableMetadata *) linitial(fragments));
+	json_decref(jroot);
+}
+
 List *
 parseIcebergFragmentResponse(char *buffer, size_t buffer_size)
 {
@@ -175,6 +276,17 @@ parseIcebergFragmentResponse(char *buffer, size_t buffer_size)
 	/* set the first element of the list as tableMetadata */
 	ExternalTableMetadata *tableMetadata = makeNode(ExternalTableMetadata);
 	result = lappend(result, tableMetadata);
+
+	/*
+	 * The table's current top-level columns as name -> Iceberg field-id, which
+	 * the reader matches external Iceberg data-file columns by (#482).  It
+	 * rides on the table metadata node because that node is element 0 of this
+	 * very list: the QD dispatches the list to the QEs, which is where the
+	 * reader runs, and every scan path that reads an Iceberg table reads it
+	 * from here.  Absent for an older agent -- the lists stay NIL and the
+	 * reader matches by name as it did before.
+	 */
+	fillIcebergFieldIds(jroot, tableMetadata);
 
 	/*
 	 * Parse global deduplicated delete files list (new format).
@@ -420,6 +532,12 @@ iceberg_get_external_fragments(Oid relid,
 					elog(DEBUG1, "iceberg fragment cache hit for relid %u (snapshot " INT64_FORMAT ")",
 						 relid, cachedSnapshotId);
 					result = parseIcebergFragmentResponse(cached->raw_json, cached->raw_json_size);
+					/*
+					 * The cached body's field-id map predates any schema-only
+					 * commit since; the live answer's is current.  #482
+					 */
+					refreshIcebergFieldIds(result, context->buffer,
+										   context->buffer_pos);
 				}
 				else
 				{

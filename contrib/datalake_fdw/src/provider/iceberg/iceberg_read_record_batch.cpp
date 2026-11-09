@@ -221,7 +221,16 @@ icebergReadRecordBatch::openCurrentTask()
 			DatalakeFieldDescription *fd = (DatalakeFieldDescription *) lfirst(lc);
 			/* index into scan_tupdesc (== position in datafileDesc) */
 			emitAttr.push_back((int) emitAttr.size());
-			emitPhysical.push_back(matchParquetColumn(schema, fd, hasFieldIds));
+
+			int phys = matchParquetColumn(schema, fd, hasFieldIds);
+
+			/* Same refusal the row reader makes, for the same reason.  #482 */
+			if (phys < 0 && parquetColumnIsGroupField(schema, fd, hasFieldIds))
+				elog(ERROR, "column \"%s\" is a struct, list or map in %s, which "
+					 "datalake_fdw cannot read as a single column",
+					 fd->name, gopherPath.c_str());
+
+			emitPhysical.push_back(phys);
 		}
 
 		/*

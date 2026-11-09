@@ -28,6 +28,39 @@ namespace Datalake {
 namespace Internal {
 
 /*
+ * Copy a narrow fixed-width arrow array into its widened form, nulls kept.
+ * Only the widenings Iceberg schema evolution allows use this (int32 -> int64,
+ * float -> double), so the conversion is always value-preserving.  #482
+ */
+template <typename InArray, typename OutBuilder>
+static std::shared_ptr<::parquet_arrow::Array>
+widenFixedWidth(const std::shared_ptr<::parquet_arrow::Array> &in,
+				const std::shared_ptr<::parquet_arrow::DataType> &outType,
+				::parquet_arrow::MemoryPool *pool)
+{
+	auto		src = std::static_pointer_cast<InArray>(in);
+	const int64_t n = in->length();
+	OutBuilder	b(outType, pool);
+	std::shared_ptr<::parquet_arrow::Array> out;
+
+	PARQUET_VEC_CHECK(b.Reserve(n), "widen reserve");
+
+	const bool	has_null = (in->null_count() != 0);
+
+	for (int64_t i = 0; i < n; i++)
+	{
+		if (has_null && src->IsNull(i))
+		{
+			b.UnsafeAppendNull();
+			continue;
+		}
+		b.UnsafeAppend(src->Value(i));
+	}
+	PARQUET_VEC_CHECK(b.Finish(&out), "widen finish");
+	return out;
+}
+
+/*
  * parquet::arrow's output Arrow type comes from the FILE schema, not the PG
  * column type, so we normalize per column (issue #424 DESIGN R1#1/2/6):
  *   - date32: file value is days since 1970-01-01; the engine reads the raw
@@ -341,9 +374,36 @@ normalizeParquetVecColumn(parquet_arrow::MemoryPool *pool, Oid typeOid,
 				(typeOid == FLOAT4OID) ? ::parquet_arrow::Type::FLOAT :
 										 ::parquet_arrow::Type::DOUBLE;
 			if (in->type_id() != want)
-				elog(ERROR, "datalake parquet vectorized read: column type %u expects a "
-					 "matching fixed-width arrow type, got %s; run with vectorization off",
-					 typeOid, in->type()->ToString().c_str());
+			{
+				/*
+				 * Iceberg schema evolution promotes a column in place: int ->
+				 * long and float -> double leave the old data files alone, so a
+				 * file written before the ALTER still holds the narrow physical
+				 * type while the PG column is now the wide one.  Widen here, as
+				 * the row reader does (#401), rather than refusing the file.
+				 * Only these two widenings: anything else -- notably a
+				 * NARROWING, an int4 column over a file that holds INT64 --
+				 * would lose value bits, and would hand the engine a column
+				 * whose width does not match the slot it reads it into.
+				 * #482
+				 */
+				if (typeOid == INT8OID &&
+					in->type_id() == ::parquet_arrow::Type::INT32)
+					out_arr = widenFixedWidth<::parquet_arrow::Int32Array,
+											  ::parquet_arrow::Int64Builder>(
+								  in, ::parquet_arrow::int64(), pool);
+				else if (typeOid == FLOAT8OID &&
+						 in->type_id() == ::parquet_arrow::Type::FLOAT)
+					out_arr = widenFixedWidth<::parquet_arrow::FloatArray,
+											  ::parquet_arrow::DoubleBuilder>(
+								  in, ::parquet_arrow::float64(), pool);
+				else
+					elog(ERROR, "datalake parquet vectorized read: column type %u expects a "
+						 "matching fixed-width arrow type, got %s; run with vectorization off",
+						 typeOid, in->type()->ToString().c_str());
+				out_type = out_arr->type();
+				break;
+			}
 			out_arr = in;
 			out_type = in->type();
 			break;

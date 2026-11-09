@@ -673,6 +673,8 @@ _outExternalTableMetadata(StringInfo str, const ExternalTableMetadata *node)
 	WRITE_BOOL_FIELD(extractPartitionValueFromPath);
 	WRITE_BOOL_FIELD(hiveStylePartitioningEnabled);
 	WRITE_BOOL_FIELD(isMorTable);
+	WRITE_NODE_FIELD(icebergFieldIdNames);
+	WRITE_NODE_FIELD(icebergFieldIdValues);
 }
 
 static void
