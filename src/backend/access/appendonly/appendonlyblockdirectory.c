@@ -1787,3 +1787,139 @@ out:
 
 	return rownum;
 }
+
+/*
+ * AOBlkDirCursor_Init
+ *
+ * Set up a cursor over the block directory entries of column group
+ * 'colgroupno'.  The caller keeps the block directory relation and its index
+ * open while the cursor is used.
+ */
+void
+AOBlkDirCursor_Init(AOBlkDirCursor *cursor, Relation blkdirRel,
+					Relation blkdirIdx, Snapshot snapshot, int colgroupno)
+{
+	cursor->blkdirRel = blkdirRel;
+	cursor->blkdirIdx = blkdirIdx;
+	cursor->snapshot = snapshot;
+	cursor->colgroupno = colgroupno;
+	cursor->segno = -1;
+	cursor->sysscan = NULL;
+	cursor->mpinfo.minipage = palloc0(minipage_size(NUM_MINIPAGE_ENTRIES));
+	cursor->mpinfo.numMinipageEntries = 0;
+	cursor->entryno = -1;
+	cursor->entry_first_ordinal = 0;
+}
+
+static void
+AOBlkDirCursor_Restart(AOBlkDirCursor *cursor, int segno)
+{
+	ScanKeyData scankeys[2];
+
+	if (cursor->sysscan != NULL)
+		systable_endscan_ordered(cursor->sysscan);
+
+	ScanKeyInit(&scankeys[0], Anum_pg_aoblkdir_segno,
+				BTEqualStrategyNumber, F_INT4EQ, Int32GetDatum(segno));
+	ScanKeyInit(&scankeys[1], Anum_pg_aoblkdir_columngroupno,
+				BTEqualStrategyNumber, F_INT4EQ,
+				Int32GetDatum(cursor->colgroupno));
+
+	cursor->sysscan = systable_beginscan_ordered(cursor->blkdirRel,
+												 cursor->blkdirIdx,
+												 cursor->snapshot,
+												 2, scankeys);
+	cursor->segno = segno;
+	cursor->mpinfo.numMinipageEntries = 0;
+	cursor->entryno = -1;
+	cursor->entry_first_ordinal = 0;
+}
+
+/*
+ * AOBlkDirCursor_FindRow
+ *
+ * Find the entry of the block that holds row 'ordinal' of segment file
+ * 'segno'.  On success, copy it to *entry, set *entry_first_ordinal to the
+ * ordinal of its first row and return true.  Return false if the directory
+ * has no such entry.
+ *
+ * The ordinal of a row is the number of rows stored before it in the segment
+ * file, so it is the sum of the row counts of the entries before it: entries
+ * are walked in row order from the start of the segment file.  Calls for the
+ * same segment file are expected with increasing ordinals; an ordinal before
+ * the current entry restarts the walk.
+ */
+bool
+AOBlkDirCursor_FindRow(AOBlkDirCursor *cursor, int segno, int64 ordinal,
+					   MinipageEntry *entry, int64 *entry_first_ordinal)
+{
+	if (cursor->segno != segno || ordinal < cursor->entry_first_ordinal)
+		AOBlkDirCursor_Restart(cursor, segno);
+
+	for (;;)
+	{
+		MinipageEntry *cur;
+
+		if (cursor->entryno >= 0)
+		{
+			cur = &cursor->mpinfo.minipage->entry[cursor->entryno];
+
+			/* a placeholder of an insert in progress, see InsertPlaceholder */
+			if (cur->rowCount == AOTupleId_MaxRowNum)
+				return false;
+
+			if (ordinal < cursor->entry_first_ordinal + cur->rowCount)
+			{
+				*entry = *cur;
+				*entry_first_ordinal = cursor->entry_first_ordinal;
+				return true;
+			}
+
+			cursor->entry_first_ordinal += cur->rowCount;
+		}
+
+		/* move to the next entry, reading the next minipage if needed */
+		if (cursor->entryno + 1 < (int) cursor->mpinfo.numMinipageEntries)
+			cursor->entryno++;
+		else
+		{
+			HeapTuple	tuple;
+			Datum		value;
+			bool		isnull;
+
+			if (cursor->sysscan == NULL)
+				return false;
+
+			tuple = systable_getnext_ordered(cursor->sysscan,
+											 ForwardScanDirection);
+			if (!HeapTupleIsValid(tuple))
+			{
+				/* past the last entry; keep the position for the next call */
+				systable_endscan_ordered(cursor->sysscan);
+				cursor->sysscan = NULL;
+				cursor->entryno = -1;
+				cursor->mpinfo.numMinipageEntries = 0;
+				return false;
+			}
+
+			value = heap_getattr(tuple, Anum_pg_aoblkdir_minipage,
+								 RelationGetDescr(cursor->blkdirRel), &isnull);
+			copy_out_minipage(&cursor->mpinfo, value, isnull);
+			cursor->entryno = 0;
+			if (cursor->mpinfo.numMinipageEntries == 0)
+				cursor->entryno = -1;
+		}
+	}
+}
+
+void
+AOBlkDirCursor_End(AOBlkDirCursor *cursor)
+{
+	if (cursor->sysscan != NULL)
+		systable_endscan_ordered(cursor->sysscan);
+	cursor->sysscan = NULL;
+	cursor->segno = -1;
+	if (cursor->mpinfo.minipage)
+		pfree(cursor->mpinfo.minipage);
+	cursor->mpinfo.minipage = NULL;
+}

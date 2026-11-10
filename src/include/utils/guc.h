@@ -303,6 +303,7 @@ extern bool	parallel_query_use_streaming_hashagg;
 extern bool gp_use_streaming_hashagg;
 extern bool optimizer_use_streaming_hashagg;
 extern int  gp_appendonly_insert_files;
+extern bool gp_appendonly_parallel_scan_blkdir;
 extern int  gp_appendonly_insert_files_tuples_range;
 extern int  gp_random_insert_segments;
 extern bool enable_answer_query_using_materialized_views;

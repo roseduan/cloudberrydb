@@ -56,6 +56,7 @@
 		"gp_appendonly_compaction_threshold",
 		"gp_appendonly_insert_files",
 		"gp_appendonly_insert_files_tuples_range",
+		"gp_appendonly_parallel_scan_blkdir",
 		"gp_appendonly_verify_block_checksums",
 		"gp_appendonly_verify_write_block",
 		"gp_blockdirectory_entry_min_range",

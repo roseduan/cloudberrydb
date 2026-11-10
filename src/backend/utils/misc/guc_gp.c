@@ -156,6 +156,7 @@ bool		parallel_query_use_streaming_hashagg = false;
 bool		gp_use_streaming_hashagg = true;
 bool		optimizer_use_streaming_hashagg = true;
 int			gp_appendonly_insert_files = 0;
+bool		gp_appendonly_parallel_scan_blkdir = true;
 int			gp_appendonly_insert_files_tuples_range = 0;
 int			gp_random_insert_segments = 0;
 int 		gp_appendonly_compaction_segfile_limit = 0;
@@ -978,6 +979,17 @@ struct config_bool ConfigureNamesBool_gp[] =
 			GUC_SUPERUSER_ONLY | GUC_NOT_IN_SAMPLE | GUC_NO_SHOW_ALL
 		},
 		&gp_appendonly_compaction,
+		true,
+		NULL, NULL, NULL
+	},
+
+	{
+		{"gp_appendonly_parallel_scan_blkdir", PGC_USERSET, DEVELOPER_OPTIONS,
+			gettext_noop("Use the block directory to seek to chunks in parallel scans of append-optimized tables."),
+			NULL,
+			GUC_NOT_IN_SAMPLE | GUC_NO_SHOW_ALL
+		},
+		&gp_appendonly_parallel_scan_blkdir,
 		true,
 		NULL, NULL, NULL
 	},

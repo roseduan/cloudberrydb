@@ -270,6 +270,15 @@ typedef struct AOCSScanDescData
 	int64					 chunk_end_row;
 
 	/*
+	 * Block directory cursors of the projected columns, in proj_atts order,
+	 * used to seek to the first block of a chunk instead of reading every
+	 * block before it.  NULL if the relation has no block directory.
+	 */
+	Relation				 blkdirRel;
+	Relation				 blkdirIdx;
+	AOBlkDirCursor			*blkdir_cursors;
+
+	/*
 	 * The only relation wide Storage Option, the rest are aquired in a per
 	 * column basis and there is no need to keep track of.
 	 */

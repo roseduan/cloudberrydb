@@ -190,6 +190,26 @@ typedef struct AOBlkDirScanData
 	int							colgroupno;
 } AOBlkDirScanData, *AOBlkDirScan;
 
+/*
+ * A cursor over the block directory entries of one column group of one
+ * segment file, in row order.  It translates a row ordinal (the position of a
+ * row in its segment file, counting from 0) to the entry of the block that
+ * holds it, for a parallel scan to seek to the block.  It only moves forward.
+ */
+typedef struct AOBlkDirCursor
+{
+	Relation	blkdirRel;
+	Relation	blkdirIdx;
+	Snapshot	snapshot;
+	int			colgroupno;
+
+	int			segno;			/* -1 if not positioned */
+	SysScanDesc sysscan;
+	MinipagePerColumnGroup mpinfo;	/* the current minipage */
+	int			entryno;		/* the current entry, or -1 */
+	int64		entry_first_ordinal;	/* ordinal of its first row */
+} AOBlkDirCursor;
+
 extern void AppendOnlyBlockDirectoryEntry_GetBeginRange(
 	AppendOnlyBlockDirectoryEntry	*directoryEntry,
 	int64							*fileOffset,
@@ -212,6 +232,13 @@ extern int64 AOBlkDirScan_GetRowNum(
 	int								colgroupno,
 	int64							targrow,
 	int64							*startrow);
+extern void AOBlkDirCursor_Init(AOBlkDirCursor *cursor, Relation blkdirRel,
+								Relation blkdirIdx, Snapshot snapshot,
+								int colgroupno);
+extern bool AOBlkDirCursor_FindRow(AOBlkDirCursor *cursor, int segno,
+								   int64 ordinal, MinipageEntry *entry,
+								   int64 *entry_first_ordinal);
+extern void AOBlkDirCursor_End(AOBlkDirCursor *cursor);
 extern bool AppendOnlyBlockDirectory_CoversTuple(
 	AppendOnlyBlockDirectory		*blockDirectory,
 	AOTupleId 						*aoTupleId);

@@ -677,6 +677,18 @@ aocs_endscan(AOCSScanDesc scan)
 	if (scan->seg_first_chunk)
 		pfree(scan->seg_first_chunk);
 
+	if (scan->blkdir_cursors)
+	{
+		for (int i = 0; i < scan->columnScanInfo.num_proj_atts; i++)
+			AOBlkDirCursor_End(&scan->blkdir_cursors[i]);
+		pfree(scan->blkdir_cursors);
+		scan->blkdir_cursors = NULL;
+	}
+	if (scan->blkdirIdx)
+		index_close(scan->blkdirIdx, AccessShareLock);
+	if (scan->blkdirRel)
+		table_close(scan->blkdirRel, AccessShareLock);
+
 	if (scan->columnScanInfo.ds)
 	{
 		Assert(scan->columnScanInfo.proj_atts);
@@ -3291,6 +3303,25 @@ aocs_parallelscan_init(AOCSScanDesc scan)
 			 RelationGetRelationName(scan->rs_base.rs_rd), total_chunks,
 			 nblocks);
 
+	/*
+	 * With a block directory, a process seeks to the first block of each of
+	 * its chunks.  The cursors are set up by aocs_parallelscan_next_chunk(),
+	 * once the projected columns are known.
+	 */
+	if (gp_appendonly_parallel_scan_blkdir)
+	{
+		Oid			blkdirrelid;
+		Oid			blkdiridxid;
+
+		GetAppendOnlyEntryAuxOids(scan->rs_base.rs_rd, NULL, &blkdirrelid,
+								  &blkdiridxid, NULL, NULL);
+		if (OidIsValid(blkdirrelid) && OidIsValid(blkdiridxid))
+		{
+			scan->blkdirRel = table_open(blkdirrelid, AccessShareLock);
+			scan->blkdirIdx = index_open(blkdiridxid, AccessShareLock);
+		}
+	}
+
 	elog(DEBUG1, "parallel scan of AOCS relation \"%s\": %d segment files, "
 		 "%d columns, " INT64_FORMAT " rows per chunk, " UINT64_FORMAT " chunks",
 		 RelationGetRelationName(scan->rs_base.rs_rd), scan->total_seg,
@@ -3340,8 +3371,13 @@ aocs_block_rows_consumed(DatumStreamRead *ds)
 static void
 aocs_parallelscan_skip_rows(AOCSScanDesc scan, int64 nrows)
 {
+	int			segno;
+	int64		target = scan->segrowsprocessed + nrows;	/* its ordinal */
+
 	if (nrows == 0)
 		return;
+
+	segno = scan->seginfo[scan->cur_seg]->segno;
 
 	for (AttrNumber i = 0; i < scan->columnScanInfo.num_proj_atts; i++)
 	{
@@ -3349,6 +3385,45 @@ aocs_parallelscan_skip_rows(AOCSScanDesc scan, int64 nrows)
 		DatumStreamRead *ds = scan->columnScanInfo.ds[attno];
 		int64		consumed = aocs_block_rows_consumed(ds);
 		int64		left = nrows;
+		int64		seek_first_row = -1;
+
+		/*
+		 * If the block directory has the block of the target row, and it is
+		 * not the current or the next block, seek to it.  The loop below then
+		 * starts at that block, as if the blocks before it had been skipped.
+		 */
+		if (scan->blkdir_cursors != NULL &&
+			left > ds->blockRowCount - consumed)
+		{
+			MinipageEntry entry;
+			int64		entry_first;
+			bool		found;
+			MemoryContext oldcxt;
+
+			oldcxt = MemoryContextSwitchTo(scan->columnScanInfo.scanCtx);
+			found = AOBlkDirCursor_FindRow(&scan->blkdir_cursors[i], segno,
+										   target, &entry, &entry_first);
+			MemoryContextSwitchTo(oldcxt);
+
+			if (found &&
+				entry_first > scan->segrowsprocessed + (ds->blockRowCount - consumed) &&
+				entry.fileOffset < ds->ao_read.logicalEof)
+			{
+				AppendOnlyStorageRead_SetTemporaryRange(&ds->ao_read,
+														entry.fileOffset,
+														ds->ao_read.logicalEof);
+				ds->blockFirstRowNum = entry.firstRowNum;
+				ds->blockRowCount = 0;
+				consumed = 0;
+				left = target - entry_first;
+				seek_first_row = entry.firstRowNum;
+
+				elog(DEBUG2, "parallel scan seeks to row " INT64_FORMAT
+					 " of segment file %d, column %d: block at offset "
+					 INT64_FORMAT ", first row " INT64_FORMAT,
+					 target, segno, attno + 1, entry.fileOffset, entry_first);
+			}
+		}
 
 		if (left >= ds->blockRowCount - consumed)
 		{
@@ -3368,6 +3443,20 @@ aocs_parallelscan_skip_rows(AOCSScanDesc scan, int64 nrows)
 						 " of relation \"%s\" in parallel scan",
 						 scan->seginfo[scan->cur_seg]->segno, attno + 1,
 						 RelationGetRelationName(scan->rs_base.rs_rd));
+
+				/* the block we seeked to must be the one of the entry */
+				if (seek_first_row >= 0)
+				{
+					if (ds->getBlockInfo.firstRow >= 0 &&
+						ds->getBlockInfo.firstRow != seek_first_row)
+						elog(ERROR, "block directory entry of row " INT64_FORMAT
+							 " of segment file %d, column %d, of relation \"%s\""
+							 " points to a block with first row " INT64_FORMAT,
+							 seek_first_row, segno, attno + 1,
+							 RelationGetRelationName(scan->rs_base.rs_rd),
+							 ds->getBlockInfo.firstRow);
+					seek_first_row = -1;
+				}
 
 				/* DatumStreamRead: firstRow is expected to be -1 for pre-4.0 blocks */
 				loaded = false;
@@ -3478,6 +3567,19 @@ aocs_parallelscan_next_chunk(AOCSScanDesc scan)
 		scan->cur_seg = seg;
 		open_all_datumstreamread_segfiles(scan, scan->seginfo[seg]);
 		scan->segrowsprocessed = 0;
+	}
+
+	if (scan->blkdirRel != NULL && scan->blkdir_cursors == NULL)
+	{
+		MemoryContext oldcxt = MemoryContextSwitchTo(scan->columnScanInfo.scanCtx);
+
+		scan->blkdir_cursors = palloc(scan->columnScanInfo.num_proj_atts *
+									  sizeof(AOBlkDirCursor));
+		for (int i = 0; i < scan->columnScanInfo.num_proj_atts; i++)
+			AOBlkDirCursor_Init(&scan->blkdir_cursors[i], scan->blkdirRel,
+								scan->blkdirIdx, scan->appendOnlyMetaDataSnapshot,
+								scan->columnScanInfo.proj_atts[i]);
+		MemoryContextSwitchTo(oldcxt);
 	}
 
 	aocs_parallelscan_skip_rows(scan, startrow - scan->segrowsprocessed);
