@@ -58,9 +58,11 @@ static bool ValidXLogRecordHeader(XLogReaderState *state, XLogRecPtr RecPtr,
 static bool ValidXLogRecord(XLogReaderState *state, XLogRecord *record,
 							XLogRecPtr recptr);
 static void ResetDecoder(XLogReaderState *state);
+#ifdef USE_ZSTD
 static bool zstd_decompress_backupblock(const char *source, int32 slen,
 										char *dest, int32 rawsize,
 										char *errormessage);
+#endif
 static void WALOpenSegmentInit(WALOpenSegment *seg, WALSegmentContext *segcxt,
 							   int segsize, const char *waldir);
 
@@ -2094,19 +2096,6 @@ RestoreBlockImage(XLogReaderState *record, uint8 block_id, char *page)
 
 	if (BKPIMAGE_COMPRESSED(bkpb->bimg_info))
 	{
-		char errormessage[MAX_ERRORMSG_LEN];
-		/* If a backup block image is compressed, decompress it */
-		if (!zstd_decompress_backupblock(ptr, bkpb->bimg_len, tmp.data,
-										 BLCKSZ - bkpb->hole_length,
-										 errormessage))
-		{
-			report_invalid_record(record, "invalid compressed image at %X/%X, block %d (%s)",
-								  LSN_FORMAT_ARGS(record->ReadRecPtr),
-								  block_id,
-								  errormessage);
-			return false;
-		}
-
 		bool		decomp_success = true;
 
 		if ((bkpb->bimg_info & BKPIMAGE_COMPRESS_PGLZ) != 0)
@@ -2132,12 +2121,18 @@ RestoreBlockImage(XLogReaderState *record, uint8 block_id, char *page)
 		else if ((bkpb->bimg_info & BKPIMAGE_COMPRESS_ZSTD) != 0)
 		{
 #ifdef USE_ZSTD
-			size_t		decomp_result = ZSTD_decompress(tmp.data,
-														BLCKSZ - bkpb->hole_length,
-														ptr, bkpb->bimg_len);
-
-			if (ZSTD_isError(decomp_result))
+			char errormessage[MAX_ERRORMSG_LEN];
+			/* If a backup block image is compressed, decompress it */
+			if (!zstd_decompress_backupblock(ptr, bkpb->bimg_len, tmp.data,
+											 BLCKSZ - bkpb->hole_length,
+											 errormessage))
+			{
+				report_invalid_record(record, "invalid compressed image at %X/%X, block %d (%s)",
+									  LSN_FORMAT_ARGS(record->ReadRecPtr),
+									  block_id,
+									  errormessage);
 				decomp_success = false;
+			}
 #else
 			report_invalid_record(record, "could not restore image at %X/%X compressed with %s not supported by build, block %d",
 								  LSN_FORMAT_ARGS(record->ReadRecPtr),
